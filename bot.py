@@ -10,7 +10,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitget Compounding Breakout Engine Running 24/7!")
+        self.wfile.write(b"Bitget Compounding Bot Active!")
 
     def log_message(self, format, *args):
         return
@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"[*] Health check server active on port {port}")
+    print(f"[*] Health check active on port {port}")
     server.serve_forever()
 
 threading.Thread(target=run_health_server, daemon=True).start()
@@ -28,15 +28,13 @@ API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
-# Dynamic Compounding Settings
 COMPOUND_RATIO = 0.80        # Reinvest 80% of wallet balance per trade
-MIN_USDT_BALANCE = 1.90      # Minimum balance required to take a trade
+MIN_USDT_BALANCE = 1.90      # Minimum balance to trade
 LEVERAGE = 3                 # 3x leverage
 MIN_VOLUME_USDT = 1_000_000  # $1M+ daily volume
 TIMEFRAME = '5m'
 
 TAKE_PROFIT_PCT = 0.015      # +1.5% Take Profit
-STOP_LOSS_PCT = 0.015        # -1.5% Stop Loss
 VOLUME_SPIKE_MULT = 3.0      # Volume must be 3x above average
 
 exchange = ccxt.bitget({
@@ -49,7 +47,6 @@ exchange = ccxt.bitget({
 })
 
 def get_available_balance():
-    """Fetches real-time available USDT balance from Bitget."""
     try:
         bal = exchange.fetch_balance({'type': 'swap'})
         if 'USDT' in bal and 'free' in bal['USDT']:
@@ -58,7 +55,7 @@ def get_available_balance():
             return float(bal['free']['USDT'])
         return 0.0
     except Exception as e:
-        print(f"[!] Error reading balance: {e}")
+        print(f"[!] Error fetching balance: {e}")
         return 0.0
 
 def calculate_ema(prices, period):
@@ -74,9 +71,14 @@ def get_tradable_symbols():
         tickers = exchange.fetch_tickers()
         valid = []
         for symbol, ticker in tickers.items():
+            # Exclude traditional tokenized equities (e.g., TSM, GLW, BE) that have huge minimum contract sizes
+            base = symbol.split('/')[0]
+            if base in ['TSM', 'GLW', 'BE', 'METU', 'NVDA', 'AAPL', 'TSLA', 'AMZN', 'MSFT', 'GOOGL']:
+                continue
+
             if symbol.endswith(':USDT') and ticker.get('quoteVolume', 0) >= MIN_VOLUME_USDT:
                 valid.append(symbol)
-        print(f"[*] Loaded {len(valid)} active pairs for Compounding Breakout.")
+        print(f"[*] Loaded {len(valid)} active crypto pairs (stocks filtered out).")
         return valid
     except Exception as e:
         print(f"[!] Error loading symbols: {e}")
@@ -102,23 +104,23 @@ def evaluate_symbol(symbol):
         if c_close <= prev_20_high:
             return
 
-        # 2. Volume Explosion Check (3x average)
+        # 2. Volume Explosion (3x average)
         avg_vol = sum(volumes[-17:-2]) / 15.0
         if avg_vol <= 0 or (c_vol / avg_vol) < VOLUME_SPIKE_MULT:
             return
 
-        # 3. Bullish Dominance Check
+        # 3. Bullish Dominance
         candle_range = c_high - c_low
         if candle_range <= 0 or ((c_close - c_low) / candle_range) < 0.85:
             return
 
-        # 4. Moving Average Momentum (Price > 9 EMA > 21 EMA)
+        # 4. Moving Average Momentum
         ema_9 = calculate_ema(closes[:-1], 9)
         ema_21 = calculate_ema(closes[:-1], 21)
         if c_close < ema_9 or ema_9 < ema_21:
             return
 
-        # --- DYNAMIC COMPOUNDING CALCULATION ---
+        # Check Balance & Position Sizing
         current_balance = get_available_balance()
         if current_balance < MIN_USDT_BALANCE:
             return
@@ -136,20 +138,34 @@ def evaluate_symbol(symbol):
         if float(coin_amount) <= 0:
             return
 
+        # Check Exchange Minimum Contract Size
+        market = exchange.market(symbol)
+        min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
+        if min_amount and float(coin_amount) < min_amount:
+            return
+
+        print(f"\n🚀 [QUALIFIED CRYPTO BREAKOUT] {symbol}")
+        print(f" ├─ Wallet Balance: ${current_balance:.2f} USDT")
+        print(f" ├─ Compounded Margin (80%): ${trade_margin:.2f} USDT")
+        print(f" ├─ Position Value (3x): ${target_notional:.2f} USDT")
+        print(f" └─ Breakout Price: ${c_close}")
+
         try:
             exchange.set_leverage(LEVERAGE, symbol)
         except Exception:
             pass
 
-        print(f"\n🚀 [COMPOUNDING BREAKOUT TRIGGERED] {symbol}")
-        print(f" ├─ Wallet Balance: ${current_balance:.2f} USDT")
-        print(f" ├─ Compounded Margin Used (80%): ${trade_margin:.2f} USDT")
-        print(f" ├─ Total Trade Value (3x): ${target_notional:.2f} USDT")
-        print(f" └─ Breakout Close: ${c_close}")
-
-        # Execute Market Entry
-        order = exchange.create_market_buy_order(symbol, coin_amount)
-        print(f"✅ [SUCCESS] Order Filled! ID: {order['id']}")
+        # Execute Market Entry with Hedge Mode compatibility
+        try:
+            order = exchange.create_market_buy_order(
+                symbol,
+                coin_amount,
+                params={'tradeSide': 'open'}
+            )
+            print(f"✅ [SUCCESS] Order Filled! ID: {order['id']}")
+        except Exception as order_err:
+            print(f"[!] Order rejected by Bitget on {symbol}: {order_err}")
+            return
 
         # Set Take Profit (+1.5%)
         tp_price = exchange.price_to_precision(symbol, c_close * (1 + TAKE_PROFIT_PCT))
@@ -160,20 +176,21 @@ def evaluate_symbol(symbol):
                 side='sell',
                 amount=coin_amount,
                 price=tp_price,
-                params={'reduceOnly': True}
+                params={'tradeSide': 'close', 'reduceOnly': True}
             )
             print(f"🎯 [AUTO TP PLACED] Target: ${tp_price} (+1.5%)")
         except Exception as tp_err:
-            print(f"[!] Warning placing TP: {tp_err}")
+            print(f"[!] Warning placing TP on {symbol}: {tp_err}")
 
-        # 5-minute cooldown so it doesn't double-buy
+        # 5-minute cooldown
         time.sleep(300)
 
-    except Exception:
+    except Exception as e:
+        print(f"[!] Evaluation Error: {e}")
         return
 
 def run_bot():
-    print(f"[*] Starting 5m Compounding Breakout Scanner on Bitget ($1M+ Volume)...")
+    print(f"[*] Starting 5m Compounding Breakout Scanner...")
     symbols = get_tradable_symbols()
 
     while True:
