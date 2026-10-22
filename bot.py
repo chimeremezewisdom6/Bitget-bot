@@ -81,7 +81,7 @@ def evaluate_symbol(symbol):
                 continue
 
             rebound_ratio = (c_close - c_low) / candle_range
-            if rebound_ratio < 0.50:
+            if rebound_ratio < 0.10:
                 continue
 
             try:
