@@ -1,357 +1,340 @@
 import os
+import sys
 import time
-import json
-import urllib.request
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
-# ==================== KEEP-ALIVE SERVER (FOR RENDER 24/7) ====================
-class HealthCheckHandler(BaseHTTPRequestHandler):
+# ==========================================================
+# 1. RENDER KEEP-ALIVE SERVER (Port 10000)
+# ==========================================================
+class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Binance + Bybit + OKX + Gate Consensus Engine Active 24/7!")
+        self.wfile.write(b"Bot is hunting momentum.")
 
     def log_message(self, format, *args):
-        return
+        return  # Silence HTTP server logs to keep terminal clean
 
-def run_health_server():
+def start_keep_alive():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"[*] Health check server active on port {port}")
-    server.serve_forever()
+    server = HTTPServer(("0.0.0.0", port), PingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[SYSTEM] Keep-alive server running on port {port}", flush=True)
 
-threading.Thread(target=run_health_server, daemon=True).start()
-
-# ==================== CONFIGURATION ====================
+# ==========================================================
+# 2. EXCHANGE CONFIGURATION
+# ==========================================================
 API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
-COMPOUND_RATIO = 0.80        # Reinvest 80% of balance per trade
-LEVERAGE = 3                 # 3x leverage
-MIN_USDT_BALANCE = 1.90      # Minimum balance to trade
-TIMEFRAME = '15m'            # 15-Minute Timeframe
-BREAKEVEN_TRIGGER_PCT = 0.008 # Move SL to Entry at +0.8% profit
+if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
+    print("[FATAL] Missing Bitget API credentials in environment variables!", flush=True)
+    sys.exit(1)
 
-# Minimum COMBINED volume across Binance + Bybit + OKX + Gate.io
-MIN_COMBINED_GLOBAL_VOLUME = 15_000_000  # $15,000,000+ USD!
-
-# 1. Execution Client (Bitget)
-bitget = ccxt.bitget({
-    'apiKey': API_KEY,
-    'secret': SECRET_KEY,
-    'password': PASSPHRASE,
-    'options': {
-        'defaultType': 'swap',
-        'oneWayMode': True,
-        'hedged': False,
+exchange = ccxt.bitget({
+    "apiKey": API_KEY,
+    "secret": SECRET_KEY,
+    "password": PASSPHRASE,
+    "enableRateLimit": True,
+    "options": {
+        "defaultType": "swap",
+        "createMarketBuyOrderRequiresPrice": False
     }
 })
 
-# 2. Free Global Feeds (Bybit, OKX, Gate.io)
-bybit = ccxt.bybit({'enableRateLimit': True})
-okx = ccxt.okx({'enableRateLimit': True})
-gateio = ccxt.gate({'enableRateLimit': True})
+LEVERAGE = 3
+BALANCE_USE_PCT = 0.80  # 80% compounding
+MIN_NOTIONAL = 5.20     # Safe buffer above Bitget's $5.00 min requirement
+MIN_24H_VOLUME = 15_000_000  # $15M minimum global liquidity
 
-def get_available_balance():
+# ==========================================================
+# 3. BITGET ONE-WAY ORDER HELPERS (Error 25156 Immune)
+# ==========================================================
+def open_long_position(symbol, amount):
+    """Dual-fallback execution for Bitget Unified One-Way Mode"""
     try:
-        bal = bitget.fetch_balance({'type': 'swap'})
-        if 'USDT' in bal and 'free' in bal['USDT']:
-            return float(bal['USDT']['free'])
-        elif 'free' in bal and 'USDT' in bal['free']:
-            return float(bal['free']['USDT'])
-        return 0.0
+        return exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side='buy',
+            amount=amount,
+            params={'tradeSide': 'buy_single'}
+        )
     except Exception as e:
-        print(f"[!] Balance error: {e}")
-        return 0.0
+        if '25156' in str(e) or 'tradeSide' in str(e).lower():
+            return exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side='buy',
+                amount=amount,
+                params={'tradeSide': 'open'}
+            )
+        raise e
 
-def fetch_binance_volumes():
-    """Fetches Binance 24h volume via official public market data mirror to bypass 418 bans."""
-    binance_vols = {}
-    mirrors = [
-        "https://fapi.binance.com/fapi/v1/ticker/24hr",        # Binance Futures (Volume leader)
-        "https://data-api.binance.vision/api/v3/ticker/24hr"  # Binance Spot Official Mirror
-    ]
-    for url in mirrors:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-            with urllib.request.urlopen(req, timeout=8) as response:
-                items = json.loads(response.read().decode())
-                for item in items:
-                    sym = item.get('symbol', '')
-                    if sym.endswith('USDT'):
-                        base = sym[:-4].upper()
-                        vol = float(item.get('quoteVolume', 0))
-                        binance_vols[base] = binance_vols.get(base, 0) + vol
-                label = "Futures" if "fapi" in url else "Spot Mirror"
-                print(f" ├─ Binance ({label}): Loaded {len(binance_vols)} pairs.")
-                return binance_vols
-        except Exception as e:
-            pass
-    print(" ├─ [!] Binance mirror unavailable; continuing with Bybit + OKX + Gate.")
-    return binance_vols
-
-def fetch_multi_exchange_global_volumes():
-    """Aggregates real-time 24h trading volume from Binance, Bybit, OKX, and Gate.io."""
-    global_volumes = {}
-    print("[*] Fetching Global Liquidity Consensus from Binance, Bybit, OKX, and Gate.io...")
-
-    # 1. Binance Volume (via Mirror)
-    binance_vols = fetch_binance_volumes()
-    for base, vol in binance_vols.items():
-        global_volumes[base] = global_volumes.get(base, 0) + vol
-
-    # 2. Bybit Volume
+def close_long_position(symbol, amount):
+    """Dual-fallback exit for Bitget Unified One-Way Mode"""
     try:
-        bybit_tickers = bybit.fetch_tickers()
-        for sym, t in bybit_tickers.items():
-            base = sym.split('/')[0].split(':')[0].upper()
-            vol = float(t.get('quoteVolume', 0))
-            global_volumes[base] = global_volumes.get(base, 0) + vol
-        print(f" ├─ Bybit: Loaded {len(bybit_tickers)} pairs.")
+        return exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side='sell',
+            amount=amount,
+            params={'tradeSide': 'sell_single'}
+        )
     except Exception as e:
-        print(f" ├─ [!] Bybit feed notice: {e}")
+        if '25156' in str(e) or 'tradeSide' in str(e).lower():
+            return exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side='sell',
+                amount=amount,
+                params={'tradeSide': 'close'}
+            )
+        raise e
 
-    # 3. OKX Volume
+def get_open_position():
+    """Returns symbol, amount, entry_price of active long position, or None"""
     try:
-        okx_tickers = okx.fetch_tickers()
-        for sym, t in okx_tickers.items():
-            base = sym.split('/')[0].split(':')[0].upper()
-            vol = float(t.get('quoteVolume', 0))
-            global_volumes[base] = global_volumes.get(base, 0) + vol
-        print(f" ├─ OKX: Loaded {len(okx_tickers)} pairs.")
+        positions = exchange.fetch_positions()
+        for p in positions:
+            contracts = float(p.get('contracts', 0) or 0)
+            side = p.get('side', '').lower()
+            if contracts > 0 and side == 'long':
+                return {
+                    'symbol': p['symbol'],
+                    'contracts': contracts,
+                    'entry_price': float(p.get('entryPrice', 0))
+                }
     except Exception as e:
-        print(f" ├─ [!] OKX feed notice: {e}")
+        print(f"[POSITION CHECK ERROR] {e}", flush=True)
+    return None
 
-    # 4. Gate.io Volume
+# ==========================================================
+# 4. MOMENTUM SCREENER (Early Initiation / No Top Chasing)
+# ==========================================================
+def scan_for_momentum():
+    """
+    1. Grabs all swap tickers in ONE fast API call.
+    2. Filters liquid coins moving between +1.5% and +9% (not top-extended).
+    3. Verifies RVol >= 2.5x and clean funding rate.
+    """
     try:
-        gate_tickers = gateio.fetch_tickers()
-        for sym, t in gate_tickers.items():
-            base = sym.split('/')[0].split('_')[0].upper()
-            vol = float(t.get('quoteVolume', 0))
-            global_volumes[base] = global_volumes.get(base, 0) + vol
-        print(f" └─ Gate.io: Loaded {len(gate_tickers)} pairs.")
+        exchange.load_markets()
+        tickers = exchange.fetch_tickers()
     except Exception as e:
-        print(f" └─ [!] Gate.io feed notice: {e}")
+        print(f"[SCANNER ERROR] Failed fetching tickers: {e}", flush=True)
+        return None
 
-    return global_volumes
-
-def get_tradable_symbols(global_volumes):
-    """Filters Bitget contracts to ONLY those backed by heavy global consensus."""
-    try:
-        bitget.load_markets()
-        tickers = bitget.fetch_tickers()
-        valid = []
-
-        for symbol, ticker in tickers.items():
-            if symbol.endswith(':USDT'):
-                base = symbol.split(':')[0].split('/')[0].upper()
-
-                # Clean multiplier prefixes (e.g. 1000PEPE -> PEPE)
-                clean_base = base
-                for prefix in ['1000000', '10000', '1000']:
-                    if clean_base.startswith(prefix) and len(clean_base) > len(prefix):
-                        clean_base = clean_base[len(prefix):]
-                        break
-
-                combined_vol = global_volumes.get(base, 0) or global_volumes.get(clean_base, 0)
-
-                # MUST HAVE AT LEAST $15,000,000 COMBINED GLOBAL VOLUME!
-                if combined_vol >= MIN_COMBINED_GLOBAL_VOLUME:
-                    valid.append((symbol, ticker, combined_vol))
-
-        # Sort descending by global volume (heaviest coins first!)
-        valid.sort(key=lambda x: x[2], reverse=True)
-        selected = [(v[0], v[1], v[2]) for v in valid]
-        print(f"[*] Verified {len(selected)} Bitget contracts backed by >= $15M Global Volume (Binance Included).")
-        return selected
-    except Exception as e:
-        print(f"[!] Symbol error: {e}")
-        return []
-
-def calculate_ema(prices, period):
-    multiplier = 2 / (period + 1)
-    ema = [prices[0]]
-    for p in prices[1:]:
-        ema.append((p - ema[-1]) * multiplier + ema[-1])
-    return ema[-1]
-
-def check_order_book_bids(symbol):
-    try:
-        ob = bitget.fetch_order_book(symbol, limit=15)
-        if not ob or not ob['bids'] or not ob['asks']:
-            return False, 0.0
-        bids = sum([b[1] for b in ob['bids'][:15]])
-        asks = sum([a[1] for a in ob['asks'][:15]])
-        if asks <= 0: return True, 99.0
-        return (bids / asks) >= 1.6, (bids / asks)
-    except Exception:
-        return False, 0.0
-
-def place_buy_order(symbol, coin_amount):
-    """Dual-mode order placement."""
-    try:
-        return bitget.create_order(symbol, 'market', 'buy', coin_amount, params={'tradeSide': 'buy_single'})
-    except Exception as e1:
-        if '25156' in str(e1) or 'tradeSide' in str(e1):
-            return bitget.create_order(symbol, 'market', 'buy', coin_amount, params={'tradeSide': 'open'})
-        raise e1
-
-def manage_trade_adaptively(symbol, coin_amount, entry_price, dynamic_tp, smart_sl):
-    """Monitors live trade: locks Breakeven at +0.8% so trade has ZERO RISK!"""
-    print(f"🛡️ [GLOBAL TITAN MONITOR ACTIVE] Guarding {symbol}...")
-    breakeven_set = False
-    start_time = time.time()
-
-    while (time.time() - start_time) < 1800: # 30 min max run
-        try:
-            ticker = bitget.fetch_ticker(symbol)
-            curr_price = float(ticker['last'])
-            pnl_pct = (curr_price - entry_price) / entry_price
-
-            # 1. Take Profit reached
-            if curr_price >= dynamic_tp:
-                print(f"🎯 [TAKE PROFIT HIT] Closing {symbol} at ${curr_price} (+{pnl_pct*100:.2f}%)!")
-                bitget.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
-                return
-
-            # 2. Risk-Free Breakeven Trigger (+0.8%)
-            if pnl_pct >= BREAKEVEN_TRIGGER_PCT and not breakeven_set:
-                smart_sl = entry_price * 1.001
-                breakeven_set = True
-                print(f"🔒 [BREAKEVEN ACTIVATED] {symbol} up +{pnl_pct*100:.2f}%! Stop Loss moved to Entry. ZERO RISK!")
-
-            # 3. Stop Loss hit
-            if curr_price <= smart_sl:
-                reason = "BREAKEVEN EXIT ($0 Loss)" if breakeven_set else "STRUCTURAL STOP"
-                print(f"⚠️ [{reason}] Closing {symbol} at ${curr_price}...")
-                bitget.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
-                return
-
-            time.sleep(5)
-        except Exception:
-            time.sleep(5)
+    candidates = []
+    for symbol, t in tickers.items():
+        if not symbol.endswith(":USDT"):
             continue
 
-def evaluate_symbol(symbol_data):
-    symbol, ticker, combined_global_vol = symbol_data
-    try:
-        # Fetch 25 candles on the 15-MINUTE chart
-        ohlcv = bitget.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=25)
-        if len(ohlcv) < 20:
-            return
+        vol_24h = float(t.get('quoteVolume', 0) or 0)
+        pct_24h = float(t.get('percentage', 0) or 0)
 
-        highs = [c[2] for c in ohlcv]
-        lows = [c[3] for c in ohlcv]
-        closes = [c[4] for c in ohlcv]
-        volumes = [c[5] for c in ohlcv]
+        # Liquidity + Anti-Top Filter:
+        # Pumping between +1.5% and +9.0% with at least $15M volume
+        if vol_24h >= MIN_24H_VOLUME and 1.5 <= pct_24h <= 9.0:
+            candidates.append((symbol, pct_24h, vol_24h))
 
-        # Candle 1 (Previous 15m candle): index -3
-        c1_high = ohlcv[-3][2]
+    # Sort by 24h percentage gain descending
+    candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # Candle 2 (Completed 15m candle): index -2
-        c2_open, c2_high, c2_low, c2_close, c2_vol = (
-            ohlcv[-2][1], ohlcv[-2][2], ohlcv[-2][3], ohlcv[-2][4], ohlcv[-2][5]
-        )
-
-        # 1. MOMENTUM: Price must be above 20 EMA on 15m
-        ema_20 = calculate_ema(closes[:-1], 20)
-        if c2_close < ema_20:
-            return
-
-        # 2. INITIATION: Candle must close GREEN and break previous 15m high
-        if c2_close <= c2_open or c2_close <= c1_high:
-            return
-
-        # 3. VOLUME CONFIRMATION: Volume must be at least 1.8x average
-        avg_vol = sum(volumes[-16:-2]) / 14.0
-        if avg_vol <= 0 or (c2_vol / avg_vol) < 1.8:
-            return
-
-        # 4. ORDER BOOK LIQUIDITY: Bids must dominate Asks on Bitget
-        has_bids, ratio = check_order_book_bids(symbol)
-        if not has_bids:
-            return
-
-        # 5. DYNAMIC TARGET: Ceiling target between +1.8% and +4.5%
-        range_ceiling = max(highs[-18:-2])
-        dynamic_tp = range_ceiling * 0.996
-        profit_room_pct = (dynamic_tp - c2_close) / c2_close
-
-        if profit_room_pct < 0.018 or profit_room_pct > 0.045:
-            return
-
-        # Balance check & compounding
-        current_balance = get_available_balance()
-        if current_balance < MIN_USDT_BALANCE:
-            return
-
-        trade_margin = current_balance * COMPOUND_RATIO
-        target_notional = trade_margin * LEVERAGE
-        if target_notional < 5.5:
-            target_notional = 5.5
-
-        coin_amount = target_notional / c2_close
-        coin_amount = bitget.amount_to_precision(symbol, coin_amount)
-
-        # Skip stock contracts if below min lot
-        market = bitget.market(symbol)
-        min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
-        if min_amount and float(coin_amount) < min_amount:
-            return
-
-        if float(coin_amount) <= 0:
-            return
-
+    # Inspect top candidates for 15m structural initiation
+    for symbol, pct_24h, _ in candidates[:10]:
         try:
-            bitget.set_leverage(LEVERAGE, symbol)
-        except Exception:
-            pass
+            market = exchange.market(symbol)
+            min_lot = float(market['limits']['amount']['min'] or 0)
 
-        # Stop loss: 0.7% below the breakout candle's low
-        smart_sl = c2_low * 0.993
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=25)
+            if len(ohlcv) < 22:
+                continue
 
-        base_name = symbol.split(':')[0]
-        print(f"\n🌐 [GLOBAL 4-EXCHANGE BREAKOUT VERIFIED] {symbol}")
-        print(f" ├─ Asset: {base_name}")
-        print(f" ├─ Global Combined Volume: ${combined_global_vol:,.0f} USDT (Binance + Bybit + OKX + Gate)")
-        print(f" ├─ Order Book Support: {ratio:.2f}x Bids over Asks 🔥")
-        print(f" ├─ Target (+{profit_room_pct*100:.2f}%): ${dynamic_tp:.4f}")
-        print(f" └─ Entry Price: ${c2_close}")
+            closes = [c[4] for c in ohlcv]
+            volumes = [c[5] for c in ohlcv]
+            cur_price = closes[-1]
 
-        # Place Entry Buy Order
-        order = place_buy_order(symbol, coin_amount)
-        print(f"✅ [SUCCESS] Global Multi-Exchange Order Filled! ID: {order['id']}")
+            # 1. Base / Average check: 20-period SMA
+            sma_20 = sum(closes[-21:-1]) / 20
+            dist_from_sma = ((cur_price - sma_20) / sma_20) * 100
 
-        # Start Active Adaptive Monitoring (Breakeven + Dynamic Exit)
-        manage_trade_adaptively(symbol, coin_amount, c2_close, dynamic_tp, smart_sl)
+            # Must be breaking out fresh from base (0.8% to 3.5% above baseline)
+            if not (0.8 <= dist_from_sma <= 3.5):
+                continue
 
-        time.sleep(120)
+            # 2. Whale Volume (RVol >= 2.5x)
+            avg_vol = sum(volumes[-21:-1]) / 20
+            cur_vol = volumes[-1]
+            rvol = cur_vol / avg_vol if avg_vol > 0 else 0
+            if rvol < 2.5:
+                continue
 
-    except Exception:
-        return
+            # 3. Clean Funding Rate Check (< 0.03% per 8h)
+            try:
+                funding = exchange.fetch_funding_rate(symbol)
+                fr = float(funding.get('fundingRate', 0) or 0)
+                if fr > 0.0003:  # Too crowded
+                    continue
+            except Exception:
+                pass  # Do not block if funding endpoint times out
 
-def run_bot():
-    print(f"[*] Starting 4-Exchange Global Consensus Engine (Binance + Bybit + OKX + Gate.io)...")
-    last_global_fetch = 0
-    global_volumes = {}
+            # 4. Open Interest Expansion
+            try:
+                oi_data = exchange.fetch_open_interest(symbol)
+                oi_val = float(oi_data.get('openInterestValue', 0) or oi_data.get('openInterestAmount', 0))
+                if oi_val <= 0:
+                    continue
+            except Exception:
+                pass
+
+            print(f"[FOUND RUNNER] {symbol} | RVol: {rvol:.2f}x | DistSMA: +{dist_from_sma:.2f}% | 24h: +{pct_24h:.1f}%", flush=True)
+            return symbol, cur_price, min_lot
+
+        except Exception as e:
+            continue
+
+    return None
+
+# ==========================================================
+# 5. TRADE GUARDIAN (Execution & State Machine)
+# ==========================================================
+def manage_active_trade(symbol, contracts, entry_price):
+    highest_price = entry_price
+    entry_time = time.time()
+    last_log_time = 0
+
+    print(f"\n[GUARDIAN ACTIVE] Managing {symbol} | Entry: {entry_price:.6f} | Qty: {contracts}", flush=True)
 
     while True:
-        # Refresh Global Volume Consensus every 3 hours
-        if time.time() - last_global_fetch > 10800 or len(global_volumes) == 0:
-            global_volumes = fetch_multi_exchange_global_volumes()
-            last_global_fetch = time.time()
+        try:
+            time.sleep(3)
+            ticker = exchange.fetch_ticker(symbol)
+            cur_price = float(ticker['last'])
 
-        symbols_data = get_tradable_symbols(global_volumes)
-        for sym_data in symbols_data:
-            evaluate_symbol(sym_data)
-            time.sleep(0.06)
+            if cur_price > highest_price:
+                highest_price = cur_price
 
-        print("[*] Multi-Exchange sweep complete. Re-scanning...")
-        time.sleep(15)
+            pnl_pct = ((cur_price - entry_price) / entry_price) * 100
+            peak_pnl = ((highest_price - entry_price) / entry_price) * 100
+            elapsed_min = (time.time() - entry_time) / 60
+
+            # Log heartbeat every 20 seconds
+            if time.time() - last_log_time > 20:
+                print(f"[STATUS] {symbol} PnL: {pnl_pct:+.2f}% | Peak: {peak_pnl:+.2f}% | Active: {elapsed_min:.1f}m", flush=True)
+                last_log_time = time.time()
+
+            # ----------------------------------------------------
+            # RULE 1: THE FEE-SHIELD LOCK (+1.0% -> +0.5%)
+            # Once it crosses +1.0%, never allow it below +0.5%
+            # ----------------------------------------------------
+            if peak_pnl >= 1.0:
+                guaranteed_floor = entry_price * 1.005
+                if cur_price <= guaranteed_floor:
+                    print(f"[EXIT TRIGGER] Fee-Shield Triggered! Locked +0.5% profit (Peak: +{peak_pnl:.2f}%)", flush=True)
+                    close_long_position(symbol, contracts)
+                    break
+
+            # ----------------------------------------------------
+            # RULE 2: MOMENTUM STALL / BOX EXHAUSTION EXIT
+            # If trade has run > 15 mins and stays stuck in a box
+            # ----------------------------------------------------
+            if elapsed_min >= 15 and peak_pnl < 1.0:
+                if abs(pnl_pct) <= 0.45:
+                    print(f"[EXIT TRIGGER] Momentum stalled in a tight box after {elapsed_min:.0f} mins. Closing trade.", flush=True)
+                    close_long_position(symbol, contracts)
+                    break
+
+            # ----------------------------------------------------
+            # RULE 3: INITIAL STRUCTURAL STOP LOSS (-1.2%)
+            # ----------------------------------------------------
+            if peak_pnl < 1.0 and pnl_pct <= -1.20:
+                print(f"[EXIT TRIGGER] Initial Stop Loss hit at {pnl_pct:.2f}%.", flush=True)
+                close_long_position(symbol, contracts)
+                break
+
+            # ----------------------------------------------------
+            # RULE 4: DYNAMIC RUNNER TRAIL (+3% to +10%+ expansion)
+            # Give 1.5% breathing room from highest peak
+            # ----------------------------------------------------
+            if peak_pnl >= 3.0:
+                trailing_floor = highest_price * 0.985
+                if cur_price <= trailing_floor:
+                    print(f"[EXIT TRIGGER] Trailing stop triggered. Banked runner at +{pnl_pct:.2f}% (Peak: +{peak_pnl:.2f}%)", flush=True)
+                    close_long_position(symbol, contracts)
+                    break
+
+        except Exception as e:
+            print(f"[GUARDIAN LOOP WARNING] {e}", flush=True)
+            time.sleep(2)
+
+# ==========================================================
+# 6. MAIN ENGINE LOOP
+# ==========================================================
+def main():
+    start_keep_alive()
+    print("[SYSTEM] Bitget Early-Base Momentum Hunter initialized.", flush=True)
+
+    while True:
+        try:
+            # Check if position is already open
+            pos = get_open_position()
+            if pos:
+                manage_active_trade(pos['symbol'], pos['contracts'], pos['entry_price'])
+                time.sleep(5)
+                continue
+
+            # Fetch Wallet Balance
+            balance_info = exchange.fetch_balance()
+            usdt_free = float(balance_info['USDT']['free'] or 0)
+            
+            # Sizing: 80% available balance * 3x leverage
+            notional = (usdt_free * BALANCE_USE_PCT) * LEVERAGE
+            
+            if notional < MIN_NOTIONAL:
+                print(f"[WAITING] Margin too low for $5 min notional (Balance: ${usdt_free:.2f} | Notional: ${notional:.2f})", flush=True)
+                time.sleep(15)
+                continue
+
+            # Scan for early momentum
+            result = scan_for_momentum()
+            if not result:
+                time.sleep(10)
+                continue
+
+            symbol, cur_price, min_lot = result
+
+            # Calculate amount and precision
+            raw_amount = notional / cur_price
+            formatted_amount = float(exchange.amount_to_precision(symbol, raw_amount))
+
+            # Safety check: does the account meet the contract minimum lot size?
+            if formatted_amount < min_lot:
+                print(f"[SKIP] {symbol}: Sizing ({formatted_amount}) below min lot ({min_lot})", flush=True)
+                time.sleep(5)
+                continue
+
+            # Ensure leverage is configured on Bitget
+            try:
+                exchange.set_leverage(LEVERAGE, symbol, params={'marginMode': 'crossed'})
+            except Exception:
+                pass
+
+            print(f"[ENTERING LONG] {symbol} | Size: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
+            order = open_long_position(symbol, formatted_amount)
+            print(f"[ORDER PLACED] ID: {order.get('id')}", flush=True)
+
+            # Wait 3 seconds for exchange fill confirmation before launching guardian
+            time.sleep(3)
+
+        except Exception as e:
+            print(f"[MAIN LOOP ERROR] {e}", flush=True)
+            time.sleep(10)
 
 if __name__ == "__main__":
-    run_bot()
+    main()
