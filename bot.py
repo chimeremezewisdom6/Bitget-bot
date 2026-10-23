@@ -4,13 +4,13 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
-# ==================== KEEP-ALIVE SERVER FOR RENDER ====================
+# ==================== KEEP-ALIVE SERVER (FOR RENDER 24/7) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitget Whale Exhaustion Bot Active!")
+        self.wfile.write(b"Bitget Smart Liquidity Trap Engine Running 24/7!")
 
     def log_message(self, format, *args):
         return
@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"[*] Health check active on port {port}")
+    print(f"[*] Health check server active on port {port}")
     server.serve_forever()
 
 threading.Thread(target=run_health_server, daemon=True).start()
@@ -28,15 +28,17 @@ API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
-COMPOUND_RATIO = 0.80        # Use 80% of wallet balance per trade
+COMPOUND_RATIO = 0.80        # Reinvest 80% of available USDT per trade
 LEVERAGE = 3                 # 3x leverage
-MIN_USDT_BALANCE = 1.90      # Minimum wallet balance
-MIN_VOLUME_USDT = 1_000_000  # $1M+ daily volume
-TIMEFRAME = '5m'
+MIN_USDT_BALANCE = 1.90      # Minimum balance required to trade
+MIN_VOLUME_USDT = 1_000_000  # $1,000,000+ daily volume filter
+TIMEFRAME = '5m'             # 5-minute execution timeframe
 
-TAKE_PROFIT_PCT = 0.015      # +1.5% Take Profit
-VOLUME_DUMP_MULT = 2.2       # Whale volume dump multiplier
+TAKE_PROFIT_PCT = 0.025      # +2.5% Target (void fill)
+SL_CUSHION = 0.008           # 0.8% Wise Cushion below the sweep low
+VOLUME_MULT = 1.8            # Volume must be at least 1.8x average (stop-loss trigger volume)
 
+# Initialize Bitget
 exchange = ccxt.bitget({
     'apiKey': API_KEY,
     'secret': SECRET_KEY,
@@ -49,6 +51,7 @@ exchange = ccxt.bitget({
 })
 
 def get_available_balance():
+    """Fetches live available USDT balance from Bitget."""
     try:
         bal = exchange.fetch_balance({'type': 'swap'})
         if 'USDT' in bal and 'free' in bal['USDT']:
@@ -57,10 +60,11 @@ def get_available_balance():
             return float(bal['free']['USDT'])
         return 0.0
     except Exception as e:
-        print(f"[!] Balance check: {e}")
+        print(f"[!] Balance read notice: {e}")
         return 0.0
 
 def get_tradable_symbols():
+    """Fetches all active USDT-M Perpetual pairs with >= $1M volume."""
     try:
         exchange.load_markets()
         tickers = exchange.fetch_tickers()
@@ -68,14 +72,14 @@ def get_tradable_symbols():
         for symbol, ticker in tickers.items():
             if symbol.endswith(':USDT') and ticker.get('quoteVolume', 0) >= MIN_VOLUME_USDT:
                 valid.append(symbol)
-        print(f"[*] Loaded {len(valid)} active pairs for Whale Exhaustion scan.")
+        print(f"[*] Loaded {len(valid)} active pairs for Smart Sweep Scan.")
         return valid
     except Exception as e:
-        print(f"[!] Symbol load error: {e}")
+        print(f"[!] Symbol fetch error: {e}")
         return []
 
 def place_buy_order(symbol, coin_amount):
-    """Safely executes buy order in any position mode."""
+    """Dual-mode order placement: works in One-Way or Hedge mode seamlessly."""
     try:
         return exchange.create_order(
             symbol=symbol,
@@ -95,74 +99,47 @@ def place_buy_order(symbol, coin_amount):
             )
         raise e1
 
-def check_order_book_bids(symbol):
-    """Verifies that buyers now dominate the order book."""
-    try:
-        ob = exchange.fetch_order_book(symbol, limit=15)
-        if not ob or not ob['bids'] or not ob['asks']:
-            return False
-        total_bids = sum([b[1] for b in ob['bids'][:15]])
-        total_asks = sum([a[1] for a in ob['asks'][:15]])
-        if total_asks <= 0:
-            return True
-        return (total_bids / total_asks) >= 1.5
-    except Exception:
-        return False
-
 def evaluate_symbol(symbol):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=25)
-        if len(ohlcv) < 22:
+        # Fetch 60 candles (~5 hours of market structure)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=60)
+        if len(ohlcv) < 55:
             return
 
+        lows = [c[3] for c in ohlcv]
         volumes = [c[5] for c in ohlcv]
 
-        # CANDLE 1 (Whale Dump): Completed at index -3
-        c1_open, c1_high, c1_low, c1_close, c1_vol = (
-            ohlcv[-3][1], ohlcv[-3][2], ohlcv[-3][3], ohlcv[-3][4], ohlcv[-3][5]
-        )
-
-        # CANDLE 2 (Confirmation Whale Stopped): Completed at index -2
-        c2_open, c2_high, c2_low, c2_close, c2_vol = (
+        # Latest completed candle is index -2
+        c_open, c_high, c_low, c_close, c_vol = (
             ohlcv[-2][1], ohlcv[-2][2], ohlcv[-2][3], ohlcv[-2][4], ohlcv[-2][5]
         )
 
-        # -------------------------------------------------------------------------
-        # STEP 1: VERIFY CANDLE 1 WAS A WHALE DUMP
-        # -------------------------------------------------------------------------
-        avg_vol = sum(volumes[-15:-3]) / 12.0
-        if avg_vol <= 0 or (c1_vol / avg_vol) < VOLUME_DUMP_MULT:
-            return  # No whale volume on Candle 1
+        # 1. IDENTIFY THE 4-HOUR STRUCTURAL FLOOR (Lowest low of 50 candles before this one)
+        structural_floor = min(lows[-52:-2])
 
-        # Must be a RED dump candle
-        c1_drop = ((c1_close - c1_open) / c1_open) * 100
-        if c1_drop > -1.0:
-            return  # Dump was too small to be a whale
+        # 2. THE SWEEP CHECK: Price MUST have punctured BELOW the 50-candle floor
+        if c_low >= structural_floor:
+            return  # Did not sweep the floor
 
-        # -------------------------------------------------------------------------
-        # STEP 2: VERIFY CANDLE 2 PROVES THE WHALE HAS STOPPED TRADING
-        # -------------------------------------------------------------------------
-        # Rule A: The whale stopped dumping (Volume on Candle 2 drops significantly)
-        if c2_vol >= c1_vol * 0.85:
-            return  # Volume is still too high, whale might still be dumping!
+        # 3. THE TRAP CONFIRMATION: Price MUST close back ABOVE the floor
+        # Proves the whale run out of selling power and shorts are trapped below!
+        if c_close <= structural_floor:
+            return  # Closed below floor, selling might continue
 
-        # Rule B: The low holds (Price did NOT go lower than the whale dump low)
-        if c2_low < c1_low:
-            return  # Price made a lower low, sellers are not done!
+        # 4. ABSORPTION WICK: Lower wick must be at least 25% of the candle's total range
+        candle_range = c_high - c_low
+        if candle_range <= 0:
+            return
+        lower_wick = min(c_open, c_close) - c_low
+        if (lower_wick / candle_range) < 0.25:
+            return
 
-        # Rule C: Buyers take over (Candle 2 closes GREEN and above Candle 1 close)
-        if c2_close <= c2_open or c2_close <= c1_close:
-            return  # Candle 2 is not green, buyers have not taken the upper hand!
+        # 5. VOLUME CONFIRMATION: Volume spike showing stop-loss execution
+        avg_vol = sum(volumes[-20:-2]) / 18.0
+        if avg_vol <= 0 or (c_vol / avg_vol) < VOLUME_MULT:
+            return
 
-        # -------------------------------------------------------------------------
-        # STEP 3: ORDER BOOK CONFIRMATION (Buyers heavily outnumber sellers)
-        # -------------------------------------------------------------------------
-        if not check_order_book_bids(symbol):
-            return  # Order book not yet stacked with buyers
-
-        # -------------------------------------------------------------------------
-        # STEP 4: WHALE IS CONFIRMED GONE -> EXECUTE
-        # -------------------------------------------------------------------------
+        # Balance check & Dynamic Compounding
         current_balance = get_available_balance()
         if current_balance < MIN_USDT_BALANCE:
             return
@@ -172,9 +149,10 @@ def evaluate_symbol(symbol):
         if target_notional < 5.5:
             target_notional = 5.5
 
-        coin_amount = target_notional / c2_close
+        coin_amount = target_notional / c_close
         coin_amount = exchange.amount_to_precision(symbol, coin_amount)
 
+        # Safety Check: Skip high-priced stock futures if order doesn't meet minimum lot
         market = exchange.market(symbol)
         min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
         if min_amount and float(coin_amount) < min_amount:
@@ -188,23 +166,30 @@ def evaluate_symbol(symbol):
         except Exception:
             pass
 
-        # Stop loss placed right below the whale dump low
-        smart_sl = c1_low * 0.998
-        tp_price = exchange.price_to_precision(symbol, c2_close * (1 + TAKE_PROFIT_PCT))
+        # SMART & WISE STOP LOSS: 0.8% cushion below the absolute sweep low
+        smart_sl = c_low * (1.0 - SL_CUSHION)
+        sl_pct = ((c_close - smart_sl) / c_close) * 100
+
+        # Discard extreme outliers (avoid massive wicks where risk > 2.8%)
+        if sl_pct > 2.8 or sl_pct < 0.5:
+            return
+
+        tp_price = exchange.price_to_precision(symbol, c_close * (1.0 + TAKE_PROFIT_PCT))
         smart_sl_price = exchange.price_to_precision(symbol, smart_sl)
 
-        print(f"\n🐋 [WHALE DUMP COMPLETED & BUYERS IN CONTROL] {symbol}")
-        print(f" ├─ Whale Dump (Candle 1): {c1_drop:.2f}% drop with {c1_vol / avg_vol:.1f}x volume")
-        print(f" ├─ Whale Stopped (Candle 2): Volume dried up, Low held at ${c1_low}")
-        print(f" ├─ Buyers Reversal: Green candle closed at ${c2_close}")
-        print(f" ├─ Entry Price: ${c2_close}")
-        print(f" └─ Take Profit Target (+1.5%): ${tp_price}")
+        print(f"\n⚡ [SMART LIQUIDITY SWEEP & SHORT TRAP] {symbol}")
+        print(f" ├─ Wallet: ${current_balance:.2f} USDT")
+        print(f" ├─ 4h Structural Floor Swept: ${structural_floor}")
+        print(f" ├─ Sweep Low: ${c_low} (Stops triggered)")
+        print(f" ├─ Closed Back Above Floor: ${c_close}")
+        print(f" ├─ Target (+2.5% TP): ${tp_price}")
+        print(f" └─ Wise Stop Loss (-{sl_pct:.2f}%): ${smart_sl_price}")
 
-        # Place Entry Order
+        # Place Entry Buy Order
         order = place_buy_order(symbol, coin_amount)
         print(f"✅ [SUCCESS] Order Filled! ID: {order['id']}")
 
-        # Place Take-Profit Limit
+        # Place Take-Profit Limit (+2.5%)
         try:
             exchange.create_order(
                 symbol=symbol,
@@ -214,18 +199,18 @@ def evaluate_symbol(symbol):
                 price=tp_price,
                 params={'reduceOnly': True, 'tradeSide': 'sell_single'}
             )
-            print(f"🎯 [AUTO TP PLACED] at ${tp_price}")
+            print(f"🎯 [AUTO TP PLACED] at ${tp_price} (+2.5%)")
         except Exception as tp_err:
             print(f"[!] TP notice: {tp_err}")
 
-        # 5-minute cooldown to let the trade run
+        # 5-minute pause to let the upward void fill develop
         time.sleep(300)
 
     except Exception:
         return
 
 def run_bot():
-    print(f"[*] Starting Whale Exhaustion & Confirmation Scanner on Bitget...")
+    print(f"[*] Starting Smart Liquidity Trap Scanner on Bitget ($1M+ Volume)...")
     symbols = get_tradable_symbols()
 
     while True:
@@ -233,7 +218,7 @@ def run_bot():
             evaluate_symbol(sym)
             time.sleep(0.06)
 
-        print("[*] 5m sweep complete. Re-scanning...")
+        print("[*] 5m sweep finished. Re-scanning...")
         time.sleep(10)
 
 if __name__ == "__main__":
