@@ -12,7 +12,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitget Global Triangulation Engine Active 24/7!")
+        self.wfile.write(b"Bitget Global Top 500 Engine Active 24/7!")
 
     def log_message(self, format, *args):
         return
@@ -60,23 +60,25 @@ def get_available_balance():
         print(f"[!] Balance error: {e}")
         return 0.0
 
-def fetch_global_top_200_symbols():
-    """Fetches the True Global Top 200 cryptocurrencies across all worldwide exchanges via CoinCap."""
+def fetch_global_top_500_symbols():
+    """Fetches the True Global Top 500 cryptocurrencies worldwide via CoinCap."""
     try:
-        url = "https://api.coincap.io/v2/assets?limit=200"
+        url = "https://api.coincap.io/v2/assets?limit=500"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=12) as response:
             data = json.loads(response.read().decode())
             global_symbols = set([item['symbol'].upper() for item in data.get('data', [])])
-            print(f"[*] Global Aggregator: Loaded {len(global_symbols)} verified worldwide assets (Leader: BTC).")
-            return global_symbols
+            if len(global_symbols) > 50:
+                print(f"[*] Global Aggregator: Loaded {len(global_symbols)} verified worldwide assets (TOP 500).")
+                return global_symbols
     except Exception as e:
-        print(f"[!] Global Aggregator fallback: {e}")
-        # High-liquidity global fallback list if network is slow
-        return {"BTC", "ETH", "SOL", "DOGE", "PEPE", "SUI", "XRP", "NEAR", "AVAX", "LINK", "ADA", "SHIB", "BNB", "DOT", "LTC", "BCH", "APT", "UNI", "ICP", "FET"}
+        print(f"[!] Global Aggregator notice: {e}")
+    
+    # Fallback list of top liquid global giants
+    return {"BTC", "ETH", "SOL", "DOGE", "PEPE", "SUI", "XRP", "NEAR", "AVAX", "LINK", "ADA", "SHIB", "BNB", "DOT", "LTC", "BCH", "APT", "UNI", "ICP", "FET", "RENDER", "TAO", "WIF", "BONK", "FLOKI", "AR", "INJ", "TIA", "SEI", "KAS"}
 
 def get_tradable_symbols(global_verified_symbols):
-    """Filters Bitget contracts to ONLY those present in the Global Top 200."""
+    """Filters Bitget contracts to ONLY those present in the Global Top 500."""
     try:
         exchange.load_markets()
         tickers = exchange.fetch_tickers()
@@ -85,15 +87,24 @@ def get_tradable_symbols(global_verified_symbols):
         for symbol, ticker in tickers.items():
             if symbol.endswith(':USDT'):
                 base = symbol.split(':')[0].split('/')[0].upper()
-                # MUST BE IN THE GLOBAL TOP 200
-                if base in global_verified_symbols:
-                    vol = float(ticker.get('quoteVolume', 0))
-                    valid.append((symbol, ticker, vol))
+                
+                # Strip multiplier prefixes (e.g. 1000PEPE -> PEPE, 1000BONK -> BONK)
+                clean_base = base
+                for prefix in ['1000000', '10000', '1000']:
+                    if clean_base.startswith(prefix) and len(clean_base) > len(prefix):
+                        clean_base = clean_base[len(prefix):]
+                        break
 
-        # Sort descending so highest volume coins are scanned first
+                # Check if base coin or clean base is in the Global Top 500
+                if base in global_verified_symbols or clean_base in global_verified_symbols:
+                    vol = float(ticker.get('quoteVolume', 0))
+                    if vol >= 500_000: # Ensure coin has active trading
+                        valid.append((symbol, ticker, vol))
+
+        # Sort descending by volume so biggest coins are scanned first
         valid.sort(key=lambda x: x[2], reverse=True)
         selected = [(v[0], v[1]) for v in valid]
-        print(f"[*] Verified {len(selected)} Bitget contracts backed by Global Multi-Exchange Volume.")
+        print(f"[*] Successfully loaded {len(selected)} Bitget contracts verified in the GLOBAL TOP 500.")
         return selected
     except Exception as e:
         print(f"[!] Symbol error: {e}")
@@ -129,7 +140,7 @@ def place_buy_order(symbol, coin_amount):
 
 def manage_trade_adaptively(symbol, coin_amount, entry_price, dynamic_tp, smart_sl):
     """Monitors live trade: locks Breakeven at +0.8% so trade has ZERO RISK!"""
-    print(f"🛡️ [GLOBAL RUNNER MONITOR ACTIVE] Guarding {symbol}...")
+    print(f"🛡️ [TOP-500 RUNNER MONITOR ACTIVE] Guarding {symbol}...")
     breakeven_set = False
     start_time = time.time()
 
@@ -184,40 +195,26 @@ def evaluate_symbol(symbol_data):
             ohlcv[-2][1], ohlcv[-2][2], ohlcv[-2][3], ohlcv[-2][4], ohlcv[-2][5]
         )
 
-        # ---------------------------------------------------------------------
-        # LAYER 1: BITGET PRICE BREAKOUT ON 15M
-        # ---------------------------------------------------------------------
+        # 1. MOMENTUM: Price must be above 20 EMA on 15m
         ema_20 = calculate_ema(closes[:-1], 20)
         if c2_close < ema_20:
             return
 
+        # 2. INITIATION: Candle must close GREEN and break previous 15m high
         if c2_close <= c2_open or c2_close <= c1_high:
             return
 
+        # 3. VOLUME CONFIRMATION: Volume must be at least 1.8x average
         avg_vol = sum(volumes[-16:-2]) / 14.0
         if avg_vol <= 0 or (c2_vol / avg_vol) < 1.8:
             return
 
-        # ---------------------------------------------------------------------
-        # LAYER 2: GLOBAL COMPOSITE INDEX CHECK (Binance/OKX/Coinbase Average)
-        # ---------------------------------------------------------------------
-        # Read Bitget's internal multi-exchange global index price
-        global_index_price = float(ticker.get('info', {}).get('indexPrice') or ticker.get('info', {}).get('indexPr') or c2_close)
-        
-        # Ensure the contract price isn't artificially inflated above the Global Index Price
-        price_spread = (c2_close - global_index_price) / global_index_price
-        if price_spread > 0.008:
-            # Bitget is trading 0.8% higher than global markets (local fakeout danger!)
-            return
-
-        # ---------------------------------------------------------------------
-        # LAYER 3: ORDER BOOK DEPTH CONFIRMATION
-        # ---------------------------------------------------------------------
+        # 4. ORDER BOOK LIQUIDITY: Bids must dominate Asks on Bitget
         has_bids, ratio = check_order_book_bids(symbol)
         if not has_bids:
             return
 
-        # Dynamic ceiling target between +1.8% and +4.5%
+        # 5. DYNAMIC TARGET: Ceiling target between +1.8% and +4.5%
         range_ceiling = max(highs[-18:-2])
         dynamic_tp = range_ceiling * 0.996
         profit_room_pct = (dynamic_tp - c2_close) / c2_close
@@ -238,6 +235,7 @@ def evaluate_symbol(symbol_data):
         coin_amount = target_notional / c2_close
         coin_amount = exchange.amount_to_precision(symbol, coin_amount)
 
+        # Skip stock contracts if below min lot
         market = exchange.market(symbol)
         min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
         if min_amount and float(coin_amount) < min_amount:
@@ -251,20 +249,19 @@ def evaluate_symbol(symbol_data):
         except Exception:
             pass
 
-        # Smart Stop Loss: 0.7% below the breakout candle's low
+        # Stop loss: 0.7% below the breakout candle's low
         smart_sl = c2_low * 0.993
 
         base_name = symbol.split(':')[0]
-        print(f"\n🌍 [GLOBAL TRIANGULATION BREAKOUT VERIFIED] {symbol}")
-        print(f" ├─ Asset: {base_name} (Verified in Global Top 200 Worldwide!)")
-        print(f" ├─ Global Composite Index: ${global_index_price:.4f}")
+        print(f"\n🌐 [GLOBAL TOP-500 MOMENTUM BREAKOUT] {symbol}")
+        print(f" ├─ Asset: {base_name} (Verified in Global Top 500 Worldwide!)")
         print(f" ├─ Order Book Support: {ratio:.2f}x Bids over Asks 🔥")
         print(f" ├─ Target (+{profit_room_pct*100:.2f}%): ${dynamic_tp:.4f}")
         print(f" └─ Entry Price: ${c2_close}")
 
         # Place Entry Buy Order
         order = place_buy_order(symbol, coin_amount)
-        print(f"✅ [SUCCESS] Global Multi-Exchange Order Filled! ID: {order['id']}")
+        print(f"✅ [SUCCESS] Global Top-500 Order Filled! ID: {order['id']}")
 
         # Start Active Adaptive Monitoring (Breakeven + Dynamic Exit)
         manage_trade_adaptively(symbol, coin_amount, c2_close, dynamic_tp, smart_sl)
@@ -275,14 +272,16 @@ def evaluate_symbol(symbol_data):
         return
 
 def run_bot():
-    print(f"[*] Starting Global Triangulation Scanner (CoinCap Global + Bitget Index)...")
+    print(f"[*] Starting Global Top 500 Scanner (Worldwide Liquid Assets + Bitget Executed)...")
     last_global_fetch = 0
     global_verified_symbols = set()
 
     while True:
-        # Refresh Global Top 200 list every 2 hours
-        if time.time() - last_global_fetch > 7200:
-            global_verified_symbols = fetch_global_top_200_symbols()
+        # Refresh Global Top 500 list every 2 hours
+        if time.time() - last_global_fetch > 7200 or len(global_verified_symbols) == 0:
+            fetched = fetch_global_top_500_symbols()
+            if fetched and len(fetched) > 0:
+                global_verified_symbols = fetched
             last_global_fetch = time.time()
 
         symbols_data = get_tradable_symbols(global_verified_symbols)
@@ -290,7 +289,7 @@ def run_bot():
             evaluate_symbol(sym_data)
             time.sleep(0.06)
 
-        print("[*] Global sweep complete. Re-scanning...")
+        print("[*] Global Top 500 sweep complete. Re-scanning...")
         time.sleep(15)
 
 if __name__ == "__main__":
