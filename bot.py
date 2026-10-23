@@ -4,13 +4,13 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
-# ==================== KEEP-ALIVE SERVER (FOR RENDER 24/7) ====================
+# ==================== KEEP-ALIVE SERVER FOR RENDER ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitget Smart Liquidity Trap Engine Running 24/7!")
+        self.wfile.write(b"Bitget Dynamic Liquidity Range Engine Active!")
 
     def log_message(self, format, *args):
         return
@@ -28,17 +28,16 @@ API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
-COMPOUND_RATIO = 0.80        # Reinvest 80% of available USDT per trade
+COMPOUND_RATIO = 0.80        # Reinvest 80% of wallet balance
 LEVERAGE = 3                 # 3x leverage
-MIN_USDT_BALANCE = 1.90      # Minimum balance required to trade
-MIN_VOLUME_USDT = 1_000_000  # $1,000,000+ daily volume filter
-TIMEFRAME = '5m'             # 5-minute execution timeframe
+MIN_USDT_BALANCE = 1.90      # Minimum balance to trade
+MIN_VOLUME_USDT = 1_000_000  # $1M+ daily volume
+TIMEFRAME = '5m'             # Execution timeframe
 
-TAKE_PROFIT_PCT = 0.025      # +2.5% Target (void fill)
-SL_CUSHION = 0.008           # 0.8% Wise Cushion below the sweep low
-VOLUME_MULT = 1.8            # Volume must be at least 1.8x average (stop-loss trigger volume)
+# Dynamic Range Filters
+MIN_PROFIT_ROOM = 0.018      # Only enter if there is at least +1.8% room to the ceiling
+MAX_PROFIT_ROOM = 0.060      # Cap profit targets at +6.0% for realistic fills
 
-# Initialize Bitget
 exchange = ccxt.bitget({
     'apiKey': API_KEY,
     'secret': SECRET_KEY,
@@ -51,7 +50,6 @@ exchange = ccxt.bitget({
 })
 
 def get_available_balance():
-    """Fetches live available USDT balance from Bitget."""
     try:
         bal = exchange.fetch_balance({'type': 'swap'})
         if 'USDT' in bal and 'free' in bal['USDT']:
@@ -60,11 +58,10 @@ def get_available_balance():
             return float(bal['free']['USDT'])
         return 0.0
     except Exception as e:
-        print(f"[!] Balance read notice: {e}")
+        print(f"[!] Balance error: {e}")
         return 0.0
 
 def get_tradable_symbols():
-    """Fetches all active USDT-M Perpetual pairs with >= $1M volume."""
     try:
         exchange.load_markets()
         tickers = exchange.fetch_tickers()
@@ -72,10 +69,10 @@ def get_tradable_symbols():
         for symbol, ticker in tickers.items():
             if symbol.endswith(':USDT') and ticker.get('quoteVolume', 0) >= MIN_VOLUME_USDT:
                 valid.append(symbol)
-        print(f"[*] Loaded {len(valid)} active pairs for Smart Sweep Scan.")
+        print(f"[*] Loaded {len(valid)} active pairs for Dynamic Range scan.")
         return valid
     except Exception as e:
-        print(f"[!] Symbol fetch error: {e}")
+        print(f"[!] Error loading symbols: {e}")
         return []
 
 def place_buy_order(symbol, coin_amount):
@@ -101,12 +98,14 @@ def place_buy_order(symbol, coin_amount):
 
 def evaluate_symbol(symbol):
     try:
-        # Fetch 60 candles (~5 hours of market structure)
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=60)
-        if len(ohlcv) < 55:
+        # Fetch 40 candles (over 3 hours of real price action)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=40)
+        if len(ohlcv) < 35:
             return
 
+        highs = [c[2] for c in ohlcv]
         lows = [c[3] for c in ohlcv]
+        closes = [c[4] for c in ohlcv]
         volumes = [c[5] for c in ohlcv]
 
         # Latest completed candle is index -2
@@ -114,32 +113,37 @@ def evaluate_symbol(symbol):
             ohlcv[-2][1], ohlcv[-2][2], ohlcv[-2][3], ohlcv[-2][4], ohlcv[-2][5]
         )
 
-        # 1. IDENTIFY THE 4-HOUR STRUCTURAL FLOOR (Lowest low of 50 candles before this one)
-        structural_floor = min(lows[-52:-2])
+        # 1. DYNAMIC RANGE CEILING (Where long traders will take profit)
+        range_ceiling = max(highs[-32:-2])
 
-        # 2. THE SWEEP CHECK: Price MUST have punctured BELOW the 50-candle floor
-        if c_low >= structural_floor:
-            return  # Did not sweep the floor
+        # 2. DYNAMIC RANGE FLOOR (Where short sellers have their Take-Profit targets)
+        range_floor = min(lows[-32:-2])
 
-        # 3. THE TRAP CONFIRMATION: Price MUST close back ABOVE the floor
-        # Proves the whale run out of selling power and shorts are trapped below!
-        if c_close <= structural_floor:
-            return  # Closed below floor, selling might continue
-
-        # 4. ABSORPTION WICK: Lower wick must be at least 25% of the candle's total range
-        candle_range = c_high - c_low
-        if candle_range <= 0:
-            return
-        lower_wick = min(c_open, c_close) - c_low
-        if (lower_wick / candle_range) < 0.25:
+        # 3. VERIFY SHORTS HIT THEIR TARGET & CLOSED:
+        # Price must have dipped to or below the floor, triggering short TP buy orders
+        if c_low > range_floor:
             return
 
-        # 5. VOLUME CONFIRMATION: Volume spike showing stop-loss execution
-        avg_vol = sum(volumes[-20:-2]) / 18.0
-        if avg_vol <= 0 or (c_vol / avg_vol) < VOLUME_MULT:
+        # 4. UPPER SIDE TAKES CONTROL:
+        # Price must reject the floor and close back ABOVE it as a green candle
+        if c_close <= range_floor or c_close <= c_open:
             return
 
-        # Balance check & Dynamic Compounding
+        # 5. MEASURE THE DYNAMIC ROOM TO RUN:
+        # Target the ceiling minus a 5% buffer so the order fills before resistance
+        dynamic_tp_price = range_ceiling * 0.995
+        potential_profit_pct = (dynamic_tp_price - c_close) / c_close
+
+        # Filter out coins with too little room to run
+        if potential_profit_pct < MIN_PROFIT_ROOM or potential_profit_pct > MAX_PROFIT_ROOM:
+            return
+
+        # Volume confirmation: Short covering creates a spike
+        avg_vol = sum(volumes[-15:-2]) / 13.0
+        if avg_vol <= 0 or (c_vol / avg_vol) < 1.5:
+            return
+
+        # Balance check & compounding
         current_balance = get_available_balance()
         if current_balance < MIN_USDT_BALANCE:
             return
@@ -152,7 +156,7 @@ def evaluate_symbol(symbol):
         coin_amount = target_notional / c_close
         coin_amount = exchange.amount_to_precision(symbol, coin_amount)
 
-        # Safety Check: Skip high-priced stock futures if order doesn't meet minimum lot
+        # Safety Check: Skip stock perps if below min contract size
         market = exchange.market(symbol)
         min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
         if min_amount and float(coin_amount) < min_amount:
@@ -166,30 +170,29 @@ def evaluate_symbol(symbol):
         except Exception:
             pass
 
-        # SMART & WISE STOP LOSS: 0.8% cushion below the absolute sweep low
-        smart_sl = c_low * (1.0 - SL_CUSHION)
+        # DYNAMIC STRUCTURAL STOP LOSS: Placed below the floor rejection wick
+        smart_sl = c_low * 0.993  # 0.7% cushion below the floor wick
         sl_pct = ((c_close - smart_sl) / c_close) * 100
 
-        # Discard extreme outliers (avoid massive wicks where risk > 2.8%)
-        if sl_pct > 2.8 or sl_pct < 0.5:
+        # Discard trades where risk is disproportionate
+        if sl_pct > 2.2 or sl_pct < 0.4:
             return
 
-        tp_price = exchange.price_to_precision(symbol, c_close * (1.0 + TAKE_PROFIT_PCT))
+        tp_price = exchange.price_to_precision(symbol, dynamic_tp_price)
         smart_sl_price = exchange.price_to_precision(symbol, smart_sl)
 
-        print(f"\n⚡ [SMART LIQUIDITY SWEEP & SHORT TRAP] {symbol}")
-        print(f" ├─ Wallet: ${current_balance:.2f} USDT")
-        print(f" ├─ 4h Structural Floor Swept: ${structural_floor}")
-        print(f" ├─ Sweep Low: ${c_low} (Stops triggered)")
-        print(f" ├─ Closed Back Above Floor: ${c_close}")
-        print(f" ├─ Target (+2.5% TP): ${tp_price}")
-        print(f" └─ Wise Stop Loss (-{sl_pct:.2f}%): ${smart_sl_price}")
+        print(f"\n🏛️ [DYNAMIC RANGE LIQUIDITY ROTATION] {symbol}")
+        print(f" ├─ Shorts Take-Profit Floor: ${range_floor}")
+        print(f" ├─ Entry (Upper side in control): ${c_close}")
+        print(f" ├─ Longs Take-Profit Target (Ceiling): ${tp_price} (+{potential_profit_pct * 100:.2f}%)")
+        print(f" ├─ Structural Stop Loss: ${smart_sl_price} (-{sl_pct:.2f}%)")
+        print(f" └─ Risk-to-Reward: 1 : {potential_profit_pct / (sl_pct / 100):.2f}")
 
-        # Place Entry Buy Order
+        # Place Entry Order
         order = place_buy_order(symbol, coin_amount)
         print(f"✅ [SUCCESS] Order Filled! ID: {order['id']}")
 
-        # Place Take-Profit Limit (+2.5%)
+        # Place Dynamic Take-Profit Limit
         try:
             exchange.create_order(
                 symbol=symbol,
@@ -199,18 +202,18 @@ def evaluate_symbol(symbol):
                 price=tp_price,
                 params={'reduceOnly': True, 'tradeSide': 'sell_single'}
             )
-            print(f"🎯 [AUTO TP PLACED] at ${tp_price} (+2.5%)")
+            print(f"🎯 [DYNAMIC TP PLACED] at ${tp_price} (+{potential_profit_pct * 100:.2f}%)")
         except Exception as tp_err:
             print(f"[!] TP notice: {tp_err}")
 
-        # 5-minute pause to let the upward void fill develop
+        # 5-minute cooldown to let the rotation play out
         time.sleep(300)
 
     except Exception:
         return
 
 def run_bot():
-    print(f"[*] Starting Smart Liquidity Trap Scanner on Bitget ($1M+ Volume)...")
+    print(f"[*] Starting Dynamic Liquidity Range Scanner on Bitget ($1M+ Volume)...")
     symbols = get_tradable_symbols()
 
     while True:
@@ -218,7 +221,7 @@ def run_bot():
             evaluate_symbol(sym)
             time.sleep(0.06)
 
-        print("[*] 5m sweep finished. Re-scanning...")
+        print("[*] 5m sweep complete. Re-scanning...")
         time.sleep(10)
 
 if __name__ == "__main__":
