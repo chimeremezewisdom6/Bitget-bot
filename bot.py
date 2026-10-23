@@ -49,10 +49,10 @@ bitget = ccxt.bitget({
     }
 })
 
-# 2. Free Global Market Feeds (NO API KEYS NEEDED)
+# 2. Free Global Market Feeds (Fixed 'gate' attribute)
 bybit = ccxt.bybit({'enableRateLimit': True})
 okx = ccxt.okx({'enableRateLimit': True})
-gateio = ccxt.gateio({'enableRateLimit': True})
+gateio = ccxt.gate({'enableRateLimit': True})
 
 def get_available_balance():
     try:
