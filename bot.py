@@ -10,7 +10,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitget Whale Absorption Engine Running 24/7!")
+        self.wfile.write(b"Bitget Whale Exhaustion Bot Active!")
 
     def log_message(self, format, *args):
         return
@@ -18,7 +18,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"[*] Health check server active on port {port}")
+    print(f"[*] Health check active on port {port}")
     server.serve_forever()
 
 threading.Thread(target=run_health_server, daemon=True).start()
@@ -28,15 +28,14 @@ API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
-COMPOUND_RATIO = 0.80        # Reinvest 80% of balance per trade
+COMPOUND_RATIO = 0.80        # Use 80% of wallet balance per trade
 LEVERAGE = 3                 # 3x leverage
-MIN_USDT_BALANCE = 1.90      # Minimum balance to trigger
+MIN_USDT_BALANCE = 1.90      # Minimum wallet balance
 MIN_VOLUME_USDT = 1_000_000  # $1M+ daily volume
 TIMEFRAME = '5m'
 
 TAKE_PROFIT_PCT = 0.015      # +1.5% Take Profit
-ORDERBOOK_IMBALANCE = 1.8    # Bids must be 1.8x larger than Asks
-VOLUME_CLIMAX_MULT = 2.2     # Volume must be 2.2x above average
+VOLUME_DUMP_MULT = 2.2       # Whale volume dump multiplier
 
 exchange = ccxt.bitget({
     'apiKey': API_KEY,
@@ -69,14 +68,14 @@ def get_tradable_symbols():
         for symbol, ticker in tickers.items():
             if symbol.endswith(':USDT') and ticker.get('quoteVolume', 0) >= MIN_VOLUME_USDT:
                 valid.append(symbol)
-        print(f"[*] Loaded {len(valid)} active pairs for Whale Imbalance Scan.")
+        print(f"[*] Loaded {len(valid)} active pairs for Whale Exhaustion scan.")
         return valid
     except Exception as e:
         print(f"[!] Symbol load error: {e}")
         return []
 
 def place_buy_order(symbol, coin_amount):
-    """Dual fallback to ensure Bitget fills order in any position mode."""
+    """Safely executes buy order in any position mode."""
     try:
         return exchange.create_order(
             symbol=symbol,
@@ -96,60 +95,74 @@ def place_buy_order(symbol, coin_amount):
             )
         raise e1
 
-def check_order_book_imbalance(symbol):
-    """Checks live Bitget depth. Returns True if buyers heavily outnumber sellers."""
+def check_order_book_bids(symbol):
+    """Verifies that buyers now dominate the order book."""
     try:
         ob = exchange.fetch_order_book(symbol, limit=15)
         if not ob or not ob['bids'] or not ob['asks']:
-            return False, 0.0
-
+            return False
         total_bids = sum([b[1] for b in ob['bids'][:15]])
         total_asks = sum([a[1] for a in ob['asks'][:15]])
-
         if total_asks <= 0:
-            return True, 99.0
-
-        imbalance_ratio = total_bids / total_asks
-        return imbalance_ratio >= ORDERBOOK_IMBALANCE, imbalance_ratio
+            return True
+        return (total_bids / total_asks) >= 1.5
     except Exception:
-        return False, 0.0
+        return False
 
 def evaluate_symbol(symbol):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=20)
-        if len(ohlcv) < 18:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=25)
+        if len(ohlcv) < 22:
             return
 
         volumes = [c[5] for c in ohlcv]
 
-        # Latest completed candle is index -2
-        c_open, c_high, c_low, c_close, c_vol = (
+        # CANDLE 1 (Whale Dump): Completed at index -3
+        c1_open, c1_high, c1_low, c1_close, c1_vol = (
+            ohlcv[-3][1], ohlcv[-3][2], ohlcv[-3][3], ohlcv[-3][4], ohlcv[-3][5]
+        )
+
+        # CANDLE 2 (Confirmation Whale Stopped): Completed at index -2
+        c2_open, c2_high, c2_low, c2_close, c2_vol = (
             ohlcv[-2][1], ohlcv[-2][2], ohlcv[-2][3], ohlcv[-2][4], ohlcv[-2][5]
         )
 
-        candle_range = c_high - c_low
-        if candle_range <= 0:
-            return
+        # -------------------------------------------------------------------------
+        # STEP 1: VERIFY CANDLE 1 WAS A WHALE DUMP
+        # -------------------------------------------------------------------------
+        avg_vol = sum(volumes[-15:-3]) / 12.0
+        if avg_vol <= 0 or (c1_vol / avg_vol) < VOLUME_DUMP_MULT:
+            return  # No whale volume on Candle 1
 
-        # 1. Volume Climax Check (Did aggressive volume hit this candle?)
-        avg_vol = sum(volumes[-12:-2]) / 10.0
-        if avg_vol <= 0 or (c_vol / avg_vol) < VOLUME_CLIMAX_MULT:
-            return
+        # Must be a RED dump candle
+        c1_drop = ((c1_close - c1_open) / c1_open) * 100
+        if c1_drop > -1.0:
+            return  # Dump was too small to be a whale
 
-        # 2. Absorption Check (Did buyers absorb the selling leaving a lower wick?)
-        lower_wick = min(c_open, c_close) - c_low
-        wick_ratio = lower_wick / candle_range
+        # -------------------------------------------------------------------------
+        # STEP 2: VERIFY CANDLE 2 PROVES THE WHALE HAS STOPPED TRADING
+        # -------------------------------------------------------------------------
+        # Rule A: The whale stopped dumping (Volume on Candle 2 drops significantly)
+        if c2_vol >= c1_vol * 0.85:
+            return  # Volume is still too high, whale might still be dumping!
 
-        # Lower wick must be at least 25% of total candle (shows buying absorption)
-        if wick_ratio < 0.25:
-            return
+        # Rule B: The low holds (Price did NOT go lower than the whale dump low)
+        if c2_low < c1_low:
+            return  # Price made a lower low, sellers are not done!
 
-        # 3. LIVE ORDER BOOK IMBALANCE (The Whale Exhaustion Confirmation)
-        is_imbalanced, ratio = check_order_book_imbalance(symbol)
-        if not is_imbalanced:
-            return
+        # Rule C: Buyers take over (Candle 2 closes GREEN and above Candle 1 close)
+        if c2_close <= c2_open or c2_close <= c1_close:
+            return  # Candle 2 is not green, buyers have not taken the upper hand!
 
-        # Balance check & compounding
+        # -------------------------------------------------------------------------
+        # STEP 3: ORDER BOOK CONFIRMATION (Buyers heavily outnumber sellers)
+        # -------------------------------------------------------------------------
+        if not check_order_book_bids(symbol):
+            return  # Order book not yet stacked with buyers
+
+        # -------------------------------------------------------------------------
+        # STEP 4: WHALE IS CONFIRMED GONE -> EXECUTE
+        # -------------------------------------------------------------------------
         current_balance = get_available_balance()
         if current_balance < MIN_USDT_BALANCE:
             return
@@ -159,10 +172,9 @@ def evaluate_symbol(symbol):
         if target_notional < 5.5:
             target_notional = 5.5
 
-        coin_amount = target_notional / c_close
+        coin_amount = target_notional / c2_close
         coin_amount = exchange.amount_to_precision(symbol, coin_amount)
 
-        # Skip coins where $7 doesn't meet minimum contract limit
         market = exchange.market(symbol)
         min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
         if min_amount and float(coin_amount) < min_amount:
@@ -176,20 +188,19 @@ def evaluate_symbol(symbol):
         except Exception:
             pass
 
-        # Smart Stop Loss: Placed 0.2% below the absorption wick
-        smart_sl_price = c_low * 0.998
-        tp_price = exchange.price_to_precision(symbol, c_close * (1 + TAKE_PROFIT_PCT))
-        smart_sl_price = exchange.price_to_precision(symbol, smart_sl_price)
+        # Stop loss placed right below the whale dump low
+        smart_sl = c1_low * 0.998
+        tp_price = exchange.price_to_precision(symbol, c2_close * (1 + TAKE_PROFIT_PCT))
+        smart_sl_price = exchange.price_to_precision(symbol, smart_sl)
 
-        print(f"\n🐋 [WHALE ABSORPTION & IMBALANCE DETECTED] {symbol}")
-        print(f" ├─ Wallet: ${current_balance:.2f} USDT")
-        print(f" ├─ Volume Climax: {c_vol / avg_vol:.1f}x average")
-        print(f" ├─ Absorption Wick: {wick_ratio * 100:.1f}%")
-        print(f" ├─ Order Book Imbalance: {ratio:.2f}x MORE BIDS THAN ASKS! 🔥")
-        print(f" ├─ Entry Price: ${c_close}")
+        print(f"\n🐋 [WHALE DUMP COMPLETED & BUYERS IN CONTROL] {symbol}")
+        print(f" ├─ Whale Dump (Candle 1): {c1_drop:.2f}% drop with {c1_vol / avg_vol:.1f}x volume")
+        print(f" ├─ Whale Stopped (Candle 2): Volume dried up, Low held at ${c1_low}")
+        print(f" ├─ Buyers Reversal: Green candle closed at ${c2_close}")
+        print(f" ├─ Entry Price: ${c2_close}")
         print(f" └─ Take Profit Target (+1.5%): ${tp_price}")
 
-        # Place Entry Buy Order
+        # Place Entry Order
         order = place_buy_order(symbol, coin_amount)
         print(f"✅ [SUCCESS] Order Filled! ID: {order['id']}")
 
@@ -207,14 +218,14 @@ def evaluate_symbol(symbol):
         except Exception as tp_err:
             print(f"[!] TP notice: {tp_err}")
 
-        # 5-minute cooldown to let the bounce play out
+        # 5-minute cooldown to let the trade run
         time.sleep(300)
 
     except Exception:
         return
 
 def run_bot():
-    print(f"[*] Starting Whale Imbalance & Absorption Scanner on Bitget...")
+    print(f"[*] Starting Whale Exhaustion & Confirmation Scanner on Bitget...")
     symbols = get_tradable_symbols()
 
     while True:
