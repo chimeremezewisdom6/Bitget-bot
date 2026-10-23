@@ -1,5 +1,7 @@
 import os
 import time
+import json
+import urllib.request
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
@@ -10,7 +12,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Multi-Exchange Consensus Engine Active 24/7!")
+        self.wfile.write(b"Binance + Bybit + OKX + Gate Consensus Engine Active 24/7!")
 
     def log_message(self, format, *args):
         return
@@ -34,7 +36,7 @@ MIN_USDT_BALANCE = 1.90      # Minimum balance to trade
 TIMEFRAME = '15m'            # 15-Minute Timeframe
 BREAKEVEN_TRIGGER_PCT = 0.008 # Move SL to Entry at +0.8% profit
 
-# Minimum COMBINED volume across Bybit + OKX + Gate.io
+# Minimum COMBINED volume across Binance + Bybit + OKX + Gate.io
 MIN_COMBINED_GLOBAL_VOLUME = 15_000_000  # $15,000,000+ USD!
 
 # 1. Execution Client (Bitget)
@@ -49,7 +51,7 @@ bitget = ccxt.bitget({
     }
 })
 
-# 2. Free Global Market Feeds (Fixed 'gate' attribute)
+# 2. Free Global Feeds (Bybit, OKX, Gate.io)
 bybit = ccxt.bybit({'enableRateLimit': True})
 okx = ccxt.okx({'enableRateLimit': True})
 gateio = ccxt.gate({'enableRateLimit': True})
@@ -66,12 +68,43 @@ def get_available_balance():
         print(f"[!] Balance error: {e}")
         return 0.0
 
-def fetch_multi_exchange_global_volumes():
-    """Aggregates real-time 24h trading volume from Bybit, OKX, and Gate.io."""
-    global_volumes = {}
-    print("[*] Fetching Global Liquidity Consensus from Bybit, OKX, and Gate.io...")
+def fetch_binance_volumes():
+    """Fetches Binance 24h volume via official public market data mirror to bypass 418 bans."""
+    binance_vols = {}
+    mirrors = [
+        "https://fapi.binance.com/fapi/v1/ticker/24hr",        # Binance Futures (Volume leader)
+        "https://data-api.binance.vision/api/v3/ticker/24hr"  # Binance Spot Official Mirror
+    ]
+    for url in mirrors:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, timeout=8) as response:
+                items = json.loads(response.read().decode())
+                for item in items:
+                    sym = item.get('symbol', '')
+                    if sym.endswith('USDT'):
+                        base = sym[:-4].upper()
+                        vol = float(item.get('quoteVolume', 0))
+                        binance_vols[base] = binance_vols.get(base, 0) + vol
+                label = "Futures" if "fapi" in url else "Spot Mirror"
+                print(f" ├─ Binance ({label}): Loaded {len(binance_vols)} pairs.")
+                return binance_vols
+        except Exception as e:
+            pass
+    print(" ├─ [!] Binance mirror unavailable; continuing with Bybit + OKX + Gate.")
+    return binance_vols
 
-    # 1. Bybit Volume
+def fetch_multi_exchange_global_volumes():
+    """Aggregates real-time 24h trading volume from Binance, Bybit, OKX, and Gate.io."""
+    global_volumes = {}
+    print("[*] Fetching Global Liquidity Consensus from Binance, Bybit, OKX, and Gate.io...")
+
+    # 1. Binance Volume (via Mirror)
+    binance_vols = fetch_binance_volumes()
+    for base, vol in binance_vols.items():
+        global_volumes[base] = global_volumes.get(base, 0) + vol
+
+    # 2. Bybit Volume
     try:
         bybit_tickers = bybit.fetch_tickers()
         for sym, t in bybit_tickers.items():
@@ -82,7 +115,7 @@ def fetch_multi_exchange_global_volumes():
     except Exception as e:
         print(f" ├─ [!] Bybit feed notice: {e}")
 
-    # 2. OKX Volume
+    # 3. OKX Volume
     try:
         okx_tickers = okx.fetch_tickers()
         for sym, t in okx_tickers.items():
@@ -93,7 +126,7 @@ def fetch_multi_exchange_global_volumes():
     except Exception as e:
         print(f" ├─ [!] OKX feed notice: {e}")
 
-    # 3. Gate.io Volume
+    # 4. Gate.io Volume
     try:
         gate_tickers = gateio.fetch_tickers()
         for sym, t in gate_tickers.items():
@@ -133,7 +166,7 @@ def get_tradable_symbols(global_volumes):
         # Sort descending by global volume (heaviest coins first!)
         valid.sort(key=lambda x: x[2], reverse=True)
         selected = [(v[0], v[1], v[2]) for v in valid]
-        print(f"[*] Verified {len(selected)} Bitget contracts backed by >= $15M Combined Global Volume.")
+        print(f"[*] Verified {len(selected)} Bitget contracts backed by >= $15M Global Volume (Binance Included).")
         return selected
     except Exception as e:
         print(f"[!] Symbol error: {e}")
@@ -282,9 +315,9 @@ def evaluate_symbol(symbol_data):
         smart_sl = c2_low * 0.993
 
         base_name = symbol.split(':')[0]
-        print(f"\n🌐 [GLOBAL MULTI-EXCHANGE BREAKOUT VERIFIED] {symbol}")
+        print(f"\n🌐 [GLOBAL 4-EXCHANGE BREAKOUT VERIFIED] {symbol}")
         print(f" ├─ Asset: {base_name}")
-        print(f" ├─ Combined Global Volume: ${combined_global_vol:,.0f} USDT (Bybit + OKX + Gate)")
+        print(f" ├─ Global Combined Volume: ${combined_global_vol:,.0f} USDT (Binance + Bybit + OKX + Gate)")
         print(f" ├─ Order Book Support: {ratio:.2f}x Bids over Asks 🔥")
         print(f" ├─ Target (+{profit_room_pct*100:.2f}%): ${dynamic_tp:.4f}")
         print(f" └─ Entry Price: ${c2_close}")
@@ -302,7 +335,7 @@ def evaluate_symbol(symbol_data):
         return
 
 def run_bot():
-    print(f"[*] Starting Multi-Exchange Consensus Engine (Bybit + OKX + Gate.io + Bitget)...")
+    print(f"[*] Starting 4-Exchange Global Consensus Engine (Binance + Bybit + OKX + Gate.io)...")
     last_global_fetch = 0
     global_volumes = {}
 
