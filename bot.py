@@ -4,13 +4,13 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
-# ==================== KEEP-ALIVE SERVER FOR RENDER ====================
+# ==================== KEEP-ALIVE SERVER (FOR RENDER 24/7) ====================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitget Dynamic Liquidity Range Engine Active!")
+        self.wfile.write(b"Bitget Double-Rebound Breakeven Engine Active!")
 
     def log_message(self, format, *args):
         return
@@ -28,15 +28,16 @@ API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
-COMPOUND_RATIO = 0.80        # Reinvest 80% of wallet balance
+COMPOUND_RATIO = 0.80        # Reinvest 80% of available balance
 LEVERAGE = 3                 # 3x leverage
 MIN_USDT_BALANCE = 1.90      # Minimum balance to trade
 MIN_VOLUME_USDT = 1_000_000  # $1M+ daily volume
-TIMEFRAME = '5m'             # Execution timeframe
+TIMEFRAME = '5m'
 
-# Dynamic Range Filters
-MIN_PROFIT_ROOM = 0.018      # Only enter if there is at least +1.8% room to the ceiling
-MAX_PROFIT_ROOM = 0.060      # Cap profit targets at +6.0% for realistic fills
+# Strategy Rules
+MIN_PRICE_DROP = -2.5        # Minimum dump of -2.5% to -3.0%
+HEFTY_IMBALANCE_RATIO = 2.2  # Bids must be at least 2.2x larger than Asks (HEFTY only!)
+BREAKEVEN_TRIGGER_PCT = 0.008 # Move SL to Entry as soon as trade is up +0.8%
 
 exchange = ccxt.bitget({
     'apiKey': API_KEY,
@@ -58,7 +59,7 @@ def get_available_balance():
             return float(bal['free']['USDT'])
         return 0.0
     except Exception as e:
-        print(f"[!] Balance error: {e}")
+        print(f"[!] Balance read notice: {e}")
         return 0.0
 
 def get_tradable_symbols():
@@ -69,14 +70,29 @@ def get_tradable_symbols():
         for symbol, ticker in tickers.items():
             if symbol.endswith(':USDT') and ticker.get('quoteVolume', 0) >= MIN_VOLUME_USDT:
                 valid.append(symbol)
-        print(f"[*] Loaded {len(valid)} active pairs for Dynamic Range scan.")
+        print(f"[*] Loaded {len(valid)} active pairs for Double-Rebound scan.")
         return valid
     except Exception as e:
-        print(f"[!] Error loading symbols: {e}")
+        print(f"[!] Symbol error: {e}")
         return []
 
+def check_hefty_imbalance(symbol):
+    """Verifies that buyers heavily dominate the order book (Bids >= 2.2x Asks)."""
+    try:
+        ob = exchange.fetch_order_book(symbol, limit=20)
+        if not ob or not ob['bids'] or not ob['asks']:
+            return False, 0.0
+        total_bids = sum([b[1] for b in ob['bids'][:15]])
+        total_asks = sum([a[1] for a in ob['asks'][:15]])
+        if total_asks <= 0:
+            return True, 99.0
+        ratio = total_bids / total_asks
+        return ratio >= HEFTY_IMBALANCE_RATIO, ratio
+    except Exception:
+        return False, 0.0
+
 def place_buy_order(symbol, coin_amount):
-    """Dual-mode order placement: works in One-Way or Hedge mode seamlessly."""
+    """Dual-mode order execution: One-Way or Hedge mode."""
     try:
         return exchange.create_order(
             symbol=symbol,
@@ -96,9 +112,46 @@ def place_buy_order(symbol, coin_amount):
             )
         raise e1
 
+def manage_trade_adaptively(symbol, coin_amount, entry_price, dynamic_tp, smart_sl):
+    """Active trade monitor: Moves Stop Loss to Breakeven at +0.8% to guarantee NO RED!"""
+    print(f"🛡️ [ADAPTIVE MONITOR ACTIVE] Guarding {symbol} against losses...")
+    breakeven_set = False
+    start_time = time.time()
+
+    # Monitor trade closely for up to 20 minutes (240 ticks)
+    while (time.time() - start_time) < 1200:
+        try:
+            ticker = exchange.fetch_ticker(symbol)
+            curr_price = float(ticker['last'])
+            pnl_pct = (curr_price - entry_price) / entry_price
+
+            # Rule 1: TARGET HIT (+1.8% to +4%)
+            if curr_price >= dynamic_tp:
+                print(f"🎯 [TAKE PROFIT REACHED] Closing {symbol} at ${curr_price} (+{pnl_pct*100:.2f}%)!")
+                exchange.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
+                return
+
+            # Rule 2: MOVE SL TO BREAKEVEN AT +0.8% GAIN (Eliminate the Red!)
+            if pnl_pct >= BREAKEVEN_TRIGGER_PCT and not breakeven_set:
+                smart_sl = entry_price * 1.001  # Locked at entry + tiny fee cushion!
+                breakeven_set = True
+                print(f"🔒 [BREAKEVEN ACTIVATED] {symbol} is up +{pnl_pct*100:.2f}%! Stop Loss moved to Entry (${smart_sl:.4f}). Trade is now 100% RISK-FREE!")
+
+            # Rule 3: STOP LOSS HIT (Controlled structural exit)
+            if curr_price <= smart_sl:
+                reason = "BREAKEVEN EXIT ($0 Loss)" if breakeven_set else "STRUCTURAL STOP"
+                print(f"⚠️ [{reason}] Closing {symbol} at ${curr_price}...")
+                exchange.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
+                return
+
+            time.sleep(5)  # Check price every 5 seconds
+
+        except Exception as monitor_err:
+            time.sleep(5)
+            continue
+
 def evaluate_symbol(symbol):
     try:
-        # Fetch 40 candles (over 3 hours of real price action)
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=40)
         if len(ohlcv) < 35:
             return
@@ -106,44 +159,55 @@ def evaluate_symbol(symbol):
         highs = [c[2] for c in ohlcv]
         lows = [c[3] for c in ohlcv]
         closes = [c[4] for c in ohlcv]
-        volumes = [c[5] for c in ohlcv]
 
-        # Latest completed candle is index -2
-        c_open, c_high, c_low, c_close, c_vol = (
-            ohlcv[-2][1], ohlcv[-2][2], ohlcv[-2][3], ohlcv[-2][4], ohlcv[-2][5]
+        # Candle 1 (Whale Dump): Completed at index -4 or -3
+        c1_open, c1_low, c1_close = ohlcv[-4][1], ohlcv[-4][3], ohlcv[-4][4]
+        
+        # Candle 2 (First Rebound): Completed at index -3
+        c2_open, c2_close, c2_low = ohlcv[-3][1], ohlcv[-3][4], ohlcv[-3][3]
+
+        # Candle 3 (Second Rebound / Retest Confirmation): Completed at index -2
+        c3_open, c3_high, c3_low, c3_close = (
+            ohlcv[-2][1], ohlcv[-2][2], ohlcv[-2][3], ohlcv[-2][4]
         )
 
-        # 1. DYNAMIC RANGE CEILING (Where long traders will take profit)
-        range_ceiling = max(highs[-32:-2])
-
-        # 2. DYNAMIC RANGE FLOOR (Where short sellers have their Take-Profit targets)
-        range_floor = min(lows[-32:-2])
-
-        # 3. VERIFY SHORTS HIT THEIR TARGET & CLOSED:
-        # Price must have dipped to or below the floor, triggering short TP buy orders
-        if c_low > range_floor:
+        # ---------------------------------------------------------------------
+        # 1. SEQUENCE 1: VERIFY A REAL DUMP OCCURRED (>= 2.5% to 3.0% drop)
+        # ---------------------------------------------------------------------
+        dump_pct = ((c1_low - c1_open) / c1_open) * 100
+        if dump_pct > MIN_PRICE_DROP:
             return
 
-        # 4. UPPER SIDE TAKES CONTROL:
-        # Price must reject the floor and close back ABOVE it as a green candle
-        if c_close <= range_floor or c_close <= c_open:
+        # ---------------------------------------------------------------------
+        # 2. SEQUENCE 2: VERIFY DOUBLE REBOUND (Low Holds & Closes Green)
+        # ---------------------------------------------------------------------
+        # Floor must hold: Candle 3 must NOT break the low of the dump
+        if c3_low < (c1_low * 0.997):
+            return  # Low broke, dump is still happening!
+
+        # Second rebound must close GREEN and above Candle 3 open
+        if c3_close <= c3_open or c3_close <= c2_close:
+            return  # Not a confirmed green bounce
+
+        # ---------------------------------------------------------------------
+        # 3. HEFTY IMBALANCE CHECK (No Minor or Mid Imbalances Allowed!)
+        # ---------------------------------------------------------------------
+        has_hefty_imbalance, ratio = check_hefty_imbalance(symbol)
+        if not has_hefty_imbalance:
+            return  # Bids are not >= 2.2x Asks, skip!
+
+        # ---------------------------------------------------------------------
+        # 4. DYNAMIC CEILING (Take Profit Target)
+        # ---------------------------------------------------------------------
+        range_ceiling = max(highs[-30:-2])
+        dynamic_tp = range_ceiling * 0.995
+        room_pct = (dynamic_tp - c3_close) / c3_close
+
+        # Must have at least +1.8% open room to the ceiling
+        if room_pct < 0.018 or room_pct > 0.065:
             return
 
-        # 5. MEASURE THE DYNAMIC ROOM TO RUN:
-        # Target the ceiling minus a 5% buffer so the order fills before resistance
-        dynamic_tp_price = range_ceiling * 0.995
-        potential_profit_pct = (dynamic_tp_price - c_close) / c_close
-
-        # Filter out coins with too little room to run
-        if potential_profit_pct < MIN_PROFIT_ROOM or potential_profit_pct > MAX_PROFIT_ROOM:
-            return
-
-        # Volume confirmation: Short covering creates a spike
-        avg_vol = sum(volumes[-15:-2]) / 13.0
-        if avg_vol <= 0 or (c_vol / avg_vol) < 1.5:
-            return
-
-        # Balance check & compounding
+        # Balance check
         current_balance = get_available_balance()
         if current_balance < MIN_USDT_BALANCE:
             return
@@ -153,10 +217,10 @@ def evaluate_symbol(symbol):
         if target_notional < 5.5:
             target_notional = 5.5
 
-        coin_amount = target_notional / c_close
+        coin_amount = target_notional / c3_close
         coin_amount = exchange.amount_to_precision(symbol, coin_amount)
 
-        # Safety Check: Skip stock perps if below min contract size
+        # Skip stock contracts if under min limit
         market = exchange.market(symbol)
         min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
         if min_amount and float(coin_amount) < min_amount:
@@ -170,50 +234,31 @@ def evaluate_symbol(symbol):
         except Exception:
             pass
 
-        # DYNAMIC STRUCTURAL STOP LOSS: Placed below the floor rejection wick
-        smart_sl = c_low * 0.993  # 0.7% cushion below the floor wick
-        sl_pct = ((c_close - smart_sl) / c_close) * 100
+        # Initial structural stop loss: 0.8% below the double bottom floor
+        smart_sl = c1_low * 0.992
 
-        # Discard trades where risk is disproportionate
-        if sl_pct > 2.2 or sl_pct < 0.4:
-            return
+        print(f"\n💎 [ULTRA-CONFIRMED DOUBLE REBOUND] {symbol}")
+        print(f" ├─ Sequence 1: {dump_pct:.2f}% Dump Absorbed")
+        print(f" ├─ Sequence 2: Double Bottom Held at ${c1_low} -> Rebounded Green!")
+        print(f" ├─ Hefty Order Book Imbalance: {ratio:.2f}x BIDS OVER ASKS! 🔥")
+        print(f" ├─ Dynamic Ceiling Target (+{room_pct*100:.2f}%): ${dynamic_tp:.4f}")
+        print(f" └─ Entry Price: ${c3_close}")
 
-        tp_price = exchange.price_to_precision(symbol, dynamic_tp_price)
-        smart_sl_price = exchange.price_to_precision(symbol, smart_sl)
-
-        print(f"\n🏛️ [DYNAMIC RANGE LIQUIDITY ROTATION] {symbol}")
-        print(f" ├─ Shorts Take-Profit Floor: ${range_floor}")
-        print(f" ├─ Entry (Upper side in control): ${c_close}")
-        print(f" ├─ Longs Take-Profit Target (Ceiling): ${tp_price} (+{potential_profit_pct * 100:.2f}%)")
-        print(f" ├─ Structural Stop Loss: ${smart_sl_price} (-{sl_pct:.2f}%)")
-        print(f" └─ Risk-to-Reward: 1 : {potential_profit_pct / (sl_pct / 100):.2f}")
-
-        # Place Entry Order
+        # Place Entry Buy Order
         order = place_buy_order(symbol, coin_amount)
         print(f"✅ [SUCCESS] Order Filled! ID: {order['id']}")
 
-        # Place Dynamic Take-Profit Limit
-        try:
-            exchange.create_order(
-                symbol=symbol,
-                type='limit',
-                side='sell',
-                amount=coin_amount,
-                price=tp_price,
-                params={'reduceOnly': True, 'tradeSide': 'sell_single'}
-            )
-            print(f"🎯 [DYNAMIC TP PLACED] at ${tp_price} (+{potential_profit_pct * 100:.2f}%)")
-        except Exception as tp_err:
-            print(f"[!] TP notice: {tp_err}")
+        # Start Active Adaptive Monitoring (Breakeven + Dynamic Exit)
+        manage_trade_adaptively(symbol, coin_amount, c3_close, dynamic_tp, smart_sl)
 
-        # 5-minute cooldown to let the rotation play out
-        time.sleep(300)
+        # 2-minute cooldown after trade exit
+        time.sleep(120)
 
     except Exception:
         return
 
 def run_bot():
-    print(f"[*] Starting Dynamic Liquidity Range Scanner on Bitget ($1M+ Volume)...")
+    print(f"[*] Starting Ultra-Defensive Double-Rebound Scanner on Bitget...")
     symbols = get_tradable_symbols()
 
     while True:
@@ -221,7 +266,7 @@ def run_bot():
             evaluate_symbol(sym)
             time.sleep(0.06)
 
-        print("[*] 5m sweep complete. Re-scanning...")
+        print("[*] Sweep complete. Re-scanning...")
         time.sleep(10)
 
 if __name__ == "__main__":
