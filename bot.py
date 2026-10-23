@@ -1,7 +1,5 @@
 import os
 import time
-import json
-import urllib.request
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
@@ -12,7 +10,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitget Global Top 500 Engine Active 24/7!")
+        self.wfile.write(b"Multi-Exchange Consensus Engine Active 24/7!")
 
     def log_message(self, format, *args):
         return
@@ -30,14 +28,17 @@ API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
-COMPOUND_RATIO = 0.80        # Reinvest 80% of wallet balance per trade
+COMPOUND_RATIO = 0.80        # Reinvest 80% of balance per trade
 LEVERAGE = 3                 # 3x leverage
 MIN_USDT_BALANCE = 1.90      # Minimum balance to trade
-TIMEFRAME = '15m'            # 15-Minute Timeframe (Filters noise!)
+TIMEFRAME = '15m'            # 15-Minute Timeframe
 BREAKEVEN_TRIGGER_PCT = 0.008 # Move SL to Entry at +0.8% profit
 
-# Bitget Client
-exchange = ccxt.bitget({
+# Minimum COMBINED volume across Bybit + OKX + Gate.io
+MIN_COMBINED_GLOBAL_VOLUME = 15_000_000  # $15,000,000+ USD!
+
+# 1. Execution Client (Bitget)
+bitget = ccxt.bitget({
     'apiKey': API_KEY,
     'secret': SECRET_KEY,
     'password': PASSPHRASE,
@@ -48,9 +49,14 @@ exchange = ccxt.bitget({
     }
 })
 
+# 2. Free Global Market Feeds (NO API KEYS NEEDED)
+bybit = ccxt.bybit({'enableRateLimit': True})
+okx = ccxt.okx({'enableRateLimit': True})
+gateio = ccxt.gateio({'enableRateLimit': True})
+
 def get_available_balance():
     try:
-        bal = exchange.fetch_balance({'type': 'swap'})
+        bal = bitget.fetch_balance({'type': 'swap'})
         if 'USDT' in bal and 'free' in bal['USDT']:
             return float(bal['USDT']['free'])
         elif 'free' in bal and 'USDT' in bal['free']:
@@ -60,51 +66,74 @@ def get_available_balance():
         print(f"[!] Balance error: {e}")
         return 0.0
 
-def fetch_global_top_500_symbols():
-    """Fetches the True Global Top 500 cryptocurrencies worldwide via CoinCap."""
-    try:
-        url = "https://api.coincap.io/v2/assets?limit=500"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=12) as response:
-            data = json.loads(response.read().decode())
-            global_symbols = set([item['symbol'].upper() for item in data.get('data', [])])
-            if len(global_symbols) > 50:
-                print(f"[*] Global Aggregator: Loaded {len(global_symbols)} verified worldwide assets (TOP 500).")
-                return global_symbols
-    except Exception as e:
-        print(f"[!] Global Aggregator notice: {e}")
-    
-    # Fallback list of top liquid global giants
-    return {"BTC", "ETH", "SOL", "DOGE", "PEPE", "SUI", "XRP", "NEAR", "AVAX", "LINK", "ADA", "SHIB", "BNB", "DOT", "LTC", "BCH", "APT", "UNI", "ICP", "FET", "RENDER", "TAO", "WIF", "BONK", "FLOKI", "AR", "INJ", "TIA", "SEI", "KAS"}
+def fetch_multi_exchange_global_volumes():
+    """Aggregates real-time 24h trading volume from Bybit, OKX, and Gate.io."""
+    global_volumes = {}
+    print("[*] Fetching Global Liquidity Consensus from Bybit, OKX, and Gate.io...")
 
-def get_tradable_symbols(global_verified_symbols):
-    """Filters Bitget contracts to ONLY those present in the Global Top 500."""
+    # 1. Bybit Volume
     try:
-        exchange.load_markets()
-        tickers = exchange.fetch_tickers()
+        bybit_tickers = bybit.fetch_tickers()
+        for sym, t in bybit_tickers.items():
+            base = sym.split('/')[0].split(':')[0].upper()
+            vol = float(t.get('quoteVolume', 0))
+            global_volumes[base] = global_volumes.get(base, 0) + vol
+        print(f" ├─ Bybit: Loaded {len(bybit_tickers)} pairs.")
+    except Exception as e:
+        print(f" ├─ [!] Bybit feed notice: {e}")
+
+    # 2. OKX Volume
+    try:
+        okx_tickers = okx.fetch_tickers()
+        for sym, t in okx_tickers.items():
+            base = sym.split('/')[0].split(':')[0].upper()
+            vol = float(t.get('quoteVolume', 0))
+            global_volumes[base] = global_volumes.get(base, 0) + vol
+        print(f" ├─ OKX: Loaded {len(okx_tickers)} pairs.")
+    except Exception as e:
+        print(f" ├─ [!] OKX feed notice: {e}")
+
+    # 3. Gate.io Volume
+    try:
+        gate_tickers = gateio.fetch_tickers()
+        for sym, t in gate_tickers.items():
+            base = sym.split('/')[0].split('_')[0].upper()
+            vol = float(t.get('quoteVolume', 0))
+            global_volumes[base] = global_volumes.get(base, 0) + vol
+        print(f" └─ Gate.io: Loaded {len(gate_tickers)} pairs.")
+    except Exception as e:
+        print(f" └─ [!] Gate.io feed notice: {e}")
+
+    return global_volumes
+
+def get_tradable_symbols(global_volumes):
+    """Filters Bitget contracts to ONLY those backed by heavy global consensus."""
+    try:
+        bitget.load_markets()
+        tickers = bitget.fetch_tickers()
         valid = []
 
         for symbol, ticker in tickers.items():
             if symbol.endswith(':USDT'):
                 base = symbol.split(':')[0].split('/')[0].upper()
-                
-                # Strip multiplier prefixes (e.g. 1000PEPE -> PEPE, 1000BONK -> BONK)
+
+                # Clean multiplier prefixes (e.g. 1000PEPE -> PEPE)
                 clean_base = base
                 for prefix in ['1000000', '10000', '1000']:
                     if clean_base.startswith(prefix) and len(clean_base) > len(prefix):
                         clean_base = clean_base[len(prefix):]
                         break
 
-                # Check if base coin or clean base is in the Global Top 500
-                if base in global_verified_symbols or clean_base in global_verified_symbols:
-                    vol = float(ticker.get('quoteVolume', 0))
-                    if vol >= 500_000: # Ensure coin has active trading
-                        valid.append((symbol, ticker, vol))
+                combined_vol = global_volumes.get(base, 0) or global_volumes.get(clean_base, 0)
 
-        # Sort descending by volume so biggest coins are scanned first
+                # MUST HAVE AT LEAST $15,000,000 COMBINED GLOBAL VOLUME!
+                if combined_vol >= MIN_COMBINED_GLOBAL_VOLUME:
+                    valid.append((symbol, ticker, combined_vol))
+
+        # Sort descending by global volume (heaviest coins first!)
         valid.sort(key=lambda x: x[2], reverse=True)
-        selected = [(v[0], v[1]) for v in valid]
-        print(f"[*] Successfully loaded {len(selected)} Bitget contracts verified in the GLOBAL TOP 500.")
+        selected = [(v[0], v[1], v[2]) for v in valid]
+        print(f"[*] Verified {len(selected)} Bitget contracts backed by >= $15M Combined Global Volume.")
         return selected
     except Exception as e:
         print(f"[!] Symbol error: {e}")
@@ -119,7 +148,7 @@ def calculate_ema(prices, period):
 
 def check_order_book_bids(symbol):
     try:
-        ob = exchange.fetch_order_book(symbol, limit=15)
+        ob = bitget.fetch_order_book(symbol, limit=15)
         if not ob or not ob['bids'] or not ob['asks']:
             return False, 0.0
         bids = sum([b[1] for b in ob['bids'][:15]])
@@ -132,28 +161,28 @@ def check_order_book_bids(symbol):
 def place_buy_order(symbol, coin_amount):
     """Dual-mode order placement."""
     try:
-        return exchange.create_order(symbol, 'market', 'buy', coin_amount, params={'tradeSide': 'buy_single'})
+        return bitget.create_order(symbol, 'market', 'buy', coin_amount, params={'tradeSide': 'buy_single'})
     except Exception as e1:
         if '25156' in str(e1) or 'tradeSide' in str(e1):
-            return exchange.create_order(symbol, 'market', 'buy', coin_amount, params={'tradeSide': 'open'})
+            return bitget.create_order(symbol, 'market', 'buy', coin_amount, params={'tradeSide': 'open'})
         raise e1
 
 def manage_trade_adaptively(symbol, coin_amount, entry_price, dynamic_tp, smart_sl):
     """Monitors live trade: locks Breakeven at +0.8% so trade has ZERO RISK!"""
-    print(f"🛡️ [TOP-500 RUNNER MONITOR ACTIVE] Guarding {symbol}...")
+    print(f"🛡️ [GLOBAL TITAN MONITOR ACTIVE] Guarding {symbol}...")
     breakeven_set = False
     start_time = time.time()
 
     while (time.time() - start_time) < 1800: # 30 min max run
         try:
-            ticker = exchange.fetch_ticker(symbol)
+            ticker = bitget.fetch_ticker(symbol)
             curr_price = float(ticker['last'])
             pnl_pct = (curr_price - entry_price) / entry_price
 
             # 1. Take Profit reached
             if curr_price >= dynamic_tp:
                 print(f"🎯 [TAKE PROFIT HIT] Closing {symbol} at ${curr_price} (+{pnl_pct*100:.2f}%)!")
-                exchange.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
+                bitget.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
                 return
 
             # 2. Risk-Free Breakeven Trigger (+0.8%)
@@ -166,7 +195,7 @@ def manage_trade_adaptively(symbol, coin_amount, entry_price, dynamic_tp, smart_
             if curr_price <= smart_sl:
                 reason = "BREAKEVEN EXIT ($0 Loss)" if breakeven_set else "STRUCTURAL STOP"
                 print(f"⚠️ [{reason}] Closing {symbol} at ${curr_price}...")
-                exchange.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
+                bitget.create_order(symbol, 'market', 'sell', coin_amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
                 return
 
             time.sleep(5)
@@ -175,10 +204,10 @@ def manage_trade_adaptively(symbol, coin_amount, entry_price, dynamic_tp, smart_
             continue
 
 def evaluate_symbol(symbol_data):
-    symbol, ticker = symbol_data
+    symbol, ticker, combined_global_vol = symbol_data
     try:
         # Fetch 25 candles on the 15-MINUTE chart
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=25)
+        ohlcv = bitget.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=25)
         if len(ohlcv) < 20:
             return
 
@@ -233,10 +262,10 @@ def evaluate_symbol(symbol_data):
             target_notional = 5.5
 
         coin_amount = target_notional / c2_close
-        coin_amount = exchange.amount_to_precision(symbol, coin_amount)
+        coin_amount = bitget.amount_to_precision(symbol, coin_amount)
 
         # Skip stock contracts if below min lot
-        market = exchange.market(symbol)
+        market = bitget.market(symbol)
         min_amount = market.get('limits', {}).get('amount', {}).get('min', 0)
         if min_amount and float(coin_amount) < min_amount:
             return
@@ -245,7 +274,7 @@ def evaluate_symbol(symbol_data):
             return
 
         try:
-            exchange.set_leverage(LEVERAGE, symbol)
+            bitget.set_leverage(LEVERAGE, symbol)
         except Exception:
             pass
 
@@ -253,15 +282,16 @@ def evaluate_symbol(symbol_data):
         smart_sl = c2_low * 0.993
 
         base_name = symbol.split(':')[0]
-        print(f"\n🌐 [GLOBAL TOP-500 MOMENTUM BREAKOUT] {symbol}")
-        print(f" ├─ Asset: {base_name} (Verified in Global Top 500 Worldwide!)")
+        print(f"\n🌐 [GLOBAL MULTI-EXCHANGE BREAKOUT VERIFIED] {symbol}")
+        print(f" ├─ Asset: {base_name}")
+        print(f" ├─ Combined Global Volume: ${combined_global_vol:,.0f} USDT (Bybit + OKX + Gate)")
         print(f" ├─ Order Book Support: {ratio:.2f}x Bids over Asks 🔥")
         print(f" ├─ Target (+{profit_room_pct*100:.2f}%): ${dynamic_tp:.4f}")
         print(f" └─ Entry Price: ${c2_close}")
 
         # Place Entry Buy Order
         order = place_buy_order(symbol, coin_amount)
-        print(f"✅ [SUCCESS] Global Top-500 Order Filled! ID: {order['id']}")
+        print(f"✅ [SUCCESS] Global Multi-Exchange Order Filled! ID: {order['id']}")
 
         # Start Active Adaptive Monitoring (Breakeven + Dynamic Exit)
         manage_trade_adaptively(symbol, coin_amount, c2_close, dynamic_tp, smart_sl)
@@ -272,24 +302,22 @@ def evaluate_symbol(symbol_data):
         return
 
 def run_bot():
-    print(f"[*] Starting Global Top 500 Scanner (Worldwide Liquid Assets + Bitget Executed)...")
+    print(f"[*] Starting Multi-Exchange Consensus Engine (Bybit + OKX + Gate.io + Bitget)...")
     last_global_fetch = 0
-    global_verified_symbols = set()
+    global_volumes = {}
 
     while True:
-        # Refresh Global Top 500 list every 2 hours
-        if time.time() - last_global_fetch > 7200 or len(global_verified_symbols) == 0:
-            fetched = fetch_global_top_500_symbols()
-            if fetched and len(fetched) > 0:
-                global_verified_symbols = fetched
+        # Refresh Global Volume Consensus every 3 hours
+        if time.time() - last_global_fetch > 10800 or len(global_volumes) == 0:
+            global_volumes = fetch_multi_exchange_global_volumes()
             last_global_fetch = time.time()
 
-        symbols_data = get_tradable_symbols(global_verified_symbols)
+        symbols_data = get_tradable_symbols(global_volumes)
         for sym_data in symbols_data:
             evaluate_symbol(sym_data)
             time.sleep(0.06)
 
-        print("[*] Global Top 500 sweep complete. Re-scanning...")
+        print("[*] Multi-Exchange sweep complete. Re-scanning...")
         time.sleep(15)
 
 if __name__ == "__main__":
