@@ -14,7 +14,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Dual Long/Short Trajectory Matching Engine is active.")
+        self.wfile.write(b"15-Minute Scenario Memory & Blending Desk is active.")
 
     def log_message(self, format, *args):
         return  # Silence server logs
@@ -39,18 +39,16 @@ if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
     print("[FATAL] Missing Bitget API credentials in environment variables!", flush=True)
     sys.exit(1)
 
-# Risk & Order Sizing
+# Sizing & Boundaries
 LEVERAGE = 3
 BALANCE_USE_PCT = 0.85        # Use 85% of free USDT
 MIN_NOTIONAL = 5.10           # Minimum $5.10 order value on Bitget
 MIN_24H_VOLUME = 5_000_000    # $5M global liquidity floor
-SCAN_INTERVAL_SECONDS = 60    # Rapid scan interval
-MAX_CONCURRENT_CAMERAS = 6    # Film up to 6 coins simultaneously
-BASELINE_TAPES_REQUIRED = 10  # Baseline films needed before live matching begins
-SIMILARITY_THRESHOLD = 75.0   # 75% curve match to strike
-LIBRARY_FILE = "video_library.json"
+INSPECTION_INTERVAL = 900     # 15 minutes structured review (900 seconds)
+BASELINE_SCENARIO_GOAL = 10   # First 10 scenarios are pure camera study
+MEMORY_FILE = "scenario_memory.json"
 
-# Non-Crypto / TradFi Blacklist
+# Traditional assets / CFDs blacklisted
 NON_CRYPTO_SYMBOLS = {
     'CL', 'BZ', 'SOXS', 'SOXL', 'KORU', 'MU', 'TSLA', 'NVDA', 'AAPL', 'MSFT',
     'AMZN', 'GOOGL', 'META', 'SPX', 'NDX', 'DJI', 'XAU', 'XAG', 'MINIMAX', 'DOS'
@@ -70,7 +68,7 @@ exchange = ccxt.bitget({
 
 
 # ==============================================================================
-# 3. STATISTICAL & TECHNICAL UTILITIES
+# 3. STATISTICAL UTILITIES
 # ==============================================================================
 def calculate_rsi(closes, period=14):
     """Calculates standard Relative Strength Index (RSI)."""
@@ -95,61 +93,96 @@ def calculate_rsi(closes, period=14):
 
 
 # ==============================================================================
-# 4. VIDEO LIBRARY (PERSISTENT FOOTPRINT STORAGE)
+# 4. SCENARIO MEMORY BANK (PERSISTENT JOURNAL)
 # ==============================================================================
-def load_video_library():
-    default_lib = {
-        "total_filmed": 0,
-        "hero_tapes": [],    # Tapes that pumped and held gains (Long standard)
-        "trap_tapes": [],    # Tapes that spiked and dumped (Short standard)
-        "active_films": []   # Currently filming in parallel
+def load_memory():
+    default_memory = {
+        "total_studied": 0,
+        "scenarios": [],       # Full archive of past 15m footprints
+        "active_studies": []   # Currently observing next-15m candle
     }
-    if os.path.exists(LIBRARY_FILE):
+    if os.path.exists(MEMORY_FILE):
         try:
-            with open(LIBRARY_FILE, "r") as f:
+            with open(MEMORY_FILE, "r") as f:
                 data = json.load(f)
-                default_lib.update(data)
-                return default_lib
+                default_memory.update(data)
+                return default_memory
         except Exception:
             pass
-    return default_lib
+    return default_memory
 
 
-def save_video_library(lib):
+def save_memory(mem):
     try:
-        with open(LIBRARY_FILE, "w") as f:
-            json.dump(lib, f, indent=2)
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(mem, f, indent=2)
     except Exception as e:
-        print(f"[LIBRARY WARNING] Failed to save video library: {e}", flush=True)
+        print(f"[MEMORY WARNING] Save failed: {e}", flush=True)
 
 
 # ==============================================================================
-# 5. VIDEO REPLAY & SHAPE-MATCHING ENGINE
+# 5. MULTI-SCENARIO BLENDING & UNDERSTANDING ENGINE
 # ==============================================================================
-def calculate_trajectory_similarity(live_frames, ref_frames):
+def evaluate_scenario_understanding(memory, candidate):
     """
-    Compares the opening scene (first 3-5 frames) of a live coin against
-    the opening scene of a historical Tape. Returns 0% to 100% similarity.
+    Evaluates whether the candidate:
+    1. Matches a single past winning scenario.
+    2. Blends two or more past scenarios into a clear, high-conviction decision.
+    3. Is confusing or contradictory -> In which case, REJECT and LEARN ONLY.
     """
-    compare_len = min(len(live_frames), len(ref_frames))
-    if compare_len < 3:
-        return 0.0
+    scenarios = memory['scenarios']
 
-    errors = []
-    for i in range(compare_len):
-        live_pnl = live_frames[i]['pnl']
-        ref_pnl = ref_frames[i]['pnl']
-        live_dd = live_frames[i]['drawdown']
-        ref_dd = ref_frames[i]['drawdown']
+    # RULE 1: Under baseline (first 10 scenarios) -> NEVER TRADE
+    if memory['total_studied'] < BASELINE_SCENARIO_GOAL:
+        return False, "BASELINE_LEARNING", "Still observing initial 10 baseline scenarios. Preserving cash."
 
-        # Measure curve divergence
-        pnl_diff = abs(live_pnl - ref_pnl)
-        dd_diff = abs(live_dd - ref_dd)
-        errors.append(min((pnl_diff * 3.0) + (dd_diff * 2.0), 30.0))
+    if not scenarios:
+        return False, "INSUFFICIENT_DATA", "No historical scenario library yet."
 
-    avg_error = sum(errors) / len(errors)
-    similarity = max(100.0 - avg_error, 0.0)
-    return round(similarity, 1)
+    # Find matching past scenarios
+    matched_scenarios = []
+    for s in scenarios:
+        # Same direction (Long leader vs Short laggard)
+        if s['direction'] != candidate['direction']:
+            continue
+
+        # Liquidity alignment
+        liq_diff = abs(s['vol_24h_m'] - candidate['vol_24h_m']) / max(s['vol_24h_m'], 1.0)
+        # 15m magnitude alignment
+        mag_diff = abs(abs(s['pct_15m']) - abs(candidate['pct_15m']))
+        # Volume profile alignment
+        rvol_diff = abs(s['rvol'] - candidate['rvol'])
+
+        if liq_diff <= 0.6 and mag_diff <= 2.5 and rvol_diff <= 1.5:
+            matched_scenarios.append(s)
+
+    # RULE 2: If NO past scenarios match, it's completely new -> DO NOT TRADE, LEARN IT
+    if len(matched_scenarios) == 0:
+        return False, "NEW_SCENARIO", "Never seen this scenario structure before. Studying without trading."
+
+    # RULE 3: SINGLE SCENARIO MATCH
+    if len(matched_scenarios) == 1:
+        past = matched_scenarios[0]
+        if past['outcome'] == "CONTINUATION_WINNER":
+            return True, "EXACT_PAST_MATCH", f"Matches proven winning scenario #{past['id']} on {past['symbol']}. Confident strike."
+        else:
+            return False, "PAST_FAILURE_MATCH", f"Matches past failing scenario #{past['id']}. High risk of reversal. No trade."
+
+    # RULE 4: MULTI-SCENARIO BLENDING (Case 12+: Combining 2 or more past scenarios)
+    winners = [s for s in matched_scenarios if s['outcome'] == "CONTINUATION_WINNER"]
+    failures = [s for s in matched_scenarios if s['outcome'] in ["FAKEOUT_REVERSAL", "CHOPPY_STALL"]]
+
+    # If the combined scenarios agree with high consistency:
+    if len(winners) >= 2 and len(failures) == 0:
+        win_symbols = ", ".join([s['symbol'] for s in winners])
+        return True, "BLENDED_HIGH_CONVICTION", f"Blends {len(winners)} past winning scenarios ({win_symbols}). Direction is crystal clear."
+
+    # RULE 5: THE CONFUSING MARKET CLAUSE
+    # If past scenarios are split (some won, some dumped) -> IT IS CONFUSING
+    if len(winners) > 0 and len(failures) > 0:
+        return False, "CONFUSING_MARKET", f"Conflicting past signals ({len(winners)} Won, {len(failures)} Failed). Scenario not understood. Learn only."
+
+    return False, "INCONCLUSIVE", "Scenario blend does not provide edge. Preserving vault cash."
 
 
 # ==============================================================================
@@ -175,152 +208,128 @@ def get_open_position():
 
 
 def open_long_position(symbol, amount):
-    """Executes market buy order for Long."""
     try:
         return exchange.create_order(
-            symbol=symbol,
-            type='market',
-            side='buy',
-            amount=amount,
+            symbol=symbol, type='market', side='buy', amount=amount,
             params={'tradeSide': 'buy_single'}
         )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
             return exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side='buy',
-                amount=amount,
+                symbol=symbol, type='market', side='buy', amount=amount,
                 params={'tradeSide': 'open'}
             )
         raise e
 
 
 def close_long_position(symbol, amount):
-    """Executes market sell order to close Long."""
     try:
         return exchange.create_order(
-            symbol=symbol,
-            type='market',
-            side='sell',
-            amount=amount,
+            symbol=symbol, type='market', side='sell', amount=amount,
             params={'tradeSide': 'sell_single'}
         )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
             return exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side='sell',
-                amount=amount,
+                symbol=symbol, type='market', side='sell', amount=amount,
                 params={'tradeSide': 'close'}
             )
         raise e
 
 
 def open_short_position(symbol, amount):
-    """Executes market sell order for Short."""
     try:
         return exchange.create_order(
-            symbol=symbol,
-            type='market',
-            side='sell',
-            amount=amount,
+            symbol=symbol, type='market', side='sell', amount=amount,
             params={'tradeSide': 'sell_single'}
         )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
             return exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side='sell',
-                amount=amount,
+                symbol=symbol, type='market', side='sell', amount=amount,
                 params={'tradeSide': 'open'}
             )
         raise e
 
 
 def close_short_position(symbol, amount):
-    """Executes market buy order to close Short."""
     try:
         return exchange.create_order(
-            symbol=symbol,
-            type='market',
-            side='buy',
-            amount=amount,
+            symbol=symbol, type='market', side='buy', amount=amount,
             params={'tradeSide': 'buy_single'}
         )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
             return exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side='buy',
-                amount=amount,
+                symbol=symbol, type='market', side='buy', amount=amount,
                 params={'tradeSide': 'close'}
             )
         raise e
 
 
 # ==============================================================================
-# 7. SCANNER WITH STRICT OVERPOWER RULE
+# 7. 15-MINUTE LEADERBOARD SCANNER (TOP GAINER & TOP LOSER)
 # ==============================================================================
-def inspect_coin_overpower_imbalance(symbol, pct_24h, vol_24h):
+def scan_15m_leaders(liquid_symbols):
     """
-    STRICT OVERPOWER RULE:
-    5m gain strictly exceeds the 1h magnitude: pct_5m > abs(pct_1h)
+    Inspects 15m candles across liquid crypto.
+    Returns: Top 15m Gainer (Long Candidate) and Top 15m Loser (Short Candidate).
     """
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=25)
-        if len(ohlcv) < 20:
-            return None
+    candidates = []
 
-        closes = [x[4] for x in ohlcv]
-        volumes = [x[5] for x in ohlcv]
-
-        cur_price = closes[-1]
-        price_5m_ago = closes[-2]
-        pct_5m = ((cur_price - price_5m_ago) / price_5m_ago) * 100
-
-        price_1h_ago = closes[-13] if len(closes) >= 13 else closes[0]
-        pct_1h = ((cur_price - price_1h_ago) / price_1h_ago) * 100
-
-        avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 1
-        rvol = round(volumes[-1] / avg_vol, 2) if avg_vol > 0 else 1.0
-        rsi_5m = calculate_rsi(closes, period=14)
-
-        is_overpower = (pct_5m >= 2.0 and rvol >= 2.0 and pct_5m > (abs(pct_1h) + 0.05))
-
-        if not is_overpower:
-            return None
-
-        funding_rate = 0.0
+    for sym, pct_24h, vol_24h in liquid_symbols:
         try:
-            f_data = exchange.fetch_funding_rate(symbol)
-            funding_rate = float(f_data.get('fundingRate', 0) or 0) * 100
-        except Exception:
-            pass
+            ohlcv = exchange.fetch_ohlcv(sym, timeframe='15m', limit=20)
+            if len(ohlcv) < 15:
+                continue
 
-        return {
-            "symbol": symbol,
-            "cur_price": cur_price,
-            "pct_5m": round(pct_5m, 2),
-            "pct_1h": round(pct_1h, 2),
-            "pct_24h": round(pct_24h, 2),
-            "rvol": rvol,
-            "rsi_5m": rsi_5m,
-            "funding_pct": round(funding_rate, 4),
-            "vol_24h_m": round(vol_24h / 1_000_000, 2)
-        }
-    except Exception:
-        return None
+            closes = [x[4] for x in ohlcv]
+            volumes = [x[5] for x in ohlcv]
+
+            cur_price = closes[-1]
+            price_15m_ago = closes[-2]
+            pct_15m = ((cur_price - price_15m_ago) / price_15m_ago) * 100
+
+            avg_vol = sum(volumes[-16:-1]) / 15 if len(volumes) >= 16 else 1
+            rvol = round(volumes[-1] / avg_vol, 2) if avg_vol > 0 else 1.0
+            rsi = calculate_rsi(closes, period=14)
+
+            funding_rate = 0.0
+            try:
+                f_data = exchange.fetch_funding_rate(sym)
+                funding_rate = float(f_data.get('fundingRate', 0) or 0) * 100
+            except Exception:
+                pass
+
+            candidates.append({
+                "symbol": sym,
+                "cur_price": cur_price,
+                "pct_15m": round(pct_15m, 2),
+                "pct_24h": round(pct_24h, 2),
+                "rvol": rvol,
+                "rsi": rsi,
+                "funding_pct": round(funding_rate, 4),
+                "vol_24h_m": round(vol_24h / 1_000_000, 2)
+            })
+        except Exception:
+            continue
+
+    if not candidates:
+        return None, None
+
+    # Sort to find the #1 Strongest Gainer and #1 Deepest Loser
+    candidates.sort(key=lambda x: x['pct_15m'], reverse=True)
+    top_gainer = candidates[0] if candidates[0]['pct_15m'] >= 1.5 else None
+    top_loser = candidates[-1] if candidates[-1]['pct_15m'] <= -1.5 else None
+
+    return top_gainer, top_loser
 
 
 # ==============================================================================
-# 8. ACTIVE TRADE GUARDIAN (HANDLES BOTH LONGS AND SHORTS)
+# 8. ACTIVE TRADE GUARDIAN (LIVE RISK MANAGEMENT)
 # ==============================================================================
 def manage_active_trade(symbol, side, contracts, entry_price):
-    """Guards active Long or Short with 4 strict capital-protection rules."""
+    """Guards live position with 4 strict capital-protection rules."""
     highest_price = entry_price
     lowest_price = entry_price
     entry_time = time.time()
@@ -341,11 +350,10 @@ def manage_active_trade(symbol, side, contracts, entry_price):
 
             elapsed_min = (time.time() - entry_time) / 60
 
-            # Calculate direction-specific PnL
             if side == 'long':
                 pnl_pct = ((cur_price - entry_price) / entry_price) * 100
                 peak_pnl = ((highest_price - entry_price) / entry_price) * 100
-            else:  # short
+            else:
                 pnl_pct = ((entry_price - cur_price) / entry_price) * 100
                 peak_pnl = ((entry_price - lowest_price) / entry_price) * 100
 
@@ -356,18 +364,18 @@ def manage_active_trade(symbol, side, contracts, entry_price):
             # 1. FEE-SHIELD LOCK (+1.0% -> +0.5%)
             if peak_pnl >= 1.0:
                 if side == 'long' and cur_price <= entry_price * 1.005:
-                    print(f"[EXIT TRIGGER] Long Fee-Shield hit! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
+                    print(f"[EXIT TRIGGER] Long Fee-Shield! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
                     close_long_position(symbol, contracts)
                     break
                 elif side == 'short' and cur_price >= entry_price * 0.995:
-                    print(f"[EXIT TRIGGER] Short Fee-Shield hit! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
+                    print(f"[EXIT TRIGGER] Short Fee-Shield! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
                     close_short_position(symbol, contracts)
                     break
 
             # 2. MOMENTUM STALL / BOX CHOP EXIT (15 Mins)
             if elapsed_min >= 15 and peak_pnl < 1.0:
                 if abs(pnl_pct) <= 0.45:
-                    print(f"[EXIT TRIGGER] Momentum stalled in a box for {elapsed_min:.0f}m. Dumping chop.", flush=True)
+                    print(f"[EXIT TRIGGER] Momentum stalled for {elapsed_min:.0f}m. Dumping chop.", flush=True)
                     if side == 'long':
                         close_long_position(symbol, contracts)
                     else:
@@ -388,13 +396,13 @@ def manage_active_trade(symbol, side, contracts, entry_price):
                 if side == 'long':
                     trailing_floor = highest_price * 0.985
                     if cur_price <= trailing_floor:
-                        print(f"[EXIT TRIGGER] Long Trailing stop triggered at {pnl_pct:+.2f}% (Peak: +{peak_pnl:.2f}%).", flush=True)
+                        print(f"[EXIT TRIGGER] Long Trailing stop triggered at {pnl_pct:+.2f}%.", flush=True)
                         close_long_position(symbol, contracts)
                         break
-                else:  # short
+                else:
                     trailing_ceiling = lowest_price * 1.015
                     if cur_price >= trailing_ceiling:
-                        print(f"[EXIT TRIGGER] Short Trailing stop triggered at {pnl_pct:+.2f}% (Peak: +{peak_pnl:.2f}%).", flush=True)
+                        print(f"[EXIT TRIGGER] Short Trailing stop triggered at {pnl_pct:+.2f}%.", flush=True)
                         close_short_position(symbol, contracts)
                         break
 
@@ -404,11 +412,11 @@ def manage_active_trade(symbol, side, contracts, entry_price):
 
 
 # ==============================================================================
-# 9. MAIN AUTONOMOUS DUAL ENGINE
+# 9. MAIN AUTONOMOUS 15-MINUTE ENGINE
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] Dual Long/Short Trajectory Matching Engine initialized.", flush=True)
+    print("[SYSTEM] 15-Minute Leaderboard & Scenario Blending Desk initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -416,143 +424,85 @@ def main():
     except Exception as e:
         print(f"[WARNING] load_markets: {e}", flush=True)
 
-    lib = load_video_library()
-    print(f"[LIBRARY] Historical Films: {lib['total_filmed']} | Hero Tapes: {len(lib['hero_tapes'])} | Trap Tapes: {len(lib['trap_tapes'])}", flush=True)
-
-    cycle = 1
+    memory = load_memory()
+    print(f"[MEMORY] Historical Scenarios Cataloged: {memory['total_studied']}/{BASELINE_SCENARIO_GOAL}", flush=True)
 
     while True:
         try:
-            # 1. Manage Active Live Trade if any
+            # 1. Position Check: If in a live trade, guard it exclusively
             pos = get_open_position()
             if pos:
                 manage_active_trade(pos['symbol'], pos['side'], pos['contracts'], pos['entry_price'])
                 time.sleep(5)
                 continue
 
-            # 2. Advance all Active Films simultaneously
-            remaining_films = []
-            trade_candidate = None  # Will hold: (symbol, side, cur_price)
+            # 2. Check USDT Wallet Balance
+            balance_info = exchange.fetch_balance()
+            usdt_free = float(balance_info.get('USDT', {}).get('free', 0) or 0)
+            notional = (usdt_free * BALANCE_USE_PCT) * LEVERAGE
 
-            for film in lib['active_films']:
-                sym = film['symbol']
-                elapsed_min = (time.time() - film['started_at']) / 60
+            # 3. Update Active Next-15m Candle Studies
+            remaining_active = []
+            for study in memory['active_studies']:
+                sym = study['symbol']
+                elapsed_min = (time.time() - study['started_at']) / 60
 
                 try:
                     ticker = exchange.fetch_ticker(sym)
                     cur_price = float(ticker.get('last', 0) or 0)
                 except Exception:
-                    remaining_films.append(film)
+                    remaining_active.append(study)
                     continue
 
-                if cur_price > film['peak_price']:
-                    film['peak_price'] = cur_price
-                if cur_price < film['lowest_price']:
-                    film['lowest_price'] = cur_price
+                base_price = study['base_price']
+                continuation_pnl = ((cur_price - base_price) / base_price) * 100
 
-                base_price = film['base_price']
-                cur_pnl = ((cur_price - base_price) / base_price) * 100
-                peak_pnl = ((film['peak_price'] - base_price) / base_price) * 100
-                drawdown = ((cur_price - film['peak_price']) / film['peak_price']) * 100
+                # Completed the 15-minute test candle
+                if elapsed_min >= 15.0:
+                    study['continuation_15m_pct'] = round(continuation_pnl, 2)
+                    direction = study['direction']
 
-                # Record Frame every ~2 minutes
-                last_frame_min = film['frames'][-1]['min'] if film['frames'] else -99
-                if (elapsed_min - last_frame_min) >= 2.0:
-                    frame = {
-                        "frame_no": len(film['frames']) + 1,
-                        "min": round(elapsed_min, 1),
-                        "pnl": round(cur_pnl, 2),
-                        "peak": round(peak_pnl, 2),
-                        "drawdown": round(drawdown, 2)
-                    }
-                    film['frames'].append(frame)
-
-                # --- PATTERN REPLAY SCREENING (Minutes 6 to 12) ---
-                if lib['total_filmed'] >= BASELINE_TAPES_REQUIRED and not film.get('evaluated'):
-                    if 6.0 <= elapsed_min <= 12.0 and len(film['frames']) >= 3:
-                        film['evaluated'] = True
-
-                        best_hero_score = 0.0
-                        best_hero_ref = None
-                        for hero in lib['hero_tapes']:
-                            sim = calculate_trajectory_similarity(film['frames'], hero['frames'])
-                            if sim > best_hero_score:
-                                best_hero_score = sim
-                                best_hero_ref = hero
-
-                        best_trap_score = 0.0
-                        best_trap_ref = None
-                        for trap in lib['trap_tapes']:
-                            sim = calculate_trajectory_similarity(film['frames'], trap['frames'])
-                            if sim > best_trap_score:
-                                best_trap_score = sim
-                                best_trap_ref = trap
-
-                        funding = film['initial_metrics']['funding_pct']
-
-                        # BRANCH A: HERO MATCH -> EXECUTE LONG
-                        if best_hero_score >= SIMILARITY_THRESHOLD and cur_pnl >= 1.0 and drawdown > -1.0:
-                            print("\n" + "*" * 80, flush=True)
-                            print(f"[DUAL ENGINE: LONG GREEN LIGHT] {sym} is repeating a Hero Tape footprint!", flush=True)
-                            print(f"  Similarity: {best_hero_score}% match to Hero Tape ({best_hero_ref['symbol']})", flush=True)
-                            print(f"  Action: Entering 3x LONG to ride momentum expansion.", flush=True)
-                            print("*" * 80 + "\n", flush=True)
-                            trade_candidate = (sym, 'long', cur_price)
-
-                        # BRANCH B: TRAP MATCH -> EXECUTE SHORT (FADE THE TRAP)
-                        elif best_trap_score >= SIMILARITY_THRESHOLD and (drawdown <= -1.2 or cur_pnl <= 0.2) and funding >= -0.01:
-                            print("\n" + "*" * 80, flush=True)
-                            print(f"[DUAL ENGINE: SHORT GREEN LIGHT] {sym} is repeating a Trap Tape footprint!", flush=True)
-                            print(f"  Similarity: {best_trap_score}% match to Trap Tape ({best_trap_ref['symbol']})", flush=True)
-                            print(f"  Funding Check: {funding:+.4f}% (Clean, no short-squeeze risk).", flush=True)
-                            print(f"  Action: Entering 3x SHORT to fade the failed breakout.", flush=True)
-                            print("*" * 80 + "\n", flush=True)
-                            trade_candidate = (sym, 'short', cur_price)
+                    # Classify Outcome
+                    if direction == "LONG_LEADER":
+                        if continuation_pnl >= 1.2:
+                            outcome = "CONTINUATION_WINNER"
+                        elif continuation_pnl <= -0.8:
+                            outcome = "FAKEOUT_REVERSAL"
                         else:
-                            print(f"[VIDEO SCREENING] {sym} inconclusive (Hero: {best_hero_score}% | Trap: {best_trap_score}%). Preserving cash.", flush=True)
+                            outcome = "CHOPPY_STALL"
+                    else:  # SHORT_LAGGARD
+                        if continuation_pnl <= -1.2:
+                            outcome = "CONTINUATION_WINNER"
+                        elif continuation_pnl >= 0.8:
+                            outcome = "FAKEOUT_REVERSAL"
+                        else:
+                            outcome = "CHOPPY_STALL"
 
-                # --- COMPLETE 60-MINUTE FILM ARCHIVING ---
-                if elapsed_min >= 60:
-                    film['final_pnl'] = round(cur_pnl, 2)
-                    film['peak_pnl'] = round(peak_pnl, 2)
-
-                    if cur_pnl >= 2.5 and peak_pnl >= 4.0 and film['lowest_price'] >= base_price * 0.985:
-                        label = "HERO_PUMP_TAPE"
-                        lib['hero_tapes'].append(film)
-                    elif cur_pnl <= 0.0 or drawdown <= -2.5:
-                        label = "TRAP_DUMP_TAPE"
-                        lib['trap_tapes'].append(film)
-                    else:
-                        label = "STAGNANT_CHOP_TAPE"
-
-                    film['label'] = label
-                    lib['total_filmed'] += 1
+                    study['outcome'] = outcome
+                    memory['total_studied'] += 1
+                    memory['scenarios'].append(study)
 
                     print("\n" + "=" * 80, flush=True)
-                    print(f"[TAPE ARCHIVED #{lib['total_filmed']}] Finished 60m film on {sym}", flush=True)
-                    print(f"  Classification: {label} (Peak: +{film['peak_pnl']}% | Close: {film['final_pnl']}%)", flush=True)
-                    print(f"  Total Library:  {len(lib['hero_tapes'])} Heroes | {len(lib['trap_tapes'])} Traps", flush=True)
+                    print(f"[SCENARIO #{memory['total_studied']} RECORDED] {direction} on {sym}", flush=True)
+                    print(f"  Trigger 15m Move: {study['pct_15m']:+}% | Next 15m Continuation: {continuation_pnl:+.2f}%", flush=True)
+                    print(f"  Outcome:          {outcome}", flush=True)
+                    print(f"  Total Learned:    {len(memory['scenarios'])} distinct market footprints.", flush=True)
                     print("=" * 80 + "\n", flush=True)
 
-                    save_video_library(lib)
+                    save_memory(memory)
                 else:
-                    remaining_films.append(film)
+                    remaining_active.append(study)
 
-            lib['active_films'] = remaining_films
+            memory['active_studies'] = remaining_active
 
-            # 3. Check Wallet Balance & Sizing
-            balance_info = exchange.fetch_balance()
-            usdt_free = float(balance_info.get('USDT', {}).get('free', 0) or 0)
-            notional = (usdt_free * BALANCE_USE_PCT) * LEVERAGE
-
-            # 4. Scan Market for New Overpower Imbalances (Parallel Scanning)
+            # 4. Fetch Liquid Crypto Universe (>= $5M Volume)
             try:
                 tickers = exchange.fetch_tickers()
             except Exception as e:
                 time.sleep(10)
                 continue
 
-            candidates = []
+            liquid_symbols = []
             for symbol, t in tickers.items():
                 if not symbol.endswith(":USDT"):
                     continue
@@ -562,54 +512,75 @@ def main():
                 vol_24h = float(t.get('quoteVolume', 0) or 0)
                 pct_24h = float(t.get('percentage', 0) or 0)
                 if vol_24h >= MIN_24H_VOLUME:
-                    candidates.append((symbol, pct_24h, vol_24h))
+                    liquid_symbols.append((symbol, pct_24h, vol_24h))
 
-            candidates.sort(key=lambda x: x[2], reverse=True)
-            top_candidates = candidates[:30]
+            # Sort by 24h volume descending and inspect top 25
+            liquid_symbols.sort(key=lambda x: x[2], reverse=True)
+            top_liquid = liquid_symbols[:25]
 
-            active_syms = {f['symbol'] for f in lib['active_films']}
+            print(f"\n[15-MINUTE REVIEW] Scanning {len(top_liquid)} liquid markets for Top Gainer & Loser...", flush=True)
+            top_gainer, top_loser = scan_15m_leaders(top_liquid)
 
-            for sym, pct_24h, vol_24h in top_candidates:
-                if len(lib['active_films']) >= MAX_CONCURRENT_CAMERAS:
-                    break
+            trade_candidate = None
 
-                if sym in active_syms:
-                    continue
+            # Test Top Gainer (Long Candidate)
+            if top_gainer:
+                candidate_data = dict(top_gainer)
+                candidate_data['direction'] = "LONG_LEADER"
+                can_trade, reason_code, message = evaluate_scenario_understanding(memory, candidate_data)
 
-                metrics = inspect_coin_overpower_imbalance(sym, pct_24h, vol_24h)
-                if not metrics:
-                    continue
-
-                new_film = {
-                    "film_id": lib['total_filmed'] + len(lib['active_films']) + 1,
-                    "symbol": sym,
-                    "started_at": time.time(),
-                    "base_price": metrics['cur_price'],
-                    "peak_price": metrics['cur_price'],
-                    "lowest_price": metrics['cur_price'],
-                    "initial_metrics": metrics,
-                    "frames": [
-                        {
-                            "frame_no": 1,
-                            "min": 0.0,
-                            "pnl": 0.0,
-                            "peak": 0.0,
-                            "drawdown": 0.0
+                if can_trade:
+                    print(f"\n[TRADE GREEN LIGHT: LONG] {top_gainer['symbol']} | {message}", flush=True)
+                    trade_candidate = (top_gainer['symbol'], 'long', top_gainer['cur_price'])
+                else:
+                    # If baseline or confusing -> Add to active learning
+                    active_syms = {s['symbol'] for s in memory['active_studies']}
+                    if top_gainer['symbol'] not in active_syms and len(memory['active_studies']) < 4:
+                        study_entry = {
+                            "id": memory['total_studied'] + len(memory['active_studies']) + 1,
+                            "symbol": top_gainer['symbol'],
+                            "direction": "LONG_LEADER",
+                            "started_at": time.time(),
+                            "base_price": top_gainer['cur_price'],
+                            "pct_15m": top_gainer['pct_15m'],
+                            "rvol": top_gainer['rvol'],
+                            "rsi": top_gainer['rsi'],
+                            "funding_pct": top_gainer['funding_pct'],
+                            "vol_24h_m": top_gainer['vol_24h_m']
                         }
-                    ],
-                    "evaluated": False
-                }
-                lib['active_films'].append(new_film)
-                active_syms.add(sym)
-                save_video_library(lib)
+                        memory['active_studies'].append(study_entry)
+                        save_memory(memory)
+                        print(f"  [STUDYING GAINER #{study_entry['id']}] {top_gainer['symbol']} (+{top_gainer['pct_15m']}%). {message}", flush=True)
 
-                print("\n" + "-" * 80, flush=True)
-                print(f"[OVERPOWER DETECTED] Camera #{len(lib['active_films'])} started on {sym}!", flush=True)
-                print(f"  5m Gain: +{metrics['pct_5m']}% OVERPOWERED 1h Magnitude ({abs(metrics['pct_1h'])}%)", flush=True)
-                print(f"  Filming to see if it becomes a LONG (Hero) or a SHORT (Trap)...", flush=True)
-                print("-" * 80 + "\n", flush=True)
+            # Test Top Loser (Short Candidate)
+            if top_loser and not trade_candidate:
+                candidate_data = dict(top_loser)
+                candidate_data['direction'] = "SHORT_LAGGARD"
+                can_trade, reason_code, message = evaluate_scenario_understanding(memory, candidate_data)
 
-            # 5. Place Trade if Replay Engine Triggered Long or Short
+                if can_trade:
+                    print(f"\n[TRADE GREEN LIGHT: SHORT] {top_loser['symbol']} | {message}", flush=True)
+                    trade_candidate = (top_loser['symbol'], 'short', top_loser['cur_price'])
+                else:
+                    active_syms = {s['symbol'] for s in memory['active_studies']}
+                    if top_loser['symbol'] not in active_syms and len(memory['active_studies']) < 4:
+                        study_entry = {
+                            "id": memory['total_studied'] + len(memory['active_studies']) + 1,
+                            "symbol": top_loser['symbol'],
+                            "direction": "SHORT_LAGGARD",
+                            "started_at": time.time(),
+                            "base_price": top_loser['cur_price'],
+                            "pct_15m": top_loser['pct_15m'],
+                            "rvol": top_loser['rvol'],
+                            "rsi": top_loser['rsi'],
+                            "funding_pct": top_loser['funding_pct'],
+                            "vol_24h_m": top_loser['vol_24h_m']
+                        }
+                        memory['active_studies'].append(study_entry)
+                        save_memory(memory)
+                        print(f"  [STUDYING LOSER #{study_entry['id']}] {top_loser['symbol']} ({top_loser['pct_15m']}%). {message}", flush=True)
+
+            # 5. Execute Live Order if Green Light Confirmed
             if trade_candidate and notional >= MIN_NOTIONAL:
                 symbol, side, cur_price = trade_candidate
                 market = exchange.market(symbol)
@@ -624,31 +595,25 @@ def main():
                         pass
 
                     if side == 'long':
-                        print(f"\n[ORDER EXECUTION] Entering LONG on {symbol} | Amount: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
+                        print(f"\n[ORDER EXECUTION] Entering 3x LONG on {symbol} | Notional: ${notional:.2f}", flush=True)
                         order = open_long_position(symbol, formatted_amount)
                     else:
-                        print(f"\n[ORDER EXECUTION] Entering SHORT on {symbol} | Amount: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
+                        print(f"\n[ORDER EXECUTION] Entering 3x SHORT on {symbol} | Notional: ${notional:.2f}", flush=True)
                         order = open_short_position(symbol, formatted_amount)
 
                     print(f"[ORDER PLACED] Bitget Order ID: {order.get('id')}", flush=True)
                     time.sleep(3)
                     continue
 
-            # Heartbeat Pulse
-            if cycle % 2 == 0:
-                active_summary = ", ".join([f"{f['symbol']} ({(time.time()-f['started_at'])/60:.0f}m)" for f in lib['active_films']])
-                if not active_summary:
-                    active_summary = "Scanning for overpower spikes..."
-                print(
-                    f"[RADAR PULSE] Films Done: {lib['total_filmed']}/{BASELINE_TAPES_REQUIRED} | "
-                    f"Library: {len(lib['hero_tapes'])} Long Tapes / {len(lib['trap_tapes'])} Short Tapes | "
-                    f"Cameras: [{active_summary}] | Vault: ${usdt_free:.2f} USDT",
-                    flush=True
-                )
+            # Status Pulse
+            print(
+                f"[DESK STATUS] Learned Scenarios: {memory['total_studied']}/{BASELINE_SCENARIO_GOAL} | "
+                f"Currently Filming: {len(memory['active_studies'])} | Vault: ${usdt_free:.2f} USDT",
+                flush=True
+            )
 
-            cycle += 1
-            save_video_library(lib)
-            time.sleep(SCAN_INTERVAL_SECONDS)
+            save_memory(memory)
+            time.sleep(INSPECTION_INTERVAL)
 
         except Exception as e:
             print(f"[MAIN LOOP EXCEPTION] {e}", flush=True)
