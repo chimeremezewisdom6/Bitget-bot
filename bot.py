@@ -13,10 +13,10 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Trader Desk Bot is watching the charts.")
+        self.wfile.write(b"Trader Desk Bot is actively watching the charts.")
 
     def log_message(self, format, *args):
-        return
+        return  # Silence HTTP server logs to keep terminal output clean
 
 def start_keep_alive():
     port = int(os.environ.get("PORT", 10000))
@@ -26,14 +26,14 @@ def start_keep_alive():
     print(f"[SYSTEM] Keep-alive server running on port {port}", flush=True)
 
 # ==========================================================
-# 2. EXCHANGE & STRATEGY SETTINGS
+# 2. EXCHANGE CONFIGURATION & TUNED SETTINGS
 # ==========================================================
 API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 PASSPHRASE = os.environ.get("PASSPHRASE")
 
 if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
-    print("[FATAL] Missing Bitget API credentials!", flush=True)
+    print("[FATAL] Missing Bitget API credentials in environment variables!", flush=True)
     sys.exit(1)
 
 exchange = ccxt.bitget({
@@ -49,17 +49,17 @@ exchange = ccxt.bitget({
 })
 
 LEVERAGE = 3
-BALANCE_USE_PCT = 0.80             # 80% compounding
-MIN_NOTIONAL = 5.10                # Safety buffer above Bitget $5.00 min
-MIN_24H_VOLUME = 10_000_000        # LOWERED to $10M for broader runner coverage
-INSPECTION_INTERVAL_SECONDS = 900  # 15 minutes chart inspection cycle
-CONVICTION_THRESHOLD = 70          # ADJUSTED from 80 down to 70 for responsive entries
+BALANCE_USE_PCT = 0.85             # 85% of $2.62 = $2.22 margin -> ~$6.68 notional (safely above $5.00 min)
+MIN_NOTIONAL = 5.10                # Safety buffer above Bitget's $5.00 min order requirement
+MIN_24H_VOLUME = 10_000_000        # $10,000,000 minimum volume floor
+INSPECTION_INTERVAL_SECONDS = 900  # 15 minutes structured chart review cycle
+CONVICTION_THRESHOLD = 70          # Out of 100 (Responsive entry for early breakout runners)
 
 # ==========================================================
-# 3. BITGET ONE-WAY ORDER HELPERS
+# 3. BITGET ONE-WAY ORDER HELPERS (Error 25156 Immune)
 # ==========================================================
 def open_long_position(symbol, amount):
-    """Dual-fallback for Bitget Unified One-Way Mode"""
+    """Dual-fallback execution for Bitget Unified One-Way Mode"""
     try:
         return exchange.create_order(
             symbol=symbol,
@@ -118,7 +118,7 @@ def get_open_position():
     return None
 
 # ==========================================================
-# 4. CALIBRATED TRADER ANALYSIS & SCORING
+# 4. TRADER ANALYSIS & CONVICTION SCORING
 # ==========================================================
 def evaluate_coin(symbol, pct_24h):
     """
@@ -139,16 +139,16 @@ def evaluate_coin(symbol, pct_24h):
     volumes = [c[5] for c in ohlcv]
     cur_price = closes[-1]
 
-    # 1. Base / Average Proximity (20-period SMA)
+    # 1. Base Proximity (20-period SMA)
     sma_20 = sum(closes[-21:-1]) / 20
     dist_from_sma = ((cur_price - sma_20) / sma_20) * 100
 
     if 0.5 <= dist_from_sma <= 2.5:
         score += 25
-        thesis.append(f"Prime breakout (+{dist_from_sma:.1f}% off 20 SMA)")
+        thesis.append(f"Prime base breakout (+{dist_from_sma:.1f}% off 20 SMA)")
     elif 2.5 < dist_from_sma <= 4.2:
         score += 18
-        thesis.append(f"Moderate pump (+{dist_from_sma:.1f}% off 20 SMA)")
+        thesis.append(f"Moderate expansion (+{dist_from_sma:.1f}% off 20 SMA)")
     else:
         thesis.append(f"Base distance {dist_from_sma:+.1f}%")
 
@@ -169,7 +169,7 @@ def evaluate_coin(symbol, pct_24h):
     else:
         thesis.append(f"Low volume ({rvol:.2f}x)")
 
-    # 3. Open Interest (Whale Money Inflow)
+    # 3. Open Interest (Whale Capital Inflow)
     try:
         oi_data = exchange.fetch_open_interest(symbol)
         oi_val = float(oi_data.get('openInterestValue', 0) or oi_data.get('openInterestAmount', 0))
@@ -204,7 +204,7 @@ def evaluate_coin(symbol, pct_24h):
 def perform_market_inspection(inspection_num, usdt_balance):
     print("\n" + "=" * 80, flush=True)
     print(f" [TRADER DESK LOG #{inspection_num}] Market Review | Timeframe: 15m Structure", flush=True)
-    print(f" Portfolio: ${usdt_balance:.2f} USDT (100% Cash | Scanning for Conviction >= {CONVICTION_THRESHOLD})", flush=True)
+    print(f" Portfolio: ${usdt_balance:.2f} USDT (100% Cash | Target Conviction Score >= {CONVICTION_THRESHOLD})", flush=True)
     print("=" * 80, flush=True)
 
     try:
@@ -213,7 +213,7 @@ def perform_market_inspection(inspection_num, usdt_balance):
         print(f"[ERROR] Failed fetching tickers: {e}", flush=True)
         return None
 
-    # Step 1: Filter liquid universe (>= $10M Volume, 24h gain between +0.8% and +9.5%)
+    # Filter liquid universe (>= $10M Volume, 24h change between +0.8% and +9.5%)
     candidates = []
     for symbol, t in tickers.items():
         if not symbol.endswith(":USDT"):
@@ -228,10 +228,9 @@ def perform_market_inspection(inspection_num, usdt_balance):
     print(f"[*] Universe Scanned: {len(tickers)} pairs | {len(candidates)} match volume (>= $10M) & price range", flush=True)
 
     if not candidates:
-        print("[OBSERVATION] No liquid pairs breaking out. Preserving capital in USDT.", flush=True)
+        print("[OBSERVATION] No liquid pairs currently breaking out. Preserving capital in USDT.", flush=True)
         return None
 
-    # Step 2: Grade top 6 setups
     ranked_setups = []
     print("\n--- TOP WATCHLIST OBSERVATIONS ---", flush=True)
     for symbol, pct_24h, _ in candidates[:6]:
@@ -262,137 +261,10 @@ def perform_market_inspection(inspection_num, usdt_balance):
         print(f"            Action: Executing Long entry.", flush=True)
         return best_candidate['symbol'], best_candidate['price']
     else:
-        print(f"[DECISION] Top setup {best_candidate['symbol']} scored {best_candidate['score']}/100 (< {CONVICTION_THRESHOLD}).", flush=True)
+        print(f"[DECISION] Top setup was {best_candidate['symbol']} with Score {best_candidate['score']}/100 (< {CONVICTION_THRESHOLD}).", flush=True)
         print(f"           Risk/reward sub-optimal. Sitting patient in USDT cash.", flush=True)
         print(f"           Next chart inspection in {INSPECTION_INTERVAL_SECONDS // 60} minutes.\n", flush=True)
         return None
 
 # ==========================================================
 # 5. ACTIVE TRADE GUARDIAN
-# ==========================================================
-def manage_active_trade(symbol, contracts, entry_price):
-    highest_price = entry_price
-    entry_time = time.time()
-    last_log_time = 0
-
-    print(f"\n[GUARDIAN ACTIVE] Managing {symbol} | Entry: {entry_price:.6f} | Qty: {contracts}", flush=True)
-
-    while True:
-        try:
-            time.sleep(3)
-            ticker = exchange.fetch_ticker(symbol)
-            cur_price = float(ticker['last'])
-
-            if cur_price > highest_price:
-                highest_price = cur_price
-
-            pnl_pct = ((cur_price - entry_price) / entry_price) * 100
-            peak_pnl = ((highest_price - entry_price) / entry_price) * 100
-            elapsed_min = (time.time() - entry_time) / 60
-
-            if time.time() - last_log_time > 15:
-                print(f"[TRADE STATUS] {symbol} | PnL: {pnl_pct:+.2f}% | Peak: {peak_pnl:+.2f}% | Duration: {elapsed_min:.1f}m", flush=True)
-                last_log_time = time.time()
-
-            # 1. THE FEE-SHIELD LOCK (+1.0% -> +0.5%)
-            if peak_pnl >= 1.0:
-                guaranteed_floor = entry_price * 1.005
-                if cur_price <= guaranteed_floor:
-                    print(f"[EXIT TRIGGER] Fee-Shield hit! Locked +0.5% profit (Peak: +{peak_pnl:.2f}%)", flush=True)
-                    close_long_position(symbol, contracts)
-                    break
-
-            # 2. MOMENTUM STALL / BOX CHOP EXIT
-            if elapsed_min >= 15 and peak_pnl < 1.0:
-                if abs(pnl_pct) <= 0.45:
-                    print(f"[EXIT TRIGGER] Momentum stalled in a box after {elapsed_min:.0f} mins. Closing trade.", flush=True)
-                    close_long_position(symbol, contracts)
-                    break
-
-            # 3. INITIAL STRUCTURAL STOP (-1.2%)
-            if peak_pnl < 1.0 and pnl_pct <= -1.20:
-                print(f"[EXIT TRIGGER] Hard stop hit at {pnl_pct:.2f}%. Protecting capital.", flush=True)
-                close_long_position(symbol, contracts)
-                break
-
-            # 4. RUNNER TRAIL (+3% to +10%+ expansion)
-            if peak_pnl >= 3.0:
-                trailing_floor = highest_price * 0.985
-                if cur_price <= trailing_floor:
-                    print(f"[EXIT TRIGGER] Trailing stop triggered. Banked runner at +{pnl_pct:.2f}% (Peak: +{peak_pnl:.2f}%)", flush=True)
-                    close_long_position(symbol, contracts)
-                    break
-
-        except Exception as e:
-            print(f"[GUARDIAN WARNING] {e}", flush=True)
-            time.sleep(2)
-
-# ==========================================================
-# 6. MAIN ENGINE LOOP
-# ==========================================================
-def main():
-    start_keep_alive()
-    print("[SYSTEM] Bitget Trader Desk & Momentum Hunter initialized.", flush=True)
-
-    try:
-        print("[SYSTEM] Pre-loading Bitget markets...", flush=True)
-        exchange.load_markets()
-        print(f"[SYSTEM] Loaded {len(exchange.markets)} markets successfully.", flush=True)
-    except Exception as e:
-        print(f"[WARNING] load_markets: {e}", flush=True)
-
-    inspection_num = 1
-
-    while True:
-        try:
-            pos = get_open_position()
-            if pos:
-                manage_active_trade(pos['symbol'], pos['contracts'], pos['entry_price'])
-                time.sleep(5)
-                continue
-
-            balance_info = exchange.fetch_balance()
-            usdt_free = float(balance_info['USDT']['free'] or 0)
-            notional = (usdt_free * BALANCE_USE_PCT) * LEVERAGE
-
-            if notional < MIN_NOTIONAL:
-                print(f"[WAITING] Margin low for $5 min notional (Free: ${usdt_free:.2f} | Notional: ${notional:.2f})", flush=True)
-                time.sleep(30)
-                continue
-
-            trade_candidate = perform_market_inspection(inspection_num, usdt_free)
-            inspection_num += 1
-
-            if not trade_candidate:
-                time.sleep(INSPECTION_INTERVAL_SECONDS)
-                continue
-
-            symbol, cur_price = trade_candidate
-            market = exchange.market(symbol)
-            min_lot = float(market['limits']['amount']['min'] or 0)
-
-            raw_amount = notional / cur_price
-            formatted_amount = float(exchange.amount_to_precision(symbol, raw_amount))
-
-            if formatted_amount < min_lot:
-                print(f"[SKIP] {symbol}: Size {formatted_amount} below min lot {min_lot}. Staying in cash.", flush=True)
-                time.sleep(30)
-                continue
-
-            try:
-                exchange.set_leverage(LEVERAGE, symbol, params={'marginMode': 'crossed'})
-            except Exception:
-                pass
-
-            print(f"\n[ORDER PLACEMENT] Entering Long {symbol} | Size: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
-            order = open_long_position(symbol, formatted_amount)
-            print(f"[ORDER PLACED] Bitget Order ID: {order.get('id')}", flush=True)
-
-            time.sleep(3)
-
-        except Exception as e:
-            print(f"[MAIN LOOP EXCEPTION] {e}", flush=True)
-            time.sleep(15)
-
-if __name__ == "__main__":
-    main()
