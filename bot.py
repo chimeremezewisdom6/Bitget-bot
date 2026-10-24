@@ -14,7 +14,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Autonomous Scenario Learning & Execution Engine is active.")
+        self.wfile.write(b"Multi-Camera Trajectory Replay Engine is running.")
 
     def log_message(self, format, *args):
         return  # Silence server logs
@@ -44,11 +44,13 @@ LEVERAGE = 3
 BALANCE_USE_PCT = 0.85        # Use 85% of free USDT
 MIN_NOTIONAL = 5.10           # Minimum $5.10 order value on Bitget
 MIN_24H_VOLUME = 5_000_000    # $5M global liquidity floor
-SCAN_INTERVAL_SECONDS = 90    # Market review pulse
-JOURNAL_FILE = "scenario_brain.json"
-INITIAL_STUDY_COUNT = 10      # Baseline observations before live trading begins
+SCAN_INTERVAL_SECONDS = 60    # Rapid universe scan every 60 seconds
+MAX_CONCURRENT_CAMERAS = 6    # Film up to 6 coins SIMULTANEOUSLY for fast learning
+BASELINE_TAPES_REQUIRED = 10  # Baseline films needed before live matching unlocks
+SIMILARITY_THRESHOLD = 75.0   # 75% curve match to strike
+LIBRARY_FILE = "video_library.json"
 
-# Non-Crypto / TradFi Blacklist
+# Traditional assets / CFDs blacklisted
 NON_CRYPTO_SYMBOLS = {
     'CL', 'BZ', 'SOXS', 'SOXL', 'KORU', 'MU', 'TSLA', 'NVDA', 'AAPL', 'MSFT',
     'AMZN', 'GOOGL', 'META', 'SPX', 'NDX', 'DJI', 'XAU', 'XAG', 'MINIMAX', 'DOS'
@@ -93,127 +95,63 @@ def calculate_rsi(closes, period=14):
 
 
 # ==============================================================================
-# 4. SCENARIO CLASSIFIER (TEACHING THE MACHINE TO IDENTIFY PATTERNS)
+# 4. VIDEO LIBRARY (PERSISTENT MULTI-TRACK STORAGE)
 # ==============================================================================
-def classify_scenario_archetype(metrics):
-    """
-    Categorizes the imbalance into a discrete, understandable scenario signature.
-    Features: Liquidity Tier, Trend Alignment, Funding Pressure, Overextension.
-    """
-    # 1. Liquidity Tier
-    liq_tier = "MEGA_LIQUID" if metrics['vol_24h_m'] >= 25.0 else "MID_LIQUID"
-
-    # 2. Trend Alignment (Is 5m bursting WITH 1h trend, or counter-trend?)
-    trend_align = "WITH_1H_TREND" if metrics['pct_1h'] >= 0.5 else "COUNTER_TREND"
-
-    # 3. Funding Runway (Are longs crowded or clean?)
-    funding_cond = "CLEAN_FUNDING" if metrics['funding_pct'] <= 0.012 else "CROWDED_FUNDING"
-
-    # 4. Momentum Quality (Is RSI room available or blow-off?)
-    rsi_cond = "HEALTHY_MOMENTUM" if metrics['rsi_5m'] <= 78.0 else "HYPER_EXTENDED"
-
-    scenario_key = f"{liq_tier}__{trend_align}__{funding_cond}__{rsi_cond}"
-    return scenario_key
-
-
-# ==============================================================================
-# 5. PERSISTENT SCENARIO BRAIN & JOURNAL
-# ==============================================================================
-def load_brain():
-    default_brain = {
-        "total_observed": 0,
-        "scenarios": {},      # Tracks win/loss record for each scenario archetype
-        "active_studies": [], # Cases currently being forward-tracked (5m, 15m, 60m)
-        "history": []         # Log of all completed case studies
+def load_video_library():
+    default_lib = {
+        "total_filmed": 0,
+        "hero_tapes": [],    # Tapes that pumped and held gains
+        "trap_tapes": [],    # Tapes that spiked and dumped
+        "active_films": []   # Currently filming in parallel
     }
-    if os.path.exists(JOURNAL_FILE):
+    if os.path.exists(LIBRARY_FILE):
         try:
-            with open(JOURNAL_FILE, "r") as f:
+            with open(LIBRARY_FILE, "r") as f:
                 data = json.load(f)
-                default_brain.update(data)
-                return default_brain
+                default_lib.update(data)
+                return default_lib
         except Exception:
             pass
-    return default_brain
+    return default_lib
 
 
-def save_brain(brain):
+def save_video_library(lib):
     try:
-        with open(JOURNAL_FILE, "w") as f:
-            json.dump(brain, f, indent=2)
+        with open(LIBRARY_FILE, "w") as f:
+            json.dump(lib, f, indent=2)
     except Exception as e:
-        print(f"[BRAIN WARNING] Save failed: {e}", flush=True)
+        print(f"[LIBRARY WARNING] Failed to save video library: {e}", flush=True)
 
 
-def update_scenario_knowledge(brain, scenario_key, outcome, details):
+# ==============================================================================
+# 5. VIDEO REPLAY & SHAPE-MATCHING ENGINE
+# ==============================================================================
+def calculate_trajectory_similarity(live_frames, hero_frames):
     """
-    Updates the brain's understanding of a specific scenario:
-    - Counts wins vs losses
-    - Marks whether it is STEADY, UNSTEADY, or still needs more data
+    Compares the opening scene (first 3-5 frames) of a live coin against
+    the opening scene of a recorded Hero Tape. Returns 0% to 100% similarity.
     """
-    if scenario_key not in brain['scenarios']:
-        brain['scenarios'][scenario_key] = {
-            "seen": 0,
-            "wins": 0,
-            "losses": 0,
-            "chops": 0,
-            "status": "INSUFFICIENT_DATA",
-            "notes": "Newly discovered scenario. Collecting observations."
-        }
+    compare_len = min(len(live_frames), len(hero_frames))
+    if compare_len < 3:
+        return 0.0
 
-    s = brain['scenarios'][scenario_key]
-    s['seen'] += 1
+    errors = []
+    for i in range(compare_len):
+        live_pnl = live_frames[i]['pnl']
+        hero_pnl = hero_frames[i]['pnl']
+        live_dd = live_frames[i]['drawdown']
+        hero_dd = hero_frames[i]['drawdown']
 
-    if outcome == "SUSTAINED RUNNER":
-        s['wins'] += 1
-    elif outcome == "EXHAUSTION TRAP":
-        s['losses'] += 1
-    else:
-        s['chops'] += 1
-
-    # Evaluate understanding of this specific scenario
-    win_rate = (s['wins'] / s['seen']) * 100
-
-    if s['seen'] >= 2:
-        if win_rate >= 70.0 and s['losses'] == 0:
-            s['status'] = "UNDERSTOOD_STEADY"
-            s['notes'] = f"HIGH CONSISTENCY ({s['wins']}/{s['seen']} wins). This scenario reliably moves forward. Trade authorized."
-        elif s['losses'] >= 1 and s['wins'] >= 1:
-            s['status'] = "UNSTEADY_LEARNING"
-            s['notes'] = (
-                f"UNSTEADY SCENARIO ({s['wins']}W / {s['losses']}L). Outcome varies significantly by coin. "
-                f"DO NOT TRADE. Keep observing to find missing variables."
-            )
-        elif s['losses'] > s['wins']:
-            s['status'] = "UNDERSTOOD_FAILURE"
-            s['notes'] = f"PREDICTABLE TRAP ({s['losses']}/{s['seen']} failed). Breakouts in this scenario consistently dump."
+        # If live coin dips negative while Hero Tape never did, penalize heavily
+        if live_dd < -0.6 and hero_dd >= -0.3:
+            errors.append(25.0)
         else:
-            s['status'] = "UNSTEADY_LEARNING"
-            s['notes'] = "Outcome is inconclusive. Keep studying without capital."
+            pnl_diff = abs(live_pnl - hero_pnl)
+            errors.append(min(pnl_diff * 4.0, 30.0))
 
-
-def is_scenario_tradeable(brain, scenario_key):
-    """
-    Returns True ONLY if:
-    1. We have completed the baseline observations (10 cases).
-    2. This specific scenario is marked 'UNDERSTOOD_STEADY'.
-    If it is unsteady, unverified, or a trap, returns False.
-    """
-    if brain['total_observed'] < INITIAL_STUDY_COUNT:
-        return False, "Still completing baseline learning (Under 10 total cases)."
-
-    if scenario_key not in brain['scenarios']:
-        return False, "Brand new scenario. Insufficient data to understand behavior."
-
-    s = brain['scenarios'][scenario_key]
-    if s['status'] == "UNDERSTOOD_STEADY":
-        return True, f"Scenario fully understood & proven steady ({s['wins']}/{s['seen']} wins)."
-    elif s['status'] == "UNSTEADY_LEARNING":
-        return False, f"Scenario is UNSTEADY ({s['wins']}W / {s['losses']}L). Inconsistent follow-through. Cash preserved."
-    elif s['status'] == "UNDERSTOOD_FAILURE":
-        return False, f"Scenario is a recognized TRAP ({s['losses']}/{s['seen']} dumped). Trade forbidden."
-    else:
-        return False, "Scenario still under observation (needs more proof)."
+    avg_error = sum(errors) / len(errors)
+    similarity = max(100.0 - avg_error, 0.0)
+    return round(similarity, 1)
 
 
 # ==============================================================================
@@ -282,10 +220,10 @@ def close_long_position(symbol, amount):
 
 
 # ==============================================================================
-# 7. MARKET SCANNER & TELEMETRY
+# 7. SCANNER & IMBALANCE TRIGGER
 # ==============================================================================
 def inspect_coin_imbalance(symbol, pct_24h, vol_24h):
-    """Examines 5m candles, volume, and funding to spot velocity imbalances."""
+    """Detects sudden velocity imbalance ignition."""
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=25)
         if len(ohlcv) < 20:
@@ -305,7 +243,7 @@ def inspect_coin_imbalance(symbol, pct_24h, vol_24h):
         rvol = round(volumes[-1] / avg_vol, 2) if avg_vol > 0 else 1.0
         rsi_5m = calculate_rsi(closes, period=14)
 
-        # Imbalance Trigger: 5m gain >= 2.0%, RVol >= 2.0x, outpacing 1h
+        # Imbalance Ignition: 5m gain >= 2.0%, RVol >= 2.0x, outpacing 1h
         is_imbalance = (pct_5m >= 2.0 and rvol >= 2.0 and (pct_1h <= 0 or (pct_5m / max(pct_1h, 0.1) >= 0.6)))
 
         if not is_imbalance:
@@ -318,7 +256,7 @@ def inspect_coin_imbalance(symbol, pct_24h, vol_24h):
         except Exception:
             pass
 
-        metrics = {
+        return {
             "symbol": symbol,
             "cur_price": cur_price,
             "pct_5m": round(pct_5m, 2),
@@ -329,9 +267,6 @@ def inspect_coin_imbalance(symbol, pct_24h, vol_24h):
             "funding_pct": round(funding_rate, 4),
             "vol_24h_m": round(vol_24h / 1_000_000, 2)
         }
-        metrics['scenario_key'] = classify_scenario_archetype(metrics)
-        return metrics
-
     except Exception:
         return None
 
@@ -361,14 +296,14 @@ def manage_active_trade(symbol, contracts, entry_price):
             elapsed_min = (time.time() - entry_time) / 60
 
             if time.time() - last_log_time > 15:
-                print(f"[TRADE STATUS] {symbol} | PnL: {pnl_pct:+.2f}% | Peak: {peak_pnl:+.2f}% | Elapsed: {elapsed_min:.1f}m", flush=True)
+                print(f"[TRADE STATUS] {symbol} | PnL: {pnl_pct:+.2f}% | Peak: {peak_pnl:+.2f}% | Time: {elapsed_min:.1f}m", flush=True)
                 last_log_time = time.time()
 
             # 1. FEE-SHIELD LOCK (+1.0% -> +0.5%)
             if peak_pnl >= 1.0:
                 guaranteed_floor = entry_price * 1.005
                 if cur_price <= guaranteed_floor:
-                    print(f"[EXIT TRIGGER] Fee-Shield hit! Locked +0.5% net profit (Peak was +{peak_pnl:.2f}%).", flush=True)
+                    print(f"[EXIT TRIGGER] Fee-Shield hit! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
                     close_long_position(symbol, contracts)
                     break
 
@@ -399,11 +334,11 @@ def manage_active_trade(symbol, contracts, entry_price):
 
 
 # ==============================================================================
-# 9. MAIN AUTONOMOUS ENGINE
+# 9. MAIN AUTONOMOUS ENGINE (SIMULTANEOUS MULTI-CAMERA RECORDING)
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] Autonomous Scenario-Based Momentum Desk initialized.", flush=True)
+    print("[SYSTEM] Simultaneous Multi-Camera Trajectory Engine initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -411,81 +346,117 @@ def main():
     except Exception as e:
         print(f"[WARNING] load_markets: {e}", flush=True)
 
-    brain = load_brain()
-    print(f"[STATUS] Brain Loaded. Total Lifetime Imbalances Observed: {brain['total_observed']}", flush=True)
-    print(f"[STATUS] Cataloged Scenarios: {len(brain['scenarios'])} unique archetypes.", flush=True)
+    lib = load_video_library()
+    print(f"[LIBRARY] Historical Films: {lib['total_filmed']} | Hero Tapes: {len(lib['hero_tapes'])} | Trap Tapes: {len(lib['trap_tapes'])}", flush=True)
 
     cycle = 1
 
     while True:
         try:
-            # 1. Manage Active Trade if any
+            # 1. Manage Active Live Trade if any
             pos = get_open_position()
             if pos:
                 manage_active_trade(pos['symbol'], pos['contracts'], pos['entry_price'])
                 time.sleep(5)
                 continue
 
-            # 2. Update Active Shadow Studies (Forward Tracking)
-            remaining_studies = []
-            for case in brain['active_studies']:
-                sym = case['symbol']
-                elapsed_min = (time.time() - case['detected_at']) / 60
+            # 2. Advance the Video Camera on ALL Active Films in Parallel
+            remaining_films = []
+            trade_candidate = None
+
+            for film in lib['active_films']:
+                sym = film['symbol']
+                elapsed_min = (time.time() - film['started_at']) / 60
 
                 try:
                     ticker = exchange.fetch_ticker(sym)
                     cur_price = float(ticker.get('last', 0) or 0)
                 except Exception:
-                    remaining_studies.append(case)
+                    remaining_films.append(film)
                     continue
 
-                if cur_price > case['peak_price']:
-                    case['peak_price'] = cur_price
-                if cur_price < case['lowest_price']:
-                    case['lowest_price'] = cur_price
+                if cur_price > film['peak_price']:
+                    film['peak_price'] = cur_price
+                if cur_price < film['lowest_price']:
+                    film['lowest_price'] = cur_price
 
-                base_price = case['base_price']
+                base_price = film['base_price']
                 cur_pnl = ((cur_price - base_price) / base_price) * 100
-                peak_pnl = ((case['peak_price'] - base_price) / base_price) * 100
+                peak_pnl = ((film['peak_price'] - base_price) / base_price) * 100
+                drawdown = ((cur_price - film['peak_price']) / film['peak_price']) * 100
 
-                # Completed at 60 mins
+                # Record Frame every ~2 minutes
+                last_frame_min = film['frames'][-1]['min'] if film['frames'] else -99
+                if (elapsed_min - last_frame_min) >= 2.0:
+                    frame = {
+                        "frame_no": len(film['frames']) + 1,
+                        "min": round(elapsed_min, 1),
+                        "pnl": round(cur_pnl, 2),
+                        "peak": round(peak_pnl, 2),
+                        "drawdown": round(drawdown, 2)
+                    }
+                    film['frames'].append(frame)
+
+                # --- PATTERN REPLAY SCREENING (Minutes 6 to 12) ---
+                # Checks if opening scene matches a Hero Tape without waiting 60 minutes
+                if lib['total_filmed'] >= BASELINE_TAPES_REQUIRED and len(lib['hero_tapes']) > 0 and not film.get('evaluated'):
+                    if 6.0 <= elapsed_min <= 12.0 and len(film['frames']) >= 3:
+                        best_match_score = 0.0
+                        best_hero_ref = None
+
+                        for hero in lib['hero_tapes']:
+                            sim = calculate_trajectory_similarity(film['frames'], hero['frames'])
+                            if sim > best_match_score:
+                                best_match_score = sim
+                                best_hero_ref = hero
+
+                        film['evaluated'] = True
+
+                        if best_match_score >= SIMILARITY_THRESHOLD and cur_pnl >= 1.0 and drawdown > -1.0:
+                            print("\n" + "*" * 80, flush=True)
+                            print(f"[VIDEO MATCH GREEN LIGHT] {sym} is repeating a Hero Tape footprint!", flush=True)
+                            print(f"  Similarity: {best_match_score}% match to Hero Tape ({best_hero_ref['symbol']})", flush=True)
+                            print(f"  Live Trajectory: 5m PnL is +{cur_pnl:.2f}% | Drawdown held to {drawdown:.2f}%", flush=True)
+                            print("*" * 80 + "\n", flush=True)
+                            trade_candidate = (sym, cur_price)
+                        else:
+                            print(f"[VIDEO REJECTED] {sym} opening frames scored only {best_match_score}% similarity to Hero Tapes. No trade.", flush=True)
+
+                # --- COMPLETE 60-MINUTE FILM ARCHIVING ---
                 if elapsed_min >= 60:
-                    case['final_pnl'] = round(cur_pnl, 2)
-                    case['peak_pnl'] = round(peak_pnl, 2)
+                    film['final_pnl'] = round(cur_pnl, 2)
+                    film['peak_pnl'] = round(peak_pnl, 2)
 
-                    if cur_pnl >= 2.0 and peak_pnl >= 3.5:
-                        verdict = "SUSTAINED RUNNER"
-                    elif cur_pnl <= 0.0:
-                        verdict = "EXHAUSTION TRAP"
+                    if cur_pnl >= 2.5 and peak_pnl >= 4.0 and film['lowest_price'] >= base_price * 0.985:
+                        label = "HERO_PUMP_TAPE"
+                        lib['hero_tapes'].append(film)
+                    elif cur_pnl <= 0.0 or drawdown <= -2.5:
+                        label = "TRAP_DUMP_TAPE"
+                        lib['trap_tapes'].append(film)
                     else:
-                        verdict = "STALL"
+                        label = "STAGNANT_CHOP_TAPE"
 
-                    case['verdict'] = verdict
-                    brain['total_observed'] += 1
-                    brain['history'].append(case)
-
-                    # Update specific scenario intelligence
-                    update_scenario_knowledge(brain, case['scenario_key'], verdict, case)
+                    film['label'] = label
+                    lib['total_filmed'] += 1
 
                     print("\n" + "=" * 80, flush=True)
-                    print(f"[SCENARIO STUDY COMPLETE] #{brain['total_observed']} on {sym}", flush=True)
-                    print(f"  Archetype: {case['scenario_key']}", flush=True)
-                    print(f"  Outcome:   {verdict} (Peak: +{case['peak_pnl']}%, 60m Close: {case['final_pnl']}%)", flush=True)
-                    print(f"  Diagnosis: {brain['scenarios'][case['scenario_key']]['notes']}", flush=True)
+                    print(f"[TAPE ARCHIVED #{lib['total_filmed']}] Finished 60m film on {sym}", flush=True)
+                    print(f"  Classification: {label} (Peak: +{film['peak_pnl']}% | Close: {film['final_pnl']}%)", flush=True)
+                    print(f"  Total Library:  {len(lib['hero_tapes'])} Heroes | {len(lib['trap_tapes'])} Traps", flush=True)
                     print("=" * 80 + "\n", flush=True)
 
-                    save_brain(brain)
+                    save_video_library(lib)
                 else:
-                    remaining_studies.append(case)
+                    remaining_films.append(film)
 
-            brain['active_studies'] = remaining_studies
+            lib['active_films'] = remaining_films
 
-            # 3. Check Wallet & Sizing
+            # 3. Check Wallet Balance & Sizing
             balance_info = exchange.fetch_balance()
             usdt_free = float(balance_info.get('USDT', {}).get('free', 0) or 0)
             notional = (usdt_free * BALANCE_USE_PCT) * LEVERAGE
 
-            # 4. Scan Market for Imbalances
+            # 4. Scan Market for New Imbalances (CONTINUOUS, PARALLEL SCANNING)
             try:
                 tickers = exchange.fetch_tickers()
             except Exception as e:
@@ -504,14 +475,16 @@ def main():
                 if vol_24h >= MIN_24H_VOLUME:
                     candidates.append((symbol, pct_24h, vol_24h))
 
-            # Focus on top liquid crypto
             candidates.sort(key=lambda x: x[2], reverse=True)
             top_candidates = candidates[:30]
 
-            active_syms = {c['symbol'] for c in brain['active_studies']}
-            trade_candidate = None
+            active_syms = {f['symbol'] for f in lib['active_films']}
 
+            # START NEW CAMERAS SIMULTANEOUSLY (UP TO MAX_CONCURRENT_CAMERAS)
             for sym, pct_24h, vol_24h in top_candidates:
+                if len(lib['active_films']) >= MAX_CONCURRENT_CAMERAS:
+                    break  # Maximum parallel cameras reached
+
                 if sym in active_syms:
                     continue
 
@@ -519,40 +492,37 @@ def main():
                 if not metrics:
                     continue
 
-                scenario_key = metrics['scenario_key']
-                is_tradeable, reason = is_scenario_tradeable(brain, scenario_key)
+                # Point an independent camera at this coin
+                new_film = {
+                    "film_id": lib['total_filmed'] + len(lib['active_films']) + 1,
+                    "symbol": sym,
+                    "started_at": time.time(),
+                    "base_price": metrics['cur_price'],
+                    "peak_price": metrics['cur_price'],
+                    "lowest_price": metrics['cur_price'],
+                    "initial_metrics": metrics,
+                    "frames": [
+                        {
+                            "frame_no": 1,
+                            "min": 0.0,
+                            "pnl": 0.0,
+                            "peak": 0.0,
+                            "drawdown": 0.0
+                        }
+                    ],
+                    "evaluated": False
+                }
+                lib['active_films'].append(new_film)
+                active_syms.add(sym)
+                save_video_library(lib)
 
-                # Case A: Scenario is proven steady and understood -> EXECUTE
-                if is_tradeable:
-                    print("\n" + "*" * 80, flush=True)
-                    print(f"[TRADE GREEN LIGHT] {sym} matches UNDERSTOOD & STEADY scenario!", flush=True)
-                    print(f"Archetype: {scenario_key}", flush=True)
-                    print(f"Reason:    {reason}", flush=True)
-                    print("*" * 80 + "\n", flush=True)
-                    trade_candidate = (sym, metrics['cur_price'])
-                    break
+                print("\n" + "-" * 80, flush=True)
+                print(f"[SIMULTANEOUS CAMERA #{len(lib['active_films'])}] Started filming {sym}!", flush=True)
+                print(f"  Trigger: 5m Gain +{metrics['pct_5m']}% | RVol {metrics['rvol']}x | Vol: ${metrics['vol_24h_m']}M", flush=True)
+                print(f"  Filming alongside other active cameras simultaneously...", flush=True)
+                print("-" * 80 + "\n", flush=True)
 
-                # Case B: Scenario is unsteady, a trap, or needs more learning -> RECORD & OBSERVE SAFELY
-                else:
-                    new_study = {
-                        "symbol": sym,
-                        "detected_at": time.time(),
-                        "base_price": metrics['cur_price'],
-                        "peak_price": metrics['cur_price'],
-                        "lowest_price": metrics['cur_price'],
-                        "scenario_key": scenario_key,
-                        "initial_metrics": metrics
-                    }
-                    brain['active_studies'].append(new_study)
-                    save_brain(brain)
-
-                    print(f"\n[SCENARIO DETECTED & LOGGED] {sym} | 5m Gain: +{metrics['pct_5m']}% | Vol: ${metrics['vol_24h_m']}M", flush=True)
-                    print(f"  Archetype: {scenario_key}", flush=True)
-                    print(f"  Decision:  NO TRADE. {reason}", flush=True)
-                    print(f"  Action:    Vault USDT untouched. Studying trajectory forward for 60 minutes...\n", flush=True)
-                    break  # Avoid spamming multiple studies in a single cycle
-
-            # 5. Place Trade if Qualified
+            # 5. Place Trade if a Film Matched a Hero Pattern
             if trade_candidate and notional >= MIN_NOTIONAL:
                 symbol, cur_price = trade_candidate
                 market = exchange.market(symbol)
@@ -572,19 +542,20 @@ def main():
                     time.sleep(3)
                     continue
 
-            # Heartbeat Pulse
+            # Heartbeat Pulse (Shows every camera rolling in parallel)
             if cycle % 2 == 0:
-                steady_scenarios = [k for k, v in brain['scenarios'].items() if v.get('status') == "UNDERSTOOD_STEADY"]
-                unsteady_scenarios = [k for k, v in brain['scenarios'].items() if v.get('status') == "UNSTEADY_LEARNING"]
+                active_summary = ", ".join([f"{f['symbol']} ({(time.time()-f['started_at'])/60:.0f}m)" for f in lib['active_films']])
+                if not active_summary:
+                    active_summary = "Scanning for spikes..."
                 print(
-                    f"[RADAR PULSE] Observed: {brain['total_observed']}/{INITIAL_STUDY_COUNT} | "
-                    f"Steady Scenarios: {len(steady_scenarios)} | Unsteady: {len(unsteady_scenarios)} | "
-                    f"Vault: ${usdt_free:.2f} USDT | Next scan in {SCAN_INTERVAL_SECONDS}s...",
+                    f"[RADAR PULSE] Films Done: {lib['total_filmed']}/{BASELINE_TAPES_REQUIRED} | "
+                    f"Cameras Rolling ({len(lib['active_films'])}/{MAX_CONCURRENT_CAMERAS}): [{active_summary}] | "
+                    f"Vault: ${usdt_free:.2f} USDT",
                     flush=True
                 )
 
             cycle += 1
-            save_brain(brain)
+            save_video_library(lib)
             time.sleep(SCAN_INTERVAL_SECONDS)
 
         except Exception as e:
