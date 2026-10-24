@@ -14,7 +14,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Velocity Overpower & Trajectory Matching Engine is active.")
+        self.wfile.write(b"Dual Long/Short Trajectory Matching Engine is active.")
 
     def log_message(self, format, *args):
         return  # Silence server logs
@@ -46,7 +46,7 @@ MIN_NOTIONAL = 5.10           # Minimum $5.10 order value on Bitget
 MIN_24H_VOLUME = 5_000_000    # $5M global liquidity floor
 SCAN_INTERVAL_SECONDS = 60    # Rapid scan interval
 MAX_CONCURRENT_CAMERAS = 6    # Film up to 6 coins simultaneously
-BASELINE_TAPES_REQUIRED = 10  # Film 10 full tapes before live matching starts
+BASELINE_TAPES_REQUIRED = 10  # Baseline films needed before live matching begins
 SIMILARITY_THRESHOLD = 75.0   # 75% curve match to strike
 LIBRARY_FILE = "video_library.json"
 
@@ -100,8 +100,8 @@ def calculate_rsi(closes, period=14):
 def load_video_library():
     default_lib = {
         "total_filmed": 0,
-        "hero_tapes": [],    # Tapes that pumped and held gains
-        "trap_tapes": [],    # Tapes that spiked and dumped
+        "hero_tapes": [],    # Tapes that pumped and held gains (Long standard)
+        "trap_tapes": [],    # Tapes that spiked and dumped (Short standard)
         "active_films": []   # Currently filming in parallel
     }
     if os.path.exists(LIBRARY_FILE):
@@ -126,28 +126,26 @@ def save_video_library(lib):
 # ==============================================================================
 # 5. VIDEO REPLAY & SHAPE-MATCHING ENGINE
 # ==============================================================================
-def calculate_trajectory_similarity(live_frames, hero_frames):
+def calculate_trajectory_similarity(live_frames, ref_frames):
     """
     Compares the opening scene (first 3-5 frames) of a live coin against
-    the opening scene of a recorded Hero Tape. Returns 0% to 100% similarity.
+    the opening scene of a historical Tape. Returns 0% to 100% similarity.
     """
-    compare_len = min(len(live_frames), len(hero_frames))
+    compare_len = min(len(live_frames), len(ref_frames))
     if compare_len < 3:
         return 0.0
 
     errors = []
     for i in range(compare_len):
         live_pnl = live_frames[i]['pnl']
-        hero_pnl = hero_frames[i]['pnl']
+        ref_pnl = ref_frames[i]['pnl']
         live_dd = live_frames[i]['drawdown']
-        hero_dd = hero_frames[i]['drawdown']
+        ref_dd = ref_frames[i]['drawdown']
 
-        # If live coin dips negative while Hero Tape never did, penalize heavily
-        if live_dd < -0.6 and hero_dd >= -0.3:
-            errors.append(25.0)
-        else:
-            pnl_diff = abs(live_pnl - hero_pnl)
-            errors.append(min(pnl_diff * 4.0, 30.0))
+        # Measure curve divergence
+        pnl_diff = abs(live_pnl - ref_pnl)
+        dd_diff = abs(live_dd - ref_dd)
+        errors.append(min((pnl_diff * 3.0) + (dd_diff * 2.0), 30.0))
 
     avg_error = sum(errors) / len(errors)
     similarity = max(100.0 - avg_error, 0.0)
@@ -155,18 +153,19 @@ def calculate_trajectory_similarity(live_frames, hero_frames):
 
 
 # ==============================================================================
-# 6. BITGET ONE-WAY ORDER HELPERS
+# 6. BITGET ONE-WAY DUAL-ORDER HELPERS (LONG & SHORT)
 # ==============================================================================
 def get_open_position():
-    """Checks for active long position."""
+    """Checks for active Long or Short position."""
     try:
         positions = exchange.fetch_positions()
         for p in positions:
             contracts = float(p.get('contracts', 0) or 0)
             side = p.get('side', '').lower()
-            if contracts > 0 and side == 'long':
+            if contracts > 0 and side in ['long', 'short']:
                 return {
                     'symbol': p['symbol'],
+                    'side': side,
                     'contracts': contracts,
                     'entry_price': float(p.get('entryPrice', 0))
                 }
@@ -176,7 +175,7 @@ def get_open_position():
 
 
 def open_long_position(symbol, amount):
-    """Dual-fallback execution for Bitget Unified One-Way Mode."""
+    """Executes market buy order for Long."""
     try:
         return exchange.create_order(
             symbol=symbol,
@@ -198,7 +197,7 @@ def open_long_position(symbol, amount):
 
 
 def close_long_position(symbol, amount):
-    """Dual-fallback exit for Bitget Unified One-Way Mode."""
+    """Executes market sell order to close Long."""
     try:
         return exchange.create_order(
             symbol=symbol,
@@ -219,16 +218,57 @@ def close_long_position(symbol, amount):
         raise e
 
 
+def open_short_position(symbol, amount):
+    """Executes market sell order for Short."""
+    try:
+        return exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side='sell',
+            amount=amount,
+            params={'tradeSide': 'sell_single'}
+        )
+    except Exception as e:
+        if '25156' in str(e) or 'tradeSide' in str(e).lower():
+            return exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side='sell',
+                amount=amount,
+                params={'tradeSide': 'open'}
+            )
+        raise e
+
+
+def close_short_position(symbol, amount):
+    """Executes market buy order to close Short."""
+    try:
+        return exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side='buy',
+            amount=amount,
+            params={'tradeSide': 'buy_single'}
+        )
+    except Exception as e:
+        if '25156' in str(e) or 'tradeSide' in str(e).lower():
+            return exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side='buy',
+                amount=amount,
+                params={'tradeSide': 'close'}
+            )
+        raise e
+
+
 # ==============================================================================
-# 7. SCANNER WITH STRICT "VELOCITY OVERPOWER" RULE
+# 7. SCANNER WITH STRICT OVERPOWER RULE
 # ==============================================================================
 def inspect_coin_overpower_imbalance(symbol, pct_24h, vol_24h):
     """
     STRICT OVERPOWER RULE:
-    1. 5m gain MUST BE strictly greater in value than the 1h magnitude:
-       pct_5m > abs(pct_1h) (e.g. if 1h was -5%, 5m must be >= +5.1%)
-    2. Minimum baseline impulse: pct_5m >= 2.0%
-    3. Volume ignition: 5m RVol >= 2.0x
+    5m gain strictly exceeds the 1h magnitude: pct_5m > abs(pct_1h)
     """
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=25)
@@ -249,8 +289,6 @@ def inspect_coin_overpower_imbalance(symbol, pct_24h, vol_24h):
         rvol = round(volumes[-1] / avg_vol, 2) if avg_vol > 0 else 1.0
         rsi_5m = calculate_rsi(closes, period=14)
 
-        # === THE EXACT OVERPOWER TEST ===
-        # 5m gain must be >= 2.0%, volume >= 2.0x, AND 5m gain MUST strictly beat the 1h magnitude
         is_overpower = (pct_5m >= 2.0 and rvol >= 2.0 and pct_5m > (abs(pct_1h) + 0.05))
 
         if not is_overpower:
@@ -279,15 +317,16 @@ def inspect_coin_overpower_imbalance(symbol, pct_24h, vol_24h):
 
 
 # ==============================================================================
-# 8. ACTIVE TRADE GUARDIAN (LIVE RISK RULES)
+# 8. ACTIVE TRADE GUARDIAN (HANDLES BOTH LONGS AND SHORTS)
 # ==============================================================================
-def manage_active_trade(symbol, contracts, entry_price):
-    """Guards active long with 4 strict capital-protection rules."""
+def manage_active_trade(symbol, side, contracts, entry_price):
+    """Guards active Long or Short with 4 strict capital-protection rules."""
     highest_price = entry_price
+    lowest_price = entry_price
     entry_time = time.time()
     last_log_time = 0
 
-    print(f"\n[GUARDIAN ACTIVE] Managing {symbol} | Entry: {entry_price} | Contracts: {contracts}", flush=True)
+    print(f"\n[GUARDIAN ACTIVE] Managing {side.upper()} on {symbol} | Entry: {entry_price} | Contracts: {contracts}", flush=True)
 
     while True:
         try:
@@ -297,43 +336,67 @@ def manage_active_trade(symbol, contracts, entry_price):
 
             if cur_price > highest_price:
                 highest_price = cur_price
+            if cur_price < lowest_price:
+                lowest_price = cur_price
 
-            pnl_pct = ((cur_price - entry_price) / entry_price) * 100
-            peak_pnl = ((highest_price - entry_price) / entry_price) * 100
             elapsed_min = (time.time() - entry_time) / 60
 
+            # Calculate direction-specific PnL
+            if side == 'long':
+                pnl_pct = ((cur_price - entry_price) / entry_price) * 100
+                peak_pnl = ((highest_price - entry_price) / entry_price) * 100
+            else:  # short
+                pnl_pct = ((entry_price - cur_price) / entry_price) * 100
+                peak_pnl = ((entry_price - lowest_price) / entry_price) * 100
+
             if time.time() - last_log_time > 15:
-                print(f"[TRADE STATUS] {symbol} | PnL: {pnl_pct:+.2f}% | Peak: {peak_pnl:+.2f}% | Time: {elapsed_min:.1f}m", flush=True)
+                print(f"[TRADE STATUS] {side.upper()} {symbol} | PnL: {pnl_pct:+.2f}% | Peak: {peak_pnl:+.2f}% | Time: {elapsed_min:.1f}m", flush=True)
                 last_log_time = time.time()
 
             # 1. FEE-SHIELD LOCK (+1.0% -> +0.5%)
             if peak_pnl >= 1.0:
-                guaranteed_floor = entry_price * 1.005
-                if cur_price <= guaranteed_floor:
-                    print(f"[EXIT TRIGGER] Fee-Shield hit! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
+                if side == 'long' and cur_price <= entry_price * 1.005:
+                    print(f"[EXIT TRIGGER] Long Fee-Shield hit! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
                     close_long_position(symbol, contracts)
+                    break
+                elif side == 'short' and cur_price >= entry_price * 0.995:
+                    print(f"[EXIT TRIGGER] Short Fee-Shield hit! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%).", flush=True)
+                    close_short_position(symbol, contracts)
                     break
 
             # 2. MOMENTUM STALL / BOX CHOP EXIT (15 Mins)
             if elapsed_min >= 15 and peak_pnl < 1.0:
                 if abs(pnl_pct) <= 0.45:
-                    print(f"[EXIT TRIGGER] Momentum stalled in a box after {elapsed_min:.0f}m. Dumping chop.", flush=True)
-                    close_long_position(symbol, contracts)
+                    print(f"[EXIT TRIGGER] Momentum stalled in a box for {elapsed_min:.0f}m. Dumping chop.", flush=True)
+                    if side == 'long':
+                        close_long_position(symbol, contracts)
+                    else:
+                        close_short_position(symbol, contracts)
                     break
 
             # 3. INITIAL HARD STOP (-1.2%)
             if peak_pnl < 1.0 and pnl_pct <= -1.20:
                 print(f"[EXIT TRIGGER] Hard stop hit at {pnl_pct:.2f}%. Protecting capital.", flush=True)
-                close_long_position(symbol, contracts)
+                if side == 'long':
+                    close_long_position(symbol, contracts)
+                else:
+                    close_short_position(symbol, contracts)
                 break
 
-            # 4. RUNNER TRAIL (+3% or higher)
+            # 4. RUNNER TRAILING STOP (+3% or higher)
             if peak_pnl >= 3.0:
-                trailing_floor = highest_price * 0.985
-                if cur_price <= trailing_floor:
-                    print(f"[EXIT TRIGGER] Trailing stop triggered. Banked runner at {pnl_pct:+.2f}% (Peak: +{peak_pnl:.2f}%).", flush=True)
-                    close_long_position(symbol, contracts)
-                    break
+                if side == 'long':
+                    trailing_floor = highest_price * 0.985
+                    if cur_price <= trailing_floor:
+                        print(f"[EXIT TRIGGER] Long Trailing stop triggered at {pnl_pct:+.2f}% (Peak: +{peak_pnl:.2f}%).", flush=True)
+                        close_long_position(symbol, contracts)
+                        break
+                else:  # short
+                    trailing_ceiling = lowest_price * 1.015
+                    if cur_price >= trailing_ceiling:
+                        print(f"[EXIT TRIGGER] Short Trailing stop triggered at {pnl_pct:+.2f}% (Peak: +{peak_pnl:.2f}%).", flush=True)
+                        close_short_position(symbol, contracts)
+                        break
 
         except Exception as e:
             print(f"[GUARDIAN WARNING] {e}", flush=True)
@@ -341,11 +404,11 @@ def manage_active_trade(symbol, contracts, entry_price):
 
 
 # ==============================================================================
-# 9. MAIN AUTONOMOUS ENGINE
+# 9. MAIN AUTONOMOUS DUAL ENGINE
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] Velocity Overpower Trajectory Engine initialized.", flush=True)
+    print("[SYSTEM] Dual Long/Short Trajectory Matching Engine initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -363,13 +426,13 @@ def main():
             # 1. Manage Active Live Trade if any
             pos = get_open_position()
             if pos:
-                manage_active_trade(pos['symbol'], pos['contracts'], pos['entry_price'])
+                manage_active_trade(pos['symbol'], pos['side'], pos['contracts'], pos['entry_price'])
                 time.sleep(5)
                 continue
 
             # 2. Advance all Active Films simultaneously
             remaining_films = []
-            trade_candidate = None
+            trade_candidate = None  # Will hold: (symbol, side, cur_price)
 
             for film in lib['active_films']:
                 sym = film['symbol']
@@ -405,28 +468,48 @@ def main():
                     film['frames'].append(frame)
 
                 # --- PATTERN REPLAY SCREENING (Minutes 6 to 12) ---
-                if lib['total_filmed'] >= BASELINE_TAPES_REQUIRED and len(lib['hero_tapes']) > 0 and not film.get('evaluated'):
+                if lib['total_filmed'] >= BASELINE_TAPES_REQUIRED and not film.get('evaluated'):
                     if 6.0 <= elapsed_min <= 12.0 and len(film['frames']) >= 3:
-                        best_match_score = 0.0
-                        best_hero_ref = None
-
-                        for hero in lib['hero_tapes']:
-                            sim = calculate_trajectory_similarity(film['frames'], hero['frames'])
-                            if sim > best_match_score:
-                                best_match_score = sim
-                                best_hero_ref = hero
-
                         film['evaluated'] = True
 
-                        if best_match_score >= SIMILARITY_THRESHOLD and cur_pnl >= 1.0 and drawdown > -1.0:
+                        best_hero_score = 0.0
+                        best_hero_ref = None
+                        for hero in lib['hero_tapes']:
+                            sim = calculate_trajectory_similarity(film['frames'], hero['frames'])
+                            if sim > best_hero_score:
+                                best_hero_score = sim
+                                best_hero_ref = hero
+
+                        best_trap_score = 0.0
+                        best_trap_ref = None
+                        for trap in lib['trap_tapes']:
+                            sim = calculate_trajectory_similarity(film['frames'], trap['frames'])
+                            if sim > best_trap_score:
+                                best_trap_score = sim
+                                best_trap_ref = trap
+
+                        funding = film['initial_metrics']['funding_pct']
+
+                        # BRANCH A: HERO MATCH -> EXECUTE LONG
+                        if best_hero_score >= SIMILARITY_THRESHOLD and cur_pnl >= 1.0 and drawdown > -1.0:
                             print("\n" + "*" * 80, flush=True)
-                            print(f"[OVERPOWER VIDEO MATCH] {sym} is repeating a Hero Tape footprint!", flush=True)
-                            print(f"  Similarity: {best_match_score}% match to Hero Tape ({best_hero_ref['symbol']})", flush=True)
-                            print(f"  Trajectory: 5m PnL is +{cur_pnl:.2f}% | Drawdown held to {drawdown:.2f}%", flush=True)
+                            print(f"[DUAL ENGINE: LONG GREEN LIGHT] {sym} is repeating a Hero Tape footprint!", flush=True)
+                            print(f"  Similarity: {best_hero_score}% match to Hero Tape ({best_hero_ref['symbol']})", flush=True)
+                            print(f"  Action: Entering 3x LONG to ride momentum expansion.", flush=True)
                             print("*" * 80 + "\n", flush=True)
-                            trade_candidate = (sym, cur_price)
+                            trade_candidate = (sym, 'long', cur_price)
+
+                        # BRANCH B: TRAP MATCH -> EXECUTE SHORT (FADE THE TRAP)
+                        elif best_trap_score >= SIMILARITY_THRESHOLD and (drawdown <= -1.2 or cur_pnl <= 0.2) and funding >= -0.01:
+                            print("\n" + "*" * 80, flush=True)
+                            print(f"[DUAL ENGINE: SHORT GREEN LIGHT] {sym} is repeating a Trap Tape footprint!", flush=True)
+                            print(f"  Similarity: {best_trap_score}% match to Trap Tape ({best_trap_ref['symbol']})", flush=True)
+                            print(f"  Funding Check: {funding:+.4f}% (Clean, no short-squeeze risk).", flush=True)
+                            print(f"  Action: Entering 3x SHORT to fade the failed breakout.", flush=True)
+                            print("*" * 80 + "\n", flush=True)
+                            trade_candidate = (sym, 'short', cur_price)
                         else:
-                            print(f"[VIDEO REJECTED] {sym} opening frames scored {best_match_score}% match to Hero Tapes. No trade.", flush=True)
+                            print(f"[VIDEO SCREENING] {sym} inconclusive (Hero: {best_hero_score}% | Trap: {best_trap_score}%). Preserving cash.", flush=True)
 
                 # --- COMPLETE 60-MINUTE FILM ARCHIVING ---
                 if elapsed_min >= 60:
@@ -446,7 +529,7 @@ def main():
                     lib['total_filmed'] += 1
 
                     print("\n" + "=" * 80, flush=True)
-                    print(f"[OVERPOWER TAPE ARCHIVED #{lib['total_filmed']}] Finished 60m film on {sym}", flush=True)
+                    print(f"[TAPE ARCHIVED #{lib['total_filmed']}] Finished 60m film on {sym}", flush=True)
                     print(f"  Classification: {label} (Peak: +{film['peak_pnl']}% | Close: {film['final_pnl']}%)", flush=True)
                     print(f"  Total Library:  {len(lib['hero_tapes'])} Heroes | {len(lib['trap_tapes'])} Traps", flush=True)
                     print("=" * 80 + "\n", flush=True)
@@ -497,7 +580,6 @@ def main():
                 if not metrics:
                     continue
 
-                # Point an independent camera at this overpower setup
                 new_film = {
                     "film_id": lib['total_filmed'] + len(lib['active_films']) + 1,
                     "symbol": sym,
@@ -524,13 +606,12 @@ def main():
                 print("\n" + "-" * 80, flush=True)
                 print(f"[OVERPOWER DETECTED] Camera #{len(lib['active_films'])} started on {sym}!", flush=True)
                 print(f"  5m Gain: +{metrics['pct_5m']}% OVERPOWERED 1h Magnitude ({abs(metrics['pct_1h'])}%)", flush=True)
-                print(f"  RVol: {metrics['rvol']}x | 24h Vol: ${metrics['vol_24h_m']}M | Base Price: ${metrics['cur_price']}", flush=True)
-                print(f"  Filming frame-by-frame trajectory simultaneously...", flush=True)
+                print(f"  Filming to see if it becomes a LONG (Hero) or a SHORT (Trap)...", flush=True)
                 print("-" * 80 + "\n", flush=True)
 
-            # 5. Place Trade if a Film Matched a Hero Pattern
+            # 5. Place Trade if Replay Engine Triggered Long or Short
             if trade_candidate and notional >= MIN_NOTIONAL:
-                symbol, cur_price = trade_candidate
+                symbol, side, cur_price = trade_candidate
                 market = exchange.market(symbol)
                 min_lot = float(market['limits']['amount']['min'] or 0)
                 raw_amount = notional / cur_price
@@ -542,8 +623,13 @@ def main():
                     except Exception:
                         pass
 
-                    print(f"\n[ORDER EXECUTION] Entering Long on {symbol} | Amount: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
-                    order = open_long_position(symbol, formatted_amount)
+                    if side == 'long':
+                        print(f"\n[ORDER EXECUTION] Entering LONG on {symbol} | Amount: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
+                        order = open_long_position(symbol, formatted_amount)
+                    else:
+                        print(f"\n[ORDER EXECUTION] Entering SHORT on {symbol} | Amount: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
+                        order = open_short_position(symbol, formatted_amount)
+
                     print(f"[ORDER PLACED] Bitget Order ID: {order.get('id')}", flush=True)
                     time.sleep(3)
                     continue
@@ -555,8 +641,8 @@ def main():
                     active_summary = "Scanning for overpower spikes..."
                 print(
                     f"[RADAR PULSE] Films Done: {lib['total_filmed']}/{BASELINE_TAPES_REQUIRED} | "
-                    f"Cameras Rolling ({len(lib['active_films'])}/{MAX_CONCURRENT_CAMERAS}): [{active_summary}] | "
-                    f"Vault: ${usdt_free:.2f} USDT",
+                    f"Library: {len(lib['hero_tapes'])} Long Tapes / {len(lib['trap_tapes'])} Short Tapes | "
+                    f"Cameras: [{active_summary}] | Vault: ${usdt_free:.2f} USDT",
                     flush=True
                 )
 
