@@ -268,3 +268,143 @@ def perform_market_inspection(inspection_num, usdt_balance):
 
 # ==========================================================
 # 5. ACTIVE TRADE GUARDIAN
+# ==========================================================
+def manage_active_trade(symbol, contracts, entry_price):
+    highest_price = entry_price
+    entry_time = time.time()
+    last_log_time = 0
+
+    print(f"\n[GUARDIAN ACTIVE] Managing {symbol} | Entry: {entry_price:.6f} | Qty: {contracts}", flush=True)
+
+    while True:
+        try:
+            time.sleep(3)
+            ticker = exchange.fetch_ticker(symbol)
+            cur_price = float(ticker['last'])
+
+            if cur_price > highest_price:
+                highest_price = cur_price
+
+            pnl_pct = ((cur_price - entry_price) / entry_price) * 100
+            peak_pnl = ((highest_price - entry_price) / entry_price) * 100
+            elapsed_min = (time.time() - entry_time) / 60
+
+            # Real-time update every 15 seconds
+            if time.time() - last_log_time > 15:
+                print(f"[TRADE STATUS] {symbol} | PnL: {pnl_pct:+.2f}% | Peak: {peak_pnl:+.2f}% | Duration: {elapsed_min:.1f}m", flush=True)
+                last_log_time = time.time()
+
+            # 1. THE FEE-SHIELD LOCK (+1.0% -> +0.5%)
+            if peak_pnl >= 1.0:
+                guaranteed_floor = entry_price * 1.005
+                if cur_price <= guaranteed_floor:
+                    print(f"[EXIT TRIGGER] Fee-Shield hit! Locked +0.5% profit (Peak was +{peak_pnl:.2f}%)", flush=True)
+                    close_long_position(symbol, contracts)
+                    break
+
+            # 2. MOMENTUM STALL / BOX CHOP EXIT
+            if elapsed_min >= 15 and peak_pnl < 1.0:
+                if abs(pnl_pct) <= 0.45:
+                    print(f"[EXIT TRIGGER] Momentum stalled in a box after {elapsed_min:.0f} mins. Dumping position.", flush=True)
+                    close_long_position(symbol, contracts)
+                    break
+
+            # 3. INITIAL STRUCTURAL STOP (-1.2%)
+            if peak_pnl < 1.0 and pnl_pct <= -1.20:
+                print(f"[EXIT TRIGGER] Hard stop hit at {pnl_pct:.2f}%. Protecting capital.", flush=True)
+                close_long_position(symbol, contracts)
+                break
+
+            # 4. RUNNER TRAIL (+3% to +10%+ expansion)
+            if peak_pnl >= 3.0:
+                trailing_floor = highest_price * 0.985
+                if cur_price <= trailing_floor:
+                    print(f"[EXIT TRIGGER] Trailing stop triggered. Banked runner at +{pnl_pct:.2f}% (Peak: +{peak_pnl:.2f}%)", flush=True)
+                    close_long_position(symbol, contracts)
+                    break
+
+        except Exception as e:
+            print(f"[GUARDIAN WARNING] {e}", flush=True)
+            time.sleep(2)
+
+# ==========================================================
+# 6. MAIN ENGINE LOOP
+# ==========================================================
+def main():
+    start_keep_alive()
+    print("[SYSTEM] Bitget Trader Desk & Momentum Hunter initialized.", flush=True)
+
+    try:
+        print("[SYSTEM] Pre-loading Bitget markets...", flush=True)
+        exchange.load_markets()
+        print(f"[SYSTEM] Loaded {len(exchange.markets)} markets successfully.", flush=True)
+    except Exception as e:
+        print(f"[WARNING] load_markets: {e}", flush=True)
+
+    inspection_num = 1
+
+    while True:
+        try:
+            # 1. Check if already in an active position
+            pos = get_open_position()
+            if pos:
+                manage_active_trade(pos['symbol'], pos['contracts'], pos['entry_price'])
+                time.sleep(5)
+                continue
+
+            # 2. Fetch Wallet Balance dynamically
+            balance_info = exchange.fetch_balance()
+            usdt_free = float(balance_info['USDT']['free'] or 0)
+            notional = (usdt_free * BALANCE_USE_PCT) * LEVERAGE
+
+            if notional < MIN_NOTIONAL:
+                print(f"[WAITING] Margin low for $5 min notional (Free: ${usdt_free:.2f} | Notional: ${notional:.2f})", flush=True)
+                time.sleep(30)
+                continue
+
+            # 3. Conduct the structured 15m review
+            trade_candidate = perform_market_inspection(inspection_num, usdt_free)
+            inspection_num += 1
+
+            # 4. If no setup hits 70: Wait with an active 3-minute heartbeat pulse
+            if not trade_candidate:
+                wait_step = 180  # Log heartbeat every 3 minutes
+                total_waited = 0
+                while total_waited < INSPECTION_INTERVAL_SECONDS:
+                    time.sleep(wait_step)
+                    total_waited += wait_step
+                    mins_left = (INSPECTION_INTERVAL_SECONDS - total_waited) // 60
+                    if mins_left > 0:
+                        print(f"[RADAR PULSE] Preserving ${usdt_free:.2f} USDT cash. Next comprehensive review in {mins_left}m...", flush=True)
+                continue
+
+            symbol, cur_price = trade_candidate
+            market = exchange.market(symbol)
+            min_lot = float(market['limits']['amount']['min'] or 0)
+
+            # 5. Precision formatting & minimum lot safety
+            raw_amount = notional / cur_price
+            formatted_amount = float(exchange.amount_to_precision(symbol, raw_amount))
+
+            if formatted_amount < min_lot:
+                print(f"[SKIP] {symbol}: Size {formatted_amount} below min lot {min_lot}. Staying in cash.", flush=True)
+                time.sleep(30)
+                continue
+
+            try:
+                exchange.set_leverage(LEVERAGE, symbol, params={'marginMode': 'crossed'})
+            except Exception:
+                pass
+
+            print(f"\n[ORDER PLACEMENT] Entering Long {symbol} | Size: {formatted_amount} | Notional: ${notional:.2f}", flush=True)
+            order = open_long_position(symbol, formatted_amount)
+            print(f"[ORDER PLACED] Bitget Order ID: {order.get('id')}", flush=True)
+
+            time.sleep(3)
+
+        except Exception as e:
+            print(f"[MAIN LOOP EXCEPTION] {e}", flush=True)
+            time.sleep(15)
+
+if __name__ == "__main__":
+    main()
