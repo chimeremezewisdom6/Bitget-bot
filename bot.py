@@ -14,7 +14,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Multi-Camera Trajectory Replay Engine is running.")
+        self.wfile.write(b"Velocity Overpower & Trajectory Matching Engine is active.")
 
     def log_message(self, format, *args):
         return  # Silence server logs
@@ -44,13 +44,13 @@ LEVERAGE = 3
 BALANCE_USE_PCT = 0.85        # Use 85% of free USDT
 MIN_NOTIONAL = 5.10           # Minimum $5.10 order value on Bitget
 MIN_24H_VOLUME = 5_000_000    # $5M global liquidity floor
-SCAN_INTERVAL_SECONDS = 60    # Rapid universe scan every 60 seconds
-MAX_CONCURRENT_CAMERAS = 6    # Film up to 6 coins SIMULTANEOUSLY for fast learning
-BASELINE_TAPES_REQUIRED = 10  # Baseline films needed before live matching unlocks
+SCAN_INTERVAL_SECONDS = 60    # Rapid scan interval
+MAX_CONCURRENT_CAMERAS = 6    # Film up to 6 coins simultaneously
+BASELINE_TAPES_REQUIRED = 10  # Film 10 full tapes before live matching starts
 SIMILARITY_THRESHOLD = 75.0   # 75% curve match to strike
 LIBRARY_FILE = "video_library.json"
 
-# Traditional assets / CFDs blacklisted
+# Non-Crypto / TradFi Blacklist
 NON_CRYPTO_SYMBOLS = {
     'CL', 'BZ', 'SOXS', 'SOXL', 'KORU', 'MU', 'TSLA', 'NVDA', 'AAPL', 'MSFT',
     'AMZN', 'GOOGL', 'META', 'SPX', 'NDX', 'DJI', 'XAU', 'XAG', 'MINIMAX', 'DOS'
@@ -95,7 +95,7 @@ def calculate_rsi(closes, period=14):
 
 
 # ==============================================================================
-# 4. VIDEO LIBRARY (PERSISTENT MULTI-TRACK STORAGE)
+# 4. VIDEO LIBRARY (PERSISTENT FOOTPRINT STORAGE)
 # ==============================================================================
 def load_video_library():
     default_lib = {
@@ -220,10 +220,16 @@ def close_long_position(symbol, amount):
 
 
 # ==============================================================================
-# 7. SCANNER & IMBALANCE TRIGGER
+# 7. SCANNER WITH STRICT "VELOCITY OVERPOWER" RULE
 # ==============================================================================
-def inspect_coin_imbalance(symbol, pct_24h, vol_24h):
-    """Detects sudden velocity imbalance ignition."""
+def inspect_coin_overpower_imbalance(symbol, pct_24h, vol_24h):
+    """
+    STRICT OVERPOWER RULE:
+    1. 5m gain MUST BE strictly greater in value than the 1h magnitude:
+       pct_5m > abs(pct_1h) (e.g. if 1h was -5%, 5m must be >= +5.1%)
+    2. Minimum baseline impulse: pct_5m >= 2.0%
+    3. Volume ignition: 5m RVol >= 2.0x
+    """
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=25)
         if len(ohlcv) < 20:
@@ -243,10 +249,11 @@ def inspect_coin_imbalance(symbol, pct_24h, vol_24h):
         rvol = round(volumes[-1] / avg_vol, 2) if avg_vol > 0 else 1.0
         rsi_5m = calculate_rsi(closes, period=14)
 
-        # Imbalance Ignition: 5m gain >= 2.0%, RVol >= 2.0x, outpacing 1h
-        is_imbalance = (pct_5m >= 2.0 and rvol >= 2.0 and (pct_1h <= 0 or (pct_5m / max(pct_1h, 0.1) >= 0.6)))
+        # === THE EXACT OVERPOWER TEST ===
+        # 5m gain must be >= 2.0%, volume >= 2.0x, AND 5m gain MUST strictly beat the 1h magnitude
+        is_overpower = (pct_5m >= 2.0 and rvol >= 2.0 and pct_5m > (abs(pct_1h) + 0.05))
 
-        if not is_imbalance:
+        if not is_overpower:
             return None
 
         funding_rate = 0.0
@@ -334,11 +341,11 @@ def manage_active_trade(symbol, contracts, entry_price):
 
 
 # ==============================================================================
-# 9. MAIN AUTONOMOUS ENGINE (SIMULTANEOUS MULTI-CAMERA RECORDING)
+# 9. MAIN AUTONOMOUS ENGINE
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] Simultaneous Multi-Camera Trajectory Engine initialized.", flush=True)
+    print("[SYSTEM] Velocity Overpower Trajectory Engine initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -360,7 +367,7 @@ def main():
                 time.sleep(5)
                 continue
 
-            # 2. Advance the Video Camera on ALL Active Films in Parallel
+            # 2. Advance all Active Films simultaneously
             remaining_films = []
             trade_candidate = None
 
@@ -398,7 +405,6 @@ def main():
                     film['frames'].append(frame)
 
                 # --- PATTERN REPLAY SCREENING (Minutes 6 to 12) ---
-                # Checks if opening scene matches a Hero Tape without waiting 60 minutes
                 if lib['total_filmed'] >= BASELINE_TAPES_REQUIRED and len(lib['hero_tapes']) > 0 and not film.get('evaluated'):
                     if 6.0 <= elapsed_min <= 12.0 and len(film['frames']) >= 3:
                         best_match_score = 0.0
@@ -414,13 +420,13 @@ def main():
 
                         if best_match_score >= SIMILARITY_THRESHOLD and cur_pnl >= 1.0 and drawdown > -1.0:
                             print("\n" + "*" * 80, flush=True)
-                            print(f"[VIDEO MATCH GREEN LIGHT] {sym} is repeating a Hero Tape footprint!", flush=True)
+                            print(f"[OVERPOWER VIDEO MATCH] {sym} is repeating a Hero Tape footprint!", flush=True)
                             print(f"  Similarity: {best_match_score}% match to Hero Tape ({best_hero_ref['symbol']})", flush=True)
-                            print(f"  Live Trajectory: 5m PnL is +{cur_pnl:.2f}% | Drawdown held to {drawdown:.2f}%", flush=True)
+                            print(f"  Trajectory: 5m PnL is +{cur_pnl:.2f}% | Drawdown held to {drawdown:.2f}%", flush=True)
                             print("*" * 80 + "\n", flush=True)
                             trade_candidate = (sym, cur_price)
                         else:
-                            print(f"[VIDEO REJECTED] {sym} opening frames scored only {best_match_score}% similarity to Hero Tapes. No trade.", flush=True)
+                            print(f"[VIDEO REJECTED] {sym} opening frames scored {best_match_score}% match to Hero Tapes. No trade.", flush=True)
 
                 # --- COMPLETE 60-MINUTE FILM ARCHIVING ---
                 if elapsed_min >= 60:
@@ -440,7 +446,7 @@ def main():
                     lib['total_filmed'] += 1
 
                     print("\n" + "=" * 80, flush=True)
-                    print(f"[TAPE ARCHIVED #{lib['total_filmed']}] Finished 60m film on {sym}", flush=True)
+                    print(f"[OVERPOWER TAPE ARCHIVED #{lib['total_filmed']}] Finished 60m film on {sym}", flush=True)
                     print(f"  Classification: {label} (Peak: +{film['peak_pnl']}% | Close: {film['final_pnl']}%)", flush=True)
                     print(f"  Total Library:  {len(lib['hero_tapes'])} Heroes | {len(lib['trap_tapes'])} Traps", flush=True)
                     print("=" * 80 + "\n", flush=True)
@@ -456,7 +462,7 @@ def main():
             usdt_free = float(balance_info.get('USDT', {}).get('free', 0) or 0)
             notional = (usdt_free * BALANCE_USE_PCT) * LEVERAGE
 
-            # 4. Scan Market for New Imbalances (CONTINUOUS, PARALLEL SCANNING)
+            # 4. Scan Market for New Overpower Imbalances (Parallel Scanning)
             try:
                 tickers = exchange.fetch_tickers()
             except Exception as e:
@@ -480,19 +486,18 @@ def main():
 
             active_syms = {f['symbol'] for f in lib['active_films']}
 
-            # START NEW CAMERAS SIMULTANEOUSLY (UP TO MAX_CONCURRENT_CAMERAS)
             for sym, pct_24h, vol_24h in top_candidates:
                 if len(lib['active_films']) >= MAX_CONCURRENT_CAMERAS:
-                    break  # Maximum parallel cameras reached
+                    break
 
                 if sym in active_syms:
                     continue
 
-                metrics = inspect_coin_imbalance(sym, pct_24h, vol_24h)
+                metrics = inspect_coin_overpower_imbalance(sym, pct_24h, vol_24h)
                 if not metrics:
                     continue
 
-                # Point an independent camera at this coin
+                # Point an independent camera at this overpower setup
                 new_film = {
                     "film_id": lib['total_filmed'] + len(lib['active_films']) + 1,
                     "symbol": sym,
@@ -517,9 +522,10 @@ def main():
                 save_video_library(lib)
 
                 print("\n" + "-" * 80, flush=True)
-                print(f"[SIMULTANEOUS CAMERA #{len(lib['active_films'])}] Started filming {sym}!", flush=True)
-                print(f"  Trigger: 5m Gain +{metrics['pct_5m']}% | RVol {metrics['rvol']}x | Vol: ${metrics['vol_24h_m']}M", flush=True)
-                print(f"  Filming alongside other active cameras simultaneously...", flush=True)
+                print(f"[OVERPOWER DETECTED] Camera #{len(lib['active_films'])} started on {sym}!", flush=True)
+                print(f"  5m Gain: +{metrics['pct_5m']}% OVERPOWERED 1h Magnitude ({abs(metrics['pct_1h'])}%)", flush=True)
+                print(f"  RVol: {metrics['rvol']}x | 24h Vol: ${metrics['vol_24h_m']}M | Base Price: ${metrics['cur_price']}", flush=True)
+                print(f"  Filming frame-by-frame trajectory simultaneously...", flush=True)
                 print("-" * 80 + "\n", flush=True)
 
             # 5. Place Trade if a Film Matched a Hero Pattern
@@ -542,11 +548,11 @@ def main():
                     time.sleep(3)
                     continue
 
-            # Heartbeat Pulse (Shows every camera rolling in parallel)
+            # Heartbeat Pulse
             if cycle % 2 == 0:
                 active_summary = ", ".join([f"{f['symbol']} ({(time.time()-f['started_at'])/60:.0f}m)" for f in lib['active_films']])
                 if not active_summary:
-                    active_summary = "Scanning for spikes..."
+                    active_summary = "Scanning for overpower spikes..."
                 print(
                     f"[RADAR PULSE] Films Done: {lib['total_filmed']}/{BASELINE_TAPES_REQUIRED} | "
                     f"Cameras Rolling ({len(lib['active_films'])}/{MAX_CONCURRENT_CAMERAS}): [{active_summary}] | "
