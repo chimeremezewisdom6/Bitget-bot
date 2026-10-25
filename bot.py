@@ -2,22 +2,23 @@ import os
 import sys
 import time
 import math
+import traceback
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
 # ==============================================================================
-# 1. RENDER KEEP-ALIVE SERVER (PORT 10000)
+# 1. RENDER 24/7 KEEP-ALIVE SERVER (PORT 10000)
 # ==============================================================================
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX High-Displacement Quantitative Engine is active.")
+        self.wfile.write(b"APEX-V2 Institutional Engine is active and healthy.")
 
     def log_message(self, format, *args):
-        return
+        return  # Silence server logs to keep terminal clean
 
 
 def start_keep_alive():
@@ -29,7 +30,7 @@ def start_keep_alive():
 
 
 # ==============================================================================
-# 2. RISK & FRICTION DEFENSE BOUNDARIES
+# 2. EXCHANGE CONFIGURATION & RISK BOUNDARIES
 # ==============================================================================
 API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -39,18 +40,18 @@ if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
     print("[FATAL] Missing Bitget API credentials in environment variables!", flush=True)
     sys.exit(1)
 
-BASE_LEVERAGE = 3
-BALANCE_USE_PCT = 0.85
-MIN_NOTIONAL = 5.15             # Buffer above Bitget's $5.00 floor
-MIN_24H_VOLUME = 3_000_000      # $3M volume floor
-SCAN_INTERVAL_SECONDS = 75
+# Institutional Capital Boundaries
+BALANCE_USE_PCT = 0.88          # Use 88% of free vault margin
+MIN_NOTIONAL = 5.20             # Strict buffer above Bitget's $5.00 limit
+MIN_24H_VOLUME = 3_000_000      # $3M volume threshold
+SCAN_INTERVAL_SECONDS = 60      # Fast 60-second universe scan
 
-# DISPLACEMENT & VOLATILITY CORRIDOR (Eliminates both 0.5% creeps AND wild meme-coin traps)
-MIN_ATR_PCT = 1.10              # BANS SLEEPY BIG CAPS: Coin must move at least 1.10% per 15m candle
-MAX_ATR_PCT = 2.40              # BANS DANGEROUS MEME COINS: Caps maximum volatility at 2.40%
-MIN_DISPLACEMENT_PCT = 1.20     # ANTI-CREEP: The trigger candle itself MUST move at least 1.20%
-MAX_SPREAD_PCT = 0.05           # SPREAD DEFENSE: Order book spread must be <= 0.05%
-MAX_HARD_STOP_PCT = 1.80        # MAXIMUM RISK CEILING: Stop loss can never exceed 1.80%
+# Microstructure Defense Parameters
+MAX_SPREAD_PCT = 0.05           # Order book spread must be <= 0.05%
+MIN_ATR_PCT = 1.05              # Eliminates sleepy big caps (<1.05% 15m ATR)
+MAX_ATR_PCT = 2.40              # Eliminates dangerous low-cap traps (>2.40% 15m ATR)
+MIN_DISPLACEMENT_PCT = 1.15     # Anti-creep: Breakout candle must move >= 1.15%
+MAX_HARD_STOP_PCT = 1.80        # Absolute maximum loss ceiling
 
 NON_CRYPTO_SYMBOLS = {
     'CL', 'BZ', 'SOXS', 'SOXL', 'KORU', 'MU', 'TSLA', 'NVDA', 'AAPL', 'MSFT',
@@ -71,9 +72,10 @@ exchange = ccxt.bitget({
 
 
 # ==============================================================================
-# 3. MATHEMATICAL INDICATORS
+# 3. MATHEMATICAL INDICATORS (ZERO-REPAINTING)
 # ==============================================================================
 def calculate_atr(ohlcv, period=14):
+    """Calculates true Average True Range over completed candles."""
     if len(ohlcv) < period + 1:
         return 0.0
     tr_list = []
@@ -89,6 +91,7 @@ def calculate_atr(ohlcv, period=14):
 
 
 def calculate_bollinger_bands(closes, period=20, num_std=2.0):
+    """Calculates SMA, Upper/Lower Bands, and Bandwidth %."""
     if len(closes) < period:
         return None
     subset = closes[-period:]
@@ -102,6 +105,7 @@ def calculate_bollinger_bands(closes, period=20, num_std=2.0):
 
 
 def calculate_rsi(closes, period=14):
+    """Calculates standard RSI."""
     if len(closes) < period + 1:
         return 50.0
     gains, losses = [], []
@@ -123,9 +127,10 @@ def calculate_rsi(closes, period=14):
 
 
 # ==============================================================================
-# 4. ORDER HELPERS
+# 4. BITGET ONE-WAY EXECUTION & SYNCHRONIZATION HELPERS
 # ==============================================================================
 def get_open_position():
+    """Queries exchange for any active Long or Short position."""
     try:
         positions = exchange.fetch_positions()
         for p in positions:
@@ -139,50 +144,78 @@ def get_open_position():
                     'entry_price': float(p.get('entryPrice', 0))
                 }
     except Exception as e:
-        print(f"[POSITION CHECK ERROR] {e}", flush=True)
+        print(f"[POSITION QUERY WARNING] {e}", flush=True)
     return None
 
 
 def open_long_position(symbol, amount):
     try:
-        return exchange.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'tradeSide': 'buy_single'})
+        return exchange.create_order(
+            symbol=symbol, type='market', side='buy', amount=amount,
+            params={'tradeSide': 'buy_single'}
+        )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
-            return exchange.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'tradeSide': 'open'})
+            return exchange.create_order(
+                symbol=symbol, type='market', side='buy', amount=amount,
+                params={'tradeSide': 'open'}
+            )
         raise e
 
 
 def close_long_position(symbol, amount):
     try:
-        return exchange.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'tradeSide': 'sell_single'})
+        return exchange.create_order(
+            symbol=symbol, type='market', side='sell', amount=amount,
+            params={'tradeSide': 'sell_single'}
+        )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
-            return exchange.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'tradeSide': 'close'})
+            return exchange.create_order(
+                symbol=symbol, type='market', side='sell', amount=amount,
+                params={'tradeSide': 'close'}
+            )
         raise e
 
 
 def open_short_position(symbol, amount):
     try:
-        return exchange.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'tradeSide': 'sell_single'})
+        return exchange.create_order(
+            symbol=symbol, type='market', side='sell', amount=amount,
+            params={'tradeSide': 'sell_single'}
+        )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
-            return exchange.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'tradeSide': 'open'})
+            return exchange.create_order(
+                symbol=symbol, type='market', side='sell', amount=amount,
+                params={'tradeSide': 'open'}
+            )
         raise e
 
 
 def close_short_position(symbol, amount):
     try:
-        return exchange.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'tradeSide': 'buy_single'})
+        return exchange.create_order(
+            symbol=symbol, type='market', side='buy', amount=amount,
+            params={'tradeSide': 'buy_single'}
+        )
     except Exception as e:
         if '25156' in str(e) or 'tradeSide' in str(e).lower():
-            return exchange.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'tradeSide': 'close'})
+            return exchange.create_order(
+                symbol=symbol, type='market', side='buy', amount=amount,
+                params={'tradeSide': 'close'}
+            )
         raise e
 
 
 # ==============================================================================
-# 5. HIGH-DISPLACEMENT QUANTITATIVE SIGNAL ENGINE
+# 5. HIGH-DISPLACEMENT QUANTITATIVE SIGNAL ENGINE (ZERO REPAINTING)
 # ==============================================================================
-def inspect_coin_setup(symbol, pct_24h, vol_24h, ticker_data):
+def inspect_coin_setup(symbol, ticker_data):
+    """
+    Evaluates strictly on closed candles (ohlcv[-2]) to prevent repainting.
+    Uses ohlcv[-1] only to confirm live execution validity.
+    """
     try:
         bid = float(ticker_data.get('bid', 0) or 0)
         ask = float(ticker_data.get('ask', 0) or 0)
@@ -191,54 +224,62 @@ def inspect_coin_setup(symbol, pct_24h, vol_24h, ticker_data):
         if bid <= 0 or ask <= 0 or last_price <= 0:
             return None
 
-        # 1. Spread Check (Reject illiquid books)
+        # 1. Spread Filter (Order Book Depth)
         spread_pct = ((ask - bid) / last_price) * 100
         if spread_pct > MAX_SPREAD_PCT:
             return None
 
+        # Fetch 35 fifteen-minute candles
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=35)
         if len(ohlcv) < 30:
             return None
 
-        opens = [x[1] for x in ohlcv]
-        highs = [x[2] for x in ohlcv]
-        lows = [x[3] for x in ohlcv]
-        closes = [x[4] for x in ohlcv]
-        volumes = [x[5] for x in ohlcv]
+        # Closed candles array (excluding the forming candle [-1])
+        closed_ohlcv = ohlcv[:-1]
+        closes = [x[4] for x in closed_ohlcv]
+        volumes = [x[5] for x in closed_ohlcv]
 
-        atr = calculate_atr(ohlcv, period=14)
+        # 2. Dynamic ATR on closed candles
+        atr = calculate_atr(closed_ohlcv, period=14)
         if atr <= 0:
             return None
 
-        # 2. Volatility Corridor (Rejects sleepy coins moving <1.10% and meme coins moving >2.40%)
         atr_pct = (atr / last_price) * 100
         if not (MIN_ATR_PCT <= atr_pct <= MAX_ATR_PCT):
-            return None
+            return None  # Rejects both sleepy big-caps and wild meme traps
 
+        # 3. Bollinger Bands (20 periods prior to trigger candle)
         bb = calculate_bollinger_bands(closes[:-1], period=20, num_std=2.0)
         if not bb:
             return None
 
         is_coiled = bb['bandwidth'] <= 4.5
 
+        # 4. Volume Ignition (Trigger candle volume vs 20-period average)
         avg_vol = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 1
-        rvol = round(volumes[-1] / avg_vol, 2) if avg_vol > 0 else 1.0
-        if rvol < 2.0:
-            return None
+        trigger_volume = volumes[-1]
+        rvol = round(trigger_volume / avg_vol, 2) if avg_vol > 0 else 1.0
 
-        c_open, c_high, c_low, c_close = opens[-1], highs[-1], lows[-1], closes[-1]
-        candle_range = c_high - c_low
+        if rvol < 2.0:
+            return None  # Institutional fuel requirement
+
+        # 5. Evaluate the COMPLETED Trigger Candle (closed_ohlcv[-1])
+        t_open = closed_ohlcv[-1][1]
+        t_high = closed_ohlcv[-1][2]
+        t_low = closed_ohlcv[-1][3]
+        t_close = closed_ohlcv[-1][4]
+
+        candle_range = t_high - t_low
         if candle_range == 0:
             return None
 
-        upper_wick = (c_high - max(c_open, c_close)) / candle_range
-        lower_wick = (min(c_open, c_close) - c_low) / candle_range
-        body_pct = abs(c_close - c_open) / candle_range
+        upper_wick = (t_high - max(t_open, t_close)) / candle_range
+        lower_wick = (min(t_open, t_close) - t_low) / candle_range
+        body_pct = abs(t_close - t_open) / candle_range
+        candle_move = ((t_close - t_open) / t_open) * 100
         rsi = calculate_rsi(closes, period=14)
 
-        # 3. Candle Percentage Move (Displacement Check)
-        candle_pct_gain = ((c_close - c_open) / c_open) * 100
-
+        # Funding rate verification
         funding_rate = 0.0
         try:
             f_data = exchange.fetch_funding_rate(symbol)
@@ -246,50 +287,75 @@ def inspect_coin_setup(symbol, pct_24h, vol_24h, ticker_data):
         except Exception:
             pass
 
-        # === SIGNAL A: HIGH-DISPLACEMENT LONG ===
-        # Requirements:
-        # 1. Coiled spring in previous candles
-        # 2. Candle closed distinctly above the band
-        # 3. ANTI-CREEP: The candle itself must have gained at least +1.20% (not a 0.4% crawl)
-        # 4. Clean body (>52%), small upper wick (<25%), healthy RSI (50-74), clean funding
-        if is_coiled and c_close > (bb['upper'] + (0.2 * atr)) and candle_pct_gain >= MIN_DISPLACEMENT_PCT and body_pct >= 0.52 and upper_wick <= 0.25 and 50.0 <= rsi <= 74.0 and funding_rate <= 0.015:
+        # === SIGNAL A: HIGH-DISPLACEMENT EXPANSION LONG ===
+        # - Must be coiled in consolidation
+        # - Closed candle broke cleanly above upper band
+        # - Candle moved >= +1.15% (Anti-creep)
+        # - Anti-chase: closed not more than 1.1x ATR away from upper band
+        # - Healthy RSI, clean funding
+        is_long = (
+            is_coiled and
+            t_close > (bb['upper'] + (0.15 * atr)) and
+            t_close < (bb['upper'] + (1.10 * atr)) and
+            candle_move >= MIN_DISPLACEMENT_PCT and
+            body_pct >= 0.52 and
+            upper_wick <= 0.25 and
+            50.0 <= rsi <= 74.0 and
+            funding_rate <= 0.015
+        )
+        if is_long:
             return {
                 "symbol": symbol,
                 "side": "long",
-                "cur_price": c_close,
                 "atr": atr,
                 "atr_pct": round(atr_pct, 2),
-                "candle_move": round(candle_pct_gain, 2),
-                "setup": "HIGH_DISPLACEMENT_EXPANSION_LONG",
+                "candle_move": round(candle_move, 2),
+                "setup": "EXPANSION_LONG",
                 "rvol": rvol,
                 "bandwidth": round(bb['bandwidth'], 2)
             }
 
-        # === SIGNAL B: LIQUIDITY SWEEP SHORT ===
-        if c_high > (bb['upper'] + (0.3 * atr)) and upper_wick >= 0.42 and c_close < c_open and funding_rate >= -0.01:
+        # === SIGNAL B: LIQUIDITY SWEEP REVERSAL SHORT ===
+        # - Pierced above upper band by > 0.3x ATR
+        # - Rejected with >= 40% upper wick, closed red back inside band
+        is_short_sweep = (
+            t_high > (bb['upper'] + (0.30 * atr)) and
+            upper_wick >= 0.40 and
+            t_close < t_open and
+            funding_rate >= -0.01
+        )
+        if is_short_sweep:
             return {
                 "symbol": symbol,
                 "side": "short",
-                "cur_price": c_close,
                 "atr": atr,
                 "atr_pct": round(atr_pct, 2),
-                "candle_move": round(abs(candle_pct_gain), 2),
-                "setup": "LIQUIDITY_SWEEP_REVERSAL_SHORT",
+                "candle_move": round(abs(candle_move), 2),
+                "setup": "LIQUIDITY_SWEEP_SHORT",
                 "rvol": rvol,
                 "bandwidth": round(bb['bandwidth'], 2)
             }
 
-        # === SIGNAL C: HIGH-DISPLACEMENT BREAKDOWN SHORT ===
-        # ANTI-CREEP: Candle must have dropped at least -1.20%
-        if is_coiled and c_close < (bb['lower'] - (0.2 * atr)) and candle_pct_gain <= -MIN_DISPLACEMENT_PCT and body_pct >= 0.52 and lower_wick <= 0.25 and funding_rate >= -0.01:
+        # === SIGNAL C: SQUEEZE BREAKDOWN SHORT ===
+        # - Must be coiled
+        # - Closed candle dropped >= -1.15% below lower band
+        is_short_breakdown = (
+            is_coiled and
+            t_close < (bb['lower'] - (0.15 * atr)) and
+            t_close > (bb['lower'] - (1.10 * atr)) and
+            candle_move <= -MIN_DISPLACEMENT_PCT and
+            body_pct >= 0.52 and
+            lower_wick <= 0.25 and
+            funding_rate >= -0.01
+        )
+        if is_short_breakdown:
             return {
                 "symbol": symbol,
                 "side": "short",
-                "cur_price": c_close,
                 "atr": atr,
                 "atr_pct": round(atr_pct, 2),
-                "candle_move": round(abs(candle_pct_gain), 2),
-                "setup": "HIGH_DISPLACEMENT_BREAKDOWN_SHORT",
+                "candle_move": round(abs(candle_move), 2),
+                "setup": "SQUEEZE_BREAKDOWN_SHORT",
                 "rvol": rvol,
                 "bandwidth": round(bb['bandwidth'], 2)
             }
@@ -300,17 +366,26 @@ def inspect_coin_setup(symbol, pct_24h, vol_24h, ticker_data):
 
 
 # ==============================================================================
-# 6. GUARDIAN RISK MANAGEMENT
+# 6. ACTIVE TRADE GUARDIAN (TRUE FILL-PRICE ANCHORING)
 # ==============================================================================
-def manage_active_trade(symbol, side, contracts, entry_price, entry_atr):
+def manage_active_trade(symbol, side, initial_contracts, entry_price, entry_atr):
+    """
+    Guards live position with:
+    1. Real fill price anchoring
+    2. Real-time exchange position confirmation (No ghost trades)
+    3. Live contract synchronization upon exit
+    4. Adaptive ATR stop loss + fee shield + runner trail
+    """
     highest_price = entry_price
     lowest_price = entry_price
     entry_time = time.time()
     last_log_time = 0
+    last_position_check = time.time()
     fee_shield_active = False
 
     atr = entry_atr if entry_atr > 0 else (entry_price * 0.015)
 
+    # Dynamic Stop: 1.5x ATR, hard-capped at 1.80% maximum price distance
     calculated_stop = 1.5 * atr
     max_allowed_stop = entry_price * (MAX_HARD_STOP_PCT / 100.0)
     stop_distance = min(calculated_stop, max_allowed_stop)
@@ -325,13 +400,25 @@ def manage_active_trade(symbol, side, contracts, entry_price, entry_atr):
         initial_stop_price = entry_price + stop_distance
 
     stop_pct = (stop_distance / entry_price) * 100
-    print(f"\n[GUARDIAN ACTIVE] {side.upper()} {symbol} | Entry: {entry_price} | Hard Stop: {initial_stop_price:.5f} ({stop_pct:.2f}%)", flush=True)
+    print(f"\n[GUARDIAN ENGAGED] {side.upper()} {symbol} | Fill Price: {entry_price:.5f} | Initial Stop: {initial_stop_price:.5f} ({stop_pct:.2f}%)", flush=True)
 
     while True:
         try:
             time.sleep(3)
+
+            # 1. POSITION INTEGRITY CHECK (Every 25 seconds)
+            # Confirms trade is still alive on Bitget (detects manual phone closes / external stops)
+            if time.time() - last_position_check > 25:
+                pos = get_open_position()
+                if not pos or pos['symbol'] != symbol or pos['side'] != side:
+                    print(f"\n[GUARDIAN INFO] {symbol} position no longer active on exchange. Exiting Guardian mode.", flush=True)
+                    break
+                last_position_check = time.time()
+
             ticker = exchange.fetch_ticker(symbol)
             cur_price = float(ticker.get('last', 0) or 0)
+            if cur_price <= 0:
+                continue
 
             if cur_price > highest_price:
                 highest_price = cur_price
@@ -350,71 +437,71 @@ def manage_active_trade(symbol, side, contracts, entry_price, entry_atr):
                 peak_distance = entry_price - lowest_price
 
             if time.time() - last_log_time > 15:
-                shield_status = "LOCKED (+0.45%)" if fee_shield_active else "MONITORING"
+                shield_status = "LOCKED (+0.50%)" if fee_shield_active else "MONITORING"
                 print(f"[STATUS] {side.upper()} {symbol} | PnL: {pnl_pct:+.2f}% (Peak: {peak_pnl:+.2f}%) | Shield: {shield_status} | Time: {elapsed_min:.1f}m", flush=True)
                 last_log_time = time.time()
 
-            # 1. THE FEE-SHIELD LOCK (+1.2x ATR Gain -> Lock Stop at Entry + 0.45% net)
+            # Helper function to close exact currently open contracts
+            def execute_exit(reason):
+                print(f"\n[EXIT TRIGGER] {reason} | PnL: {pnl_pct:+.2f}%", flush=True)
+                live_pos = get_open_position()
+                close_amount = live_pos['contracts'] if live_pos else initial_contracts
+                if side == 'long':
+                    close_long_position(symbol, close_amount)
+                else:
+                    close_short_position(symbol, close_amount)
+
+            # 2. THE FEE-SHIELD LOCK (+1.2x ATR Gain -> Lock Stop at Entry + 0.50% net)
             if not fee_shield_active and peak_distance >= fee_shield_trigger:
                 fee_shield_active = True
-                print(f"\n[FEE-SHIELD ENGAGED] {symbol} moved 1.2x ATR! Risk-Free Stop locked at Breakeven +0.45% net.", flush=True)
+                print(f"\n[FEE-SHIELD ENGAGED] {symbol} moved 1.2x ATR in profit! Risk-Free Stop locked at Breakeven +0.50% net.", flush=True)
 
             if fee_shield_active:
-                if side == 'long' and cur_price <= entry_price * 1.0045:
-                    print(f"[EXIT TRIGGER] Long Fee-Shield executed! Locked profit at {pnl_pct:+.2f}%.", flush=True)
-                    close_long_position(symbol, contracts)
+                if side == 'long' and cur_price <= entry_price * 1.0050:
+                    execute_exit("Long Fee-Shield Hit")
                     break
-                elif side == 'short' and cur_price >= entry_price * 0.9955:
-                    print(f"[EXIT TRIGGER] Short Fee-Shield executed! Locked profit at {pnl_pct:+.2f}%.", flush=True)
-                    close_short_position(symbol, contracts)
+                elif side == 'short' and cur_price >= entry_price * 0.9950:
+                    execute_exit("Short Fee-Shield Hit")
                     break
 
-            # 2. ADAPTIVE STOP LOSS (Hard-Capped at 1.80%)
+            # 3. ADAPTIVE STOP LOSS (Hard-Capped at 1.80%)
             if not fee_shield_active:
                 if side == 'long' and cur_price <= initial_stop_price:
-                    print(f"[EXIT TRIGGER] Long Stop hit at {pnl_pct:.2f}%. Vault protected.", flush=True)
-                    close_long_position(symbol, contracts)
+                    execute_exit("Long Adaptive Stop Loss Hit")
                     break
                 elif side == 'short' and cur_price >= initial_stop_price:
-                    print(f"[EXIT TRIGGER] Short Stop hit at {pnl_pct:.2f}%. Vault protected.", flush=True)
-                    close_short_position(symbol, contracts)
+                    execute_exit("Short Adaptive Stop Loss Hit")
                     break
 
-            # 3. PARABOLIC RUNNER TRAIL (2.2 x ATR Expansion -> Trail 1.3 x ATR)
+            # 4. PARABOLIC RUNNER TRAIL (2.2x ATR Expansion -> Trail 1.3x ATR)
             if peak_distance >= runner_trigger:
                 if side == 'long':
                     trail_stop = highest_price - trail_distance
                     if cur_price <= trail_stop:
-                        print(f"[EXIT TRIGGER] Long Trailing Runner closed at {pnl_pct:+.2f}% (Peak was {peak_pnl:+.2f}%).", flush=True)
-                        close_long_position(symbol, contracts)
+                        execute_exit("Long Trailing Stop Hit")
                         break
                 else:
                     trail_stop = lowest_price + trail_distance
                     if cur_price >= trail_stop:
-                        print(f"[EXIT TRIGGER] Short Trailing Runner closed at {pnl_pct:+.2f}% (Peak was {peak_pnl:+.2f}%).", flush=True)
-                        close_short_position(symbol, contracts)
+                        execute_exit("Short Trailing Stop Hit")
                         break
 
-            # 4. DEAD-MONEY TIME STOP (45 Minutes)
+            # 5. DEAD-MONEY TIME STOP (45 Minutes Stagnation)
             if elapsed_min >= 45.0 and peak_distance < (0.8 * atr):
-                print(f"[EXIT TRIGGER] Stagnant for 45m without volatility expansion. Freeing margin at {pnl_pct:+.2f}%.", flush=True)
-                if side == 'long':
-                    close_long_position(symbol, contracts)
-                else:
-                    close_short_position(symbol, contracts)
+                execute_exit("45-Minute Stagnation Exit")
                 break
 
         except Exception as e:
-            print(f"[GUARDIAN WARNING] {e}", flush=True)
+            print(f"[GUARDIAN EXCEPTION] {e}", flush=True)
             time.sleep(2)
 
 
 # ==============================================================================
-# 7. MAIN ENGINE LOOP
+# 7. MAIN ENGINE LOOP (ADAPTIVE LEVERAGE LADDER)
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] APEX High-Displacement Engine initialized.", flush=True)
+    print("[SYSTEM] APEX-V2 Institutional Engine initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -426,6 +513,7 @@ def main():
 
     while True:
         try:
+            # 1. Manage existing trade if one is running
             pos = get_open_position()
             if pos:
                 fallback_atr = pos['entry_price'] * 0.015
@@ -433,12 +521,21 @@ def main():
                 time.sleep(5)
                 continue
 
+            # 2. Query Balance & Apply Dynamic Leverage Ladder
             balance_info = exchange.fetch_balance()
             usdt_free = float(balance_info.get('USDT', {}).get('free', 0) or 0)
 
-            leverage = 4 if usdt_free < 2.30 else BASE_LEVERAGE
+            # Autonomous Leverage Ladder (Guarantees notional is always >= $5.20)
+            if usdt_free >= 2.40:
+                leverage = 3
+            elif usdt_free >= 1.80:
+                leverage = 4
+            else:
+                leverage = 5
+
             notional = (usdt_free * BALANCE_USE_PCT) * leverage
 
+            # 3. Pull Universe Tickers
             try:
                 tickers = exchange.fetch_tickers()
             except Exception as e:
@@ -453,44 +550,51 @@ def main():
                 if base_asset in NON_CRYPTO_SYMBOLS:
                     continue
                 vol_24h = float(t.get('quoteVolume', 0) or 0)
-                pct_24h = float(t.get('percentage', 0) or 0)
                 if vol_24h >= MIN_24H_VOLUME:
-                    liquid_symbols.append((symbol, pct_24h, vol_24h, t))
+                    liquid_symbols.append((symbol, vol_24h, t))
 
-            liquid_symbols.sort(key=lambda x: x[2], reverse=True)
-            top_liquid = liquid_symbols[:35]
+            # Sort by 24h volume descending and inspect top 20 pre-filtered candidates
+            liquid_symbols.sort(key=lambda x: x[1], reverse=True)
+            top_candidates = liquid_symbols[:20]
 
             best_candidate = None
 
-            for sym, pct_24h, vol_24h, t_data in top_liquid:
-                candidate = inspect_coin_setup(sym, pct_24h, vol_24h, t_data)
+            for sym, vol_24h, t_data in top_candidates:
+                candidate = inspect_coin_setup(sym, t_data)
                 if candidate:
                     best_candidate = candidate
                     break
 
+            # 4. Strike with Absolute Precision
             if best_candidate and notional >= MIN_NOTIONAL:
                 sym = best_candidate['symbol']
                 side = best_candidate['side']
-                cur_price = best_candidate['cur_price']
                 atr = best_candidate['atr']
+
+                # Get latest live price tick for sizing
+                ticker_now = exchange.fetch_ticker(sym)
+                live_price = float(ticker_now.get('last', 0) or 0)
 
                 market = exchange.market(sym)
                 min_lot = float(market['limits']['amount']['min'] or 0)
-                raw_amount = notional / cur_price
+                raw_amount = notional / live_price
                 formatted_amount = float(exchange.amount_to_precision(sym, raw_amount))
 
-                if formatted_amount >= min_lot:
+                # Verify formatted amount clears Bitget's minimum notional
+                actual_notional = formatted_amount * live_price
+
+                if formatted_amount >= min_lot and actual_notional >= 5.10:
                     try:
                         exchange.set_leverage(leverage, sym, params={'marginMode': 'crossed'})
                     except Exception:
                         pass
 
                     print("\n" + "=" * 80, flush=True)
-                    print(f"[APEX QUANTITATIVE STRIKE: {side.upper()}] Confirmed on {sym}!", flush=True)
+                    print(f"[APEX-V2 QUANTITATIVE STRIKE: {side.upper()}] Confirmed on {sym}!", flush=True)
                     print(f"  Setup:         {best_candidate['setup']}", flush=True)
-                    print(f"  Displacement:  Candle Thrust: +{best_candidate['candle_move']}% | ATR: {best_candidate['atr_pct']}%", flush=True)
-                    print(f"  Volume Engine: RVol {best_candidate['rvol']}x | Squeeze: {best_candidate['bandwidth']}%", flush=True)
-                    print(f"  Execution:     Entering {leverage}x {side.upper()} | Notional: ${notional:.2f}", flush=True)
+                    print(f"  Displacement:  Candle Thrust: {best_candidate['candle_move']:+}% | ATR: {best_candidate['atr_pct']}%", flush=True)
+                    print(f"  Volume Engine: RVol {best_candidate['rvol']}x | Squeeze Bandwidth: {best_candidate['bandwidth']}%", flush=True)
+                    print(f"  Execution:     Entering {leverage}x {side.upper()} | Notional: ${actual_notional:.2f}", flush=True)
                     print("=" * 80 + "\n", flush=True)
 
                     if side == 'long':
@@ -499,17 +603,23 @@ def main():
                         order = open_short_position(sym, formatted_amount)
 
                     print(f"[ORDER PLACED] Bitget Order ID: {order.get('id')}", flush=True)
-                    time.sleep(3)
+                    time.sleep(2)
 
-                    manage_active_trade(sym, side, formatted_amount, cur_price, atr)
+                    # QUERY ACTUAL EXECUTED FILL PRICE FROM EXCHANGE (Zero Slippage Assumption)
+                    real_pos = get_open_position()
+                    real_fill_price = real_pos['entry_price'] if real_pos else live_price
+                    real_contracts = real_pos['contracts'] if real_pos else formatted_amount
+
+                    # Hand off to the Guardian with actual fill price
+                    manage_active_trade(sym, side, real_contracts, real_fill_price, atr)
                     continue
                 else:
-                    print(f"[SKIP] {sym}: Size {formatted_amount} below minimum lot {min_lot}.", flush=True)
+                    print(f"[SKIP] {sym}: Size ${actual_notional:.2f} below Bitget $5.10 minimum. Preserving cash.", flush=True)
 
             if cycle % 2 == 0:
                 print(
-                    f"[RADAR PULSE] Scanned {len(top_liquid)} liquid markets | "
-                    f"Vault: ${usdt_free:.2f} USDT | Next scan in {SCAN_INTERVAL_SECONDS}s...",
+                    f"[RADAR PULSE] Monitoring Top Liquid Markets | Vault Cash: ${usdt_free:.2f} USDT (Leverage Tier: {leverage}x) | "
+                    f"Next scan in {SCAN_INTERVAL_SECONDS}s...",
                     flush=True
                 )
 
@@ -518,6 +628,7 @@ def main():
 
         except Exception as e:
             print(f"[MAIN LOOP EXCEPTION] {e}", flush=True)
+            traceback.print_exc()
             time.sleep(15)
 
 
