@@ -16,10 +16,10 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX 12-Model Multi-Strategy Engine is active.")
+        self.wfile.write(b"APEX-V3 Failsafe Multi-Strategy Engine is active.")
 
     def log_message(self, format, *args):
-        return
+        return  # Silence server logs
 
 
 def start_keep_alive():
@@ -31,7 +31,79 @@ def start_keep_alive():
 
 
 # ==============================================================================
-# 2. CONFIGURATION & CAPITAL BOUNDARIES
+# 2. EMERGENCY CIRCUIT BREAKER & ANTI-BLOWOUT SHIELD
+# ==============================================================================
+CB_FILE = "circuit_breaker.json"
+LOCKOUT_FILE = "EMERGENCY_LOCKOUT.txt"
+
+ABSOLUTE_EQUITY_FLOOR = 1.50    # SHIELD 1: Balance can NEVER drop below $1.50
+MAX_CONSECUTIVE_LOSSES = 2      # SHIELD 2: 2 losses in a row = 24h hard freeze
+MAX_ORDER_NOTIONAL = 7.50       # SHIELD 4: Hard cap on position value ($7.50 max)
+MIN_ORDER_NOTIONAL = 5.15       # Buffer above Bitget's $5.00 minimum
+
+class CircuitBreaker:
+    def __init__(self):
+        self.consecutive_losses = 0
+        self.last_loss_time = 0
+        self.load_state()
+
+    def load_state(self):
+        if os.path.exists(CB_FILE):
+            try:
+                with open(CB_FILE, "r") as f:
+                    data = json.load(f)
+                    self.consecutive_losses = data.get("consecutive_losses", 0)
+                    self.last_loss_time = data.get("last_loss_time", 0)
+            except Exception:
+                pass
+
+    def save_state(self):
+        try:
+            with open(CB_FILE, "w") as f:
+                json.dump({
+                    "consecutive_losses": self.consecutive_losses,
+                    "last_loss_time": self.last_loss_time
+                }, f, indent=2)
+        except Exception:
+            pass
+
+    def check_safety(self, current_balance):
+        # 1. Hard Lockout File Check
+        if os.path.exists(LOCKOUT_FILE):
+            return False, "HARD_LOCKOUT: Emergency lockout file exists. Trading permanently halted."
+
+        # 2. Hard Equity Floor ($1.50)
+        if current_balance < ABSOLUTE_EQUITY_FLOOR:
+            with open(LOCKOUT_FILE, "w") as f:
+                f.write(f"Kill switch triggered at ${current_balance:.2f} on {time.ctime()}")
+            return False, f"EQUITY_FLOOR_BREACH: Balance ${current_balance:.2f} breached $1.50 floor! Engine locked."
+
+        # 3. Two-Strike Consecutive Loss Freeze (24h cooldown)
+        if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+            elapsed_hours = (time.time() - self.last_loss_time) / 3600
+            if elapsed_hours < 24.0:
+                remaining = 24.0 - elapsed_hours
+                return False, f"TWO_STRIKE_FREEZE: 2 consecutive losses. Trading frozen for {remaining:.1f} more hours."
+            else:
+                print("\n[CIRCUIT BREAKER] 24-hour cooling-off period ended. Resetting loss strikes.\n", flush=True)
+                self.consecutive_losses = 0
+                self.save_state()
+
+        return True, "SAFE"
+
+    def record_trade_result(self, pnl_pct):
+        if pnl_pct < 0:
+            self.consecutive_losses += 1
+            self.last_loss_time = time.time()
+            print(f"\n[CIRCUIT BREAKER] Strike logged. Consecutive losses: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
+        else:
+            self.consecutive_losses = 0
+            print("\n[CIRCUIT BREAKER] Winning trade logged. Loss strikes reset to 0.", flush=True)
+        self.save_state()
+
+
+# ==============================================================================
+# 3. CONFIGURATION & CAPITAL BOUNDARIES
 # ==============================================================================
 API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -43,7 +115,6 @@ if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
 
 BASE_LEVERAGE = 3
 BALANCE_USE_PCT = 0.88          # Use 88% of vault margin
-MIN_NOTIONAL = 5.15             # Buffer above Bitget's $5.00 limit
 MIN_24H_VOLUME = 1_000_000      # $1,000,000 volume floor
 SCAN_INTERVAL_SECONDS = 45      # Rapid 45-second scan loop
 MAX_PARALLEL_EXPERIMENTS = 8    # Run up to 8 simultaneous digital paper experiments
@@ -74,9 +145,11 @@ exchange = ccxt.bitget({
     }
 })
 
+circuit_breaker = CircuitBreaker()
+
 
 # ==============================================================================
-# 3. MATHEMATICAL INDICATORS
+# 4. MATHEMATICAL INDICATORS
 # ==============================================================================
 def calculate_atr(ohlcv, period=14):
     if len(ohlcv) < period + 1:
@@ -115,7 +188,6 @@ def calculate_rsi(closes, period=14):
 
 
 def calculate_curve_similarity(live_frames, hero_frames):
-    """Calculates mathematical trajectory similarity from 0.0% to 100.0%."""
     comp_len = min(len(live_frames), len(hero_frames))
     if comp_len < 3:
         return 0.0
@@ -131,7 +203,7 @@ def calculate_curve_similarity(live_frames, hero_frames):
 
 
 # ==============================================================================
-# 4. CAPACITY & RUNWAY VERIFICATION ENGINE
+# 5. CAPACITY & RUNWAY VERIFICATION ENGINE
 # ==============================================================================
 def check_profit_capacity(side, cur_price, highs, lows, rsi):
     """
@@ -139,11 +211,9 @@ def check_profit_capacity(side, cur_price, highs, lows, rsi):
     AT LEAST +1.50% from the current entry price.
     """
     if side == "long":
-        # 1. RSI fuel tank check
         if rsi > 68.0:
             return False, "RSI exhausted (>68.0). No fuel to push +1.5%."
 
-        # 2. Distance to nearest overhead ceiling
         recent_resistance = max(highs[-25:-1]) if len(highs) >= 26 else max(highs)
         if recent_resistance > cur_price:
             distance_to_ceiling = ((recent_resistance - cur_price) / cur_price) * 100
@@ -166,7 +236,7 @@ def check_profit_capacity(side, cur_price, highs, lows, rsi):
 
 
 # ==============================================================================
-# 5. PERSISTENT TOURNAMENT STORAGE & ROTATION QUEUE
+# 6. PERSISTENT TOURNAMENT STORAGE & ROTATION QUEUE
 # ==============================================================================
 STRATEGY_NAMES = [
     "1_BEAR_TRAP_OI_ABSORPTION",
@@ -180,7 +250,7 @@ STRATEGY_NAMES = [
     "9_CROWDED_FUNDING_DUMP",
     "10_WATERFALL_BREAKDOWN",
     "11_TRADER_AGGRESSIVENESS_SURGE",
-    "12_BLUE_SKY_BREAKOUT_RUNNER"  # Dedicated 12th Model
+    "12_BLUE_SKY_BREAKOUT_RUNNER"
 ]
 
 def load_tournament():
@@ -192,9 +262,9 @@ def load_tournament():
                 "max_profit": 0.0, "is_graduated": False
             } for name in STRATEGY_NAMES
         },
-        "verified_winning_tapes": [], # Stores 4:1 straight-line winners with >=90% quality
-        "active_studies": [],         # Live parallel paper experiments
-        "recently_traded": []         # Exclusion queue to enforce coin rotation
+        "verified_winning_tapes": [],
+        "active_studies": [],
+        "recently_traded": []
     }
     if os.path.exists(TOURNAMENT_FILE):
         try:
@@ -216,7 +286,6 @@ def save_tournament(data):
 
 
 def push_traded_coin(tourn, symbol):
-    """Enforces rotation by excluding the last 3 traded coins."""
     if symbol not in tourn['recently_traded']:
         tourn['recently_traded'].append(symbol)
     if len(tourn['recently_traded']) > MAX_RECENT_EXCLUSION:
@@ -225,7 +294,7 @@ def push_traded_coin(tourn, symbol):
 
 
 # ==============================================================================
-# 6. BITGET ONE-WAY ORDER HELPERS (FIXED WITH REDUCEONLY)
+# 7. BITGET ORDER HELPERS (SHIELD 3: PERMANENT REDUCEONLY FIX)
 # ==============================================================================
 def get_open_position():
     try:
@@ -261,9 +330,7 @@ def open_long_position(symbol, amount):
 
 
 def close_long_position(symbol, amount):
-    """
-    PERMANENT FIX: includes reduceOnly: True to eliminate Bitget error 25203.
-    """
+    """PERMANENT FIX: includes reduceOnly: True to eliminate Bitget error 25203."""
     try:
         return exchange.create_order(
             symbol=symbol, type='market', side='sell', amount=amount,
@@ -294,9 +361,7 @@ def open_short_position(symbol, amount):
 
 
 def close_short_position(symbol, amount):
-    """
-    PERMANENT FIX: includes reduceOnly: True to cleanly close shorts without margin errors.
-    """
+    """PERMANENT FIX: includes reduceOnly: True to cleanly close shorts."""
     try:
         return exchange.create_order(
             symbol=symbol, type='market', side='buy', amount=amount,
@@ -312,7 +377,7 @@ def close_short_position(symbol, amount):
 
 
 # ==============================================================================
-# 7. THE 12-MODEL SIGNAL SCANNER (WITH 4:1 RATIO & CAPACITY CHECKS)
+# 8. THE 12-MODEL SIGNAL SCANNER (WITH 4:1 RATIO & CAPACITY CHECKS)
 # ==============================================================================
 def screen_coin_for_12_models(symbol, t_data):
     try:
@@ -369,14 +434,12 @@ def screen_coin_for_12_models(symbol, t_data):
 
         matches = []
 
-        # ----------------------------------------------------------------------
-        # MODEL 12: BLUE_SKY_BREAKOUT_RUNNER (Breaking out of 25-candle ceiling)
-        # ----------------------------------------------------------------------
+        # MODEL 12: BLUE_SKY_BREAKOUT_RUNNER
         recent_25_high = max(highs[-26:-2])
         if c_close > recent_25_high and pct_5m >= 1.50 and upper_wick <= 0.40 and rsi <= 68.0:
             matches.append(("12_BLUE_SKY_BREAKOUT_RUNNER", "long", "Blue Sky Breakout above 25-candle ceiling", atr))
 
-        # MODEL 11: TRADER_AGGRESSIVENESS_SURGE (Pure Taker Violence)
+        # MODEL 11: TRADER_AGGRESSIVENESS_SURGE
         if rvol >= 3.5 and body_pct >= 0.75 and abs(pct_5m) >= 1.20 and pullback_pct <= 0.35:
             side = "long" if pct_5m > 0 else "short"
             matches.append(("11_TRADER_AGGRESSIVENESS_SURGE", side, f"Taker Violence: {rvol}x Marubozu", atr))
@@ -424,7 +487,7 @@ def screen_coin_for_12_models(symbol, t_data):
         if pct_5m <= -2.0 and rvol >= 2.0:
             matches.append(("10_WATERFALL_BREAKDOWN", "short", "Liquidation waterfall cascade", atr))
 
-        # Filter all candidates through the +1.50% Capacity Runway Check
+        # Filter all candidates through +1.50% Capacity Runway Check
         qualified = []
         for m_name, side, reason, c_atr in matches:
             has_capacity, cap_msg = check_profit_capacity(side, c_close, highs, lows, rsi)
@@ -438,7 +501,7 @@ def screen_coin_for_12_models(symbol, t_data):
 
 
 # ==============================================================================
-# 8. ACTIVE TRADE GUARDIAN (LIVE RISK ENGINE)
+# 9. ACTIVE TRADE GUARDIAN (LIVE RISK ENGINE WITH CIRCUIT BREAKER HOOK)
 # ==============================================================================
 def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
     highest_price = entry_price
@@ -498,10 +561,21 @@ def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
                 print(f"\n[LIVE EXIT TRIGGER] {reason} | PnL: {pnl_pct:+.2f}%", flush=True)
                 live_pos = get_open_position()
                 close_amount = live_pos['contracts'] if live_pos else initial_contracts
-                if side == 'long':
-                    close_long_position(symbol, close_amount)
-                else:
-                    close_short_position(symbol, close_amount)
+
+                # Try up to 3 times to guarantee execution
+                for attempt in range(1, 4):
+                    try:
+                        if side == 'long':
+                            close_long_position(symbol, close_amount)
+                        else:
+                            close_short_position(symbol, close_amount)
+                        break
+                    except Exception as exit_err:
+                        print(f"[EXIT ATTEMPT {attempt} FAILED] {exit_err}", flush=True)
+                        time.sleep(1)
+
+                # Record outcome directly into the Circuit Breaker
+                circuit_breaker.record_trade_result(pnl_pct)
 
             # 1. Fee-Shield Lock (+0.9x ATR -> Lock +0.40% net profit)
             if not fee_shield_active and peak_distance >= fee_shield_trigger:
@@ -549,7 +623,7 @@ def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
 
 
 # ==============================================================================
-# 9. SIMULTANEOUS DIGITAL PAPER EXPERIMENT TRACKER
+# 10. SIMULTANEOUS DIGITAL PAPER EXPERIMENT TRACKER
 # ==============================================================================
 def update_experiments(tourn):
     remaining = []
@@ -600,12 +674,10 @@ def update_experiments(tourn):
             if peak_pnl > stats['max_profit']:
                 stats['max_profit'] = round(peak_pnl, 2)
 
-            # Verified Winner Criteria: Gained >= 1.50% with max drawdown <= 0.60%
             if peak_pnl >= MIN_CAPACITY_RUNWAY_PCT and max_dd > -0.60:
                 stats['wins'] += 1
                 outcome = "VERIFIED_WINNER"
 
-                # Archive into high-confidence footprint tapes
                 tape = {
                     "tape_id": len(tourn['verified_winning_tapes']) + 1,
                     "symbol": sym,
@@ -637,11 +709,11 @@ def update_experiments(tourn):
 
 
 # ==============================================================================
-# 10. MAIN AUTONOMOUS ENGINE (ROTATION + SIMULTANEOUS TESTING + LIVE DESK)
+# 11. MAIN ENGINE LOOP (FAILSAFE GOVERNOR + MULTI-STRATEGY TOURNAMENT)
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] APEX 12-Model Multi-Strategy Engine initialized.", flush=True)
+    print("[SYSTEM] APEX-V3 Failsafe Multi-Strategy Engine initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -662,14 +734,21 @@ def main():
                 time.sleep(3)
                 continue
 
-            # 2. Update all running digital paper experiments in parallel
+            # 2. Update all running digital paper experiments
             if tourn['active_studies']:
                 update_experiments(tourn)
                 save_tournament(tourn)
 
-            # 3. Balance Check & Dynamic Leverage Ladder
+            # 3. Balance Check & SHIELD 1 & 2 SAFETY AUDIT
             balance_info = exchange.fetch_balance()
             usdt_free = float(balance_info.get('USDT', {}).get('free', 0) or 0)
+
+            is_safe, reason = circuit_breaker.check_safety(usdt_free)
+            if not is_safe:
+                print(f"\n[CIRCUIT BREAKER LOCKDOWN ACTIVE] Reason: {reason}", flush=True)
+                print(f"Vault Cash Protected at: ${usdt_free:.2f} USDT. Engine sleeping...\n", flush=True)
+                time.sleep(60)
+                continue
 
             # Scales leverage to guarantee order size is always >= $5.15 notional
             if usdt_free >= 2.40:
@@ -679,7 +758,9 @@ def main():
             else:
                 leverage = 5
 
-            notional = (usdt_free * BALANCE_USE_PCT) * leverage
+            # SHIELD 4: Hard Notional Sizing Clamp ($5.15 floor to $7.50 ceiling)
+            raw_notional = (usdt_free * BALANCE_USE_PCT) * leverage
+            notional = max(min(raw_notional, MAX_ORDER_NOTIONAL), MIN_ORDER_NOTIONAL)
 
             # 4. Pull Universe in 1 single call
             try:
@@ -717,10 +798,8 @@ def main():
                 matched_setups = screen_coin_for_12_models(sym, t_data)
 
                 for m_name, side, reason, price, p_5m, rvol, vol_m, atr in matched_setups:
-                    # ----------------------------------------------------------
                     # CHECK FOOTPRINT LIBRARY: Must have >= 5 verified tapes
                     # AND must match a winning tape by >= 90.0% similarity
-                    # ----------------------------------------------------------
                     library = tourn['verified_winning_tapes']
                     is_live_authorized = False
                     best_similarity = 0.0
@@ -737,7 +816,7 @@ def main():
                             is_live_authorized = True
 
                     # BRANCH A: 5 TAPES VERIFIED & >= 90% SIMILARITY -> LIVE TRADE
-                    if is_live_authorized and not live_trade_triggered and notional >= MIN_NOTIONAL:
+                    if is_live_authorized and not live_trade_triggered and notional >= MIN_ORDER_NOTIONAL:
                         ticker_now = exchange.fetch_ticker(sym)
                         live_price = float(ticker_now.get('last', 0) or 0)
 
@@ -747,14 +826,14 @@ def main():
                         formatted_amount = float(exchange.amount_to_precision(sym, raw_amount))
                         actual_notional = formatted_amount * live_price
 
-                        if formatted_amount >= min_lot and actual_notional >= 5.15:
+                        if formatted_amount >= min_lot and actual_notional >= MIN_ORDER_NOTIONAL:
                             try:
                                 exchange.set_leverage(leverage, sym, params={'marginMode': 'crossed'})
                             except Exception:
                                 pass
 
                             print("\n" + "#" * 80, flush=True)
-                            print(f"[LIVE ROTATIONAL STRIKE: {side.upper()}] Triggered by {m_name} on {sym}!", flush=True)
+                            print(f"[FAILSAFE LIVE STRIKE: {side.upper()}] Triggered by {m_name} on {sym}!", flush=True)
                             print(f"  Signal:    {reason} (5m: {p_5m:+.2f}%, RVol: {rvol}x)", flush=True)
                             print(f"  Footprint: {best_similarity}% Curve Match to Verified Winner Tape", flush=True)
                             print(f"  Execution: Real Order {leverage}x {side.upper()} | Notional: ${actual_notional:.2f}", flush=True)
@@ -803,11 +882,12 @@ def main():
             # Periodic Status Pulse
             if cycle % 2 == 0:
                 tapes_count = len(tourn['verified_winning_tapes'])
+                strikes = circuit_breaker.consecutive_losses
                 mode_str = f"LIVE READY ({tapes_count} Tapes)" if tapes_count >= MIN_VERIFIED_TAPES else f"BUILDING LIBRARY ({tapes_count}/{MIN_VERIFIED_TAPES} Tapes)"
                 recent_str = ", ".join(tourn['recently_traded']) if tourn['recently_traded'] else "None (Ready to rotate)"
                 print(
                     f"\n[RADAR PULSE] Status: {mode_str} | Active Cameras: {len(tourn['active_studies'])}/{MAX_PARALLEL_EXPERIMENTS} | "
-                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x tier) | Excluded (Rotated): [{recent_str}]",
+                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x tier) | Loss Strikes: {strikes}/2 | Excluded: [{recent_str}]",
                     flush=True
                 )
 
