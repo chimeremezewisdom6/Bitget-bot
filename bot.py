@@ -16,10 +16,10 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX-V3 Adaptive Multi-Strategy Engine is active.")
+        self.wfile.write(b"APEX-V3 Adaptive 3-Phase Multi-Strategy Engine is active.")
 
     def log_message(self, format, *args):
-        return  # Silence server logs to prevent spam
+        return
 
 def start_keep_alive():
     port = int(os.environ.get("PORT", 10000))
@@ -36,7 +36,7 @@ LOCKOUT_FILE = "EMERGENCY_LOCKOUT.txt"
 BRAIN_FILE = "brain_state.json"
 
 ABSOLUTE_EQUITY_FLOOR = 1.50   # SHIELD 1: Balance can NEVER drop below $1.50
-MAX_CONSECUTIVE_LOSSES = 2     # SHIELD 2: 2 losses in a row = 24h freeze & Quarantine
+MAX_CONSECUTIVE_LOSSES = 2     # SHIELD 2: 2 live losses = Quarantine & Cooldown
 MAX_ORDER_NOTIONAL = 7.50      # SHIELD 4: Hard cap on position value ($7.50 max)
 MIN_ORDER_NOTIONAL = 5.15      # Buffer above Bitget's $5.00 exchange minimum
 
@@ -67,17 +67,14 @@ class CircuitBreaker:
             pass
 
     def check_safety(self, current_balance):
-        # 1. Hard Lockout File Check
         if os.path.exists(LOCKOUT_FILE):
             return False, "HARD_LOCKOUT: Emergency lockout file exists. Trading permanently halted."
 
-        # 2. Hard Equity Floor ($1.50)
         if current_balance < ABSOLUTE_EQUITY_FLOOR:
             with open(LOCKOUT_FILE, "w") as f:
                 f.write(f"Kill switch triggered at ${current_balance:.2f} on {time.ctime()}")
             return False, f"EQUITY_FLOOR_BREACH: Balance ${current_balance:.2f} breached $1.50 floor! Engine locked."
 
-        # 3. Two-Strike Consecutive Loss Freeze (24h cooldown timer)
         if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
             elapsed_hours = (time.time() - self.last_loss_time) / 3600
             if elapsed_hours < 24.0:
@@ -103,21 +100,16 @@ class CircuitBreaker:
 circuit_breaker = CircuitBreaker()
 
 # ==============================================================================
-# 3. THE ADAPTIVE LEARNING BRAIN (HUMAN-LIKE POST-MORTEM & DUAL PATHS)
+# 3. FAST ADAPTIVE LEARNING BRAIN (POST-MORTEM & 9/10 SYNTHESIS)
 # ==============================================================================
 class AdaptiveLearningBrain:
-    """
-    Synthesizes rules from winning tapes, manages rolling 10-trade validation (90% win rate),
-    executes post-mortem root-cause analysis on trade failures, and controls the 5-tape
-    quarantine learning recovery cycle.
-    """
     def __init__(self):
-        self.rolling_trials = []       # Stores 1 (win) or 0 (loss) for last 10 outcomes
+        self.rolling_trials = []       # Stores 1 (win) or 0 (loss) for last 10 rapid outcomes
         self.quarantine_mode = False
         self.quarantine_target = 5
         self.quarantine_progress = 0
         self.learned_adjustments = {
-            "min_rvol": 2.0,
+            "min_rvol": 1.8,
             "max_counter_wick": 0.50,
             "min_runway": 1.50,
             "max_rsi_long": 68.0,
@@ -163,33 +155,22 @@ class AdaptiveLearningBrain:
         return (sum(self.rolling_trials) / len(self.rolling_trials)) * 100.0
 
     def can_synthesized_engine_trade(self):
-        # Must have completed at least 10 trials and won at least 9 (>= 90% Win-Rate)
+        # 9 out of 10 win rate unlocked:
         if len(self.rolling_trials) >= 10 and sum(self.rolling_trials) >= 9:
             return True
         return False
 
     def diagnose_and_adapt(self, exit_reason, pnl_pct):
-        """
-        Post-Mortem Root-Cause Analyzer: Like a human trader reflecting on a loss,
-        identifies why the loss occurred and dynamically shifts defensive parameters.
-        """
         print(f"\n[POST-MORTEM BRAIN] Analyzing trade loss: {exit_reason} (PnL: {pnl_pct:+.2f}%)", flush=True)
-
         if "Hard Stop" in exit_reason:
-            # Adverse wick stopped us out early -> tighten counter-wick tolerance
             self.learned_adjustments["max_counter_wick"] = max(0.25, round(self.learned_adjustments["max_counter_wick"] - 0.05, 2))
             print(f"[BRAIN MUTATION] Adverse wick stopped trade. Tightened max counter-wick to: {self.learned_adjustments['max_counter_wick']:.2f}%", flush=True)
-
         elif "Stagnation" in exit_reason:
-            # Lack of volume follow-through -> demand higher institutional RVol
-            self.learned_adjustments["min_rvol"] = min(3.5, round(self.learned_adjustments["min_rvol"] + 0.3, 2))
+            self.learned_adjustments["min_rvol"] = min(3.0, round(self.learned_adjustments["min_rvol"] + 0.2, 2))
             print(f"[BRAIN MUTATION] Volume stagnation decay. Increased required RVol floor to: {self.learned_adjustments['min_rvol']:.2f}x", flush=True)
-
         else:
-            # Overhead wall blocked continuation -> expand required profit runway
-            self.learned_adjustments["min_runway"] = min(3.0, round(self.learned_adjustments["min_runway"] + 0.25, 2))
-            print(f"[BRAIN MUTATION] Capacity ceiling collision. Increased capacity runway to: {self.learned_adjustments['min_runway']:.2f}%", flush=True)
-
+            self.learned_adjustments["min_runway"] = min(2.5, round(self.learned_adjustments["min_runway"] + 0.20, 2))
+            print(f"[BRAIN MUTATION] Capacity wall hit. Increased capacity runway to: {self.learned_adjustments['min_runway']:.2f}%", flush=True)
         self.save_brain()
 
     def enter_quarantine(self, tapes_to_learn=5):
@@ -197,24 +178,19 @@ class AdaptiveLearningBrain:
         self.quarantine_progress = 0
         self.quarantine_target = tapes_to_learn
         self.save_brain()
-        print(f"\n" + "=" * 80, flush=True)
-        print(f"[ADAPTIVE QUARANTINE ENGAGED] 2-Strike Event detected.", flush=True)
-        print(f"[ADAPTIVE QUARANTINE] Halting real cash execution. Bot is actively observing the market", flush=True)
-        print(f"[ADAPTIVE QUARANTINE] Must archive {tapes_to_learn} verified winning paper tapes before unlocking.", flush=True)
-        print("=" * 80 + "\n", flush=True)
+        print(f"\n[ADAPTIVE QUARANTINE] 2-Strike Event: Halting live orders.", flush=True)
+        print(f"[ADAPTIVE QUARANTINE] Observing market until {tapes_to_learn} verified winning paper tapes are completed under new rules.\n", flush=True)
 
     def check_quarantine_tape(self):
-        """Called whenever a paper experiment records a verified winning tape."""
         if self.quarantine_mode:
             self.quarantine_progress += 1
-            print(f"[QUARANTINE PROGRESS] Assimilated verified learning tape {self.quarantine_progress}/{self.quarantine_target}", flush=True)
+            print(f"[QUARANTINE PROGRESS] Archived verified tape {self.quarantine_progress}/{self.quarantine_target}", flush=True)
             if self.quarantine_progress >= self.quarantine_target:
                 self.quarantine_mode = False
                 self.quarantine_progress = 0
                 circuit_breaker.consecutive_losses = 0
                 circuit_breaker.save_state()
-                print(f"\n[QUARANTINE COMPLETE] Assimilation successful! Bot has mastered 5 winning tapes under new market conditions.", flush=True)
-                print(f"[SYSTEM UNLOCKED] Live execution re-authorized.\n", flush=True)
+                print(f"\n[QUARANTINE COMPLETE] Successfully assimilated current market regime! Live execution re-authorized.\n", flush=True)
             self.save_brain()
 
 brain = AdaptiveLearningBrain()
@@ -233,16 +209,15 @@ if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
 BASE_LEVERAGE = 3
 BALANCE_USE_PCT = 0.88          # Use 88% of vault margin
 MIN_24H_VOLUME = 1_000_000      # $1,000,000 liquid volume floor
-SCAN_INTERVAL_SECONDS = 45      # Rapid 45-second scan loop
-MAX_PARALLEL_EXPERIMENTS = 8    # Run up to 8 simultaneous digital paper experiments
+SCAN_INTERVAL_SECONDS = 30      # Fast 30-second scan loop
+MAX_PARALLEL_EXPERIMENTS = 8    # Keep up to 8 parallel cameras running 24/7
 TOURNAMENT_FILE = "rotational_tournament.json"
 
-# Strict 4:1 Ratio & Capacity Rules
 MIN_IMPULSE_PCT = 2.00          # Minimum 2.0% straight impulse
-MAX_REBOUND_PCT = 0.50          # Maximum 0.50% counter-wick (4:1 ratio)
+MAX_REBOUND_PCT = 0.50          # Maximum 0.50% counter-wick
 MIN_CAPACITY_RUNWAY_PCT = 1.50  # Must have >= 1.50% open room to nearest wall
 MIN_VERIFIED_TAPES = 5          # Must observe 5 verified winning occurrences first
-SIMILARITY_THRESHOLD = 88.0     # 88.0% curve signature match required for live execution
+SIMILARITY_THRESHOLD = 88.0     # 88.0% curve signature match required for Phase 1 live execution
 MAX_RECENT_EXCLUSION = 3        # Exclude last 3 traded coins to force rotation
 
 NON_CRYPTO_SYMBOLS = {
@@ -299,11 +274,6 @@ def calculate_rsi(closes, period=14):
     return round(100.0 - (100.0 / (1.0 + rs)), 2)
 
 def calculate_entry_signature_similarity(cand_vector, hero_vector):
-    """
-    Fixed Multi-Factor Entry Signature Matcher:
-    Vector: [abs_impulse_pct, pullback_pct, rvol, rsi, runway_pct]
-    Weights: Impulse (25%), Wick (25%), RVol (20%), RSI (15%), Runway (15%)
-    """
     weights = [0.25, 0.25, 0.20, 0.15, 0.15]
     total_score = 0.0
     for i in range(len(weights)):
@@ -319,10 +289,6 @@ def calculate_entry_signature_similarity(cand_vector, hero_vector):
 # 6. CAPACITY & RUNWAY VERIFICATION ENGINE
 # ==============================================================================
 def check_profit_capacity(side, cur_price, highs, lows, rsi, min_runway=1.50, max_rsi_long=68.0, min_rsi_short=32.0):
-    """
-    Guarantees the coin has statistical open capacity to move AT LEAST +1.50%
-    (or dynamically learned runway) from current price before hitting overhead wall.
-    """
     if cur_price <= 0:
         return False, 0.0
 
@@ -331,22 +297,15 @@ def check_profit_capacity(side, cur_price, highs, lows, rsi, min_runway=1.50, ma
 
     if side == "long":
         if rsi > max_rsi_long:
-            return False, 0.0  # Fuel tank exhausted
+            return False, 0.0
         ceiling = max(lookback_highs)
-        if ceiling <= cur_price:
-            clearance_pct = 3.0  # Blue sky breakout
-        else:
-            clearance_pct = ((ceiling - cur_price) / cur_price) * 100.0
+        clearance_pct = 3.0 if ceiling <= cur_price else ((ceiling - cur_price) / cur_price) * 100.0
         return clearance_pct >= min_runway, clearance_pct
-
-    else:  # Short
+    else:
         if rsi < min_rsi_short:
-            return False, 0.0  # Oversold floor
+            return False, 0.0
         floor = min(lookback_lows)
-        if floor >= cur_price:
-            clearance_pct = 3.0  # Blue sky breakdown
-        else:
-            clearance_pct = ((cur_price - floor) / cur_price) * 100.0
+        clearance_pct = 3.0 if floor >= cur_price else ((cur_price - floor) / cur_price) * 100.0
         return clearance_pct >= min_runway, clearance_pct
 
 # ==============================================================================
@@ -418,7 +377,6 @@ def open_long_position(symbol, amount):
         raise e
 
 def close_long_position(symbol, amount):
-    """PERMANENT FIX: includes reduceOnly: True to eliminate Bitget error 25203."""
     try:
         return exchange.create_order(
             symbol=symbol, type='market', side='sell', amount=amount,
@@ -447,7 +405,6 @@ def open_short_position(symbol, amount):
         raise e
 
 def close_short_position(symbol, amount):
-    """PERMANENT FIX: includes reduceOnly: True to cleanly close shorts."""
     try:
         return exchange.create_order(
             symbol=symbol, type='market', side='buy', amount=amount,
@@ -462,7 +419,7 @@ def close_short_position(symbol, amount):
         raise e
 
 # ==============================================================================
-# 9. THE 12-MODEL SIGNAL SCANNER (4:1 RATIO & DYNAMIC BOUNDARIES)
+# 9. THE 12-MODEL SIGNAL SCANNER (EVALUATES CLOSED CANDLE ohlcv[-2])
 # ==============================================================================
 def screen_coin_for_12_models(symbol, t_data):
     try:
@@ -483,7 +440,6 @@ def screen_coin_for_12_models(symbol, t_data):
         if len(ohlcv_5m) < 30:
             return []
 
-        # ZERO REPAINTING: evaluate finalized candle ohlcv_5m[-2] strictly
         closed_candles = ohlcv_5m[:-1]
         closes = [x[4] for x in closed_candles]
         volumes = [x[5] for x in closed_candles]
@@ -505,15 +461,10 @@ def screen_coin_for_12_models(symbol, t_data):
         atr = calculate_atr(closed_candles, period=14)
         rsi = calculate_rsi(closes, period=14)
 
-        if pct_5m >= 0:
-            pullback_pct = ((c_high - c_close) / c_open) * 100.0
-        else:
-            pullback_pct = ((c_close - c_low) / c_open) * 100.0
-
+        pullback_pct = ((c_high - c_close) / c_open) * 100.0 if pct_5m >= 0 else ((c_close - c_low) / c_open) * 100.0
         amp_pct = (candle_range / c_open) * 100.0
         funding_rate = float(t_data.get('info', {}).get('fundingRate', 0.0) or 0.01)
 
-        # Retrieve dynamic parameters from Brain
         eff_min_rvol = brain.learned_adjustments["min_rvol"]
         eff_max_wick = brain.learned_adjustments["max_counter_wick"]
         eff_min_runway = brain.learned_adjustments["min_runway"]
@@ -522,55 +473,55 @@ def screen_coin_for_12_models(symbol, t_data):
 
         matches = []
 
-        # MODEL 1: BEAR TRAP OI ABSORPTION
+        # 1. Bear Trap OI Absorption
         if pct_24h <= -2.0 and pct_5m >= 1.2 and rvol >= max(1.8, eff_min_rvol):
             matches.append(("1_BEAR_TRAP_OI_ABSORPTION", "long", "Downtrend Absorption Squeeze", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 2: SQUEEZE EXHAUSTION FADE
+        # 2. Squeeze Exhaustion Fade
         if pct_24h >= 2.0 and pct_5m >= 1.5 and rsi >= 72 and pullback_pct <= eff_max_wick:
             matches.append(("2_SQUEEZE_EXHAUSTION_FADE", "short", "Short-covering exhaustion top", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 3: RSI WASHOUT CLEAN BOUNCE
+        # 3. RSI Washout Clean Bounce
         if pct_24h <= -8.0 and pct_5m >= 1.5 and pullback_pct <= 0.40:
             matches.append(("3_RSI_WASHOUT_CLEAN_BOUNCE", "long", "Clean oversold bounce without wick", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 4: BLOWOFF TOP OVERBOUGHT
+        # 4. Blowoff Top Overbought
         if rsi >= 75.0 and pullback_pct >= 0.6 and funding_rate >= 0.03:
             matches.append(("4_BLOWOFF_TOP_OVERBOUGHT", "short", "Retail FOMO top rejection", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 5: INSTITUTIONAL OI EXPANSION
-        if pct_5m >= 1.2 and rvol >= max(2.2, eff_min_rvol) and funding_rate <= 0.012:
+        # 5. Institutional OI Expansion
+        if pct_5m >= 1.2 and rvol >= max(2.0, eff_min_rvol) and funding_rate <= 0.012:
             matches.append(("5_INSTITUTIONAL_OI_EXPANSION", "long", "Whale accumulation on clean funding", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 6: 4:1 CLEAN STAIR MOMENTUM
+        # 6. 4:1 Clean Stair Momentum
         if pct_5m >= MIN_IMPULSE_PCT and pullback_pct <= eff_max_wick and rvol >= eff_min_rvol:
-            matches.append(("6_CLEAN_STAIR_MOMENTUM", "long", "Strict 4:1 Climb-to-Fall momentum impulse", atr, pct_5m, pullback_pct, rvol, rsi))
+            matches.append(("6_CLEAN_STAIR_MOMENTUM", "long", "Strict 4:1 impulse", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 7: HIGH RVOL IGNITION
-        if rvol >= max(3.0, eff_min_rvol) and abs(pct_5m) >= 1.2:
+        # 7. High RVol Ignition
+        if rvol >= max(2.5, eff_min_rvol) and abs(pct_5m) >= 1.2:
             side = "long" if pct_5m > 0 else "short"
             matches.append(("7_HIGH_RVOL_IGNITION", side, f"High {rvol}x volume breakout", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 8: HIGH AMPLITUDE SWING
-        if amp_pct >= 4.0 and pct_5m >= 1.2:
+        # 8. High Amplitude Swing
+        if amp_pct >= 3.8 and pct_5m >= 1.2:
             matches.append(("8_HIGH_AMPLITUDE_SWING", "long", f"Wide {amp_pct:.1f}% swing bounce", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 9: CROWDED FUNDING DUMP
+        # 9. Crowded Funding Dump
         if funding_rate >= 0.035 and pct_5m <= -0.5:
             matches.append(("9_CROWDED_FUNDING_DUMP", "short", "Over-leveraged long squeeze dump", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 10: WATERFALL BREAKDOWN
-        if pct_5m <= -2.0 and rvol >= max(2.0, eff_min_rvol):
-            matches.append(("10_WATERFALL_BREAKDOWN", "short", "Liquidation waterfall cascade", atr, pct_5m, pullback_pct, rvol, rsi))
+        # 10. Waterfall Breakdown
+        if pct_5m <= -1.8 and rvol >= max(1.8, eff_min_rvol):
+            matches.append(("10_WATERFALL_BREAKDOWN", "short", "Liquidation cascade", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 11: TRADER AGGRESSIVENESS SURGE
-        if rvol >= 2.5 and abs(pct_5m) >= 1.8 and candle_range / max(atr, 0.0001) >= 1.5:
+        # 11. Trader Aggressiveness Surge
+        if rvol >= 2.2 and abs(pct_5m) >= 1.5 and candle_range / max(atr, 0.0001) >= 1.3:
             side = "long" if pct_5m > 0 else "short"
-            matches.append(("11_TRADER_AGGRESSIVENESS_SURGE", side, "Aggressive market taker volume surge", atr, pct_5m, pullback_pct, rvol, rsi))
+            matches.append(("11_TRADER_AGGRESSIVENESS_SURGE", side, "Market taker surge", atr, pct_5m, pullback_pct, rvol, rsi))
 
-        # MODEL 12: BLUE SKY BREAKOUT RUNNER
-        if pct_24h >= 5.0 and pct_5m >= 2.0 and c_close >= max(highs[-20:]):
-            matches.append(("12_BLUE_SKY_BREAKOUT_RUNNER", "long", "Fresh resistance clear sky breakout", atr, pct_5m, pullback_pct, rvol, rsi))
+        # 12. Blue Sky Breakout Runner
+        if pct_24h >= 4.0 and pct_5m >= 1.8 and c_close >= max(highs[-20:]):
+            matches.append(("12_BLUE_SKY_BREAKOUT_RUNNER", "long", "Clear sky breakout", atr, pct_5m, pullback_pct, rvol, rsi))
 
         qualified = []
         for m_name, side, reason, c_atr, p5, pb, rv, r_val in matches:
@@ -581,7 +532,6 @@ def screen_coin_for_12_models(symbol, t_data):
                 min_rsi_short=eff_rsi_short_min
             )
             if has_capacity:
-                # Entry vector: [abs(pct_5m), pullback_pct, rvol, rsi, runway_capacity]
                 entry_vector = [abs(p5), pb, rv, r_val, cap_msg]
                 qualified.append((m_name, side, reason, last_price, p5, rv, vol_24h_m, c_atr, entry_vector))
 
@@ -591,7 +541,7 @@ def screen_coin_for_12_models(symbol, t_data):
         return []
 
 # ==============================================================================
-# 10. ACTIVE TRADE GUARDIAN (LIVE RISK ENGINE WITH POST-MORTEM HOOK)
+# 10. ACTIVE TRADE GUARDIAN (LIVE RISK ENGINE)
 # ==============================================================================
 def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
     highest_price = entry_price
@@ -652,7 +602,6 @@ def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
                 live_pos = get_open_position()
                 close_amount = live_pos['contracts'] if live_pos else initial_contracts
 
-                # Try up to 3 times to guarantee clean exit
                 for attempt in range(1, 4):
                     try:
                         if side == 'long':
@@ -664,11 +613,9 @@ def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
                         print(f"[EXIT ATTEMPT {attempt} FAILED] {exit_err}", flush=True)
                         time.sleep(1)
 
-                # Record outcome into Circuit Breaker & Adaptive Brain
                 circuit_breaker.record_trade_result(pnl_pct)
                 brain.record_trial_result(pnl_pct > 0)
 
-                # Post-Mortem Diagnostics & Quarantine Hook
                 if pnl_pct < 0:
                     brain.diagnose_and_adapt(reason, pnl_pct)
                     if circuit_breaker.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
@@ -719,9 +666,16 @@ def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
             time.sleep(2)
 
 # ==============================================================================
-# 11. SIMULTANEOUS DIGITAL PAPER EXPERIMENT TRACKER
+# 11. HIGH-SPEED PAPER INCUBATOR (DYNAMIC FAST RESOLUTION)
 # ==============================================================================
 def update_experiments(tourn):
+    """
+    Rapid Real-Time Resolution:
+    - Hits +1.50% profit target with clean drawdown -> WINS IMMEDIATELY (Takes ~3-5 mins!)
+    - Drops past -0.60% -> STOPS OUT IMMEDIATELY (Takes ~1-2 mins!)
+    - Stagnates past 10 mins -> RECYCLES CAMERA IMMEDIATELY!
+    This tests 10 trades rapidly so the bot doesn't sit idle for hours!
+    """
     remaining = []
 
     for exp in tourn['active_studies']:
@@ -751,18 +705,31 @@ def update_experiments(tourn):
             peak_pnl = ((base_price - exp['lowest_price']) / base_price) * 100
             max_dd = ((base_price - exp['highest_price']) / base_price) * 100
 
-        # Record telemetry frame every 2 minutes
-        last_frame_min = exp['frames'][-1]['min'] if exp['frames'] else -99
-        if (elapsed_min - last_frame_min) >= 2.0:
-            exp['frames'].append({
-                "min": round(elapsed_min, 1),
-                "pnl": round(pnl_pct, 2),
-                "peak": round(peak_pnl, 2),
-                "drawdown": round(max_dd, 2)
-            })
+        # Fast Resolution Logic
+        is_completed = False
+        outcome = "MONITORING"
 
-        # Finalize after 20 minutes
-        if elapsed_min >= 20.0:
+        # 1. FAST WIN: Reached >= +1.50% profit target with acceptable drawdown
+        if peak_pnl >= MIN_CAPACITY_RUNWAY_PCT and max_dd > -0.60 and (pnl_pct >= 1.20 or elapsed_min >= 4.0):
+            is_completed = True
+            outcome = "VERIFIED_WINNER"
+
+        # 2. FAST STOP-OUT: Adverse wick breached -0.60% max drawdown limit
+        elif max_dd <= -0.60:
+            is_completed = True
+            outcome = "ADVERSE_WICK_LOSS"
+
+        # 3. FAST STAGNATION CUT: 10 minutes passed without hitting +0.80%
+        elif elapsed_min >= 10.0 and peak_pnl < 0.80:
+            is_completed = True
+            outcome = "STAGNATION_TIMEOUT"
+
+        # 4. HARD CEILING: Finalize after 15 minutes max
+        elif elapsed_min >= 15.0:
+            is_completed = True
+            outcome = "VERIFIED_WINNER" if (peak_pnl >= MIN_CAPACITY_RUNWAY_PCT and max_dd > -0.60) else "TIMEOUT_LOSS"
+
+        if is_completed:
             m_name = exp['model_name']
             if m_name not in tourn['models']:
                 tourn['models'][m_name] = {"tested": 0, "wins": 0, "losses": 0, "stalls": 0, "max_profit": 0.0}
@@ -773,9 +740,8 @@ def update_experiments(tourn):
             if peak_pnl > stats['max_profit']:
                 stats['max_profit'] = round(peak_pnl, 2)
 
-            if peak_pnl >= MIN_CAPACITY_RUNWAY_PCT and max_dd > -0.60:
+            if outcome == "VERIFIED_WINNER":
                 stats['wins'] += 1
-                outcome = "VERIFIED_WINNER"
                 tape = {
                     "tape_id": len(tourn['verified_winning_tapes']) + 1,
                     "symbol": sym,
@@ -784,24 +750,18 @@ def update_experiments(tourn):
                     "peak_pnl": round(peak_pnl, 2),
                     "drawdown": round(max_dd, 2),
                     "entry_vector": exp.get('entry_vector', [2.0, 0.40, 2.2, 50.0, 2.0]),
-                    "frames": exp['frames']
+                    "frames": exp.get('frames', [])
                 }
                 tourn['verified_winning_tapes'].append(tape)
-                print("\n" + "=" * 80, flush=True)
-                print(f"[VERIFIED FOOTPRINT ARCHIVED #{tape['tape_id']}] {m_name} on {sym}", flush=True)
-                print(f"  Peak Expansion: +{peak_pnl:.2f}% | Drawdown Held To: {max_dd:.2f}%", flush=True)
-                print(f"  Total Verified Library: {len(tourn['verified_winning_tapes'])}/{MIN_VERIFIED_TAPES} Tapes Recorded", flush=True)
-                print("=" * 80 + "\n", flush=True)
+                print(f"\n[RAPID EXPERIMENT WIN] #{tape['tape_id']} {m_name} on {sym} (+{peak_pnl:.2f}% in {elapsed_min:.1f}m)!", flush=True)
 
-                # Feed into brain for 9/10 synthesized learning & quarantine recovery
+                # Instantly record win into the 9/10 rolling brain
                 brain.record_trial_result(True)
                 brain.check_quarantine_tape()
 
-            elif peak_pnl < 1.0:
-                stats['stalls'] += 1
-                brain.record_trial_result(False)
             else:
                 stats['losses'] += 1
+                # Instantly score loss and free camera for next test
                 brain.record_trial_result(False)
 
         else:
@@ -810,11 +770,11 @@ def update_experiments(tourn):
     tourn['active_studies'] = remaining
 
 # ==============================================================================
-# 12. MAIN ENGINE LOOP (FAILSAFE GOVERNOR + MULTI-STRATEGY TOURNAMENT)
+# 12. MAIN ENGINE LOOP (FAILSAFE GOVERNOR + 3-PHASE EXECUTION)
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] APEX-V3 Adaptive Multi-Strategy Engine initialized.", flush=True)
+    print("[SYSTEM] APEX-V3 Fast 3-Phase Multi-Strategy Engine initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -835,7 +795,7 @@ def main():
                 time.sleep(3)
                 continue
 
-            # 2. Update all running digital paper experiments
+            # 2. Update all running digital paper experiments with Fast Resolution
             if tourn['active_studies']:
                 update_experiments(tourn)
                 save_tournament(tourn)
@@ -847,11 +807,11 @@ def main():
             is_safe, reason = circuit_breaker.check_safety(usdt_free)
             if not is_safe:
                 print(f"\n[CIRCUIT BREAKER LOCKDOWN ACTIVE] Reason: {reason}", flush=True)
-                print(f"Vault Cash Protected at: ${usdt_free:.2f} USDT. Engine sleeping...\n", flush=True)
+                print(f"Vault Cash Protected at: ${usdt_free:.2f} USDT. Sleeping...\n", flush=True)
                 time.sleep(60)
                 continue
 
-            # Scales leverage to guarantee order size is always >= $5.15 notional
+            # Scales leverage: guarantees order size is always >= $5.15 notional
             if usdt_free >= 2.40:
                 leverage = 3
             elif usdt_free >= 1.80:
@@ -859,7 +819,6 @@ def main():
             else:
                 leverage = 5
 
-            # SHIELD 4: Hard Notional Sizing Clamp ($5.15 floor to $7.50 ceiling)
             raw_notional = (usdt_free * BALANCE_USE_PCT) * leverage
             notional = max(min(raw_notional, MAX_ORDER_NOTIONAL), MIN_ORDER_NOTIONAL)
 
@@ -888,7 +847,6 @@ def main():
 
             # 5. Screen Universe for 12 Models
             for sym, vol_24h, t_data in liquid_candidates:
-                # DYNAMIC ROTATION RULE: Exclude recently traded coins
                 if sym in tourn.get('recently_traded', []):
                     continue
 
@@ -904,33 +862,34 @@ def main():
                     authorization_mode = "NONE"
                     best_similarity = 0.0
 
-                    # -------------------------------------------------------------
-                    # DUAL-PATH LOGIC (Only if not in 5-Tape Quarantine)
-                    # -------------------------------------------------------------
-                    if not brain.quarantine_mode:
-                        # PATH A: Direct Signature Match to a Winning Tape (>= 88%)
-                        if len(library) >= MIN_VERIFIED_TAPES:
-                            for hero in library:
-                                if hero['side'] == side:
-                                    hero_vec = hero.get('entry_vector', [2.0, 0.40, 2.2, 50.0, 2.0])
-                                    sim = calculate_entry_signature_similarity(cand_vector, hero_vec)
-                                    if sim > best_similarity:
-                                        best_similarity = sim
+                    # ---------------------------------------------------------
+                    # PHASE 1: DIRECT TAPE MATCH (FAST SNIPER)
+                    # ---------------------------------------------------------
+                    if len(library) >= MIN_VERIFIED_TAPES and not brain.quarantine_mode:
+                        for hero in library:
+                            if hero['side'] == side:
+                                hero_vec = hero.get('entry_vector', [2.0, 0.40, 2.2, 50.0, 2.0])
+                                sim = calculate_entry_signature_similarity(cand_vector, hero_vec)
+                                if sim > best_similarity:
+                                    best_similarity = sim
 
-                            if best_similarity >= SIMILARITY_THRESHOLD:
-                                is_live_authorized = True
-                                authorization_mode = f"PATH A (Tape Match {best_similarity}%)"
+                        if best_similarity >= SIMILARITY_THRESHOLD:
+                            is_live_authorized = True
+                            authorization_mode = f"PHASE 1 [Tape Match {best_similarity}%]"
 
-                        # PATH B: Dynamic Synthesized Learner ("Bot's Own Way")
-                        # Fires if Path A is slightly off, but rolling win rate is >= 90% (9/10 wins)
-                        if not is_live_authorized and brain.can_synthesized_engine_trade():
+                    # ---------------------------------------------------------
+                    # PHASE 2: THE 9/10 SYNTHESIZED AUTONOMOUS BRAIN
+                    # Unlocks when 9 of the last 10 rapid experiments won (>=90%)
+                    # ---------------------------------------------------------
+                    if not is_live_authorized and not brain.quarantine_mode:
+                        if brain.can_synthesized_engine_trade():
                             is_live_authorized = True
                             win_rate = brain.get_synthesized_win_rate()
-                            authorization_mode = f"PATH B (Autonomous Synthesized Brain - {win_rate:.1f}% Win Rate)"
+                            authorization_mode = f"PHASE 2 [9/10 Brain Hit {win_rate:.0f}% Win Rate]"
 
-                    # -------------------------------------------------------------
-                    # BRANCH 1: LIVE TRADE EXECUTION
-                    # -------------------------------------------------------------
+                    # ---------------------------------------------------------
+                    # EXECUTION: LIVE ORDER
+                    # ---------------------------------------------------------
                     if is_live_authorized and not live_trade_triggered and notional >= MIN_ORDER_NOTIONAL:
                         ticker_now = exchange.fetch_ticker(sym)
                         live_price = float(ticker_now.get('last', 0) or 0)
@@ -948,7 +907,7 @@ def main():
                                 pass
 
                             print("\n" + "#" * 80, flush=True)
-                            print(f"[FAILSAFE LIVE STRIKE: {side.upper()}] Triggered by {authorization_mode} on {sym}!", flush=True)
+                            print(f"[FAILSAFE LIVE STRIKE: {side.upper()}] Triggered via {authorization_mode} on {sym}!", flush=True)
                             print(f"  Signal: {reason} (5m: {p_5m:+.2f}%, RVol: {rvol}x)", flush=True)
                             print(f"  Execution: Real Order {leverage}x {side.upper()} | Notional: ${actual_notional:.2f} USDT", flush=True)
                             print("#" * 80 + "\n", flush=True)
@@ -961,7 +920,6 @@ def main():
                             print(f"[ORDER PLACED] Bitget Order ID: {order.get('id')}", flush=True)
                             time.sleep(2)
 
-                            # Asset Rotation: push to exclusion queue immediately
                             push_traded_coin(tourn, sym)
 
                             real_pos = get_open_position()
@@ -972,9 +930,9 @@ def main():
                             live_trade_triggered = True
                             break
 
-                    # -------------------------------------------------------------
-                    # BRANCH 2: BACKGROUND DIGITAL PAPER EXPERIMENT
-                    # -------------------------------------------------------------
+                    # ---------------------------------------------------------
+                    # PHASE 3: CONTINUOUS HIGH-VELOCITY PAPER EXPERIMENT INCUBATOR
+                    # ---------------------------------------------------------
                     elif len(tourn['active_studies']) < MAX_PARALLEL_EXPERIMENTS and sym not in active_syms:
                         new_study = {
                             "symbol": sym,
@@ -990,7 +948,7 @@ def main():
                         tourn['active_studies'].append(new_study)
                         active_syms.add(sym)
                         save_tournament(tourn)
-                        print(f"[PAPER EXPERIMENT #{len(tourn['active_studies'])}] Filming {m_name} on {sym} ({side.upper()}) | Zero real cash placed.", flush=True)
+                        print(f"[INCUBATOR CAMERA #{len(tourn['active_studies'])}/8] Fast Testing {m_name} on {sym} ({side.upper()})", flush=True)
 
                 if live_trade_triggered:
                     break
@@ -1000,13 +958,12 @@ def main():
                 tapes_count = len(tourn.get('verified_winning_tapes', []))
                 strikes = circuit_breaker.consecutive_losses
                 recent_str = ", ".join(tourn.get('recently_traded', [])) if tourn.get('recently_traded') else "None (Ready to rotate)"
+                win_rate = brain.get_synthesized_win_rate()
 
                 if brain.quarantine_mode:
-                    mode_str = f"QUARANTINE LEARNING ({brain.quarantine_progress}/{brain.quarantine_target} Tapes)"
-                elif tapes_count >= MIN_VERIFIED_TAPES:
-                    mode_str = f"LIVE READY ({tapes_count} Tapes | Brain 9/10: {brain.get_synthesized_win_rate():.0f}%)"
+                    mode_str = f"QUARANTINE RE-LEARNING ({brain.quarantine_progress}/{brain.quarantine_target} Tapes)"
                 else:
-                    mode_str = f"BUILDING LIBRARY ({tapes_count}/{MIN_VERIFIED_TAPES} Tapes)"
+                    mode_str = f"3-PHASE ACTIVE (Tapes: {tapes_count} | Rapid 9/10: {win_rate:.0f}%)"
 
                 print(
                     f"\n[RADAR PULSE] Status: {mode_str} | Active Cameras: {len(tourn['active_studies'])}/{MAX_PARALLEL_EXPERIMENTS}\n"
