@@ -16,7 +16,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX-V4 Human-Discernment & Volatility Engine is active.")
+        self.wfile.write(b"APEX-V5 High-Speed Human Discernment Engine is active.")
 
     def log_message(self, format, *args):
         return
@@ -203,8 +203,8 @@ if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
     sys.exit(1)
 
 BALANCE_USE_PCT = 0.85
-MIN_24H_VOLUME = 1_500_000       # $1.5M liquid volume filter
-SCAN_INTERVAL_SECONDS = 12       # Healthy pace to avoid rate limits
+MIN_24H_VOLUME = 2_000_000       # User requirement: All coins > $2,000,000 volume
+SCAN_INTERVAL_SECONDS = 8        # Fast 8-second radar cycle
 MAX_PARALLEL_CAMERAS = 5         # Parallel zero-cash observational studies
 MAX_RECENT_EXCLUSION = 4         # Memory rotation to prevent chasing the same coin
 
@@ -226,10 +226,13 @@ exchange = ccxt.bitget({
     }
 })
 
+# In-memory ticker snapshot tracker to scan 100+ coins in 0.01 seconds
+ticker_memory = {}
+
 # ==============================================================================
 # 5. HUMAN SKEPTICISM & VETO COMMITTEE (DISOBEDIENCE ENGINE)
 # ==============================================================================
-def human_skepticism_veto(symbol, side, ohlcv_1m, ticker):
+def human_skepticism_veto(symbol, side, ohlcv_1m):
     """
     Acts like a cautious human. Refuses to execute if the context suggests
     manipulation, trap liquidity, or dirty order flow—even if formulas say BUY.
@@ -238,8 +241,6 @@ def human_skepticism_veto(symbol, side, ohlcv_1m, ticker):
         return False, "Not enough recent tick context."
 
     last_candle = ohlcv_1m[-1]
-    prev_candle = ohlcv_1m[-2]
-
     c_open = last_candle[1]
     c_high = last_candle[2]
     c_low = last_candle[3]
@@ -253,7 +254,7 @@ def human_skepticism_veto(symbol, side, ohlcv_1m, ticker):
     upper_wick = c_high - max(c_open, c_close)
     lower_wick = min(c_open, c_close) - c_low
 
-    # 1. Reject Longs on Rejection Wicks (Whales dumping into retail buys)
+    # 1. Reject Longs on Rejection Wicks (Whales dumping into retail buyers)
     if side == "long" and upper_wick > (body * 1.3):
         return False, f"VETO: Massive upper wick ({upper_wick:.4f} > body {body:.4f}). Sellers smashing price down."
 
@@ -274,20 +275,17 @@ def human_skepticism_veto(symbol, side, ohlcv_1m, ticker):
         best_ask = asks[0][0]
         spread_pct = ((best_ask - best_bid) / best_bid) * 100.0
 
-        # Refuse to enter wide spreads that guarantee instant taker loss
         if spread_pct > 0.08:
             return False, f"VETO: Spread too wide ({spread_pct:.3f}%). Exchange slippage trap."
 
         bid_depth = sum([b[1] for b in bids[:5]])
         ask_depth = sum([a[1] for a in asks[:5]])
 
-        # If entering long, make sure buyers actually back the book
         if side == "long" and bid_depth < (ask_depth * 0.40):
-            return False, f"VETO: Fake rally. Bid depth ({bid_depth:.1f}) is collapsed under ask wall ({ask_depth:.1f})."
+            return False, f"VETO: Fake rally. Bid depth ({bid_depth:.1f}) collapsed under ask wall ({ask_depth:.1f})."
 
-        # If entering short, make sure ask wall actually resists price
         if side == "short" and ask_depth < (bid_depth * 0.40):
-            return False, f"VETO: Fake dump. Ask depth ({ask_depth:.1f}) is too thin against buyer wall ({bid_depth:.1f})."
+            return False, f"VETO: Fake dump. Ask depth ({ask_depth:.1f}) too thin against buyer wall ({bid_depth:.1f})."
 
     except Exception as e:
         return False, f"VETO: Unable to verify order book safety ({e})."
@@ -295,10 +293,6 @@ def human_skepticism_veto(symbol, side, ohlcv_1m, ticker):
     return True, "Human Safety Clearance Passed."
 
 def capital_preservation_veto(balance, notional, stop_dist_pct):
-    """
-    Refuses any trade that could severely damage this small account.
-    """
-    # Max loss permitted in a single trade is 8% of balance
     max_acceptable_dollar_loss = balance * 0.08
     projected_dollar_loss = notional * (stop_dist_pct / 100.0)
 
@@ -364,7 +358,7 @@ def open_long_position(symbol, amount):
             symbol=symbol, type='market', side='buy', amount=amount,
             params={'tradeSide': 'buy_single'}
         )
-    except Exception as e:
+    except Exception:
         return exchange.create_order(
             symbol=symbol, type='market', side='buy', amount=amount,
             params={'tradeSide': 'open'}
@@ -376,7 +370,7 @@ def close_long_position(symbol, amount):
             symbol=symbol, type='market', side='sell', amount=amount,
             params={'reduceOnly': True, 'tradeSide': 'sell_single'}
         )
-    except Exception as e:
+    except Exception:
         return exchange.create_order(
             symbol=symbol, type='market', side='sell', amount=amount,
             params={'reduceOnly': True, 'tradeSide': 'close'}
@@ -388,7 +382,7 @@ def open_short_position(symbol, amount):
             symbol=symbol, type='market', side='sell', amount=amount,
             params={'tradeSide': 'sell_single'}
         )
-    except Exception as e:
+    except Exception:
         return exchange.create_order(
             symbol=symbol, type='market', side='sell', amount=amount,
             params={'tradeSide': 'open'}
@@ -400,46 +394,76 @@ def close_short_position(symbol, amount):
             symbol=symbol, type='market', side='buy', amount=amount,
             params={'reduceOnly': True, 'tradeSide': 'buy_single'}
         )
-    except Exception as e:
+    except Exception:
         return exchange.create_order(
             symbol=symbol, type='market', side='buy', amount=amount,
             params={'reduceOnly': True, 'tradeSide': 'close'}
         )
 
 # ==============================================================================
-# 8. VOLATILITY RADAR
+# 8. HIGH-SPEED SCANNER (ALL COINS > $2M VOLUME IN 1 CALL)
 # ==============================================================================
-def detect_volatility_ping(symbol, ticker, ohlcv_1m):
-    if len(ohlcv_1m) < 4:
-        return None
+def scan_all_liquid_universe(tickers, study_data):
+    """
+    Scans every single coin meeting > $2M volume across the exchange simultaneously.
+    Uses memory differential to track micro-surges without spamming candle requests.
+    """
+    global ticker_memory
+    pings = []
+    now = time.time()
+    active_syms = {c['symbol'] for c in study_data['active_cameras']}
+    recent_syms = set(study_data.get('recently_traded', []))
 
-    last_candle = ohlcv_1m[-1]
-    prev_candle = ohlcv_1m[-2]
+    for symbol, t in tickers.items():
+        if not symbol.endswith(":USDT"):
+            continue
+        base = symbol.split('/')[0].upper()
+        if base in NON_CRYPTO_SYMBOLS:
+            continue
 
-    c_open = prev_candle[1]
-    c_close = last_candle[4]
-    c_high = max(prev_candle[2], last_candle[2])
-    c_low = min(prev_candle[3], last_candle[3])
+        vol_24h = float(t.get('quoteVolume', 0) or 0)
+        if vol_24h < MIN_24H_VOLUME:
+            continue
 
-    if c_open <= 0:
-        return None
+        if symbol in recent_syms or symbol in active_syms:
+            continue
 
-    pct_move_2m = ((c_close - c_open) / c_open) * 100.0
-    vol_1m = last_candle[5] * c_close
+        cur_price = float(t.get('last', 0) or 0)
+        if cur_price <= 0:
+            continue
 
-    # Require violent movement with real capital backing ($30,000+ in 1m)
-    if abs(pct_move_2m) >= 1.30 and vol_1m >= 30_000:
-        return {
-            "symbol": symbol,
-            "direction": "EXPANDING_UP" if pct_move_2m > 0 else "EXPANDING_DOWN",
-            "pct_move": round(pct_move_2m, 2),
-            "capital_injected_1m": round(vol_1m, 2),
-            "start_price": c_open,
-            "peak_price": c_high if pct_move_2m > 0 else c_low,
-            "current_price": c_close,
-            "ping_time": time.time()
-        }
-    return None
+        # Look up previous recorded price in memory snapshot
+        if symbol in ticker_memory:
+            past_price, past_time, past_vol = ticker_memory[symbol]
+            dt = now - past_time
+
+            # Check 15-45 second momentum window
+            if 12.0 <= dt <= 60.0:
+                pct_change = ((cur_price - past_price) / past_price) * 100.0
+                vol_delta = vol_24h - past_vol
+
+                # If coin surges >= 1.2% within 1 minute with at least $25,000 USDT in flow
+                if abs(pct_change) >= 1.20 and vol_delta >= 25_000:
+                    pings.append({
+                        "symbol": symbol,
+                        "direction": "EXPANDING_UP" if pct_change > 0 else "EXPANDING_DOWN",
+                        "pct_move": round(pct_change, 2),
+                        "capital_injected_1m": round(vol_delta, 2),
+                        "start_price": past_price,
+                        "current_price": cur_price,
+                        "ticker_data": t
+                    })
+                    # Reset memory so we don't trigger back-to-back duplicate pings
+                    ticker_memory[symbol] = (cur_price, now, vol_24h)
+                    continue
+
+        # Update running memory snapshot
+        if symbol not in ticker_memory or (now - ticker_memory[symbol][1]) >= 30.0:
+            ticker_memory[symbol] = (cur_price, now, vol_24h)
+
+    # Sort pings by strongest velocity
+    pings.sort(key=lambda x: abs(x['pct_move']), reverse=True)
+    return pings
 
 # ==============================================================================
 # 9. ZERO-CASH OBSERVATIONAL SCIENCE DESK
@@ -531,7 +555,7 @@ def run_empirical_experiments(study_data, leverage=4):
     study_data['active_cameras'] = remaining
 
 # ==============================================================================
-# 10. NON-BLOCKING LIVE TRADE GUARDIAN WITH INSTINCTIVE EXIT
+# 10. NON-BLOCKING LIVE TRADE GUARDIAN
 # ==============================================================================
 live_trade_state = {
     "active": False,
@@ -609,20 +633,16 @@ def poll_live_trade_guardian():
         pnl_pct = ((entry_p - cur_price) / entry_p) * 100.0
         peak_distance = entry_p - live_trade_state["lowest_price"]
 
-    # --------------------------------------------------------------------------
-    # HUMAN "HESITATION & SKEPTICISM" EARLY EXIT
-    # --------------------------------------------------------------------------
-    # If 90 seconds pass and the position cannot even cross +0.10% or is already red,
-    # a sensible human cuts the trade immediately rather than praying for a miracle.
+    # 1. Human Hesitation Exit: If trade fails to confirm into green in 90 seconds
     if elapsed_sec >= 90 and pnl_pct < 0.05:
-        execute_live_exit("Human Hesitation Cut: Momentum stalled without conviction within 90s", pnl_pct)
+        execute_live_exit("Human Hesitation Cut: Momentum stalled without follow-through", pnl_pct)
         return
 
-    # 1. Fee-Shield Lock (+0.8x ATR -> Lock Breakeven +0.35%)
+    # 2. Fee-Shield Lock (+0.8x ATR -> Lock Breakeven +0.35%)
     fee_shield_trigger = 0.8 * atr
     if not live_trade_state["fee_shield_active"] and peak_distance >= fee_shield_trigger:
         live_trade_state["fee_shield_active"] = True
-        print(f"\n[FEE-SHIELD ENGAGED] {sym} covered 0.8x ATR! Profit protected at breakeven.\n", flush=True)
+        print(f"\n[FEE-SHIELD ENGAGED] {sym} covered 0.8x ATR! Breakeven locked.\n", flush=True)
 
     if live_trade_state["fee_shield_active"]:
         if side == 'long' and cur_price <= entry_p * 1.0035:
@@ -632,7 +652,7 @@ def poll_live_trade_guardian():
             execute_live_exit("Short Fee-Shield Breakeven Hit", pnl_pct)
             return
 
-    # 2. Hard Invalidation Stop
+    # 3. Hard Invalidation Stop
     if not live_trade_state["fee_shield_active"]:
         if side == 'long' and cur_price <= live_trade_state["initial_stop_price"]:
             execute_live_exit("Long Hard Stop Invalidation Hit", pnl_pct)
@@ -641,7 +661,7 @@ def poll_live_trade_guardian():
             execute_live_exit("Short Hard Stop Invalidation Hit", pnl_pct)
             return
 
-    # 3. Trailing Runner Exit
+    # 4. Trailing Runner Exit
     runner_trigger = 1.6 * atr
     trail_distance = 1.0 * atr
     if peak_distance >= runner_trigger:
@@ -652,7 +672,7 @@ def poll_live_trade_guardian():
             execute_live_exit("Short Trailing Runner Profit Banked", pnl_pct)
             return
 
-    # 4. Long Stagnation Timeout
+    # 5. Stagnation Timeout
     if elapsed_min >= 12.0:
         execute_live_exit("12m Stagnation Invalidation", pnl_pct)
         return
@@ -663,11 +683,11 @@ def poll_live_trade_guardian():
 def main():
     global live_trade_state
     start_keep_alive()
-    print("[SYSTEM] APEX-V4 Human-Discernment Engine initialized.", flush=True)
+    print("[SYSTEM] APEX-V5 High-Speed Human Discernment Engine online.", flush=True)
 
     try:
         exchange.load_markets()
-        print(f"[SYSTEM] Connected to Bitget with {len(exchange.markets)} pairs loaded.", flush=True)
+        print(f"[SYSTEM] Loaded {len(exchange.markets)} pairs from Bitget.", flush=True)
     except Exception as e:
         print(f"[WARN] Market load warning: {e}", flush=True)
 
@@ -676,10 +696,9 @@ def main():
 
     while True:
         try:
-            # 1. Non-blocking Live Position Check & Management
+            # 1. Live Position Monitor (Non-blocking)
             pos = get_open_position()
             if pos and not live_trade_state["active"]:
-                # Recover untracked live position
                 live_trade_state = {
                     "active": True,
                     "symbol": pos['symbol'],
@@ -693,17 +712,17 @@ def main():
                     "lowest_price": pos['entry_price'],
                     "atr": pos['entry_price'] * 0.012
                 }
-                print(f"[RECOVERED] Managing existing position: {pos['side'].upper()} {pos['symbol']}", flush=True)
+                print(f"[POSITION RECOVERED] Managing: {pos['side'].upper()} {pos['symbol']}", flush=True)
 
             if live_trade_state["active"]:
                 poll_live_trade_guardian()
 
-            # 2. Update Zero-Cash Observational Studies
+            # 2. Update Zero-Cash Observational Experiments
             if study_data['active_cameras']:
                 run_empirical_experiments(study_data, leverage=4)
                 save_empirical_studies(study_data)
 
-            # 3. Capital & Safety Check
+            # 3. Capital Safety Check
             balance_info = exchange.fetch_balance()
             usdt_free = float(balance_info.get('USDT', {}).get('free', 0) or 0)
 
@@ -714,7 +733,7 @@ def main():
                 time.sleep(60)
                 continue
 
-            # Adaptive Sizing Tier
+            # Dynamic Leverage Ladder ($5.15 - $7.50 clamp)
             if usdt_free >= 2.40:
                 leverage = 3
             elif usdt_free >= 1.80:
@@ -725,61 +744,42 @@ def main():
             raw_notional = (usdt_free * BALANCE_USE_PCT) * leverage
             notional = max(min(raw_notional, MAX_ORDER_NOTIONAL), MIN_ORDER_NOTIONAL)
 
-            # 4. Fetch universe and prioritize top 20 candidates only (Protects API rate limits)
+            # 4. SINGLE-CALL SCAN: Fetch all tickers in 1 single network call
             try:
                 tickers = exchange.fetch_tickers()
             except Exception:
-                time.sleep(6)
+                time.sleep(5)
                 continue
 
-            candidates = []
-            for symbol, t in tickers.items():
-                if not symbol.endswith(":USDT"):
-                    continue
-                base = symbol.split('/')[0].upper()
-                if base in NON_CRYPTO_SYMBOLS:
-                    continue
-                vol = float(t.get('quoteVolume', 0) or 0)
-                if vol >= MIN_24H_VOLUME:
-                    candidates.append((symbol, vol, t))
+            # Run high-speed in-memory scan across ALL coins with volume > $2M
+            pings = scan_all_liquid_universe(tickers, study_data)
 
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            top_candidates = candidates[:25] # Audit only the highest quality liquid coins
-            active_syms = {c['symbol'] for c in study_data['active_cameras']}
-
-            # 5. Scan & Scrutinize
-            for sym, vol_24h, t_data in top_candidates:
-                if sym in study_data.get('recently_traded', []) or sym in active_syms:
-                    continue
-
-                if live_trade_state["active"]:
-                    break # Focus 100% on keeping the active live trade safe
-
-                time.sleep(0.08) # 80ms throttle to prevent 429 errors
-
-                try:
-                    ohlcv_1m = exchange.fetch_ohlcv(sym, timeframe='1m', limit=6)
-                except Exception:
-                    continue
-
-                ping = detect_volatility_ping(sym, t_data, ohlcv_1m)
-                if not ping:
-                    continue
-
+            # 5. Targeted Laser Inspection on Pings Only
+            for ping in pings:
+                sym = ping['symbol']
                 cur_price = ping['current_price']
                 start_price = ping['start_price']
-                peak_price = ping['peak_price']
                 dir_move = ping['direction']
                 injected_cap = ping['capital_injected_1m']
 
+                if live_trade_state["active"]:
+                    break
+
+                # Fetch 1m candles only for coins that actually triggered a ping
+                try:
+                    ohlcv_1m = exchange.fetch_ohlcv(sym, timeframe='1m', limit=5)
+                except Exception:
+                    continue
+
+                if len(ohlcv_1m) < 3:
+                    continue
+
+                peak_price = max([c[2] for c in ohlcv_1m[-2:]]) if dir_move == "EXPANDING_UP" else min([c[3] for c in ohlcv_1m[-2:]])
                 total_wave = abs(peak_price - start_price)
                 if total_wave <= 0:
                     continue
 
-                if dir_move == "EXPANDING_UP":
-                    retrace_ratio = (peak_price - cur_price) / total_wave
-                else:
-                    retrace_ratio = (cur_price - peak_price) / total_wave
+                retrace_ratio = (peak_price - cur_price) / total_wave if dir_move == "EXPANDING_UP" else (cur_price - peak_price) / total_wave
 
                 if retrace_ratio >= 0.50:
                     archetype = "RUBBER_BAND_SNAP"
@@ -810,10 +810,9 @@ def main():
                 # ==============================================================
                 # THE HUMAN SKEPTICISM CHECK (DISOBEDIENCE FILTER)
                 # ==============================================================
-                is_safe_to_enter, veto_reason = human_skepticism_veto(sym, side, ohlcv_1m, t_data)
+                is_safe_to_enter, veto_reason = human_skepticism_veto(sym, side, ohlcv_1m)
                 if not is_safe_to_enter:
-                    # The human says: "No. This looks like an abusive trap."
-                    # We do not enter with real money even if qualified.
+                    # Reject suspicious spikes/wick manipulations
                     continue
 
                 is_capital_safe, cap_reason = capital_preservation_veto(usdt_free, notional, stop_pct)
@@ -846,7 +845,7 @@ def main():
                             pass
 
                         print("\n" + "=" * 80, flush=True)
-                        print(f"[HUMAN STRIKE CLEARED] Order book verified. No manipulation wicks.", flush=True)
+                        print(f"[HUMAN STRIKE CLEARED] Order book verified across >$2M market.", flush=True)
                         print(f"  Executing {side.upper()} on {sym} | Sizing: ${actual_notional:.2f} USDT ({leverage}x)", flush=True)
                         print(f"  Target: {target_price:.4f} | Invalidation Stop: {stop_price:.4f} (-{stop_pct:.2f}%)", flush=True)
                         print("=" * 80 + "\n", flush=True)
@@ -877,7 +876,7 @@ def main():
                 # ==============================================================
                 # ZERO-CASH OBSERVATIONAL SCIENCE LAB
                 # ==============================================================
-                elif len(study_data['active_cameras']) < MAX_PARALLEL_CAMERAS and sym not in active_syms:
+                elif len(study_data['active_cameras']) < MAX_PARALLEL_CAMERAS and sym not in {c['symbol'] for c in study_data['active_cameras']}:
                     new_cam = {
                         "symbol": sym,
                         "archetype": archetype,
@@ -894,7 +893,6 @@ def main():
                         }
                     }
                     study_data['active_cameras'].append(new_cam)
-                    active_syms.add(sym)
                     save_empirical_studies(study_data)
                     print(f"[PAPER LAB] {sym} surged {ping['pct_move']:+.2f}%. Camera locked on {archetype} ({side.upper()}).", flush=True)
 
@@ -903,11 +901,14 @@ def main():
                 summary_brain = brain.get_summary_status()
                 strikes = circuit_breaker.consecutive_losses
                 mode = "QUARANTINE" if brain.quarantine_mode else "ACTIVE"
-                live_str = f"LOCKED: {live_trade_state['side'].upper()} {live_trade_state['symbol']}" if live_trade_state['active'] else "SCANNING"
+                live_str = f"LOCKED: {live_trade_state['side'].upper()} {live_trade_state['symbol']}" if live_trade_state['active'] else "SCANNING ALL >$2M"
+
+                # Count how many coins qualify above $2M volume
+                total_tracked = len([s for s, t in tickers.items() if float(t.get('quoteVolume', 0) or 0) >= MIN_24H_VOLUME and s.endswith(':USDT')])
 
                 print(
-                    f"\n[ENGINE PULSE] Status: {mode} | Live: {live_str} | Cameras: {len(study_data['active_cameras'])}/{MAX_PARALLEL_CAMERAS}\n"
-                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2\n"
+                    f"\n[ENGINE PULSE] Status: {mode} | Live: {live_str} | Coins Monitored: {total_tracked}\n"
+                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(study_data['active_cameras'])}/{MAX_PARALLEL_CAMERAS}\n"
                     f"Empirical Scores (9/10 required) -> [{summary_brain}]",
                     flush=True
                 )
@@ -918,7 +919,7 @@ def main():
         except Exception as e:
             print(f"[MAIN LOOP EXCEPTION] {e}", flush=True)
             traceback.print_exc()
-            time.sleep(10)
+            time.sleep(8)
 
 if __name__ == "__main__":
     main()
