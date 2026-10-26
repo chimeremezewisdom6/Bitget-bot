@@ -155,7 +155,7 @@ class AdaptiveLearningBrain:
         return (sum(self.rolling_trials) / len(self.rolling_trials)) * 100.0
 
     def can_synthesized_engine_trade(self):
-        # 9 out of 10 win rate unlocked:
+        # 9 out of 10 win rate unlocked (>= 90%)
         if len(self.rolling_trials) >= 10 and sum(self.rolling_trials) >= 9:
             return True
         return False
@@ -220,9 +220,11 @@ MIN_VERIFIED_TAPES = 5          # Must observe 5 verified winning occurrences fi
 SIMILARITY_THRESHOLD = 88.0     # 88.0% curve signature match required for Phase 1 live execution
 MAX_RECENT_EXCLUSION = 3        # Exclude last 3 traded coins to force rotation
 
+# Blacklist TradFi, commodities, and pre-market/synthetic pairs with oversized minimum lot sizes
 NON_CRYPTO_SYMBOLS = {
     'CL', 'BZ', 'SOXS', 'SOXL', 'KORU', 'MU', 'TSLA', 'NVDA', 'AAPL', 'MSFT',
-    'AMZN', 'GOOGL', 'META', 'SPX', 'NDX', 'DJI', 'XAU', 'XAG', 'MINIMAX', 'DOS'
+    'AMZN', 'GOOGL', 'META', 'SPX', 'NDX', 'DJI', 'XAU', 'XAG', 'MINIMAX', 'DOS',
+    'ANTHROPIC', 'OPENAI', 'SPACEX', 'STRIPE', 'SCALE'
 }
 
 exchange = ccxt.bitget({
@@ -669,13 +671,6 @@ def manage_live_trade(symbol, side, initial_contracts, entry_price, entry_atr):
 # 11. HIGH-SPEED PAPER INCUBATOR (DYNAMIC FAST RESOLUTION)
 # ==============================================================================
 def update_experiments(tourn):
-    """
-    Rapid Real-Time Resolution:
-    - Hits +1.50% profit target with clean drawdown -> WINS IMMEDIATELY (Takes ~3-5 mins!)
-    - Drops past -0.60% -> STOPS OUT IMMEDIATELY (Takes ~1-2 mins!)
-    - Stagnates past 10 mins -> RECYCLES CAMERA IMMEDIATELY!
-    This tests 10 trades rapidly so the bot doesn't sit idle for hours!
-    """
     remaining = []
 
     for exp in tourn['active_studies']:
@@ -705,26 +700,25 @@ def update_experiments(tourn):
             peak_pnl = ((base_price - exp['lowest_price']) / base_price) * 100
             max_dd = ((base_price - exp['highest_price']) / base_price) * 100
 
-        # Fast Resolution Logic
         is_completed = False
         outcome = "MONITORING"
 
-        # 1. FAST WIN: Reached >= +1.50% profit target with acceptable drawdown
+        # 1. Fast Win: Reached >= +1.50% profit target with clean drawdown
         if peak_pnl >= MIN_CAPACITY_RUNWAY_PCT and max_dd > -0.60 and (pnl_pct >= 1.20 or elapsed_min >= 4.0):
             is_completed = True
             outcome = "VERIFIED_WINNER"
 
-        # 2. FAST STOP-OUT: Adverse wick breached -0.60% max drawdown limit
+        # 2. Fast Stop-Out: Adverse wick breached -0.60% max drawdown limit
         elif max_dd <= -0.60:
             is_completed = True
             outcome = "ADVERSE_WICK_LOSS"
 
-        # 3. FAST STAGNATION CUT: 10 minutes passed without hitting +0.80%
+        # 3. Fast Stagnation Cut: 10 minutes passed without hitting +0.80%
         elif elapsed_min >= 10.0 and peak_pnl < 0.80:
             is_completed = True
             outcome = "STAGNATION_TIMEOUT"
 
-        # 4. HARD CEILING: Finalize after 15 minutes max
+        # 4. Hard Ceiling: Finalize after 15 minutes max
         elif elapsed_min >= 15.0:
             is_completed = True
             outcome = "VERIFIED_WINNER" if (peak_pnl >= MIN_CAPACITY_RUNWAY_PCT and max_dd > -0.60) else "TIMEOUT_LOSS"
@@ -755,13 +749,11 @@ def update_experiments(tourn):
                 tourn['verified_winning_tapes'].append(tape)
                 print(f"\n[RAPID EXPERIMENT WIN] #{tape['tape_id']} {m_name} on {sym} (+{peak_pnl:.2f}% in {elapsed_min:.1f}m)!", flush=True)
 
-                # Instantly record win into the 9/10 rolling brain
                 brain.record_trial_result(True)
                 brain.check_quarantine_tape()
 
             else:
                 stats['losses'] += 1
-                # Instantly score loss and free camera for next test
                 brain.record_trial_result(False)
 
         else:
@@ -774,7 +766,7 @@ def update_experiments(tourn):
 # ==============================================================================
 def main():
     start_keep_alive()
-    print("[SYSTEM] APEX-V3 Fast 3-Phase Multi-Strategy Engine initialized.", flush=True)
+    print("[SYSTEM] APEX-V3 Failsafe 3-Phase Multi-Strategy Engine initialized.", flush=True)
 
     try:
         exchange.load_markets()
@@ -795,7 +787,7 @@ def main():
                 time.sleep(3)
                 continue
 
-            # 2. Update all running digital paper experiments with Fast Resolution
+            # 2. Update all running digital paper experiments
             if tourn['active_studies']:
                 update_experiments(tourn)
                 save_tournament(tourn)
@@ -811,7 +803,7 @@ def main():
                 time.sleep(60)
                 continue
 
-            # Scales leverage: guarantees order size is always >= $5.15 notional
+            # Dynamic Leverage Ladder: Guarantees order size is always >= $5.15 notional
             if usdt_free >= 2.40:
                 leverage = 3
             elif usdt_free >= 1.80:
@@ -819,6 +811,7 @@ def main():
             else:
                 leverage = 5
 
+            # SHIELD 4: Hard Notional Sizing Clamp ($5.15 floor to $7.50 ceiling)
             raw_notional = (usdt_free * BALANCE_USE_PCT) * leverage
             notional = max(min(raw_notional, MAX_ORDER_NOTIONAL), MIN_ORDER_NOTIONAL)
 
@@ -879,7 +872,6 @@ def main():
 
                     # ---------------------------------------------------------
                     # PHASE 2: THE 9/10 SYNTHESIZED AUTONOMOUS BRAIN
-                    # Unlocks when 9 of the last 10 rapid experiments won (>=90%)
                     # ---------------------------------------------------------
                     if not is_live_authorized and not brain.quarantine_mode:
                         if brain.can_synthesized_engine_trade():
@@ -888,19 +880,36 @@ def main():
                             authorization_mode = f"PHASE 2 [9/10 Brain Hit {win_rate:.0f}% Win Rate]"
 
                     # ---------------------------------------------------------
-                    # EXECUTION: LIVE ORDER
+                    # EXECUTION: LIVE ORDER (FAILSAFE LOT & PRECISION CLAMP)
                     # ---------------------------------------------------------
                     if is_live_authorized and not live_trade_triggered and notional >= MIN_ORDER_NOTIONAL:
                         ticker_now = exchange.fetch_ticker(sym)
                         live_price = float(ticker_now.get('last', 0) or 0)
+                        if live_price <= 0:
+                            continue
 
                         market = exchange.market(sym)
-                        min_lot = float(market['limits']['amount']['min'] or 0)
+                        min_lot = float(market.get('limits', {}).get('amount', {}).get('min') or 0)
+                        amount_precision = float(market.get('precision', {}).get('amount') or 0)
+                        min_required_amount = max(min_lot, amount_precision)
+
                         raw_amount = notional / live_price
-                        formatted_amount = float(exchange.amount_to_precision(sym, raw_amount))
+
+                        # FAILSAFE PRE-CHECK: Skip immediately if account notional cannot afford min lot
+                        if raw_amount < min_required_amount:
+                            print(f"[SIZING SKIP] {sym} requires minimum lot {min_required_amount}, but vault notional gives {raw_amount:.6f}. Cleanly skipping.", flush=True)
+                            continue
+
+                        # Wrap CCXT amount_to_precision to prevent InvalidOrder crashes
+                        try:
+                            formatted_amount = float(exchange.amount_to_precision(sym, raw_amount))
+                        except Exception as prec_err:
+                            print(f"[PRECISION SKIP] {sym} precision formatting error ({prec_err}). Skipping.", flush=True)
+                            continue
+
                         actual_notional = formatted_amount * live_price
 
-                        if formatted_amount >= min_lot and actual_notional >= MIN_ORDER_NOTIONAL:
+                        if formatted_amount >= min_required_amount and actual_notional >= MIN_ORDER_NOTIONAL:
                             try:
                                 exchange.set_leverage(leverage, sym, params={'marginMode': 'crossed'})
                             except Exception:
