@@ -16,7 +16,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX-V9 Self-Determining Autonomous Trader is active.")
+        self.wfile.write(b"APEX-V11 Self-Diagnosing Autonomous Engine is active.")
 
     def log_message(self, format, *args):
         return
@@ -37,8 +37,8 @@ STUDY_LOG_FILE = "empirical_tapes.json"
 STORYBOOK_FILE = "market_storybook.jsonl"
 BRAIN_FILE = "student_brain.json"
 
-ABSOLUTE_EQUITY_FLOOR = 1.50   # Hard floor ($1.50)
-MAX_CONSECUTIVE_LOSSES = 2     # Two live losses = mandatory 24h rest
+ABSOLUTE_EQUITY_FLOOR = 1.50   # Vault floor ($1.50)
+MAX_CONSECUTIVE_LOSSES = 2     # Two live losses = mandatory rest
 MAX_ORDER_NOTIONAL = 7.50      # Cap notional size
 MIN_ORDER_NOTIONAL = 5.15      # Bitget $5.00 min + buffer
 
@@ -86,7 +86,7 @@ class CircuitBreaker:
                 remaining = 24.0 - elapsed_hours
                 return False, f"TWO_STRIKE_FREEZE: Cooldown active for {remaining:.1f} more hours."
             else:
-                print("\n[CIRCUIT BREAKER] 24-hour rest finished. Resetting strikes.\n", flush=True)
+                print("\n[CIRCUIT BREAKER] 24-hour rest finished. Resetting loss strikes.\n", flush=True)
                 self.consecutive_losses = 0
                 self.save_state()
 
@@ -96,10 +96,10 @@ class CircuitBreaker:
         if pnl_pct < 0:
             self.consecutive_losses += 1
             self.last_loss_time = time.time()
-            print(f"\n[CIRCUIT BREAKER] Live loss recorded. Strikes: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
+            print(f"\n[CIRCUIT BREAKER] Strike logged. Losses: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
         else:
             self.consecutive_losses = 0
-            print("\n[CIRCUIT BREAKER] Live win recorded. Strikes cleared to 0.", flush=True)
+            print("\n[CIRCUIT BREAKER] Winning trade logged. Strikes cleared to 0.", flush=True)
         self.save_state()
 
 circuit_breaker = CircuitBreaker()
@@ -120,20 +120,28 @@ def write_story_log(event_type, symbol, observation, lesson):
             f.write(json.dumps(story_entry) + "\n")
     except Exception:
         pass
-    print(f"\n[JOURNAL] {event_type} on {symbol}: {observation} -> LESSON: {lesson}", flush=True)
+    print(f"[JOURNAL] {event_type} on {symbol}: {observation} | Lesson: {lesson}", flush=True)
 
 # ==============================================================================
-# 4. AUTONOMOUS STUDENT BRAIN (LEARNS ITS OWN STOPS & TARGETS)
+# 4. THE SELF-REFLECTIVE CRITIC & AUTONOMOUS DIAGNOSTIC BRAIN
 # ==============================================================================
-class AutonomousStudentBrain:
+class SelfReflectiveBrain:
+    """
+    Acts like a human reviewing their own trading journal.
+    Identifies mistakes (over-trading one coin, holding into chop, suffocating stops),
+    diagnoses the cause, and changes its own operational parameters autonomously.
+    """
     def __init__(self):
-        # The bot dynamically tunes these stop multipliers based on past tape results
-        self.strategy_params = {
-            "QUICK_IMPULSE_CHASE": {"stop_mult": 1.4, "target_mult": 2.2, "trials": []},
-            "MEAN_REVERSION_SNAP": {"stop_mult": 1.3, "target_mult": 2.0, "trials": []},
-            "BREAKOUT_CONTINUATION": {"stop_mult": 1.5, "target_mult": 2.5, "trials": []}
+        self.strategies = {
+            "QUICK_IMPULSE_CHASE": {"stop_mult": 1.8, "target_mult": 2.0, "trials": []},
+            "MEAN_REVERSION_SNAP": {"stop_mult": 1.8, "target_mult": 1.9, "trials": []},
+            "BREAKOUT_CONTINUATION": {"stop_mult": 1.9, "target_mult": 2.2, "trials": []}
         }
         self.quarantine_mode = False
+        self.coin_penalties = {}       # Dynamic penalty timers on bad coins
+        self.recent_coin_history = []   # Tracks coin entry frequency
+        self.diagnosed_mistakes = []    # History of identified mistakes & fixes
+        self.min_stop_floor_pct = 0.85  # Dynamic stop distance floor
         self.load_brain()
 
     def load_brain(self):
@@ -141,8 +149,10 @@ class AutonomousStudentBrain:
             try:
                 with open(BRAIN_FILE, "r") as f:
                     data = json.load(f)
-                    self.strategy_params = data.get("strategy_params", self.strategy_params)
+                    self.strategies = data.get("strategies", self.strategies)
                     self.quarantine_mode = data.get("quarantine_mode", False)
+                    self.diagnosed_mistakes = data.get("diagnosed_mistakes", [])
+                    self.min_stop_floor_pct = data.get("min_stop_floor_pct", 0.85)
             except Exception:
                 pass
 
@@ -150,50 +160,78 @@ class AutonomousStudentBrain:
         try:
             with open(BRAIN_FILE, "w") as f:
                 json.dump({
-                    "strategy_params": self.strategy_params,
-                    "quarantine_mode": self.quarantine_mode
+                    "strategies": self.strategies,
+                    "quarantine_mode": self.quarantine_mode,
+                    "diagnosed_mistakes": self.diagnosed_mistakes[-30:],
+                    "min_stop_floor_pct": self.min_stop_floor_pct
                 }, f, indent=2)
         except Exception:
             pass
 
-    def adapt_parameters_from_film(self, strategy, film_tape):
+    def run_post_mortem_audit(self, completed_tape, all_recent_tapes):
         """
-        SELF-LEARNING MECHANIC:
-        If stops get hit too fast (< 1.5m), widen the stop multiplier automatically.
-        If trades peak high (> 2.0%) but end in stagnation, lower the target slightly.
+        THE HUMAN-STYLE REFLECTION:
+        After every trade, the bot reviews what went wrong and adjusts itself.
         """
-        strat = self.strategy_params.get(strategy)
-        if not strat:
-            return
+        sym = completed_tape['symbol']
+        pnl = completed_tape['net_pnl_pct']
+        peak = completed_tape['peak_pnl_pct']
+        dur = completed_tape['duration_minutes']
+        strat_name = completed_tape['strategy']
+        strat = self.strategies.get(strat_name)
 
-        duration = film_tape.get('duration_minutes', 0)
-        outcome = film_tape.get('outcome', '')
-        peak_pnl = film_tape.get('peak_pnl_pct', 0)
+        self.recent_coin_history.append((sym, time.time(), pnl))
+        if len(self.recent_coin_history) > 30:
+            self.recent_coin_history.pop(0)
 
-        # 1. Choke Detection: If it died in under 90 seconds, stop was too tight!
-        if outcome == "STOP_LOSS_HIT" and duration < 1.5:
-            old_mult = strat['stop_mult']
-            strat['stop_mult'] = min(round(strat['stop_mult'] + 0.15, 2), 2.5)
-            print(f"[BOT SELF-LEARNED] {strategy} stop choked too fast ({duration}m). Widened stop mult from {old_mult}x -> {strat['stop_mult']}x", flush=True)
+        # ----------------------------------------------------------------------
+        # MISTAKE 1: Over-trading & Revenge Chasing the Same Coin
+        # ----------------------------------------------------------------------
+        recent_same_coin = [entry for entry in self.recent_coin_history if entry[0] == sym and (time.time() - entry[1]) <= 600]
+        if len(recent_same_coin) >= 3:
+            net_coin_pnl = sum([entry[2] for entry in recent_same_coin])
+            if net_coin_pnl < 0:
+                penalty_seconds = 300 # 5-minute quarantine on this coin
+                self.coin_penalties[sym] = time.time() + penalty_seconds
+                diagnosis = f"MISTAKE IDENTIFIED: Revenge over-trading on {sym} ({len(recent_same_coin)} trades in 10m with net loss {net_coin_pnl:+.2f}%). FIX: Quarantined {sym} for 5 minutes."
+                self.diagnosed_mistakes.append(diagnosis)
+                print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
 
-        # 2. Greed Detection: If it went into solid profit but didn't reach the target
-        elif outcome == "STAGNATION_TIMEOUT" and peak_pnl >= 1.6:
-            old_t = strat['target_mult']
-            strat['target_mult'] = max(round(strat['target_mult'] - 0.10, 2), 1.8)
-            print(f"[BOT SELF-LEARNED] {strategy} peaked at +{peak_pnl:.2f}% but stagnated. Lowered target mult from {old_t}x -> {strat['target_mult']}x", flush=True)
+        # ----------------------------------------------------------------------
+        # MISTAKE 2: The Slow Bleed (Greed - Letting a Winner Turn into Chop)
+        # ----------------------------------------------------------------------
+        if peak >= 1.20 and pnl < 0.50 and dur >= 6.0:
+            diagnosis = f"MISTAKE IDENTIFIED: Greed on {sym}. Peaked at +{peak:.2f}%, but held for {dur:.1f}m until momentum died into {pnl:+.2f}%. FIX: Lowered target multiplier for {strat_name}."
+            if strat:
+                strat['target_mult'] = max(round(strat['target_mult'] - 0.08, 2), 1.6)
+            self.diagnosed_mistakes.append(diagnosis)
+            print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
 
-    def record_film_outcome(self, strategy, net_pnl, reason, film_tape):
-        if strategy not in self.strategy_params:
-            self.strategy_params[strategy] = {"stop_mult": 1.4, "target_mult": 2.2, "trials": []}
+        # ----------------------------------------------------------------------
+        # MISTAKE 3: Choking the Trade (Stop Loss Inside Random Noise)
+        # ----------------------------------------------------------------------
+        if completed_tape['outcome'] == "STOP_LOSS_HIT" and dur < 1.0:
+            diagnosis = f"MISTAKE IDENTIFIED: Suffocated {sym} with too tight stop. Died in {dur*60:.0f}s. FIX: Widened stop floor from {self.min_stop_floor_pct}% to {self.min_stop_floor_pct + 0.08}%."
+            self.min_stop_floor_pct = min(round(self.min_stop_floor_pct + 0.08, 2), 1.50)
+            if strat:
+                strat['stop_mult'] = min(round(strat['stop_mult'] + 0.10, 2), 2.5)
+            self.diagnosed_mistakes.append(diagnosis)
+            print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
 
-        rec = self.strategy_params[strategy]
+        self.save_brain()
+
+    def record_film_outcome(self, strategy, net_pnl, reason, film_tape, all_tapes):
+        if strategy not in self.strategies:
+            self.strategies[strategy] = {"stop_mult": 1.8, "target_mult": 2.0, "trials": []}
+
+        rec = self.strategies[strategy]
         is_win = 1 if (net_pnl >= 1.50) else 0
         rec["trials"].append(is_win)
         if len(rec["trials"]) > 10:
             rec["trials"].pop(0)
 
-        # Self-calibrate stops and targets based on this completed tape
-        self.adapt_parameters_from_film(strategy, film_tape)
+        # Run the autonomous audit to spot mistakes and fix itself
+        self.run_post_mortem_audit(film_tape, all_tapes)
 
         win_count = sum(rec["trials"])
         sample_size = len(rec["trials"])
@@ -212,16 +250,20 @@ class AutonomousStudentBrain:
         )
         self.save_brain()
 
+    def is_coin_in_penalty(self, symbol):
+        expiry = self.coin_penalties.get(symbol, 0)
+        return time.time() < expiry
+
     def is_live_ready(self, strategy):
         if self.quarantine_mode:
             return False
-        rec = self.strategy_params.get(strategy, {})
+        rec = self.strategies.get(strategy, {})
         trials = rec.get("trials", [])
         return len(trials) >= 10 and sum(trials) >= 9
 
     def get_summary_status(self):
         lines = []
-        for strat, data in self.strategy_params.items():
+        for strat, data in self.strategies.items():
             trials = data.get("trials", [])
             w = sum(trials)
             tot = len(trials)
@@ -229,7 +271,7 @@ class AutonomousStudentBrain:
             lines.append(f"{strat[:4]}: {w}/{tot} ({pct:.0f}%) [S:{data['stop_mult']}x T:{data['target_mult']}x]")
         return " | ".join(lines)
 
-brain = AutonomousStudentBrain()
+brain = SelfReflectiveBrain()
 
 # ==============================================================================
 # 5. EXCHANGES SETUP
@@ -246,7 +288,7 @@ BALANCE_USE_PCT = 0.85
 MIN_24H_VOLUME = 1_000_000       # All coins > $1,000,000
 SCAN_INTERVAL_SECONDS = 5        # Fast 5-second pulse
 MAX_PARALLEL_CAMERAS = 12        # 12 parallel learning cameras
-MAX_RECENT_EXCLUSION = 3
+MAX_RECENT_EXCLUSION = 4
 
 NON_CRYPTO_SYMBOLS = {
     'CL', 'BZ', 'SOXS', 'SOXL', 'KORU', 'MU', 'TSLA', 'NVDA', 'AAPL', 'MSFT',
@@ -266,17 +308,16 @@ bitget = ccxt.bitget({
     }
 })
 
-global_radar = ccxt.binance({
+global_radar = ccxt.binanceusdm({
     "enableRateLimit": True,
     "timeout": 10000,
-    "options": {"defaultType": "future"}
 })
 
 ticker_memory = {}
 global_binance_tickers = {}
 
 # ==============================================================================
-# 6. GLOBAL INTELLIGENCE WORKER (FIXED BINANCE SYMBOL MATCHER)
+# 6. GLOBAL INTELLIGENCE WORKER (BINANCE STREAM)
 # ==============================================================================
 def start_global_radar_worker():
     global global_binance_tickers
@@ -286,7 +327,6 @@ def start_global_radar_worker():
                 tickers = global_radar.fetch_tickers()
                 temp = {}
                 for s, t in tickers.items():
-                    # Parse symbol properly: "ENA/USDT:USDT" -> "ENA"
                     base = s.split('/')[0].split(':')[0].upper()
                     temp[base] = {
                         "price": float(t.get('last', 0) or 0),
@@ -300,7 +340,7 @@ def start_global_radar_worker():
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    print("[SYSTEM] Global Cross-Exchange Radar engaged (Binance Mother Tape active).", flush=True)
+    print("[SYSTEM] Global Cross-Exchange Radar engaged (Binance streaming).", flush=True)
 
 # ==============================================================================
 # 7. FILMING ARCHIVE PERSISTENCE
@@ -402,26 +442,20 @@ def close_short_position(symbol, amount):
         )
 
 # ==============================================================================
-# 9. DYNAMIC ATR SWING CALCULATOR (THE BOT SIZES ITS OWN STOPS)
+# 9. DYNAMIC ATR SWING CALCULATOR
 # ==============================================================================
 def calculate_natural_swing_atr(ohlcv_1m):
-    """
-    Measures how much the coin naturally breathes per minute.
-    Returns the True Range in dollar value.
-    """
     if len(ohlcv_1m) < 3:
         return 0.0
 
     ranges = []
     for candle in ohlcv_1m[-4:]:
-        c_high = candle[2]
-        c_low = candle[3]
-        ranges.append(c_high - c_low)
+        ranges.append(candle[2] - candle[3])
 
     return sum(ranges) / len(ranges) if ranges else 0.0
 
 # ==============================================================================
-# 10. UNCHAINED APPRENTICE SCANNER
+# 10. SCANNER WITH MISTAKE-PREVENTION ROTATION
 # ==============================================================================
 def scan_all_coins_fearlessly(tickers, archive):
     global ticker_memory
@@ -438,6 +472,10 @@ def scan_all_coins_fearlessly(tickers, archive):
 
         vol_24h = float(t.get('quoteVolume', 0) or 0)
         if vol_24h < MIN_24H_VOLUME or symbol in active_syms:
+            continue
+
+        # Self-correction check: If the bot penalized this coin for over-trading, skip it!
+        if brain.is_coin_in_penalty(symbol):
             continue
 
         cur_price = float(t.get('last', 0) or 0)
@@ -473,7 +511,7 @@ def scan_all_coins_fearlessly(tickers, archive):
     return pings
 
 # ==============================================================================
-# 11. MULTI-CAMERA RECORDING LAB (WATCHING TRADES PLAY OUT)
+# 11. MULTI-CAMERA RECORDING LAB (WITH AUTO-PROFIT PROTECTION)
 # ==============================================================================
 def run_filming_cameras(archive, leverage=4):
     remaining = []
@@ -522,29 +560,39 @@ def run_filming_cameras(archive, leverage=4):
         outcome = "MONITORING"
         causality = ""
 
-        # Check 1: Liquidation
+        # Self-Protective Profit Lock: If peak is up +1.10%, lock breakeven!
+        if peak_pnl >= 1.10 and not cam.get('trail_locked', False):
+            cam['trail_locked'] = True
+            if side == 'long':
+                cam['trade_hypothesis']['stop_price'] = entry_price * 1.0030
+            else:
+                cam['trade_hypothesis']['stop_price'] = entry_price * 0.9970
+            stop_price = cam['trade_hypothesis']['stop_price']
+
+        # 1. Liquidation
         if (side == 'long' and cur_price <= liq_price) or (side == 'short' and cur_price >= liq_price):
             is_finished = True
             outcome = "LIQUIDATION_LOSS"
             causality = f"Adverse wick struck liquidation at {liq_price:.4f}."
 
-        # Check 2: Stop Loss
+        # 2. Stop Loss / Breakeven Hit
         elif (side == 'long' and cur_price <= stop_price) or (side == 'short' and cur_price >= stop_price):
             is_finished = True
             outcome = "STOP_LOSS_HIT"
-            causality = f"Invalidation level hit at {stop_price:.4f}. Net PnL: {net_pnl:+.2f}%."
+            tag = "Breakeven Protected Stop" if cam.get('trail_locked') else "Invalidation Stop"
+            causality = f"{tag} hit at {stop_price:.4f}. Net PnL: {net_pnl:+.2f}%."
 
-        # Check 3: Target Hit (Win if net profit >= +1.50%)
+        # 3. Target Hit
         elif (side == 'long' and cur_price >= target_price) or (side == 'short' and cur_price <= target_price):
             is_finished = True
             outcome = "TARGET_ACHIEVED"
             causality = f"Target achieved at {target_price:.4f}. Clean Net PnL: {net_pnl:+.2f}%."
 
-        # Check 4: Stagnation timeout after 10 minutes
-        elif elapsed_min >= 10.0:
+        # 4. Stagnation timeout after 7 minutes (Cut dead weight faster)
+        elif elapsed_min >= 7.0:
             is_finished = True
             outcome = "STAGNATION_TIMEOUT"
-            causality = f"Momentum decayed into chop after 10m. Net PnL: {net_pnl:+.2f}%."
+            causality = f"Momentum decayed into chop after 7m. Net PnL: {net_pnl:+.2f}%."
 
         if is_finished:
             film_tape = {
@@ -562,7 +610,8 @@ def run_filming_cameras(archive, leverage=4):
                 "reason": causality
             }
             archive['completed_films'].append(film_tape)
-            brain.record_film_outcome(strategy, net_pnl, causality, film_tape)
+            # Send tape to Self-Reflective Critic for post-mortem analysis
+            brain.record_film_outcome(strategy, net_pnl, causality, film_tape, archive['completed_films'])
             save_film_archive(archive)
         else:
             remaining.append(cam)
@@ -570,7 +619,7 @@ def run_filming_cameras(archive, leverage=4):
     archive['active_cameras'] = remaining
 
 # ==============================================================================
-# 12. LIVE GUARDIAN (FOR REAL MONEY EXECUTION)
+# 12. LIVE GUARDIAN (FOR REAL MONEY)
 # ==============================================================================
 live_trade_state = {
     "active": False,
@@ -644,8 +693,8 @@ def poll_live_trade_guardian():
         pnl_pct = ((entry_p - cur_price) / entry_p) * 100.0
         peak_distance = entry_p - live_trade_state["lowest_price"]
 
-    # 1. Hesitation Cut (90 seconds without positive follow-through)
-    if elapsed_sec >= 90 and pnl_pct < 0.08:
+    # 1. Hesitation Cut (80 seconds without follow-through)
+    if elapsed_sec >= 80 and pnl_pct < 0.08:
         execute_live_exit("Hesitation Cut: Momentum stalled without follow-through", pnl_pct)
         return
 
@@ -678,8 +727,8 @@ def poll_live_trade_guardian():
             return
 
     # 5. Stagnation Exit
-    if elapsed_min >= 12.0:
-        execute_live_exit("12m Stagnation Timeout", pnl_pct)
+    if elapsed_min >= 10.0:
+        execute_live_exit("10m Stagnation Timeout", pnl_pct)
         return
 
 # ==============================================================================
@@ -689,7 +738,7 @@ def main():
     global live_trade_state
     start_keep_alive()
     start_global_radar_worker()
-    print("[SYSTEM] APEX-V9 Self-Determining Autonomous Trader online.", flush=True)
+    print("[SYSTEM] APEX-V11 Self-Diagnosing Autonomous Engine online.", flush=True)
 
     try:
         bitget.load_markets()
@@ -700,7 +749,7 @@ def main():
     archive = load_film_archive()
     cycle = 1
 
-    write_story_log("SYSTEM_START", "ALL", "Self-Determining Student Engine active.", "Dynamic stops and targets calibrated by empirical learning.")
+    write_story_log("SYSTEM_START", "ALL", "Self-Reflective Engine started.", "Autonomous mistake diagnostic active.")
 
     while True:
         try:
@@ -726,7 +775,7 @@ def main():
             if live_trade_state["active"]:
                 poll_live_trade_guardian()
 
-            # 2. Run Observational Filming Cameras (Learning from Wins AND Losses)
+            # 2. Run Observational Filming Cameras
             if archive['active_cameras']:
                 run_filming_cameras(archive, leverage=4)
                 save_film_archive(archive)
@@ -759,7 +808,6 @@ def main():
                 time.sleep(4)
                 continue
 
-            # Scan universe fearlessly
             pings = scan_all_coins_fearlessly(tickers, archive)
 
             # 5. Classify & Film
@@ -782,9 +830,6 @@ def main():
                 if len(ohlcv_1m) < 3:
                     continue
 
-                # --------------------------------------------------------------
-                # AUTONOMOUS CALIBRATION: The bot determines stop and target!
-                # --------------------------------------------------------------
                 natural_swing = calculate_natural_swing_atr(ohlcv_1m)
                 if natural_swing <= 0:
                     natural_swing = cur_price * 0.008
@@ -800,19 +845,16 @@ def main():
                     strategy = "QUICK_IMPULSE_CHASE"
                     side = "long" if dir_move == "EXPANDING_UP" else "short"
 
-                # Bot looks up its learned multipliers for this specific strategy
-                learned_params = brain.strategy_params.get(strategy, {"stop_mult": 1.4, "target_mult": 2.2})
+                learned_params = brain.strategies.get(strategy, {"stop_mult": 1.8, "target_mult": 2.0})
                 learned_stop_mult = learned_params["stop_mult"]
                 learned_target_mult = learned_params["target_mult"]
 
-                # Calculate stop distance using natural coin swing * learned multiplier
+                # Apply the autonomously learned stop floor
                 stop_dist = natural_swing * learned_stop_mult
-                # Floor stop distance to at least 0.75% of coin price so it can never choke in 10 seconds!
-                min_stop_floor = cur_price * 0.0075
+                min_stop_floor = cur_price * (brain.min_stop_floor_pct / 100.0)
                 if stop_dist < min_stop_floor:
                     stop_dist = min_stop_floor
 
-                # Target must always target at least +1.60% gross to net +1.50% after taker fees
                 target_dist = max(natural_swing * learned_target_mult, cur_price * 0.0160)
 
                 entry_price = cur_price
@@ -891,6 +933,7 @@ def main():
                         "started_at": time.time(),
                         "highest_price": entry_price,
                         "lowest_price": entry_price,
+                        "trail_locked": False,
                         "film_ticks": [{"t": 0, "p": entry_price}],
                         "trade_hypothesis": {
                             "side": side,
@@ -904,7 +947,6 @@ def main():
                     archive['active_cameras'].append(new_cam)
                     save_film_archive(archive)
                     print(f"[AUTONOMOUS CAMERA #{len(archive['active_cameras'])} LOCKED] {sym} | Strategy: {strategy} ({side.upper()}) | Stop: {stop_price:.4f} (-{stop_pct:.2f}%) | Target: {target_price:.4f}", flush=True)
-                    write_story_log("PAPER_EXPERIMENT_BEGUN", sym, f"Moved {ping['pct_move']:+.2f}%. Natural swing: ${natural_swing:.4f}.", f"Self-determined stop mult: {learned_stop_mult}x, target mult: {learned_target_mult}x.")
 
             # 6. Status Pulse
             if cycle % 3 == 0:
@@ -913,10 +955,11 @@ def main():
                 live_str = f"LOCKED: {live_trade_state['side'].upper()} {live_trade_state['symbol']}" if live_trade_state['active'] else "SCANNING ALL >$1M"
                 total_liquid = len([s for s, t in tickers.items() if float(t.get('quoteVolume', 0) or 0) >= MIN_24H_VOLUME and s.endswith(':USDT')])
                 global_sync_count = len(global_binance_tickers)
+                penalties_active = len([s for s in brain.coin_penalties if brain.is_coin_in_penalty(s)])
 
                 print(
                     f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid} (Global Binance Pairs: {global_sync_count})\n"
-                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS}\n"
+                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS} | Quarantined Coins: {penalties_active}\n"
                     f"Self-Calibrated Scores -> [{summary_brain}]",
                     flush=True
                 )
