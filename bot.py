@@ -38,7 +38,7 @@ class PingHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b'{"recipes": {}}')
         else:
             status = {
-                "engine": "APEX-V14 Fully Autonomous Hypothesis Student",
+                "engine": "APEX-V16 Growing-Depth & Anti-Spoofing Order Flow Engine",
                 "vault_protected": True,
                 "recipes_active": len(brain.recipes),
                 "summary": brain.get_summary_status()
@@ -58,7 +58,7 @@ def start_keep_alive():
 # ==============================================================================
 # 2. EMERGENCY CIRCUIT BREAKER & REAL CAPITAL VAULT
 # ==============================================================================
-ABSOLUTE_EQUITY_FLOOR = 1.50   # Hard floor ($1.50)
+ABSOLUTE_EQUITY_FLOOR = 1.50   # Vault hard floor ($1.50)
 MAX_CONSECUTIVE_LOSSES = 2     # Two live losses = mandatory rest
 MAX_ORDER_NOTIONAL = 7.50      # Cap notional size
 MIN_ORDER_NOTIONAL = 5.15      # Bitget $5.00 min + buffer
@@ -143,35 +143,43 @@ def write_story_log(event_type, symbol, observation, lesson):
     print(f"[JOURNAL] {event_type} on {symbol}: {observation} | Lesson: {lesson}", flush=True)
 
 # ==============================================================================
-# 4. AUTONOMOUS HYPOTHESIS & RECIPE ENGINE (THE TASTE-TESTER)
+# 4. AUTONOMOUS HYPOTHESIS & DEPTH TREND BRAIN
 # ==============================================================================
 class AutonomousChefBrain:
-    """
-    Acts like a chef tasting the food. Doesn't follow rigid rules from the programmer.
-    Analyzes its own outcomes, invents new recipes, tests them in paper mode,
-    and updates its recipe book until it hits consistent >= +1.50% wins.
-    """
     def __init__(self):
-        # Default starting parameters (the starting recipe)
         self.recipes = {
-            "BREAKOUT_CONTINUATION": {
-                "max_duration_min": 3.5,     # Starts at 3.5m instead of 7m
-                "stop_mult": 1.6,
+            "GROWING_BID_PRESSURE_LONG": {
+                "max_duration_min": 3.0,
+                "stop_mult": 1.4,
                 "target_mult": 1.8,
-                "invert_bias": False,        # Will invert if it keeps failing!
+                "invert_bias": False,
+                "trials": []
+            },
+            "GROWING_ASK_DUMP_SHORT": {
+                "max_duration_min": 3.0,
+                "stop_mult": 1.4,
+                "target_mult": 1.8,
+                "invert_bias": False,
+                "trials": []
+            },
+            "BREAKOUT_CONTINUATION": {
+                "max_duration_min": 3.0,
+                "stop_mult": 1.5,
+                "target_mult": 1.7,
+                "invert_bias": True,
                 "trials": []
             },
             "MEAN_REVERSION_SNAP": {
-                "max_duration_min": 4.0,
-                "stop_mult": 1.7,
+                "max_duration_min": 3.5,
+                "stop_mult": 1.6,
                 "target_mult": 1.8,
                 "invert_bias": False,
                 "trials": []
             },
             "QUICK_IMPULSE_CHASE": {
-                "max_duration_min": 3.0,
+                "max_duration_min": 2.8,
                 "stop_mult": 1.5,
-                "target_mult": 1.7,
+                "target_mult": 1.6,
                 "invert_bias": False,
                 "trials": []
             }
@@ -202,10 +210,6 @@ class AutonomousChefBrain:
             pass
 
     def evaluate_and_invent_recipe(self, strat_name, completed_tape, recent_tapes):
-        """
-        THE HUMAN BRAIN: Analyzes the tape, identifies what failed,
-        and invents a modified recipe to test on the next paper trade.
-        """
         r = self.recipes.get(strat_name)
         if not r:
             return
@@ -216,63 +220,40 @@ class AutonomousChefBrain:
         outcome = completed_tape['outcome']
         sym = completed_tape['symbol']
 
-        # ----------------------------------------------------------------------
-        # DISCOVERY 1: Time Horizon Calibration (Killing the Chop Graveyard)
-        # ----------------------------------------------------------------------
-        # If the trade timed out in chop, the bot realizes its holding window is too long!
+        # 1. Stagnation prevention: shorten hold time if it decays
         if outcome == "STAGNATION_TIMEOUT":
             old_timer = r['max_duration_min']
-            # Shorten the duration timer towards where it actually peaked
-            r['max_duration_min'] = max(round(r['max_duration_min'] - 0.5, 1), 2.0)
-            reasoning = f"AUTONOMOUS ADJUSTMENT: {strat_name} decayed into chop over {dur:.1f}m. Shortened holding window from {old_timer}m -> {r['max_duration_min']}m."
-            print(f"\n[CHEF REFLECTION] {reasoning}\n", flush=True)
-            write_story_log("RECIPE_MODIFIED", sym, f"Adjusted max hold to {r['max_duration_min']}m.", reasoning)
+            r['max_duration_min'] = max(round(r['max_duration_min'] - 0.4, 1), 1.8)
+            print(f"\n[CHEF REFLECTION] {strat_name} stagnated. Shortened hold: {old_timer}m -> {r['max_duration_min']}m.\n", flush=True)
 
-        # ----------------------------------------------------------------------
-        # DISCOVERY 2: The Inversion Principle (Stopping 0/10 Failures)
-        # ----------------------------------------------------------------------
-        # Look at the last 6 trials. If win rate is under 15%, the strategy is backwards!
+        # 2. Inversion check
         recent_trials = r['trials'][-6:] if len(r['trials']) >= 6 else []
         if len(recent_trials) >= 6 and sum(recent_trials) <= 1:
             r['invert_bias'] = not r['invert_bias']
-            r['trials'] = [] # Reset scorecard to test inverted hypothesis
-            new_mode = "INVERTED (Fading/Counter-Trading)" if r['invert_bias'] else "NORMAL"
-            reasoning = f"AUTONOMOUS SHIFT: {strat_name} failed repeatedly (win rate <15%). Inverting direction bias to: {new_mode}."
-            print(f"\n[CHEF REFLECTION] {reasoning}\n", flush=True)
-            write_story_log("RECIPE_INVERTED", sym, f"Flipping strategy direction.", reasoning)
+            r['trials'] = []
+            print(f"\n[CHEF REFLECTION] {strat_name} failed repeatedly. Inverted bias: {r['invert_bias']}\n", flush=True)
 
-        # ----------------------------------------------------------------------
-        # DISCOVERY 3: Greed vs Capacity Tuning
-        # ----------------------------------------------------------------------
-        # If price pushed > 1.2% profit, but missed the take-profit target
+        # 3. Greed prevention
         if peak >= 1.20 and pnl < 0.60:
-            old_t = r['target_mult']
-            r['target_mult'] = max(round(r['target_mult'] - 0.10, 2), 1.4)
-            reasoning = f"AUTONOMOUS ADJUSTMENT: {strat_name} peaked at +{peak:.2f}% but failed target. Lowered target multiplier {old_t}x -> {r['target_mult']}x."
-            print(f"\n[CHEF REFLECTION] {reasoning}\n", flush=True)
+            r['target_mult'] = max(round(r['target_mult'] - 0.08, 2), 1.4)
 
-        # ----------------------------------------------------------------------
-        # DISCOVERY 4: Anti-Revenge Rotation Penalty
-        # ----------------------------------------------------------------------
+        # 4. Anti-revenge overtrading quarantine
         self.recent_coin_history.append((sym, time.time(), pnl))
         if len(self.recent_coin_history) > 30:
             self.recent_coin_history.pop(0)
 
-        same_coin_recent = [e for e in self.recent_coin_history if e[0] == sym and (time.time() - e[1]) <= 600]
-        if len(same_coin_recent) >= 2 and sum([e[2] for e in same_coin_recent]) < 0:
-            self.coin_penalties[sym] = time.time() + 240 # 4m rest on this chart
-            print(f"\n[CHEF ROTATION] Put {sym} on 4-minute timeout after repeated choppy losses.\n", flush=True)
+        same_coin = [e for e in self.recent_coin_history if e[0] == sym and (time.time() - e[1]) <= 600]
+        if len(same_coin) >= 2 and sum([e[2] for e in same_coin]) < 0:
+            self.coin_penalties[sym] = time.time() + 240
+            print(f"\n[CHEF ROTATION] Put {sym} on 4-minute timeout.\n", flush=True)
 
         self.save_recipes()
 
     def record_film_outcome(self, strategy, net_pnl, reason, film_tape, all_tapes):
         if strategy not in self.recipes:
             self.recipes[strategy] = {
-                "max_duration_min": 3.5,
-                "stop_mult": 1.6,
-                "target_mult": 1.8,
-                "invert_bias": False,
-                "trials": []
+                "max_duration_min": 3.0, "stop_mult": 1.5, "target_mult": 1.7,
+                "invert_bias": False, "trials": []
             }
 
         r = self.recipes[strategy]
@@ -281,7 +262,6 @@ class AutonomousChefBrain:
         if len(r["trials"]) > 10:
             r["trials"].pop(0)
 
-        # Run autonomous hypothesis adjustment
         self.evaluate_and_invent_recipe(strategy, film_tape, all_tapes)
 
         win_count = sum(r["trials"])
@@ -324,7 +304,7 @@ class AutonomousChefBrain:
 brain = AutonomousChefBrain()
 
 # ==============================================================================
-# 5. EXCHANGES SETUP (BITGET EXECUTION + GLOBAL RADAR)
+# 5. EXCHANGES SETUP
 # ==============================================================================
 API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -365,8 +345,12 @@ ticker_memory = {}
 global_composite_tickers = {}
 radar_counts = {"Binance": 0, "Bybit": 0, "OKX": 0, "Gate": 0}
 
+# Order flow depth memory to track whether bids/asks are INCREASING over time
+# Format: { symbol: [ (timestamp, bid_usdt, ask_usdt, mid_price), ... ] }
+depth_history = {}
+
 # ==============================================================================
-# 6. GLOBAL MULTI-EXCHANGE RADAR (BINANCE DIRECT VIA VISION CDN)
+# 6. GLOBAL MULTI-EXCHANGE RADAR (BINANCE VISION + TOP EXCHANGES)
 # ==============================================================================
 def fetch_binance_vision_tickers():
     endpoints = [
@@ -405,19 +389,17 @@ def start_global_radar_worker():
     global global_composite_tickers, radar_counts
     def worker():
         while True:
-            # 1. Binance via data mirror
             bn = fetch_binance_vision_tickers()
             if bn:
                 global_composite_tickers.update(bn)
                 radar_counts["Binance"] = len(bn)
 
-            # 2. Bybit, OKX, Gate
             for ex_name, ex in [("Bybit", bybit_radar), ("OKX", okx_radar), ("Gate", gate_radar)]:
                 try:
                     tickers = ex.fetch_tickers()
                     c = 0
                     for s, t in tickers.items():
-                        base = s.split('/')[0].split(':')[0].split('_')[0].upper()
+                        base = s.split('/')[0].split(':')[0].upper()
                         pct = float(t.get('percentage', 0) or 0)
                         vol = float(t.get('quoteVolume', 0) or 0)
                         last_p = float(t.get('last', 0) or 0)
@@ -506,7 +488,102 @@ def close_short_position(symbol, amount):
         return bitget.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'reduceOnly': True, 'tradeSide': 'close'})
 
 # ==============================================================================
-# 9. SCANNER WITH AUTONOMOUS ROTATION
+# 9. GROWING-DEPTH & ANTI-SPOOFING ASYMMETRY AUDIT
+# ==============================================================================
+last_depth_audit_time = 0
+
+def audit_order_flow_depth_trend(symbol):
+    """
+    HUMAN DEPTH TRACKER:
+    Measures depth over time.
+    1. For Long: Not only must Bids >> Asks, but Bids must be INCREASING minute-over-minute.
+       If Bids are reducing (spoof cancel or dying demand), it VETOES the trade!
+    2. For Short: Not only must Asks >> Bids, but Asks must be INCREASING minute-over-minute.
+       If Asks are reducing, it VETOES the trade!
+    """
+    global depth_history
+    try:
+        ob = bitget.fetch_order_book(symbol, limit=25)
+        bids = ob.get('bids', [])
+        asks = ob.get('asks', [])
+
+        if not bids or not asks:
+            return None
+
+        best_bid = bids[0][0]
+        best_ask = asks[0][0]
+        cur_mid = (best_bid + best_ask) / 2.0
+
+        # Calculate dollar depth within 1.5% distance
+        bid_depth_usdt = sum([price * qty for price, qty in bids if price >= cur_mid * 0.985])
+        ask_depth_usdt = sum([price * qty for price, qty in asks if price <= cur_mid * 1.015])
+
+        if ask_depth_usdt <= 0 or bid_depth_usdt <= 0:
+            return None
+
+        now = time.time()
+        imbalance_ratio = bid_depth_usdt / ask_depth_usdt
+
+        # Initialize history for this symbol
+        if symbol not in depth_history:
+            depth_history[symbol] = []
+
+        depth_history[symbol].append((now, bid_depth_usdt, ask_depth_usdt, cur_mid))
+        if len(depth_history[symbol]) > 10:
+            depth_history[symbol].pop(0)
+
+        # We need at least 1 prior check (30 to 90 seconds ago) to verify if depth is INCREASING
+        prior_records = [rec for rec in depth_history[symbol] if 20.0 <= (now - rec[0]) <= 120.0]
+        if not prior_records:
+            return None
+
+        prev_time, prev_bid, prev_ask, prev_price = prior_records[-1]
+
+        # ----------------------------------------------------------------------
+        # SCENARIO A: GROWING BID PRESSURE (REAL LONG ACCUMULATION)
+        # Bids must be at least 3x asks, AND Bids must be INCREASING!
+        # If bids are reducing, it's a fake/spoof wall -> VETO!
+        # ----------------------------------------------------------------------
+        if imbalance_ratio >= 3.0 and bid_depth_usdt >= 20_000:
+            bid_growth_pct = ((bid_depth_usdt - prev_bid) / prev_bid) * 100.0
+
+            # It MUST be increasing or holding strong (+5% or more growth), NOT reducing!
+            if bid_growth_pct >= 5.0 and ask_depth_usdt <= (prev_ask * 1.2):
+                return {
+                    "type": "GROWING_BID_PRESSURE_LONG",
+                    "side": "long",
+                    "ratio": round(imbalance_ratio, 2),
+                    "bid_usdt": round(bid_depth_usdt, 0),
+                    "bid_growth_pct": round(bid_growth_pct, 1),
+                    "ask_usdt": round(ask_depth_usdt, 0),
+                    "mid_price": cur_mid
+                }
+
+        # ----------------------------------------------------------------------
+        # SCENARIO B: GROWING ASK DUMP (REAL SHORT PRESSURE)
+        # Asks must be at least 3x bids, AND Asks must be INCREASING!
+        # If asks are reducing, buyers are defending -> VETO!
+        # ----------------------------------------------------------------------
+        elif imbalance_ratio <= 0.33 and ask_depth_usdt >= 20_000:
+            ask_growth_pct = ((ask_depth_usdt - prev_ask) / prev_ask) * 100.0
+
+            if ask_growth_pct >= 5.0 and bid_depth_usdt <= (prev_bid * 1.2):
+                return {
+                    "type": "GROWING_ASK_DUMP_SHORT",
+                    "side": "short",
+                    "ratio": round(imbalance_ratio, 2),
+                    "ask_usdt": round(ask_depth_usdt, 0),
+                    "ask_growth_pct": round(ask_growth_pct, 1),
+                    "bid_usdt": round(bid_depth_usdt, 0),
+                    "mid_price": cur_mid
+                }
+
+    except Exception:
+        return None
+    return None
+
+# ==============================================================================
+# 10. FAST SCANNER
 # ==============================================================================
 def scan_all_coins_fearlessly(tickers, archive):
     global ticker_memory
@@ -560,7 +637,7 @@ def scan_all_coins_fearlessly(tickers, archive):
     return pings
 
 # ==============================================================================
-# 10. MULTI-CAMERA LAB (APPLIES DISCOVERED RECIPES IN REAL TIME)
+# 11. MULTI-CAMERA LAB (APPLIES RECIPES IN REAL TIME)
 # ==============================================================================
 def run_filming_cameras(archive, leverage=4):
     remaining = []
@@ -574,9 +651,8 @@ def run_filming_cameras(archive, leverage=4):
         strategy = cam['strategy']
         elapsed_min = (time.time() - cam['started_at']) / 60
 
-        # Retrieve the bot's self-determined holding timer for this recipe
-        recipe = brain.recipes.get(strategy, {"max_duration_min": 3.5})
-        max_hold_time = recipe.get("max_duration_min", 3.5)
+        recipe = brain.recipes.get(strategy, {"max_duration_min": 3.0})
+        max_hold_time = recipe.get("max_duration_min", 3.0)
 
         try:
             ticker = bitget.fetch_ticker(sym)
@@ -613,13 +689,13 @@ def run_filming_cameras(archive, leverage=4):
         outcome = "MONITORING"
         causality = ""
 
-        # Immediate Bank: If net profit crosses >= +1.50% at ANY second, lock the win!
+        # Early Bank: Catch >= +1.50% net immediately
         if net_pnl >= 1.50:
             is_finished = True
             outcome = "TARGET_ACHIEVED"
             causality = f"Captured target early at +{net_pnl:.2f}% net!"
 
-        # Profit Protection: If reached +1.0% peak, move stop to breakeven (+0.25%)
+        # Breakeven Shield (+1.0% peak -> lock +0.25%)
         elif peak_pnl >= 1.00 and not cam.get('trail_locked', False):
             cam['trail_locked'] = True
             if side == 'long':
@@ -628,23 +704,23 @@ def run_filming_cameras(archive, leverage=4):
                 cam['trade_hypothesis']['stop_price'] = entry_price * 0.9975
             stop_price = cam['trade_hypothesis']['stop_price']
 
-        # Check 1: Liquidation
+        # 1. Liquidation
         elif (side == 'long' and cur_price <= liq_price) or (side == 'short' and cur_price >= liq_price):
             is_finished = True
             outcome = "LIQUIDATION_LOSS"
             causality = f"Hit liquidation at {liq_price:.4f}."
 
-        # Check 2: Stop Loss Hit
+        # 2. Stop Hit
         elif (side == 'long' and cur_price <= stop_price) or (side == 'short' and cur_price >= stop_price):
             is_finished = True
             outcome = "STOP_LOSS_HIT"
             causality = f"Hit stop boundary at {stop_price:.4f}. Net PnL: {net_pnl:+.2f}%."
 
-        # Check 3: Self-Determined Holding Timeout (Dynamic, not hardcoded!)
+        # 3. Dynamic Timeout
         elif elapsed_min >= max_hold_time:
             is_finished = True
             outcome = "STAGNATION_TIMEOUT"
-            causality = f"Momentum decayed after self-determined hold limit of {max_hold_time:.1f}m. Net PnL: {net_pnl:+.2f}%."
+            causality = f"Decayed after dynamic hold limit of {max_hold_time:.1f}m. Net PnL: {net_pnl:+.2f}%."
 
         if is_finished:
             film_tape = {
@@ -670,7 +746,7 @@ def run_filming_cameras(archive, leverage=4):
     archive['active_cameras'] = remaining
 
 # ==============================================================================
-# 11. LIVE GUARDIAN (FOR REAL MONEY ONLY WHEN QUALIFIED)
+# 12. LIVE GUARDIAN (FOR REAL MONEY)
 # ==============================================================================
 live_trade_state = {
     "active": False, "symbol": None, "side": None, "entry_price": 0.0,
@@ -732,7 +808,7 @@ def poll_live_trade_guardian():
         return
 
     if elapsed_sec >= 90 and pnl_pct < 0.05:
-        execute_live_exit("Human Hesitation Cut: Momentum failed", pnl_pct)
+        execute_live_exit("Human Hesitation Cut: Momentum stalled", pnl_pct)
         return
 
     if side == 'long' and cur_price <= live_trade_state["initial_stop_price"]:
@@ -741,13 +817,13 @@ def poll_live_trade_guardian():
         execute_live_exit("Stop Hit", pnl_pct)
 
 # ==============================================================================
-# 12. MAIN LOOP
+# 13. MAIN ENGINE LOOP
 # ==============================================================================
 def main():
-    global live_trade_state
+    global live_trade_state, last_depth_audit_time
     start_keep_alive()
     start_global_radar_worker()
-    print("[SYSTEM] APEX-V14 Fully Autonomous Hypothesis Student online.", flush=True)
+    print("[SYSTEM] APEX-V16 Growing-Depth & Anti-Spoofing Engine online.", flush=True)
 
     try:
         bitget.load_markets()
@@ -792,16 +868,74 @@ def main():
             raw_notional = (usdt_free * BALANCE_USE_PCT) * leverage
             notional = max(min(raw_notional, MAX_ORDER_NOTIONAL), MIN_ORDER_NOTIONAL)
 
-            # 4. Single-Call Scan
+            # 4. Fetch Universe Tickers
             try:
                 tickers = bitget.fetch_tickers()
             except Exception:
                 time.sleep(4)
                 continue
 
+            active_syms = {c['symbol'] for c in archive['active_cameras']}
+
+            # ==============================================================
+            # THE 5-MINUTE GROWING DEPTH SQUEEZE AUDIT (ANTI-SPOOFING)
+            # ==============================================================
+            now_t = time.time()
+            if now_t - last_depth_audit_time >= 120.0:  # Check depth momentum every 2 minutes
+                last_depth_audit_time = now_t
+                top_vol_coins = [
+                    s for s, t in tickers.items()
+                    if s.endswith(":USDT") and float(t.get('quoteVolume', 0) or 0) >= MIN_24H_VOLUME
+                ][:18]
+
+                for audit_sym in top_vol_coins:
+                    if audit_sym in active_syms or brain.is_coin_in_penalty(audit_sym):
+                        continue
+
+                    depth_event = audit_order_flow_depth_trend(audit_sym)
+                    if depth_event and len(archive['active_cameras']) < MAX_PARALLEL_CAMERAS:
+                        sq_type = depth_event["type"]
+                        sq_side = depth_event["side"]
+                        mid_p = depth_event["mid_price"]
+                        ratio = depth_event["ratio"]
+
+                        r = brain.recipes.get(sq_type, {"stop_mult": 1.4, "target_mult": 1.8, "max_duration_min": 3.0})
+                        stop_d = max(mid_p * 0.009, mid_p * 0.006 * r['stop_mult'])
+                        target_d = max(mid_p * 0.0160, mid_p * 0.006 * r['target_mult'])
+
+                        s_price = mid_p - stop_d if sq_side == 'long' else mid_p + stop_d
+                        t_price = mid_p + target_d if sq_side == 'long' else mid_p - target_d
+                        l_price = mid_p * (1.0 - (1.0 / leverage) + BITGET_MAINTENANCE_MARGIN) if sq_side == 'long' else mid_p * (1.0 + (1.0 / leverage) - BITGET_MAINTENANCE_MARGIN)
+
+                        new_cam = {
+                            "symbol": audit_sym,
+                            "strategy": sq_type,
+                            "started_at": time.time(),
+                            "highest_price": mid_p,
+                            "lowest_price": mid_p,
+                            "trail_locked": False,
+                            "film_ticks": [{"t": 0, "p": mid_p}],
+                            "trade_hypothesis": {
+                                "side": sq_side,
+                                "entry_price": mid_p,
+                                "stop_price": s_price,
+                                "target_price": t_price,
+                                "liq_price": l_price,
+                                "simulated_notional": notional
+                            }
+                        }
+                        archive['active_cameras'].append(new_cam)
+                        active_syms.add(audit_sym)
+                        save_film_archive(archive)
+
+                        growth_str = f"Bid grew +{depth_event['bid_growth_pct']}%" if sq_side == 'long' else f"Ask grew +{depth_event['ask_growth_pct']}%"
+                        obs = f"Order Flow Squeeze confirmed! Ratio: {ratio}x ({growth_str}). Pressure verified."
+                        print(f"\n[GROWING DEPTH VERIFIED] {audit_sym} -> {sq_type} ({sq_side.upper()}) | {obs}", flush=True)
+                        write_story_log("GROWING_DEPTH_CONFIRMED", audit_sym, obs, f"Testing {sq_type}.")
+
+            # 5. Formulate Hypotheses on Momentum Pings
             pings = scan_all_coins_fearlessly(tickers, archive)
 
-            # 5. Formulate Hypotheses using Discovered Recipes
             for ping in pings:
                 sym = ping['symbol']
                 base = ping['base']
@@ -812,11 +946,9 @@ def main():
                 if live_trade_state["active"]:
                     break
 
-                # Global cross-exchange check
                 global_info = global_composite_tickers.get(base)
                 global_pct = global_info.get('pct_24h', 0) if global_info else 0
 
-                # Select Strategy Archetype
                 if global_info and abs(global_pct) > 3.0:
                     strategy = "BREAKOUT_CONTINUATION"
                     base_side = "long" if dir_move == "EXPANDING_UP" else "short"
@@ -827,16 +959,9 @@ def main():
                     strategy = "QUICK_IMPULSE_CHASE"
                     base_side = "long" if dir_move == "EXPANDING_UP" else "short"
 
-                # Pull the bot's current recipe for this strategy
-                r = brain.recipes.get(strategy, {"stop_mult": 1.6, "target_mult": 1.8, "invert_bias": False})
+                r = brain.recipes.get(strategy, {"stop_mult": 1.5, "target_mult": 1.7, "invert_bias": False})
+                side = ("short" if base_side == "long" else "long") if r.get("invert_bias", False) else base_side
 
-                # Check if the bot autonomously inverted this recipe because it kept failing!
-                if r.get("invert_bias", False):
-                    side = "short" if base_side == "long" else "long"
-                else:
-                    side = base_side
-
-                # Autonomous stop distance
                 wave = abs(cur_price - start_price)
                 stop_dist = max(wave * r['stop_mult'], cur_price * 0.009)
                 target_dist = max(wave * r['target_mult'], cur_price * 0.0160)
@@ -890,7 +1015,7 @@ def main():
                 # ==============================================================
                 # OPEN AUTONOMOUS PAPER CAMERA
                 # ==============================================================
-                elif len(archive['active_cameras']) < MAX_PARALLEL_CAMERAS and sym not in {c['symbol'] for c in archive['active_cameras']}:
+                elif len(archive['active_cameras']) < MAX_PARALLEL_CAMERAS and sym not in active_syms:
                     new_cam = {
                         "symbol": sym,
                         "strategy": strategy,
@@ -909,6 +1034,7 @@ def main():
                         }
                     }
                     archive['active_cameras'].append(new_cam)
+                    active_syms.add(sym)
                     save_film_archive(archive)
                     inv_tag = " [INVERTED]" if r.get("invert_bias") else ""
                     print(f"[AUTONOMOUS CAMERA #{len(archive['active_cameras'])} LOCKED] {sym} | {strategy}{inv_tag} ({side.upper()}) | Max Hold: {r['max_duration_min']}m", flush=True)
