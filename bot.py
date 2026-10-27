@@ -16,7 +16,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX-V11 Self-Diagnosing Autonomous Engine is active.")
+        self.wfile.write(b"APEX-V12 Global Top-5 Cross-Exchange Engine is active.")
 
     def log_message(self, format, *args):
         return
@@ -37,7 +37,7 @@ STUDY_LOG_FILE = "empirical_tapes.json"
 STORYBOOK_FILE = "market_storybook.jsonl"
 BRAIN_FILE = "student_brain.json"
 
-ABSOLUTE_EQUITY_FLOOR = 1.50   # Vault floor ($1.50)
+ABSOLUTE_EQUITY_FLOOR = 1.50   # Vault hard floor ($1.50)
 MAX_CONSECUTIVE_LOSSES = 2     # Two live losses = mandatory rest
 MAX_ORDER_NOTIONAL = 7.50      # Cap notional size
 MIN_ORDER_NOTIONAL = 5.15      # Bitget $5.00 min + buffer
@@ -96,7 +96,7 @@ class CircuitBreaker:
         if pnl_pct < 0:
             self.consecutive_losses += 1
             self.last_loss_time = time.time()
-            print(f"\n[CIRCUIT BREAKER] Strike logged. Losses: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
+            print(f"\n[CIRCUIT BREAKER] Live loss logged. Strikes: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
         else:
             self.consecutive_losses = 0
             print("\n[CIRCUIT BREAKER] Winning trade logged. Strikes cleared to 0.", flush=True)
@@ -120,17 +120,12 @@ def write_story_log(event_type, symbol, observation, lesson):
             f.write(json.dumps(story_entry) + "\n")
     except Exception:
         pass
-    print(f"[JOURNAL] {event_type} on {symbol}: {observation} | Lesson: {lesson}", flush=True)
+    print(f"[JOURNAL] {event_type} on {symbol}: {observation} -> LESSON: {lesson}", flush=True)
 
 # ==============================================================================
 # 4. THE SELF-REFLECTIVE CRITIC & AUTONOMOUS DIAGNOSTIC BRAIN
 # ==============================================================================
 class SelfReflectiveBrain:
-    """
-    Acts like a human reviewing their own trading journal.
-    Identifies mistakes (over-trading one coin, holding into chop, suffocating stops),
-    diagnoses the cause, and changes its own operational parameters autonomously.
-    """
     def __init__(self):
         self.strategies = {
             "QUICK_IMPULSE_CHASE": {"stop_mult": 1.8, "target_mult": 2.0, "trials": []},
@@ -138,7 +133,7 @@ class SelfReflectiveBrain:
             "BREAKOUT_CONTINUATION": {"stop_mult": 1.9, "target_mult": 2.2, "trials": []}
         }
         self.quarantine_mode = False
-        self.coin_penalties = {}       # Dynamic penalty timers on bad coins
+        self.coin_penalties = {}       # Dynamic penalty timers on over-traded coins
         self.recent_coin_history = []   # Tracks coin entry frequency
         self.diagnosed_mistakes = []    # History of identified mistakes & fixes
         self.min_stop_floor_pct = 0.85  # Dynamic stop distance floor
@@ -169,10 +164,6 @@ class SelfReflectiveBrain:
             pass
 
     def run_post_mortem_audit(self, completed_tape, all_recent_tapes):
-        """
-        THE HUMAN-STYLE REFLECTION:
-        After every trade, the bot reviews what went wrong and adjusts itself.
-        """
         sym = completed_tape['symbol']
         pnl = completed_tape['net_pnl_pct']
         peak = completed_tape['peak_pnl_pct']
@@ -184,34 +175,27 @@ class SelfReflectiveBrain:
         if len(self.recent_coin_history) > 30:
             self.recent_coin_history.pop(0)
 
-        # ----------------------------------------------------------------------
-        # MISTAKE 1: Over-trading & Revenge Chasing the Same Coin
-        # ----------------------------------------------------------------------
+        # 1. Over-trading check: If 3+ trades on same coin in 10m with net loss, quarantine it
         recent_same_coin = [entry for entry in self.recent_coin_history if entry[0] == sym and (time.time() - entry[1]) <= 600]
         if len(recent_same_coin) >= 3:
             net_coin_pnl = sum([entry[2] for entry in recent_same_coin])
             if net_coin_pnl < 0:
-                penalty_seconds = 300 # 5-minute quarantine on this coin
-                self.coin_penalties[sym] = time.time() + penalty_seconds
-                diagnosis = f"MISTAKE IDENTIFIED: Revenge over-trading on {sym} ({len(recent_same_coin)} trades in 10m with net loss {net_coin_pnl:+.2f}%). FIX: Quarantined {sym} for 5 minutes."
+                self.coin_penalties[sym] = time.time() + 300 # 5m quarantine
+                diagnosis = f"MISTAKE IDENTIFIED: Over-trading on {sym} ({len(recent_same_coin)} trades in 10m). Net loss: {net_coin_pnl:+.2f}%. Quarantined {sym} for 5m."
                 self.diagnosed_mistakes.append(diagnosis)
                 print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
 
-        # ----------------------------------------------------------------------
-        # MISTAKE 2: The Slow Bleed (Greed - Letting a Winner Turn into Chop)
-        # ----------------------------------------------------------------------
+        # 2. Greed check: Letting a +1.20% winner decay into chop
         if peak >= 1.20 and pnl < 0.50 and dur >= 6.0:
-            diagnosis = f"MISTAKE IDENTIFIED: Greed on {sym}. Peaked at +{peak:.2f}%, but held for {dur:.1f}m until momentum died into {pnl:+.2f}%. FIX: Lowered target multiplier for {strat_name}."
+            diagnosis = f"MISTAKE IDENTIFIED: Greed on {sym}. Peaked at +{peak:.2f}%, but decayed into {pnl:+.2f}% over {dur:.1f}m. Lowering target multiplier."
             if strat:
                 strat['target_mult'] = max(round(strat['target_mult'] - 0.08, 2), 1.6)
             self.diagnosed_mistakes.append(diagnosis)
             print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
 
-        # ----------------------------------------------------------------------
-        # MISTAKE 3: Choking the Trade (Stop Loss Inside Random Noise)
-        # ----------------------------------------------------------------------
+        # 3. Choke check: Died in under 60 seconds
         if completed_tape['outcome'] == "STOP_LOSS_HIT" and dur < 1.0:
-            diagnosis = f"MISTAKE IDENTIFIED: Suffocated {sym} with too tight stop. Died in {dur*60:.0f}s. FIX: Widened stop floor from {self.min_stop_floor_pct}% to {self.min_stop_floor_pct + 0.08}%."
+            diagnosis = f"MISTAKE IDENTIFIED: Suffocated {sym} in {dur*60:.0f}s. Widening stop floor to {self.min_stop_floor_pct + 0.08}%."
             self.min_stop_floor_pct = min(round(self.min_stop_floor_pct + 0.08, 2), 1.50)
             if strat:
                 strat['stop_mult'] = min(round(strat['stop_mult'] + 0.10, 2), 2.5)
@@ -230,7 +214,6 @@ class SelfReflectiveBrain:
         if len(rec["trials"]) > 10:
             rec["trials"].pop(0)
 
-        # Run the autonomous audit to spot mistakes and fix itself
         self.run_post_mortem_audit(film_tape, all_tapes)
 
         win_count = sum(rec["trials"])
@@ -274,7 +257,7 @@ class SelfReflectiveBrain:
 brain = SelfReflectiveBrain()
 
 # ==============================================================================
-# 5. EXCHANGES SETUP
+# 5. EXCHANGES SETUP (BITGET FOR EXECUTION + MULTI-RADAR ENGINES)
 # ==============================================================================
 API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -296,6 +279,7 @@ NON_CRYPTO_SYMBOLS = {
     'ANTHROPIC', 'OPENAI', 'SPACEX', 'STRIPE', 'SCALE'
 }
 
+# 1. Primary Execution Exchange (Bitget with your API keys)
 bitget = ccxt.bitget({
     "apiKey": API_KEY,
     "secret": SECRET_KEY,
@@ -308,39 +292,71 @@ bitget = ccxt.bitget({
     }
 })
 
-global_radar = ccxt.binanceusdm({
+# 2. Top-Tier Global Intelligence Radar Instances (Public Data Only)
+bybit_radar = ccxt.bybit({
     "enableRateLimit": True,
     "timeout": 10000,
+    "options": {"defaultType": "linear"}
+})
+
+gate_radar = ccxt.gate({
+    "enableRateLimit": True,
+    "timeout": 10000,
+    "options": {"defaultType": "swap"}
+})
+
+okx_radar = ccxt.okx({
+    "enableRateLimit": True,
+    "timeout": 10000,
+    "options": {"defaultType": "swap"}
 })
 
 ticker_memory = {}
-global_binance_tickers = {}
+global_composite_tickers = {}
 
 # ==============================================================================
-# 6. GLOBAL INTELLIGENCE WORKER (BINANCE STREAM)
+# 6. GLOBAL MULTI-EXCHANGE RADAR WORKER (BYBIT + OKX + GATE.IO)
 # ==============================================================================
 def start_global_radar_worker():
-    global global_binance_tickers
+    """
+    Connects to the top global exchanges (Bybit, OKX, Gate.io).
+    Aggregates global consensus so the bot knows if a move is real worldwide.
+    """
+    global global_composite_tickers
     def worker():
+        exchanges = [
+            ("Bybit", bybit_radar),
+            ("OKX", okx_radar),
+            ("Gate", gate_radar)
+        ]
         while True:
-            try:
-                tickers = global_radar.fetch_tickers()
-                temp = {}
-                for s, t in tickers.items():
-                    base = s.split('/')[0].split(':')[0].upper()
-                    temp[base] = {
-                        "price": float(t.get('last', 0) or 0),
-                        "pct_24h": float(t.get('percentage', 0) or 0),
-                        "vol_quote": float(t.get('quoteVolume', 0) or 0)
-                    }
-                global_binance_tickers = temp
-                time.sleep(3)
-            except Exception:
-                time.sleep(5)
+            for ex_name, ex in exchanges:
+                try:
+                    tickers = ex.fetch_tickers()
+                    count = 0
+                    for s, t in tickers.items():
+                        base = s.split('/')[0].split(':')[0].split('_')[0].upper()
+                        pct = float(t.get('percentage', 0) or 0)
+                        vol = float(t.get('quoteVolume', 0) or 0)
+                        last_p = float(t.get('last', 0) or 0)
+
+                        if base and last_p > 0:
+                            global_composite_tickers[base] = {
+                                "source": ex_name,
+                                "pct_24h": pct,
+                                "vol_quote": vol,
+                                "price": last_p,
+                                "updated_at": time.time()
+                            }
+                            count += 1
+                except Exception:
+                    pass
+                time.sleep(2)
+            time.sleep(4)
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    print("[SYSTEM] Global Cross-Exchange Radar engaged (Binance streaming).", flush=True)
+    print("[SYSTEM] Multi-Exchange Composite Radar online (Bybit + OKX + Gate.io streaming).", flush=True)
 
 # ==============================================================================
 # 7. FILMING ARCHIVE PERSISTENCE
@@ -474,7 +490,7 @@ def scan_all_coins_fearlessly(tickers, archive):
         if vol_24h < MIN_24H_VOLUME or symbol in active_syms:
             continue
 
-        # Self-correction check: If the bot penalized this coin for over-trading, skip it!
+        # Skip if penalized by self-reflection for revenge over-trading
         if brain.is_coin_in_penalty(symbol):
             continue
 
@@ -560,7 +576,7 @@ def run_filming_cameras(archive, leverage=4):
         outcome = "MONITORING"
         causality = ""
 
-        # Self-Protective Profit Lock: If peak is up +1.10%, lock breakeven!
+        # Profit Protection: If trade reached +1.10% profit, lock stop at breakeven!
         if peak_pnl >= 1.10 and not cam.get('trail_locked', False):
             cam['trail_locked'] = True
             if side == 'long':
@@ -588,7 +604,7 @@ def run_filming_cameras(archive, leverage=4):
             outcome = "TARGET_ACHIEVED"
             causality = f"Target achieved at {target_price:.4f}. Clean Net PnL: {net_pnl:+.2f}%."
 
-        # 4. Stagnation timeout after 7 minutes (Cut dead weight faster)
+        # 4. Stagnation timeout after 7m
         elif elapsed_min >= 7.0:
             is_finished = True
             outcome = "STAGNATION_TIMEOUT"
@@ -610,7 +626,6 @@ def run_filming_cameras(archive, leverage=4):
                 "reason": causality
             }
             archive['completed_films'].append(film_tape)
-            # Send tape to Self-Reflective Critic for post-mortem analysis
             brain.record_film_outcome(strategy, net_pnl, causality, film_tape, archive['completed_films'])
             save_film_archive(archive)
         else:
@@ -738,7 +753,7 @@ def main():
     global live_trade_state
     start_keep_alive()
     start_global_radar_worker()
-    print("[SYSTEM] APEX-V11 Self-Diagnosing Autonomous Engine online.", flush=True)
+    print("[SYSTEM] APEX-V12 Global Cross-Exchange Engine online.", flush=True)
 
     try:
         bitget.load_markets()
@@ -749,7 +764,7 @@ def main():
     archive = load_film_archive()
     cycle = 1
 
-    write_story_log("SYSTEM_START", "ALL", "Self-Reflective Engine started.", "Autonomous mistake diagnostic active.")
+    write_story_log("SYSTEM_START", "ALL", "Composite Radar active.", "Streaming Bybit + OKX + Gate.io consensus.")
 
     while True:
         try:
@@ -834,8 +849,12 @@ def main():
                 if natural_swing <= 0:
                     natural_swing = cur_price * 0.008
 
+                # Global cross-exchange check
+                global_info = global_composite_tickers.get(base)
+                global_pct = global_info.get('pct_24h', 0) if global_info else 0
+
                 # Select strategy archetype
-                if base in global_binance_tickers and abs(global_binance_tickers[base].get('pct_24h', 0)) > 3.0:
+                if global_info and abs(global_pct) > 3.0:
                     strategy = "BREAKOUT_CONTINUATION"
                     side = "long" if dir_move == "EXPANDING_UP" else "short"
                 elif abs(ping['pct_move']) >= 0.70:
@@ -849,7 +868,6 @@ def main():
                 learned_stop_mult = learned_params["stop_mult"]
                 learned_target_mult = learned_params["target_mult"]
 
-                # Apply the autonomously learned stop floor
                 stop_dist = natural_swing * learned_stop_mult
                 min_stop_floor = cur_price * (brain.min_stop_floor_pct / 100.0)
                 if stop_dist < min_stop_floor:
@@ -954,11 +972,11 @@ def main():
                 strikes = circuit_breaker.consecutive_losses
                 live_str = f"LOCKED: {live_trade_state['side'].upper()} {live_trade_state['symbol']}" if live_trade_state['active'] else "SCANNING ALL >$1M"
                 total_liquid = len([s for s, t in tickers.items() if float(t.get('quoteVolume', 0) or 0) >= MIN_24H_VOLUME and s.endswith(':USDT')])
-                global_sync_count = len(global_binance_tickers)
+                global_sync_count = len(global_composite_tickers)
                 penalties_active = len([s for s in brain.coin_penalties if brain.is_coin_in_penalty(s)])
 
                 print(
-                    f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid} (Global Binance Pairs: {global_sync_count})\n"
+                    f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid} (Global Composite Pairs: {global_sync_count})\n"
                     f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS} | Quarantined Coins: {penalties_active}\n"
                     f"Self-Calibrated Scores -> [{summary_brain}]",
                     flush=True
