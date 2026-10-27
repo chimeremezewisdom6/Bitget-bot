@@ -10,14 +10,40 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
 # ==============================================================================
-# 1. RENDER 24/7 KEEP-ALIVE SERVER (PORT 10000)
+# 1. RENDER 24/7 KEEP-ALIVE & LIVE TAPE VIEWER (PORT 10000)
 # ==============================================================================
+STUDY_LOG_FILE = "empirical_tapes.json"
+STORYBOOK_FILE = "market_storybook.jsonl"
+RECIPE_BOOK_FILE = "autonomous_recipes.json"
+CB_FILE = "circuit_breaker.json"
+LOCKOUT_FILE = "EMERGENCY_LOCKOUT.txt"
+
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+        self.send_header("Content-type", "application/json")
         self.end_headers()
-        self.wfile.write(b"APEX-V13 Binance Direct + Global Top-5 Cross-Exchange Engine active.")
+
+        if self.path == "/tapes":
+            if os.path.exists(STUDY_LOG_FILE):
+                with open(STUDY_LOG_FILE, "r") as f:
+                    self.wfile.write(f.read().encode('utf-8'))
+            else:
+                self.wfile.write(b'{"completed_films": []}')
+        elif self.path == "/recipes":
+            if os.path.exists(RECIPE_BOOK_FILE):
+                with open(RECIPE_BOOK_FILE, "r") as f:
+                    self.wfile.write(f.read().encode('utf-8'))
+            else:
+                self.wfile.write(b'{"recipes": {}}')
+        else:
+            status = {
+                "engine": "APEX-V14 Fully Autonomous Hypothesis Student",
+                "vault_protected": True,
+                "recipes_active": len(brain.recipes),
+                "summary": brain.get_summary_status()
+            }
+            self.wfile.write(json.dumps(status, indent=2).encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -32,13 +58,7 @@ def start_keep_alive():
 # ==============================================================================
 # 2. EMERGENCY CIRCUIT BREAKER & REAL CAPITAL VAULT
 # ==============================================================================
-CB_FILE = "circuit_breaker.json"
-LOCKOUT_FILE = "EMERGENCY_LOCKOUT.txt"
-STUDY_LOG_FILE = "empirical_tapes.json"
-STORYBOOK_FILE = "market_storybook.jsonl"
-BRAIN_FILE = "student_brain.json"
-
-ABSOLUTE_EQUITY_FLOOR = 1.50   # Vault hard floor ($1.50)
+ABSOLUTE_EQUITY_FLOOR = 1.50   # Hard floor ($1.50)
 MAX_CONSECUTIVE_LOSSES = 2     # Two live losses = mandatory rest
 MAX_ORDER_NOTIONAL = 7.50      # Cap notional size
 MIN_ORDER_NOTIONAL = 5.15      # Bitget $5.00 min + buffer
@@ -74,7 +94,7 @@ class CircuitBreaker:
 
     def check_safety(self, current_balance):
         if os.path.exists(LOCKOUT_FILE):
-            return False, "HARD_LOCKOUT: Emergency lockout file active. Real money secured."
+            return False, "HARD_LOCKOUT: Emergency lockout active. Real money secured."
 
         if current_balance < ABSOLUTE_EQUITY_FLOOR:
             with open(LOCKOUT_FILE, "w") as f:
@@ -87,7 +107,6 @@ class CircuitBreaker:
                 remaining = 24.0 - elapsed_hours
                 return False, f"TWO_STRIKE_FREEZE: Cooldown active for {remaining:.1f} more hours."
             else:
-                print("\n[CIRCUIT BREAKER] 24-hour rest finished. Resetting loss strikes.\n", flush=True)
                 self.consecutive_losses = 0
                 self.save_state()
 
@@ -97,7 +116,7 @@ class CircuitBreaker:
         if pnl_pct < 0:
             self.consecutive_losses += 1
             self.last_loss_time = time.time()
-            print(f"\n[CIRCUIT BREAKER] Strike logged. Losses: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
+            print(f"\n[CIRCUIT BREAKER] Live loss logged. Strikes: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
         else:
             self.consecutive_losses = 0
             print("\n[CIRCUIT BREAKER] Winning trade logged. Strikes cleared to 0.", flush=True)
@@ -124,141 +143,188 @@ def write_story_log(event_type, symbol, observation, lesson):
     print(f"[JOURNAL] {event_type} on {symbol}: {observation} | Lesson: {lesson}", flush=True)
 
 # ==============================================================================
-# 4. THE SELF-REFLECTIVE CRITIC & AUTONOMOUS DIAGNOSTIC BRAIN
+# 4. AUTONOMOUS HYPOTHESIS & RECIPE ENGINE (THE TASTE-TESTER)
 # ==============================================================================
-class SelfReflectiveBrain:
+class AutonomousChefBrain:
+    """
+    Acts like a chef tasting the food. Doesn't follow rigid rules from the programmer.
+    Analyzes its own outcomes, invents new recipes, tests them in paper mode,
+    and updates its recipe book until it hits consistent >= +1.50% wins.
+    """
     def __init__(self):
-        self.strategies = {
-            "QUICK_IMPULSE_CHASE": {"stop_mult": 1.8, "target_mult": 2.0, "trials": []},
-            "MEAN_REVERSION_SNAP": {"stop_mult": 1.8, "target_mult": 1.9, "trials": []},
-            "BREAKOUT_CONTINUATION": {"stop_mult": 1.9, "target_mult": 2.2, "trials": []}
+        # Default starting parameters (the starting recipe)
+        self.recipes = {
+            "BREAKOUT_CONTINUATION": {
+                "max_duration_min": 3.5,     # Starts at 3.5m instead of 7m
+                "stop_mult": 1.6,
+                "target_mult": 1.8,
+                "invert_bias": False,        # Will invert if it keeps failing!
+                "trials": []
+            },
+            "MEAN_REVERSION_SNAP": {
+                "max_duration_min": 4.0,
+                "stop_mult": 1.7,
+                "target_mult": 1.8,
+                "invert_bias": False,
+                "trials": []
+            },
+            "QUICK_IMPULSE_CHASE": {
+                "max_duration_min": 3.0,
+                "stop_mult": 1.5,
+                "target_mult": 1.7,
+                "invert_bias": False,
+                "trials": []
+            }
         }
         self.quarantine_mode = False
-        self.coin_penalties = {}       # Dynamic penalty timers on over-traded coins
-        self.recent_coin_history = []   # Tracks coin entry frequency
-        self.diagnosed_mistakes = []    # History of identified mistakes & fixes
-        self.min_stop_floor_pct = 0.85  # Dynamic stop distance floor
-        self.load_brain()
+        self.coin_penalties = {}
+        self.recent_coin_history = []
+        self.load_recipes()
 
-    def load_brain(self):
-        if os.path.exists(BRAIN_FILE):
+    def load_recipes(self):
+        if os.path.exists(RECIPE_BOOK_FILE):
             try:
-                with open(BRAIN_FILE, "r") as f:
+                with open(RECIPE_BOOK_FILE, "r") as f:
                     data = json.load(f)
-                    self.strategies = data.get("strategies", self.strategies)
+                    self.recipes = data.get("recipes", self.recipes)
                     self.quarantine_mode = data.get("quarantine_mode", False)
-                    self.diagnosed_mistakes = data.get("diagnosed_mistakes", [])
-                    self.min_stop_floor_pct = data.get("min_stop_floor_pct", 0.85)
             except Exception:
                 pass
 
-    def save_brain(self):
+    def save_recipes(self):
         try:
-            with open(BRAIN_FILE, "w") as f:
+            with open(RECIPE_BOOK_FILE, "w") as f:
                 json.dump({
-                    "strategies": self.strategies,
-                    "quarantine_mode": self.quarantine_mode,
-                    "diagnosed_mistakes": self.diagnosed_mistakes[-30:],
-                    "min_stop_floor_pct": self.min_stop_floor_pct
+                    "recipes": self.recipes,
+                    "quarantine_mode": self.quarantine_mode
                 }, f, indent=2)
         except Exception:
             pass
 
-    def run_post_mortem_audit(self, completed_tape, all_recent_tapes):
-        sym = completed_tape['symbol']
+    def evaluate_and_invent_recipe(self, strat_name, completed_tape, recent_tapes):
+        """
+        THE HUMAN BRAIN: Analyzes the tape, identifies what failed,
+        and invents a modified recipe to test on the next paper trade.
+        """
+        r = self.recipes.get(strat_name)
+        if not r:
+            return
+
+        dur = completed_tape['duration_minutes']
         pnl = completed_tape['net_pnl_pct']
         peak = completed_tape['peak_pnl_pct']
-        dur = completed_tape['duration_minutes']
-        strat_name = completed_tape['strategy']
-        strat = self.strategies.get(strat_name)
+        outcome = completed_tape['outcome']
+        sym = completed_tape['symbol']
 
+        # ----------------------------------------------------------------------
+        # DISCOVERY 1: Time Horizon Calibration (Killing the Chop Graveyard)
+        # ----------------------------------------------------------------------
+        # If the trade timed out in chop, the bot realizes its holding window is too long!
+        if outcome == "STAGNATION_TIMEOUT":
+            old_timer = r['max_duration_min']
+            # Shorten the duration timer towards where it actually peaked
+            r['max_duration_min'] = max(round(r['max_duration_min'] - 0.5, 1), 2.0)
+            reasoning = f"AUTONOMOUS ADJUSTMENT: {strat_name} decayed into chop over {dur:.1f}m. Shortened holding window from {old_timer}m -> {r['max_duration_min']}m."
+            print(f"\n[CHEF REFLECTION] {reasoning}\n", flush=True)
+            write_story_log("RECIPE_MODIFIED", sym, f"Adjusted max hold to {r['max_duration_min']}m.", reasoning)
+
+        # ----------------------------------------------------------------------
+        # DISCOVERY 2: The Inversion Principle (Stopping 0/10 Failures)
+        # ----------------------------------------------------------------------
+        # Look at the last 6 trials. If win rate is under 15%, the strategy is backwards!
+        recent_trials = r['trials'][-6:] if len(r['trials']) >= 6 else []
+        if len(recent_trials) >= 6 and sum(recent_trials) <= 1:
+            r['invert_bias'] = not r['invert_bias']
+            r['trials'] = [] # Reset scorecard to test inverted hypothesis
+            new_mode = "INVERTED (Fading/Counter-Trading)" if r['invert_bias'] else "NORMAL"
+            reasoning = f"AUTONOMOUS SHIFT: {strat_name} failed repeatedly (win rate <15%). Inverting direction bias to: {new_mode}."
+            print(f"\n[CHEF REFLECTION] {reasoning}\n", flush=True)
+            write_story_log("RECIPE_INVERTED", sym, f"Flipping strategy direction.", reasoning)
+
+        # ----------------------------------------------------------------------
+        # DISCOVERY 3: Greed vs Capacity Tuning
+        # ----------------------------------------------------------------------
+        # If price pushed > 1.2% profit, but missed the take-profit target
+        if peak >= 1.20 and pnl < 0.60:
+            old_t = r['target_mult']
+            r['target_mult'] = max(round(r['target_mult'] - 0.10, 2), 1.4)
+            reasoning = f"AUTONOMOUS ADJUSTMENT: {strat_name} peaked at +{peak:.2f}% but failed target. Lowered target multiplier {old_t}x -> {r['target_mult']}x."
+            print(f"\n[CHEF REFLECTION] {reasoning}\n", flush=True)
+
+        # ----------------------------------------------------------------------
+        # DISCOVERY 4: Anti-Revenge Rotation Penalty
+        # ----------------------------------------------------------------------
         self.recent_coin_history.append((sym, time.time(), pnl))
         if len(self.recent_coin_history) > 30:
             self.recent_coin_history.pop(0)
 
-        # 1. Over-trading check: If 3+ trades on same coin in 10m with net loss, quarantine it
-        recent_same_coin = [entry for entry in self.recent_coin_history if entry[0] == sym and (time.time() - entry[1]) <= 600]
-        if len(recent_same_coin) >= 3:
-            net_coin_pnl = sum([entry[2] for entry in recent_same_coin])
-            if net_coin_pnl < 0:
-                self.coin_penalties[sym] = time.time() + 300 # 5m quarantine
-                diagnosis = f"MISTAKE IDENTIFIED: Over-trading on {sym} ({len(recent_same_coin)} trades in 10m). Net loss: {net_coin_pnl:+.2f}%. Quarantined {sym} for 5m."
-                self.diagnosed_mistakes.append(diagnosis)
-                print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
+        same_coin_recent = [e for e in self.recent_coin_history if e[0] == sym and (time.time() - e[1]) <= 600]
+        if len(same_coin_recent) >= 2 and sum([e[2] for e in same_coin_recent]) < 0:
+            self.coin_penalties[sym] = time.time() + 240 # 4m rest on this chart
+            print(f"\n[CHEF ROTATION] Put {sym} on 4-minute timeout after repeated choppy losses.\n", flush=True)
 
-        # 2. Greed check: Letting a +1.20% winner decay into chop
-        if peak >= 1.20 and pnl < 0.50 and dur >= 6.0:
-            diagnosis = f"MISTAKE IDENTIFIED: Greed on {sym}. Peaked at +{peak:.2f}%, but decayed into {pnl:+.2f}% over {dur:.1f}m. Lowering target multiplier."
-            if strat:
-                strat['target_mult'] = max(round(strat['target_mult'] - 0.08, 2), 1.6)
-            self.diagnosed_mistakes.append(diagnosis)
-            print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
-
-        # 3. Choke check: Died in under 60 seconds
-        if completed_tape['outcome'] == "STOP_LOSS_HIT" and dur < 1.0:
-            diagnosis = f"MISTAKE IDENTIFIED: Suffocated {sym} in {dur*60:.0f}s. Widening stop floor to {self.min_stop_floor_pct + 0.08}%."
-            self.min_stop_floor_pct = min(round(self.min_stop_floor_pct + 0.08, 2), 1.50)
-            if strat:
-                strat['stop_mult'] = min(round(strat['stop_mult'] + 0.10, 2), 2.5)
-            self.diagnosed_mistakes.append(diagnosis)
-            print(f"\n[SELF-REFLECTION] {diagnosis}\n", flush=True)
-
-        self.save_brain()
+        self.save_recipes()
 
     def record_film_outcome(self, strategy, net_pnl, reason, film_tape, all_tapes):
-        if strategy not in self.strategies:
-            self.strategies[strategy] = {"stop_mult": 1.8, "target_mult": 2.0, "trials": []}
+        if strategy not in self.recipes:
+            self.recipes[strategy] = {
+                "max_duration_min": 3.5,
+                "stop_mult": 1.6,
+                "target_mult": 1.8,
+                "invert_bias": False,
+                "trials": []
+            }
 
-        rec = self.strategies[strategy]
+        r = self.recipes[strategy]
         is_win = 1 if (net_pnl >= 1.50) else 0
-        rec["trials"].append(is_win)
-        if len(rec["trials"]) > 10:
-            rec["trials"].pop(0)
+        r["trials"].append(is_win)
+        if len(r["trials"]) > 10:
+            r["trials"].pop(0)
 
-        self.run_post_mortem_audit(film_tape, all_tapes)
+        # Run autonomous hypothesis adjustment
+        self.evaluate_and_invent_recipe(strategy, film_tape, all_tapes)
 
-        win_count = sum(rec["trials"])
-        sample_size = len(rec["trials"])
+        win_count = sum(r["trials"])
+        sample_size = len(r["trials"])
         win_rate = (win_count / sample_size) * 100 if sample_size > 0 else 0
 
         verdict = "QUALIFIED WIN (>=+1.5%)" if is_win else "FAILED TARGET (<+1.5%)"
-        print(f"\n[LESSON RECORDED] {strategy} on {film_tape['symbol']} | Net: {net_pnl:+.2f}% | Verdict: {verdict}", flush=True)
-        print(f"[REASON] {reason}", flush=True)
+        print(f"\n[RECIPE TESTED] {strategy} on {film_tape['symbol']} | Net: {net_pnl:+.2f}% | Verdict: {verdict}", flush=True)
         print(f"[SCORECARD] {strategy}: {win_count}/{sample_size} passed (+1.5% target) -> {win_rate:.0f}% win rate\n", flush=True)
 
         write_story_log(
-            event_type="PAPER_TRADE_FINISHED",
+            event_type="PAPER_EXPERIMENT_FINISHED",
             symbol=film_tape['symbol'],
-            observation=f"Trade lasted {film_tape['duration_minutes']}m with PnL of {net_pnl:+.2f}%.",
+            observation=f"Finished in {film_tape['duration_minutes']}m with PnL of {net_pnl:+.2f}%.",
             lesson=reason
         )
-        self.save_brain()
+        self.save_recipes()
 
     def is_coin_in_penalty(self, symbol):
-        expiry = self.coin_penalties.get(symbol, 0)
-        return time.time() < expiry
+        return time.time() < self.coin_penalties.get(symbol, 0)
 
     def is_live_ready(self, strategy):
         if self.quarantine_mode:
             return False
-        rec = self.strategies.get(strategy, {})
-        trials = rec.get("trials", [])
+        r = self.recipes.get(strategy, {})
+        trials = r.get("trials", [])
         return len(trials) >= 10 and sum(trials) >= 9
 
     def get_summary_status(self):
         lines = []
-        for strat, data in self.strategies.items():
-            trials = data.get("trials", [])
+        for strat, r in self.recipes.items():
+            trials = r.get("trials", [])
             w = sum(trials)
             tot = len(trials)
             pct = (w / tot) * 100 if tot > 0 else 0
-            lines.append(f"{strat[:4]}: {w}/{tot} ({pct:.0f}%) [S:{data['stop_mult']}x T:{data['target_mult']}x]")
+            inv = " [INV]" if r.get('invert_bias') else ""
+            lines.append(f"{strat[:4]}: {w}/{tot} ({pct:.0f}%){inv} [Hold:{r['max_duration_min']}m]")
         return " | ".join(lines)
 
-brain = SelfReflectiveBrain()
+brain = AutonomousChefBrain()
 
 # ==============================================================================
-# 5. EXCHANGES SETUP (BITGET FOR EXECUTION + MULTI-RADAR ENGINES)
+# 5. EXCHANGES SETUP (BITGET EXECUTION + GLOBAL RADAR)
 # ==============================================================================
 API_KEY = os.environ.get("API_KEY")
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -270,9 +336,8 @@ if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
 
 BALANCE_USE_PCT = 0.85
 MIN_24H_VOLUME = 1_000_000       # All coins > $1,000,000
-SCAN_INTERVAL_SECONDS = 5        # Fast 5-second pulse
-MAX_PARALLEL_CAMERAS = 12        # 12 parallel learning cameras
-MAX_RECENT_EXCLUSION = 4
+SCAN_INTERVAL_SECONDS = 5
+MAX_PARALLEL_CAMERAS = 12
 
 NON_CRYPTO_SYMBOLS = {
     'CL', 'BZ', 'SOXS', 'SOXL', 'KORU', 'MU', 'TSLA', 'NVDA', 'AAPL', 'MSFT',
@@ -280,7 +345,6 @@ NON_CRYPTO_SYMBOLS = {
     'ANTHROPIC', 'OPENAI', 'SPACEX', 'STRIPE', 'SCALE'
 }
 
-# 1. Primary Execution Exchange (Bitget with your API keys)
 bitget = ccxt.bitget({
     "apiKey": API_KEY,
     "secret": SECRET_KEY,
@@ -293,47 +357,27 @@ bitget = ccxt.bitget({
     }
 })
 
-# 2. Public Radar Instances
-bybit_radar = ccxt.bybit({
-    "enableRateLimit": True,
-    "timeout": 10000,
-    "options": {"defaultType": "linear"}
-})
-
-gate_radar = ccxt.gate({
-    "enableRateLimit": True,
-    "timeout": 10000,
-    "options": {"defaultType": "swap"}
-})
-
-okx_radar = ccxt.okx({
-    "enableRateLimit": True,
-    "timeout": 10000,
-    "options": {"defaultType": "swap"}
-})
+bybit_radar = ccxt.bybit({"enableRateLimit": True, "timeout": 10000, "options": {"defaultType": "linear"}})
+gate_radar = ccxt.gate({"enableRateLimit": True, "timeout": 10000, "options": {"defaultType": "swap"}})
+okx_radar = ccxt.okx({"enableRateLimit": True, "timeout": 10000, "options": {"defaultType": "swap"}})
 
 ticker_memory = {}
 global_composite_tickers = {}
 radar_counts = {"Binance": 0, "Bybit": 0, "OKX": 0, "Gate": 0}
 
 # ==============================================================================
-# 6. GLOBAL MULTI-EXCHANGE RADAR (BINANCE DIRECT WORKAROUND + TOP 4)
+# 6. GLOBAL MULTI-EXCHANGE RADAR (BINANCE DIRECT VIA VISION CDN)
 # ==============================================================================
 def fetch_binance_vision_tickers():
-    """
-    Workaround: Uses Binance's official public data CDN (data-api.binance.vision).
-    Bypasses cloud datacenter IP 451 blocks without needing an API key.
-    """
     endpoints = [
         "https://data-api.binance.vision/api/v3/ticker/24hr",
         "https://api-gcp.binance.com/api/v3/ticker/24hr"
     ]
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
+    headers = {"User-Agent": "Mozilla/5.0"}
     for url in endpoints:
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=6) as response:
+            with urllib.request.urlopen(req, timeout=5) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode('utf-8'))
                     parsed = {}
@@ -349,8 +393,7 @@ def fetch_binance_vision_tickers():
                                     "source": "Binance",
                                     "pct_24h": pct,
                                     "vol_quote": vol,
-                                    "price": last_p,
-                                    "updated_at": time.time()
+                                    "price": last_p
                                 }
                     if parsed:
                         return parsed
@@ -362,15 +405,14 @@ def start_global_radar_worker():
     global global_composite_tickers, radar_counts
     def worker():
         while True:
-            # 1. Fetch Binance via unblocked data mirror
-            binance_data = fetch_binance_vision_tickers()
-            if binance_data:
-                global_composite_tickers.update(binance_data)
-                radar_counts["Binance"] = len(binance_data)
+            # 1. Binance via data mirror
+            bn = fetch_binance_vision_tickers()
+            if bn:
+                global_composite_tickers.update(bn)
+                radar_counts["Binance"] = len(bn)
 
-            # 2. Fetch Bybit, OKX, Gate
-            exchanges = [("Bybit", bybit_radar), ("OKX", okx_radar), ("Gate", gate_radar)]
-            for ex_name, ex in exchanges:
+            # 2. Bybit, OKX, Gate
+            for ex_name, ex in [("Bybit", bybit_radar), ("OKX", okx_radar), ("Gate", gate_radar)]:
                 try:
                     tickers = ex.fetch_tickers()
                     c = 0
@@ -380,26 +422,23 @@ def start_global_radar_worker():
                         vol = float(t.get('quoteVolume', 0) or 0)
                         last_p = float(t.get('last', 0) or 0)
                         if base and last_p > 0:
-                            # Keep Binance as primary, supplement others
                             if base not in global_composite_tickers:
                                 global_composite_tickers[base] = {
                                     "source": ex_name,
                                     "pct_24h": pct,
                                     "vol_quote": vol,
-                                    "price": last_p,
-                                    "updated_at": time.time()
+                                    "price": last_p
                                 }
                             c += 1
                     radar_counts[ex_name] = c
                 except Exception:
                     pass
                 time.sleep(1)
-
-            time.sleep(4)
+            time.sleep(3)
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    print("[SYSTEM] Global Multi-Exchange Composite Radar active (Binance + Bybit + OKX + Gate.io).", flush=True)
+    print("[SYSTEM] Global Multi-Exchange Composite Radar online.", flush=True)
 
 # ==============================================================================
 # 7. FILMING ARCHIVE PERSISTENCE
@@ -420,18 +459,8 @@ def save_film_archive(data):
     except Exception:
         pass
 
-def push_recently_traded(archive, symbol):
-    if "recently_traded" not in archive:
-        archive["recently_traded"] = []
-    if symbol in archive["recently_traded"]:
-        archive["recently_traded"].remove(symbol)
-    archive["recently_traded"].append(symbol)
-    if len(archive["recently_traded"]) > MAX_RECENT_EXCLUSION:
-        archive["recently_traded"].pop(0)
-    save_film_archive(archive)
-
 # ==============================================================================
-# 8. BITGET ORDER & POSITION INTERFACE
+# 8. BITGET ORDER INTERFACE
 # ==============================================================================
 def get_open_position():
     try:
@@ -454,67 +483,30 @@ def get_open_position():
 
 def open_long_position(symbol, amount):
     try:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='buy', amount=amount,
-            params={'tradeSide': 'buy_single'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'tradeSide': 'buy_single'})
     except Exception:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='buy', amount=amount,
-            params={'tradeSide': 'open'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'tradeSide': 'open'})
 
 def close_long_position(symbol, amount):
     try:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='sell', amount=amount,
-            params={'reduceOnly': True, 'tradeSide': 'sell_single'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'reduceOnly': True, 'tradeSide': 'sell_single'})
     except Exception:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='sell', amount=amount,
-            params={'reduceOnly': True, 'tradeSide': 'close'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'reduceOnly': True, 'tradeSide': 'close'})
 
 def open_short_position(symbol, amount):
     try:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='sell', amount=amount,
-            params={'tradeSide': 'sell_single'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'tradeSide': 'sell_single'})
     except Exception:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='sell', amount=amount,
-            params={'tradeSide': 'open'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='sell', amount=amount, params={'tradeSide': 'open'})
 
 def close_short_position(symbol, amount):
     try:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='buy', amount=amount,
-            params={'reduceOnly': True, 'tradeSide': 'buy_single'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'reduceOnly': True, 'tradeSide': 'buy_single'})
     except Exception:
-        return bitget.create_order(
-            symbol=symbol, type='market', side='buy', amount=amount,
-            params={'reduceOnly': True, 'tradeSide': 'close'}
-        )
+        return bitget.create_order(symbol=symbol, type='market', side='buy', amount=amount, params={'reduceOnly': True, 'tradeSide': 'close'})
 
 # ==============================================================================
-# 9. DYNAMIC ATR SWING CALCULATOR
-# ==============================================================================
-def calculate_natural_swing_atr(ohlcv_1m):
-    if len(ohlcv_1m) < 3:
-        return 0.0
-
-    ranges = []
-    for candle in ohlcv_1m[-4:]:
-        ranges.append(candle[2] - candle[3])
-
-    return sum(ranges) / len(ranges) if ranges else 0.0
-
-# ==============================================================================
-# 10. SCANNER WITH MISTAKE-PREVENTION ROTATION
+# 9. SCANNER WITH AUTONOMOUS ROTATION
 # ==============================================================================
 def scan_all_coins_fearlessly(tickers, archive):
     global ticker_memory
@@ -533,7 +525,6 @@ def scan_all_coins_fearlessly(tickers, archive):
         if vol_24h < MIN_24H_VOLUME or symbol in active_syms:
             continue
 
-        # Skip if penalized by self-reflection for revenge over-trading
         if brain.is_coin_in_penalty(symbol):
             continue
 
@@ -557,8 +548,7 @@ def scan_all_coins_fearlessly(tickers, archive):
                         "pct_move": round(pct_change, 2),
                         "capital_injected": round(vol_delta, 2),
                         "start_price": past_price,
-                        "current_price": cur_price,
-                        "dt_seconds": round(dt, 1)
+                        "current_price": cur_price
                     })
                     ticker_memory[symbol] = (cur_price, now, vol_24h)
                     continue
@@ -570,7 +560,7 @@ def scan_all_coins_fearlessly(tickers, archive):
     return pings
 
 # ==============================================================================
-# 11. MULTI-CAMERA RECORDING LAB (WITH AUTO-PROFIT PROTECTION)
+# 10. MULTI-CAMERA LAB (APPLIES DISCOVERED RECIPES IN REAL TIME)
 # ==============================================================================
 def run_filming_cameras(archive, leverage=4):
     remaining = []
@@ -583,6 +573,10 @@ def run_filming_cameras(archive, leverage=4):
         liq_price = cam['trade_hypothesis']['liq_price']
         strategy = cam['strategy']
         elapsed_min = (time.time() - cam['started_at']) / 60
+
+        # Retrieve the bot's self-determined holding timer for this recipe
+        recipe = brain.recipes.get(strategy, {"max_duration_min": 3.5})
+        max_hold_time = recipe.get("max_duration_min", 3.5)
 
         try:
             ticker = bitget.fetch_ticker(sym)
@@ -619,39 +613,38 @@ def run_filming_cameras(archive, leverage=4):
         outcome = "MONITORING"
         causality = ""
 
-        # Profit Protection: If trade reached +1.10% profit, lock stop at breakeven!
-        if peak_pnl >= 1.10 and not cam.get('trail_locked', False):
+        # Immediate Bank: If net profit crosses >= +1.50% at ANY second, lock the win!
+        if net_pnl >= 1.50:
+            is_finished = True
+            outcome = "TARGET_ACHIEVED"
+            causality = f"Captured target early at +{net_pnl:.2f}% net!"
+
+        # Profit Protection: If reached +1.0% peak, move stop to breakeven (+0.25%)
+        elif peak_pnl >= 1.00 and not cam.get('trail_locked', False):
             cam['trail_locked'] = True
             if side == 'long':
-                cam['trade_hypothesis']['stop_price'] = entry_price * 1.0030
+                cam['trade_hypothesis']['stop_price'] = entry_price * 1.0025
             else:
-                cam['trade_hypothesis']['stop_price'] = entry_price * 0.9970
+                cam['trade_hypothesis']['stop_price'] = entry_price * 0.9975
             stop_price = cam['trade_hypothesis']['stop_price']
 
-        # 1. Liquidation
-        if (side == 'long' and cur_price <= liq_price) or (side == 'short' and cur_price >= liq_price):
+        # Check 1: Liquidation
+        elif (side == 'long' and cur_price <= liq_price) or (side == 'short' and cur_price >= liq_price):
             is_finished = True
             outcome = "LIQUIDATION_LOSS"
-            causality = f"Adverse wick struck liquidation at {liq_price:.4f}."
+            causality = f"Hit liquidation at {liq_price:.4f}."
 
-        # 2. Stop Loss / Breakeven Hit
+        # Check 2: Stop Loss Hit
         elif (side == 'long' and cur_price <= stop_price) or (side == 'short' and cur_price >= stop_price):
             is_finished = True
             outcome = "STOP_LOSS_HIT"
-            tag = "Breakeven Protected Stop" if cam.get('trail_locked') else "Invalidation Stop"
-            causality = f"{tag} hit at {stop_price:.4f}. Net PnL: {net_pnl:+.2f}%."
+            causality = f"Hit stop boundary at {stop_price:.4f}. Net PnL: {net_pnl:+.2f}%."
 
-        # 3. Target Hit
-        elif (side == 'long' and cur_price >= target_price) or (side == 'short' and cur_price <= target_price):
-            is_finished = True
-            outcome = "TARGET_ACHIEVED"
-            causality = f"Target achieved at {target_price:.4f}. Clean Net PnL: {net_pnl:+.2f}%."
-
-        # 4. Stagnation timeout after 7m
-        elif elapsed_min >= 7.0:
+        # Check 3: Self-Determined Holding Timeout (Dynamic, not hardcoded!)
+        elif elapsed_min >= max_hold_time:
             is_finished = True
             outcome = "STAGNATION_TIMEOUT"
-            causality = f"Momentum decayed into chop after 7m. Net PnL: {net_pnl:+.2f}%."
+            causality = f"Momentum decayed after self-determined hold limit of {max_hold_time:.1f}m. Net PnL: {net_pnl:+.2f}%."
 
         if is_finished:
             film_tape = {
@@ -677,21 +670,12 @@ def run_filming_cameras(archive, leverage=4):
     archive['active_cameras'] = remaining
 
 # ==============================================================================
-# 12. LIVE GUARDIAN (FOR REAL MONEY)
+# 11. LIVE GUARDIAN (FOR REAL MONEY ONLY WHEN QUALIFIED)
 # ==============================================================================
 live_trade_state = {
-    "active": False,
-    "symbol": None,
-    "side": None,
-    "entry_price": 0.0,
-    "entry_time": 0.0,
-    "initial_stop_price": 0.0,
-    "target_price": 0.0,
-    "contracts": 0.0,
-    "fee_shield_active": False,
-    "highest_price": 0.0,
-    "lowest_price": 0.0,
-    "atr": 0.0
+    "active": False, "symbol": None, "side": None, "entry_price": 0.0,
+    "entry_time": 0.0, "initial_stop_price": 0.0, "contracts": 0.0,
+    "fee_shield_active": False, "highest_price": 0.0, "lowest_price": 0.0
 }
 
 def execute_live_exit(reason, pnl_pct):
@@ -725,7 +709,6 @@ def poll_live_trade_guardian():
     sym = live_trade_state["symbol"]
     side = live_trade_state["side"]
     entry_p = live_trade_state["entry_price"]
-    atr = live_trade_state["atr"]
 
     try:
         ticker = bitget.fetch_ticker(sym)
@@ -742,61 +725,29 @@ def poll_live_trade_guardian():
         live_trade_state["lowest_price"] = cur_price
 
     elapsed_sec = time.time() - live_trade_state["entry_time"]
-    elapsed_min = elapsed_sec / 60.0
+    pnl_pct = ((cur_price - entry_p) / entry_p) * 100.0 if side == 'long' else ((entry_p - cur_price) / entry_p) * 100.0
 
-    if side == 'long':
-        pnl_pct = ((cur_price - entry_p) / entry_p) * 100.0
-        peak_distance = live_trade_state["highest_price"] - entry_p
-    else:
-        pnl_pct = ((entry_p - cur_price) / entry_p) * 100.0
-        peak_distance = entry_p - live_trade_state["lowest_price"]
-
-    # 1. Hesitation Cut (80 seconds without follow-through)
-    if elapsed_sec >= 80 and pnl_pct < 0.08:
-        execute_live_exit("Hesitation Cut: Momentum stalled without follow-through", pnl_pct)
+    if pnl_pct >= 1.50:
+        execute_live_exit("Banked Target >= +1.50%", pnl_pct)
         return
 
-    # 2. Bank Target Profit (>= +1.50%)
-    if pnl_pct >= 1.55:
-        execute_live_exit("Target Target Banked: Reached >= +1.50% Goal", pnl_pct)
+    if elapsed_sec >= 90 and pnl_pct < 0.05:
+        execute_live_exit("Human Hesitation Cut: Momentum failed", pnl_pct)
         return
 
-    # 3. Fee-Shield Lock
-    fee_shield_trigger = 0.8 * atr
-    if not live_trade_state["fee_shield_active"] and peak_distance >= fee_shield_trigger:
-        live_trade_state["fee_shield_active"] = True
-        print(f"\n[FEE-SHIELD ENGAGED] {sym} covered 0.8x ATR. Breakeven profit locked.\n", flush=True)
-
-    if live_trade_state["fee_shield_active"]:
-        if side == 'long' and cur_price <= entry_p * 1.0035:
-            execute_live_exit("Long Fee-Shield Breakeven Hit", pnl_pct)
-            return
-        elif side == 'short' and cur_price >= entry_p * 0.9965:
-            execute_live_exit("Short Fee-Shield Breakeven Hit", pnl_pct)
-            return
-
-    # 4. Hard Stop
-    if not live_trade_state["fee_shield_active"]:
-        if side == 'long' and cur_price <= live_trade_state["initial_stop_price"]:
-            execute_live_exit("Long Hard Stop Hit", pnl_pct)
-            return
-        elif side == 'short' and cur_price >= live_trade_state["initial_stop_price"]:
-            execute_live_exit("Short Hard Stop Hit", pnl_pct)
-            return
-
-    # 5. Stagnation Exit
-    if elapsed_min >= 10.0:
-        execute_live_exit("10m Stagnation Timeout", pnl_pct)
-        return
+    if side == 'long' and cur_price <= live_trade_state["initial_stop_price"]:
+        execute_live_exit("Stop Hit", pnl_pct)
+    elif side == 'short' and cur_price >= live_trade_state["initial_stop_price"]:
+        execute_live_exit("Stop Hit", pnl_pct)
 
 # ==============================================================================
-# 13. MAIN ENGINE LOOP
+# 12. MAIN LOOP
 # ==============================================================================
 def main():
     global live_trade_state
     start_keep_alive()
     start_global_radar_worker()
-    print("[SYSTEM] APEX-V13 Binance Direct + Global Multi-Exchange Engine online.", flush=True)
+    print("[SYSTEM] APEX-V14 Fully Autonomous Hypothesis Student online.", flush=True)
 
     try:
         bitget.load_markets()
@@ -807,33 +758,22 @@ def main():
     archive = load_film_archive()
     cycle = 1
 
-    write_story_log("SYSTEM_START", "ALL", "Global Composite Radar engaged.", "Binance (via Vision CDN) + Bybit + OKX + Gate.io active.")
-
     while True:
         try:
-            # 1. Non-blocking Live Position Monitor
+            # 1. Position Guardian
             pos = get_open_position()
             if pos and not live_trade_state["active"]:
                 live_trade_state = {
-                    "active": True,
-                    "symbol": pos['symbol'],
-                    "side": pos['side'],
-                    "entry_price": pos['entry_price'],
-                    "entry_time": time.time(),
+                    "active": True, "symbol": pos['symbol'], "side": pos['side'],
+                    "entry_price": pos['entry_price'], "entry_time": time.time(),
                     "initial_stop_price": pos['entry_price'] * (0.988 if pos['side'] == 'long' else 1.012),
-                    "target_price": pos['entry_price'] * (1.016 if pos['side'] == 'long' else 0.984),
-                    "contracts": pos['contracts'],
-                    "fee_shield_active": False,
-                    "highest_price": pos['entry_price'],
-                    "lowest_price": pos['entry_price'],
-                    "atr": pos['entry_price'] * 0.012
+                    "contracts": pos['contracts'], "fee_shield_active": False,
+                    "highest_price": pos['entry_price'], "lowest_price": pos['entry_price']
                 }
-                print(f"[POSITION RECOVERED] Managing: {pos['side'].upper()} {pos['symbol']}", flush=True)
-
             if live_trade_state["active"]:
                 poll_live_trade_guardian()
 
-            # 2. Run Observational Filming Cameras
+            # 2. Run Observational Cameras
             if archive['active_cameras']:
                 run_filming_cameras(archive, leverage=4)
                 save_film_archive(archive)
@@ -844,22 +784,15 @@ def main():
 
             is_safe, reason = circuit_breaker.check_safety(usdt_free)
             if not is_safe:
-                print(f"\n[VAULT SHIELD LOCKED] {reason} | Free USDT: ${usdt_free:.2f}. Real money protected...\n", flush=True)
+                print(f"\n[VAULT SHIELD LOCKED] {reason} | Free USDT: ${usdt_free:.2f}. Sleeping...\n", flush=True)
                 time.sleep(60)
                 continue
 
-            # Dynamic Leverage Ladder ($5.15 - $7.50 clamp)
-            if usdt_free >= 2.40:
-                leverage = 3
-            elif usdt_free >= 1.80:
-                leverage = 4
-            else:
-                leverage = 5
-
+            leverage = 3 if usdt_free >= 2.40 else (4 if usdt_free >= 1.80 else 5)
             raw_notional = (usdt_free * BALANCE_USE_PCT) * leverage
             notional = max(min(raw_notional, MAX_ORDER_NOTIONAL), MIN_ORDER_NOTIONAL)
 
-            # 4. SINGLE-CALL SCAN: Fetch Bitget tickers
+            # 4. Single-Call Scan
             try:
                 tickers = bitget.fetch_tickers()
             except Exception:
@@ -868,68 +801,53 @@ def main():
 
             pings = scan_all_coins_fearlessly(tickers, archive)
 
-            # 5. Classify & Film
+            # 5. Formulate Hypotheses using Discovered Recipes
             for ping in pings:
                 sym = ping['symbol']
                 base = ping['base']
                 cur_price = ping['current_price']
                 start_price = ping['start_price']
                 dir_move = ping['direction']
-                injected_cap = ping['capital_injected']
 
                 if live_trade_state["active"]:
                     break
 
-                try:
-                    ohlcv_1m = bitget.fetch_ohlcv(sym, timeframe='1m', limit=5)
-                except Exception:
-                    continue
-
-                if len(ohlcv_1m) < 3:
-                    continue
-
-                natural_swing = calculate_natural_swing_atr(ohlcv_1m)
-                if natural_swing <= 0:
-                    natural_swing = cur_price * 0.008
-
-                # Global cross-exchange check (Binance primary, Bybit/OKX/Gate backup)
+                # Global cross-exchange check
                 global_info = global_composite_tickers.get(base)
                 global_pct = global_info.get('pct_24h', 0) if global_info else 0
 
-                # Select strategy archetype
+                # Select Strategy Archetype
                 if global_info and abs(global_pct) > 3.0:
                     strategy = "BREAKOUT_CONTINUATION"
-                    side = "long" if dir_move == "EXPANDING_UP" else "short"
+                    base_side = "long" if dir_move == "EXPANDING_UP" else "short"
                 elif abs(ping['pct_move']) >= 0.70:
                     strategy = "MEAN_REVERSION_SNAP"
-                    side = "short" if dir_move == "EXPANDING_UP" else "long"
+                    base_side = "short" if dir_move == "EXPANDING_UP" else "long"
                 else:
                     strategy = "QUICK_IMPULSE_CHASE"
-                    side = "long" if dir_move == "EXPANDING_UP" else "short"
+                    base_side = "long" if dir_move == "EXPANDING_UP" else "short"
 
-                learned_params = brain.strategies.get(strategy, {"stop_mult": 1.8, "target_mult": 2.0})
-                learned_stop_mult = learned_params["stop_mult"]
-                learned_target_mult = learned_params["target_mult"]
+                # Pull the bot's current recipe for this strategy
+                r = brain.recipes.get(strategy, {"stop_mult": 1.6, "target_mult": 1.8, "invert_bias": False})
 
-                stop_dist = natural_swing * learned_stop_mult
-                min_stop_floor = cur_price * (brain.min_stop_floor_pct / 100.0)
-                if stop_dist < min_stop_floor:
-                    stop_dist = min_stop_floor
+                # Check if the bot autonomously inverted this recipe because it kept failing!
+                if r.get("invert_bias", False):
+                    side = "short" if base_side == "long" else "long"
+                else:
+                    side = base_side
 
-                target_dist = max(natural_swing * learned_target_mult, cur_price * 0.0160)
+                # Autonomous stop distance
+                wave = abs(cur_price - start_price)
+                stop_dist = max(wave * r['stop_mult'], cur_price * 0.009)
+                target_dist = max(wave * r['target_mult'], cur_price * 0.0160)
 
                 entry_price = cur_price
                 stop_price = entry_price - stop_dist if side == 'long' else entry_price + stop_dist
                 target_price = entry_price + target_dist if side == 'long' else entry_price - target_dist
-                stop_pct = (stop_dist / entry_price) * 100.0
-
-                if side == 'long':
-                    liq_price = entry_price * (1.0 - (1.0 / leverage) + BITGET_MAINTENANCE_MARGIN)
-                else:
-                    liq_price = entry_price * (1.0 + (1.0 / leverage) - BITGET_MAINTENANCE_MARGIN)
+                liq_price = entry_price * (1.0 - (1.0 / leverage) + BITGET_MAINTENANCE_MARGIN) if side == 'long' else entry_price * (1.0 + (1.0 / leverage) - BITGET_MAINTENANCE_MARGIN)
 
                 # ==============================================================
-                # STRICT LIVE GATE: 9/10 PAPER WINS REQUIRED FOR REAL CASH
+                # 9/10 PROMOTION CHECK (ZERO CASH -> REAL MONEY)
                 # ==============================================================
                 if brain.is_live_ready(strategy) and not live_trade_state["active"] and notional >= MIN_ORDER_NOTIONAL:
                     market = bitget.market(sym)
@@ -953,39 +871,24 @@ def main():
                         except Exception:
                             pass
 
-                        print("\n" + "=" * 80, flush=True)
-                        print(f"[LIVE CRUCIBLE PASSED: {side.upper()}] Strategy {strategy} achieved 9/10 wins!", flush=True)
-                        print(f"  Live Real Order: {sym} | Sizing: ${actual_notional:.2f} ({leverage}x)", flush=True)
-                        print(f"  Entry: {entry_price:.4f} | Target (+1.5% min): {target_price:.4f} | Stop: {stop_price:.4f}", flush=True)
-                        print("=" * 80 + "\n", flush=True)
-
+                        print(f"\n[LIVE PROMOTION EXECUTION: {side.upper()}] Recipe {strategy} hit 9/10 wins!", flush=True)
                         order = open_long_position(sym, formatted_amount) if side == 'long' else open_short_position(sym, formatted_amount)
                         time.sleep(2)
 
-                        push_recently_traded(archive, sym)
                         real_pos = get_open_position()
                         real_fill = real_pos['entry_price'] if real_pos else entry_price
                         real_cnt = real_pos['contracts'] if real_pos else formatted_amount
 
                         live_trade_state = {
-                            "active": True,
-                            "symbol": sym,
-                            "side": side,
-                            "entry_price": real_fill,
-                            "entry_time": time.time(),
-                            "initial_stop_price": stop_price,
-                            "target_price": target_price,
-                            "contracts": real_cnt,
-                            "fee_shield_active": False,
-                            "highest_price": real_fill,
-                            "lowest_price": real_fill,
-                            "atr": stop_dist
+                            "active": True, "symbol": sym, "side": side,
+                            "entry_price": real_fill, "entry_time": time.time(),
+                            "initial_stop_price": stop_price, "contracts": real_cnt,
+                            "fee_shield_active": False, "highest_price": real_fill, "lowest_price": real_fill
                         }
-                        write_story_log("LIVE_TRADE_OPENED", sym, f"Executed {side.upper()} order.", f"Pattern {strategy} passed crucible.")
                         break
 
                 # ==============================================================
-                # FEARLESS ZERO-CASH EXPERIMENT (FILMING AUTONOMOUS TRADES)
+                # OPEN AUTONOMOUS PAPER CAMERA
                 # ==============================================================
                 elif len(archive['active_cameras']) < MAX_PARALLEL_CAMERAS and sym not in {c['symbol'] for c in archive['active_cameras']}:
                     new_cam = {
@@ -1007,27 +910,21 @@ def main():
                     }
                     archive['active_cameras'].append(new_cam)
                     save_film_archive(archive)
-                    print(f"[AUTONOMOUS CAMERA #{len(archive['active_cameras'])} LOCKED] {sym} | Strategy: {strategy} ({side.upper()}) | Stop: {stop_price:.4f} (-{stop_pct:.2f}%) | Target: {target_price:.4f}", flush=True)
+                    inv_tag = " [INVERTED]" if r.get("invert_bias") else ""
+                    print(f"[AUTONOMOUS CAMERA #{len(archive['active_cameras'])} LOCKED] {sym} | {strategy}{inv_tag} ({side.upper()}) | Max Hold: {r['max_duration_min']}m", flush=True)
 
             # 6. Status Pulse
             if cycle % 3 == 0:
                 summary_brain = brain.get_summary_status()
                 strikes = circuit_breaker.consecutive_losses
-                live_str = f"LOCKED: {live_trade_state['side'].upper()} {live_trade_state['symbol']}" if live_trade_state['active'] else "SCANNING ALL >$1M"
                 total_liquid = len([s for s, t in tickers.items() if float(t.get('quoteVolume', 0) or 0) >= MIN_24H_VOLUME and s.endswith(':USDT')])
                 global_sync_count = len(global_composite_tickers)
-                penalties_active = len([s for s in brain.coin_penalties if brain.is_coin_in_penalty(s)])
-
                 bn_c = radar_counts.get("Binance", 0)
-                by_c = radar_counts.get("Bybit", 0)
-                ok_c = radar_counts.get("OKX", 0)
-                gt_c = radar_counts.get("Gate", 0)
 
                 print(
-                    f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid}\n"
-                    f"Global Radar: {global_sync_count} pairs [Binance: {bn_c} | Bybit: {by_c} | OKX: {ok_c} | Gate: {gt_c}]\n"
-                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS} | Quarantined: {penalties_active}\n"
-                    f"Scores -> [{summary_brain}]",
+                    f"\n[ENGINE PULSE] Status: ACTIVE | Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS}\n"
+                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Radar: {global_sync_count} (Binance: {bn_c})\n"
+                    f"Autonomous Recipe Book -> [{summary_brain}]",
                     flush=True
                 )
 
