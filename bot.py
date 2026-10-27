@@ -5,6 +5,7 @@ import math
 import json
 import traceback
 import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
@@ -16,7 +17,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX-V12 Global Top-5 Cross-Exchange Engine is active.")
+        self.wfile.write(b"APEX-V13 Binance Direct + Global Top-5 Cross-Exchange Engine active.")
 
     def log_message(self, format, *args):
         return
@@ -96,7 +97,7 @@ class CircuitBreaker:
         if pnl_pct < 0:
             self.consecutive_losses += 1
             self.last_loss_time = time.time()
-            print(f"\n[CIRCUIT BREAKER] Live loss logged. Strikes: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
+            print(f"\n[CIRCUIT BREAKER] Strike logged. Losses: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
         else:
             self.consecutive_losses = 0
             print("\n[CIRCUIT BREAKER] Winning trade logged. Strikes cleared to 0.", flush=True)
@@ -120,7 +121,7 @@ def write_story_log(event_type, symbol, observation, lesson):
             f.write(json.dumps(story_entry) + "\n")
     except Exception:
         pass
-    print(f"[JOURNAL] {event_type} on {symbol}: {observation} -> LESSON: {lesson}", flush=True)
+    print(f"[JOURNAL] {event_type} on {symbol}: {observation} | Lesson: {lesson}", flush=True)
 
 # ==============================================================================
 # 4. THE SELF-REFLECTIVE CRITIC & AUTONOMOUS DIAGNOSTIC BRAIN
@@ -292,7 +293,7 @@ bitget = ccxt.bitget({
     }
 })
 
-# 2. Top-Tier Global Intelligence Radar Instances (Public Data Only)
+# 2. Public Radar Instances
 bybit_radar = ccxt.bybit({
     "enableRateLimit": True,
     "timeout": 10000,
@@ -313,50 +314,92 @@ okx_radar = ccxt.okx({
 
 ticker_memory = {}
 global_composite_tickers = {}
+radar_counts = {"Binance": 0, "Bybit": 0, "OKX": 0, "Gate": 0}
 
 # ==============================================================================
-# 6. GLOBAL MULTI-EXCHANGE RADAR WORKER (BYBIT + OKX + GATE.IO)
+# 6. GLOBAL MULTI-EXCHANGE RADAR (BINANCE DIRECT WORKAROUND + TOP 4)
 # ==============================================================================
+def fetch_binance_vision_tickers():
+    """
+    Workaround: Uses Binance's official public data CDN (data-api.binance.vision).
+    Bypasses cloud datacenter IP 451 blocks without needing an API key.
+    """
+    endpoints = [
+        "https://data-api.binance.vision/api/v3/ticker/24hr",
+        "https://api-gcp.binance.com/api/v3/ticker/24hr"
+    ]
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    for url in endpoints:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=6) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    parsed = {}
+                    for item in data:
+                        sym = item.get('symbol', '')
+                        if sym.endswith('USDT'):
+                            base = sym[:-4].upper()
+                            pct = float(item.get('priceChangePercent', 0) or 0)
+                            vol = float(item.get('quoteVolume', 0) or 0)
+                            last_p = float(item.get('lastPrice', 0) or 0)
+                            if base and last_p > 0:
+                                parsed[base] = {
+                                    "source": "Binance",
+                                    "pct_24h": pct,
+                                    "vol_quote": vol,
+                                    "price": last_p,
+                                    "updated_at": time.time()
+                                }
+                    if parsed:
+                        return parsed
+        except Exception:
+            continue
+    return {}
+
 def start_global_radar_worker():
-    """
-    Connects to the top global exchanges (Bybit, OKX, Gate.io).
-    Aggregates global consensus so the bot knows if a move is real worldwide.
-    """
-    global global_composite_tickers
+    global global_composite_tickers, radar_counts
     def worker():
-        exchanges = [
-            ("Bybit", bybit_radar),
-            ("OKX", okx_radar),
-            ("Gate", gate_radar)
-        ]
         while True:
+            # 1. Fetch Binance via unblocked data mirror
+            binance_data = fetch_binance_vision_tickers()
+            if binance_data:
+                global_composite_tickers.update(binance_data)
+                radar_counts["Binance"] = len(binance_data)
+
+            # 2. Fetch Bybit, OKX, Gate
+            exchanges = [("Bybit", bybit_radar), ("OKX", okx_radar), ("Gate", gate_radar)]
             for ex_name, ex in exchanges:
                 try:
                     tickers = ex.fetch_tickers()
-                    count = 0
+                    c = 0
                     for s, t in tickers.items():
                         base = s.split('/')[0].split(':')[0].split('_')[0].upper()
                         pct = float(t.get('percentage', 0) or 0)
                         vol = float(t.get('quoteVolume', 0) or 0)
                         last_p = float(t.get('last', 0) or 0)
-
                         if base and last_p > 0:
-                            global_composite_tickers[base] = {
-                                "source": ex_name,
-                                "pct_24h": pct,
-                                "vol_quote": vol,
-                                "price": last_p,
-                                "updated_at": time.time()
-                            }
-                            count += 1
+                            # Keep Binance as primary, supplement others
+                            if base not in global_composite_tickers:
+                                global_composite_tickers[base] = {
+                                    "source": ex_name,
+                                    "pct_24h": pct,
+                                    "vol_quote": vol,
+                                    "price": last_p,
+                                    "updated_at": time.time()
+                                }
+                            c += 1
+                    radar_counts[ex_name] = c
                 except Exception:
                     pass
-                time.sleep(2)
+                time.sleep(1)
+
             time.sleep(4)
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    print("[SYSTEM] Multi-Exchange Composite Radar online (Bybit + OKX + Gate.io streaming).", flush=True)
+    print("[SYSTEM] Global Multi-Exchange Composite Radar active (Binance + Bybit + OKX + Gate.io).", flush=True)
 
 # ==============================================================================
 # 7. FILMING ARCHIVE PERSISTENCE
@@ -753,7 +796,7 @@ def main():
     global live_trade_state
     start_keep_alive()
     start_global_radar_worker()
-    print("[SYSTEM] APEX-V12 Global Cross-Exchange Engine online.", flush=True)
+    print("[SYSTEM] APEX-V13 Binance Direct + Global Multi-Exchange Engine online.", flush=True)
 
     try:
         bitget.load_markets()
@@ -764,7 +807,7 @@ def main():
     archive = load_film_archive()
     cycle = 1
 
-    write_story_log("SYSTEM_START", "ALL", "Composite Radar active.", "Streaming Bybit + OKX + Gate.io consensus.")
+    write_story_log("SYSTEM_START", "ALL", "Global Composite Radar engaged.", "Binance (via Vision CDN) + Bybit + OKX + Gate.io active.")
 
     while True:
         try:
@@ -849,7 +892,7 @@ def main():
                 if natural_swing <= 0:
                     natural_swing = cur_price * 0.008
 
-                # Global cross-exchange check
+                # Global cross-exchange check (Binance primary, Bybit/OKX/Gate backup)
                 global_info = global_composite_tickers.get(base)
                 global_pct = global_info.get('pct_24h', 0) if global_info else 0
 
@@ -975,10 +1018,16 @@ def main():
                 global_sync_count = len(global_composite_tickers)
                 penalties_active = len([s for s in brain.coin_penalties if brain.is_coin_in_penalty(s)])
 
+                bn_c = radar_counts.get("Binance", 0)
+                by_c = radar_counts.get("Bybit", 0)
+                ok_c = radar_counts.get("OKX", 0)
+                gt_c = radar_counts.get("Gate", 0)
+
                 print(
-                    f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid} (Global Composite Pairs: {global_sync_count})\n"
-                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS} | Quarantined Coins: {penalties_active}\n"
-                    f"Self-Calibrated Scores -> [{summary_brain}]",
+                    f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid}\n"
+                    f"Global Radar: {global_sync_count} pairs [Binance: {bn_c} | Bybit: {by_c} | OKX: {ok_c} | Gate: {gt_c}]\n"
+                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS} | Quarantined: {penalties_active}\n"
+                    f"Scores -> [{summary_brain}]",
                     flush=True
                 )
 
