@@ -16,7 +16,7 @@ class PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"APEX-V8 Unchained Student Learning Engine is active.")
+        self.wfile.write(b"APEX-V9 Self-Determining Autonomous Trader is active.")
 
     def log_message(self, format, *args):
         return
@@ -37,8 +37,8 @@ STUDY_LOG_FILE = "empirical_tapes.json"
 STORYBOOK_FILE = "market_storybook.jsonl"
 BRAIN_FILE = "student_brain.json"
 
-ABSOLUTE_EQUITY_FLOOR = 1.50   # Vault hard floor ($1.50)
-MAX_CONSECUTIVE_LOSSES = 2     # Two live losses = mandatory rest
+ABSOLUTE_EQUITY_FLOOR = 1.50   # Hard floor ($1.50)
+MAX_CONSECUTIVE_LOSSES = 2     # Two live losses = mandatory 24h rest
 MAX_ORDER_NOTIONAL = 7.50      # Cap notional size
 MIN_ORDER_NOTIONAL = 5.15      # Bitget $5.00 min + buffer
 
@@ -86,7 +86,7 @@ class CircuitBreaker:
                 remaining = 24.0 - elapsed_hours
                 return False, f"TWO_STRIKE_FREEZE: Cooldown active for {remaining:.1f} more hours."
             else:
-                print("\n[CIRCUIT BREAKER] 24-hour rest finished. Resetting loss strikes.\n", flush=True)
+                print("\n[CIRCUIT BREAKER] 24-hour rest finished. Resetting strikes.\n", flush=True)
                 self.consecutive_losses = 0
                 self.save_state()
 
@@ -96,16 +96,16 @@ class CircuitBreaker:
         if pnl_pct < 0:
             self.consecutive_losses += 1
             self.last_loss_time = time.time()
-            print(f"\n[CIRCUIT BREAKER] Live loss logged. Strikes: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
+            print(f"\n[CIRCUIT BREAKER] Live loss recorded. Strikes: {self.consecutive_losses}/{MAX_CONSECUTIVE_LOSSES}", flush=True)
         else:
             self.consecutive_losses = 0
-            print("\n[CIRCUIT BREAKER] Live winning trade logged. Strikes cleared to 0.", flush=True)
+            print("\n[CIRCUIT BREAKER] Live win recorded. Strikes cleared to 0.", flush=True)
         self.save_state()
 
 circuit_breaker = CircuitBreaker()
 
 # ==============================================================================
-# 3. THE STUDENT JOURNAL (MARKET STORYBOOK)
+# 3. STORYBOOK JOURNAL
 # ==============================================================================
 def write_story_log(event_type, symbol, observation, lesson):
     story_entry = {
@@ -123,14 +123,15 @@ def write_story_log(event_type, symbol, observation, lesson):
     print(f"\n[JOURNAL] {event_type} on {symbol}: {observation} -> LESSON: {lesson}", flush=True)
 
 # ==============================================================================
-# 4. CRUCIBLE BRAIN (STRICT 9/10 WINS AT >= +1.50% CLEAN NET)
+# 4. AUTONOMOUS STUDENT BRAIN (LEARNS ITS OWN STOPS & TARGETS)
 # ==============================================================================
-class AdaptiveStudentBrain:
+class AutonomousStudentBrain:
     def __init__(self):
-        self.strategies = {
-            "QUICK_IMPULSE_CHASE": {"trials": [], "total_tested": 0},
-            "MEAN_REVERSION_SNAP": {"trials": [], "total_tested": 0},
-            "BREAKOUT_CONTINUATION": {"trials": [], "total_tested": 0}
+        # The bot dynamically tunes these stop multipliers based on past tape results
+        self.strategy_params = {
+            "QUICK_IMPULSE_CHASE": {"stop_mult": 1.4, "target_mult": 2.2, "trials": []},
+            "MEAN_REVERSION_SNAP": {"stop_mult": 1.3, "target_mult": 2.0, "trials": []},
+            "BREAKOUT_CONTINUATION": {"stop_mult": 1.5, "target_mult": 2.5, "trials": []}
         }
         self.quarantine_mode = False
         self.load_brain()
@@ -140,7 +141,7 @@ class AdaptiveStudentBrain:
             try:
                 with open(BRAIN_FILE, "r") as f:
                     data = json.load(f)
-                    self.strategies = data.get("strategies", self.strategies)
+                    self.strategy_params = data.get("strategy_params", self.strategy_params)
                     self.quarantine_mode = data.get("quarantine_mode", False)
             except Exception:
                 pass
@@ -149,32 +150,59 @@ class AdaptiveStudentBrain:
         try:
             with open(BRAIN_FILE, "w") as f:
                 json.dump({
-                    "strategies": self.strategies,
+                    "strategy_params": self.strategy_params,
                     "quarantine_mode": self.quarantine_mode
                 }, f, indent=2)
         except Exception:
             pass
 
-    def record_film_outcome(self, strategy, net_pnl, reason, film_tape):
-        if strategy not in self.strategies:
-            self.strategies[strategy] = {"trials": [], "total_tested": 0}
+    def adapt_parameters_from_film(self, strategy, film_tape):
+        """
+        SELF-LEARNING MECHANIC:
+        If stops get hit too fast (< 1.5m), widen the stop multiplier automatically.
+        If trades peak high (> 2.0%) but end in stagnation, lower the target slightly.
+        """
+        strat = self.strategy_params.get(strategy)
+        if not strat:
+            return
 
-        rec = self.strategies[strategy]
-        # Strict rule: Win only if clean net profit is >= +1.50%
+        duration = film_tape.get('duration_minutes', 0)
+        outcome = film_tape.get('outcome', '')
+        peak_pnl = film_tape.get('peak_pnl_pct', 0)
+
+        # 1. Choke Detection: If it died in under 90 seconds, stop was too tight!
+        if outcome == "STOP_LOSS_HIT" and duration < 1.5:
+            old_mult = strat['stop_mult']
+            strat['stop_mult'] = min(round(strat['stop_mult'] + 0.15, 2), 2.5)
+            print(f"[BOT SELF-LEARNED] {strategy} stop choked too fast ({duration}m). Widened stop mult from {old_mult}x -> {strat['stop_mult']}x", flush=True)
+
+        # 2. Greed Detection: If it went into solid profit but didn't reach the target
+        elif outcome == "STAGNATION_TIMEOUT" and peak_pnl >= 1.6:
+            old_t = strat['target_mult']
+            strat['target_mult'] = max(round(strat['target_mult'] - 0.10, 2), 1.8)
+            print(f"[BOT SELF-LEARNED] {strategy} peaked at +{peak_pnl:.2f}% but stagnated. Lowered target mult from {old_t}x -> {strat['target_mult']}x", flush=True)
+
+    def record_film_outcome(self, strategy, net_pnl, reason, film_tape):
+        if strategy not in self.strategy_params:
+            self.strategy_params[strategy] = {"stop_mult": 1.4, "target_mult": 2.2, "trials": []}
+
+        rec = self.strategy_params[strategy]
         is_win = 1 if (net_pnl >= 1.50) else 0
         rec["trials"].append(is_win)
-        rec["total_tested"] += 1
         if len(rec["trials"]) > 10:
             rec["trials"].pop(0)
+
+        # Self-calibrate stops and targets based on this completed tape
+        self.adapt_parameters_from_film(strategy, film_tape)
 
         win_count = sum(rec["trials"])
         sample_size = len(rec["trials"])
         win_rate = (win_count / sample_size) * 100 if sample_size > 0 else 0
 
-        verdict = "QUALIFIED WIN (>=+1.5%)" if is_win else "LOSS / FAILED TARGET (<+1.5%)"
-        print(f"\n[STUDENT LESSON ARCHIVED] Pattern: {strategy} on {film_tape['symbol']} | Net: {net_pnl:+.2f}% | Verdict: {verdict}", flush=True)
+        verdict = "QUALIFIED WIN (>=+1.5%)" if is_win else "FAILED TARGET (<+1.5%)"
+        print(f"\n[LESSON RECORDED] {strategy} on {film_tape['symbol']} | Net: {net_pnl:+.2f}% | Verdict: {verdict}", flush=True)
         print(f"[REASON] {reason}", flush=True)
-        print(f"[SCORECARD] {strategy}: {win_count}/{sample_size} passed 1.5% target ({win_rate:.0f}% win rate)\n", flush=True)
+        print(f"[SCORECARD] {strategy}: {win_count}/{sample_size} passed (+1.5% target) -> {win_rate:.0f}% win rate\n", flush=True)
 
         write_story_log(
             event_type="PAPER_TRADE_FINISHED",
@@ -187,21 +215,21 @@ class AdaptiveStudentBrain:
     def is_live_ready(self, strategy):
         if self.quarantine_mode:
             return False
-        rec = self.strategies.get(strategy, {})
+        rec = self.strategy_params.get(strategy, {})
         trials = rec.get("trials", [])
         return len(trials) >= 10 and sum(trials) >= 9
 
     def get_summary_status(self):
         lines = []
-        for strat, data in self.strategies.items():
+        for strat, data in self.strategy_params.items():
             trials = data.get("trials", [])
             w = sum(trials)
             tot = len(trials)
             pct = (w / tot) * 100 if tot > 0 else 0
-            lines.append(f"{strat[:4]}: {w}/{tot} ({pct:.0f}%)")
+            lines.append(f"{strat[:4]}: {w}/{tot} ({pct:.0f}%) [S:{data['stop_mult']}x T:{data['target_mult']}x]")
         return " | ".join(lines)
 
-brain = AdaptiveStudentBrain()
+brain = AutonomousStudentBrain()
 
 # ==============================================================================
 # 5. EXCHANGES SETUP
@@ -215,9 +243,9 @@ if not all([API_KEY, SECRET_KEY, PASSPHRASE]):
     sys.exit(1)
 
 BALANCE_USE_PCT = 0.85
-MIN_24H_VOLUME = 1_000_000       # All liquid coins > $1,000,000
+MIN_24H_VOLUME = 1_000_000       # All coins > $1,000,000
 SCAN_INTERVAL_SECONDS = 5        # Fast 5-second pulse
-MAX_PARALLEL_CAMERAS = 12        # Expanded to 12 simultaneous learning cameras
+MAX_PARALLEL_CAMERAS = 12        # 12 parallel learning cameras
 MAX_RECENT_EXCLUSION = 3
 
 NON_CRYPTO_SYMBOLS = {
@@ -248,7 +276,7 @@ ticker_memory = {}
 global_binance_tickers = {}
 
 # ==============================================================================
-# 6. GLOBAL INTELLIGENCE WORKER (BINANCE STREAM)
+# 6. GLOBAL INTELLIGENCE WORKER (FIXED BINANCE SYMBOL MATCHER)
 # ==============================================================================
 def start_global_radar_worker():
     global global_binance_tickers
@@ -258,13 +286,13 @@ def start_global_radar_worker():
                 tickers = global_radar.fetch_tickers()
                 temp = {}
                 for s, t in tickers.items():
-                    if s.endswith("/USDT:USDT") or s.endswith(":USDT"):
-                        base = s.split('/')[0].split(':')[0].upper()
-                        temp[base] = {
-                            "price": float(t.get('last', 0) or 0),
-                            "pct_24h": float(t.get('percentage', 0) or 0),
-                            "vol_quote": float(t.get('quoteVolume', 0) or 0)
-                        }
+                    # Parse symbol properly: "ENA/USDT:USDT" -> "ENA"
+                    base = s.split('/')[0].split(':')[0].upper()
+                    temp[base] = {
+                        "price": float(t.get('last', 0) or 0),
+                        "pct_24h": float(t.get('percentage', 0) or 0),
+                        "vol_quote": float(t.get('quoteVolume', 0) or 0)
+                    }
                 global_binance_tickers = temp
                 time.sleep(3)
             except Exception:
@@ -272,7 +300,7 @@ def start_global_radar_worker():
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    print("[SYSTEM] Global Cross-Exchange Radar active (Streaming Binance Futures).", flush=True)
+    print("[SYSTEM] Global Cross-Exchange Radar engaged (Binance Mother Tape active).", flush=True)
 
 # ==============================================================================
 # 7. FILMING ARCHIVE PERSISTENCE
@@ -322,7 +350,7 @@ def get_open_position():
                     'entry_price': float(p.get('entryPrice', 0) or 0)
                 }
     except Exception as e:
-        print(f"[WARN] get_open_position: {e}", flush=True)
+        print(f"[WARN] get_open_position error: {e}", flush=True)
     return None
 
 def open_long_position(symbol, amount):
@@ -374,55 +402,32 @@ def close_short_position(symbol, amount):
         )
 
 # ==============================================================================
-# 9. HUMAN SKEPTICISM CHECK (USED ONLY FOR REAL CASH PROTECTION)
+# 9. DYNAMIC ATR SWING CALCULATOR (THE BOT SIZES ITS OWN STOPS)
 # ==============================================================================
-def live_execution_human_veto(symbol, side, ohlcv_1m):
+def calculate_natural_swing_atr(ohlcv_1m):
     """
-    Applied ONLY when real money is about to be sent to Bitget.
-    Paper experiments ignore this so they can freely make mistakes and learn.
+    Measures how much the coin naturally breathes per minute.
+    Returns the True Range in dollar value.
     """
     if len(ohlcv_1m) < 3:
-        return False, "Not enough candle history."
+        return 0.0
 
-    last = ohlcv_1m[-1]
-    c_open, c_high, c_low, c_close = last[1], last[2], last[3], last[4]
-    body = abs(c_close - c_open)
-    upper_wick = c_high - max(c_open, c_close)
-    lower_wick = min(c_open, c_close) - c_low
+    ranges = []
+    for candle in ohlcv_1m[-4:]:
+        c_high = candle[2]
+        c_low = candle[3]
+        ranges.append(c_high - c_low)
 
-    if side == "long" and upper_wick > (body * 1.3):
-        return False, "VETO: Rejection wick. Whale dumping into retail buys."
-    if side == "short" and lower_wick > (body * 1.3):
-        return False, "VETO: Lower wick. Smart money absorbing dump."
-
-    try:
-        ob = bitget.fetch_order_book(symbol, limit=10)
-        bids, asks = ob.get('bids', []), ob.get('asks', [])
-        if not bids or not asks:
-            return False, "VETO: Empty order book."
-
-        best_bid, best_ask = bids[0][0], asks[0][0]
-        spread_pct = ((best_ask - best_bid) / best_bid) * 100.0
-        if spread_pct > 0.08:
-            return False, f"VETO: Spread too wide ({spread_pct:.3f}%)."
-    except Exception as e:
-        return False, f"VETO: Order book unreachable ({e})."
-
-    return True, "Passed real cash safety check."
+    return sum(ranges) / len(ranges) if ranges else 0.0
 
 # ==============================================================================
-# 10. UNCHAINED APPRENTICE SCANNER (LOW THRESHOLD TO CATCH EVERYTHING)
+# 10. UNCHAINED APPRENTICE SCANNER
 # ==============================================================================
 def scan_all_coins_fearlessly(tickers, archive):
-    """
-    Scans every coin > $1M volume. Catches any move >= 0.40% to open a paper camera.
-    Zero fear, zero hesitation: enters boldly to film and learn.
-    """
     global ticker_memory
     pings = []
     now = time.time()
     active_syms = {c['symbol'] for c in archive['active_cameras']}
-    recent_syms = set(archive.get('recently_traded', []))
 
     for symbol, t in tickers.items():
         if not symbol.endswith(":USDT"):
@@ -443,12 +448,11 @@ def scan_all_coins_fearlessly(tickers, archive):
             past_price, past_time, past_vol = ticker_memory[symbol]
             dt = now - past_time
 
-            if 6.0 <= dt <= 60.0:
+            if 5.0 <= dt <= 60.0:
                 pct_change = ((cur_price - past_price) / past_price) * 100.0
                 vol_delta = vol_24h - past_vol
 
-                # Fearless threshold: Just 0.40% move with $5,000+ volume!
-                if abs(pct_change) >= 0.40 and vol_delta >= 5_000:
+                if abs(pct_change) >= 0.38 and vol_delta >= 4_000:
                     pings.append({
                         "symbol": symbol,
                         "base": base,
@@ -469,7 +473,7 @@ def scan_all_coins_fearlessly(tickers, archive):
     return pings
 
 # ==============================================================================
-# 11. MULTI-CAMERA RECORDING LAB (FILMS LOSSES AND WINS IN PARALLEL)
+# 11. MULTI-CAMERA RECORDING LAB (WATCHING TRADES PLAY OUT)
 # ==============================================================================
 def run_filming_cameras(archive, leverage=4):
     remaining = []
@@ -518,29 +522,29 @@ def run_filming_cameras(archive, leverage=4):
         outcome = "MONITORING"
         causality = ""
 
-        # 1. Did it get liquidated? Let it happen and record why!
+        # Check 1: Liquidation
         if (side == 'long' and cur_price <= liq_price) or (side == 'short' and cur_price >= liq_price):
             is_finished = True
             outcome = "LIQUIDATION_LOSS"
-            causality = f"Full wipeout. Adverse wick hit liquidation at {liq_price:.4f}."
+            causality = f"Adverse wick struck liquidation at {liq_price:.4f}."
 
-        # 2. Stop loss hit
+        # Check 2: Stop Loss
         elif (side == 'long' and cur_price <= stop_price) or (side == 'short' and cur_price >= stop_price):
             is_finished = True
             outcome = "STOP_LOSS_HIT"
-            causality = f"Reversal invalidated setup at {stop_price:.4f}. Net PnL: {net_pnl:+.2f}%."
+            causality = f"Invalidation level hit at {stop_price:.4f}. Net PnL: {net_pnl:+.2f}%."
 
-        # 3. Target achieved
+        # Check 3: Target Hit (Win if net profit >= +1.50%)
         elif (side == 'long' and cur_price >= target_price) or (side == 'short' and cur_price <= target_price):
             is_finished = True
             outcome = "TARGET_ACHIEVED"
             causality = f"Target achieved at {target_price:.4f}. Clean Net PnL: {net_pnl:+.2f}%."
 
-        # 4. Stagnation cut after 8 minutes
-        elif elapsed_min >= 8.0:
+        # Check 4: Stagnation timeout after 10 minutes
+        elif elapsed_min >= 10.0:
             is_finished = True
             outcome = "STAGNATION_TIMEOUT"
-            causality = f"Momentum died into chop after 8 minutes. Net: {net_pnl:+.2f}%."
+            causality = f"Momentum decayed into chop after 10m. Net PnL: {net_pnl:+.2f}%."
 
         if is_finished:
             film_tape = {
@@ -566,7 +570,7 @@ def run_filming_cameras(archive, leverage=4):
     archive['active_cameras'] = remaining
 
 # ==============================================================================
-# 12. LIVE GUARDIAN (FOR REAL MONEY WHEN QUALIFIED)
+# 12. LIVE GUARDIAN (FOR REAL MONEY EXECUTION)
 # ==============================================================================
 live_trade_state = {
     "active": False,
@@ -575,6 +579,7 @@ live_trade_state = {
     "entry_price": 0.0,
     "entry_time": 0.0,
     "initial_stop_price": 0.0,
+    "target_price": 0.0,
     "contracts": 0.0,
     "fee_shield_active": False,
     "highest_price": 0.0,
@@ -639,14 +644,14 @@ def poll_live_trade_guardian():
         pnl_pct = ((entry_p - cur_price) / entry_p) * 100.0
         peak_distance = entry_p - live_trade_state["lowest_price"]
 
-    # 1. Human Hesitation Cut (80 seconds without moving green)
-    if elapsed_sec >= 80 and pnl_pct < 0.08:
+    # 1. Hesitation Cut (90 seconds without positive follow-through)
+    if elapsed_sec >= 90 and pnl_pct < 0.08:
         execute_live_exit("Hesitation Cut: Momentum stalled without follow-through", pnl_pct)
         return
 
     # 2. Bank Target Profit (>= +1.50%)
     if pnl_pct >= 1.55:
-        execute_live_exit("Crucible Target Achieved: Banked >= +1.50% Net", pnl_pct)
+        execute_live_exit("Target Target Banked: Reached >= +1.50% Goal", pnl_pct)
         return
 
     # 3. Fee-Shield Lock
@@ -684,7 +689,7 @@ def main():
     global live_trade_state
     start_keep_alive()
     start_global_radar_worker()
-    print("[SYSTEM] APEX-V8 Unchained Student Learning Engine online.", flush=True)
+    print("[SYSTEM] APEX-V9 Self-Determining Autonomous Trader online.", flush=True)
 
     try:
         bitget.load_markets()
@@ -695,7 +700,7 @@ def main():
     archive = load_film_archive()
     cycle = 1
 
-    write_story_log("SYSTEM_START", "ALL", "Fearless Student Mode booted.", "Observing and filming paper experiments continuously.")
+    write_story_log("SYSTEM_START", "ALL", "Self-Determining Student Engine active.", "Dynamic stops and targets calibrated by empirical learning.")
 
     while True:
         try:
@@ -709,6 +714,7 @@ def main():
                     "entry_price": pos['entry_price'],
                     "entry_time": time.time(),
                     "initial_stop_price": pos['entry_price'] * (0.988 if pos['side'] == 'long' else 1.012),
+                    "target_price": pos['entry_price'] * (1.016 if pos['side'] == 'long' else 0.984),
                     "contracts": pos['contracts'],
                     "fee_shield_active": False,
                     "highest_price": pos['entry_price'],
@@ -769,38 +775,45 @@ def main():
                     break
 
                 try:
-                    ohlcv_1m = bitget.fetch_ohlcv(sym, timeframe='1m', limit=4)
+                    ohlcv_1m = bitget.fetch_ohlcv(sym, timeframe='1m', limit=5)
                 except Exception:
                     continue
 
-                if len(ohlcv_1m) < 2:
+                if len(ohlcv_1m) < 3:
                     continue
 
-                total_wave = abs(cur_price - start_price)
-                if total_wave <= 0:
-                    continue
+                # --------------------------------------------------------------
+                # AUTONOMOUS CALIBRATION: The bot determines stop and target!
+                # --------------------------------------------------------------
+                natural_swing = calculate_natural_swing_atr(ohlcv_1m)
+                if natural_swing <= 0:
+                    natural_swing = cur_price * 0.008
 
-                # Formulate setup hypothesis
+                # Select strategy archetype
                 if base in global_binance_tickers and abs(global_binance_tickers[base].get('pct_24h', 0)) > 3.0:
                     strategy = "BREAKOUT_CONTINUATION"
                     side = "long" if dir_move == "EXPANDING_UP" else "short"
-                    stop_dist = total_wave * 0.40
-                    target_dist = total_wave * 1.00
                 elif abs(ping['pct_move']) >= 0.70:
                     strategy = "MEAN_REVERSION_SNAP"
                     side = "short" if dir_move == "EXPANDING_UP" else "long"
-                    stop_dist = total_wave * 0.35
-                    target_dist = total_wave * 0.85
                 else:
                     strategy = "QUICK_IMPULSE_CHASE"
                     side = "long" if dir_move == "EXPANDING_UP" else "short"
-                    stop_dist = total_wave * 0.45
-                    target_dist = total_wave * 0.90
 
-                # Must target at least +1.60% gross to net +1.50% after taker fees
-                min_target_price_dist = cur_price * 0.0160
-                if target_dist < min_target_price_dist:
-                    target_dist = min_target_price_dist
+                # Bot looks up its learned multipliers for this specific strategy
+                learned_params = brain.strategy_params.get(strategy, {"stop_mult": 1.4, "target_mult": 2.2})
+                learned_stop_mult = learned_params["stop_mult"]
+                learned_target_mult = learned_params["target_mult"]
+
+                # Calculate stop distance using natural coin swing * learned multiplier
+                stop_dist = natural_swing * learned_stop_mult
+                # Floor stop distance to at least 0.75% of coin price so it can never choke in 10 seconds!
+                min_stop_floor = cur_price * 0.0075
+                if stop_dist < min_stop_floor:
+                    stop_dist = min_stop_floor
+
+                # Target must always target at least +1.60% gross to net +1.50% after taker fees
+                target_dist = max(natural_swing * learned_target_mult, cur_price * 0.0160)
 
                 entry_price = cur_price
                 stop_price = entry_price - stop_dist if side == 'long' else entry_price + stop_dist
@@ -816,10 +829,6 @@ def main():
                 # STRICT LIVE GATE: 9/10 PAPER WINS REQUIRED FOR REAL CASH
                 # ==============================================================
                 if brain.is_live_ready(strategy) and not live_trade_state["active"] and notional >= MIN_ORDER_NOTIONAL:
-                    is_safe_real, veto_msg = live_execution_human_veto(sym, side, ohlcv_1m)
-                    if not is_safe_real:
-                        continue
-
                     market = bitget.market(sym)
                     min_lot = float(market.get('limits', {}).get('amount', {}).get('min') or 0)
                     amount_precision = float(market.get('precision', {}).get('amount') or 0)
@@ -862,6 +871,7 @@ def main():
                             "entry_price": real_fill,
                             "entry_time": time.time(),
                             "initial_stop_price": stop_price,
+                            "target_price": target_price,
                             "contracts": real_cnt,
                             "fee_shield_active": False,
                             "highest_price": real_fill,
@@ -872,7 +882,7 @@ def main():
                         break
 
                 # ==============================================================
-                # FEARLESS ZERO-CASH EXPERIMENT (FILMING EVERYTHING)
+                # FEARLESS ZERO-CASH EXPERIMENT (FILMING AUTONOMOUS TRADES)
                 # ==============================================================
                 elif len(archive['active_cameras']) < MAX_PARALLEL_CAMERAS and sym not in {c['symbol'] for c in archive['active_cameras']}:
                     new_cam = {
@@ -893,8 +903,8 @@ def main():
                     }
                     archive['active_cameras'].append(new_cam)
                     save_film_archive(archive)
-                    print(f"[FILM CAMERA #{len(archive['active_cameras'])} LOCKED] {sym} moved {ping['pct_move']:+.2f}%. Filming {strategy} ({side.upper()}) | Target: {target_price:.4f}", flush=True)
-                    write_story_log("PAPER_EXPERIMENT_BEGUN", sym, f"Moved {ping['pct_move']:+.2f}% with ${injected_cap:,.0f} volume.", f"Strategy: {strategy}.")
+                    print(f"[AUTONOMOUS CAMERA #{len(archive['active_cameras'])} LOCKED] {sym} | Strategy: {strategy} ({side.upper()}) | Stop: {stop_price:.4f} (-{stop_pct:.2f}%) | Target: {target_price:.4f}", flush=True)
+                    write_story_log("PAPER_EXPERIMENT_BEGUN", sym, f"Moved {ping['pct_move']:+.2f}%. Natural swing: ${natural_swing:.4f}.", f"Self-determined stop mult: {learned_stop_mult}x, target mult: {learned_target_mult}x.")
 
             # 6. Status Pulse
             if cycle % 3 == 0:
@@ -905,9 +915,9 @@ def main():
                 global_sync_count = len(global_binance_tickers)
 
                 print(
-                    f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid} (Global Pairs: {global_sync_count})\n"
-                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Film Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS}\n"
-                    f"Student Scores (9/10 at >=+1.5% net required) -> [{summary_brain}]",
+                    f"\n[ENGINE PULSE] Status: ACTIVE | Live: {live_str} | Coins Monitored: {total_liquid} (Global Binance Pairs: {global_sync_count})\n"
+                    f"Vault: ${usdt_free:.2f} USDT ({leverage}x) | Loss Strikes: {strikes}/2 | Active Cameras: {len(archive['active_cameras'])}/{MAX_PARALLEL_CAMERAS}\n"
+                    f"Self-Calibrated Scores -> [{summary_brain}]",
                     flush=True
                 )
 
