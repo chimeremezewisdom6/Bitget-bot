@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import threading
+import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
@@ -12,20 +13,27 @@ import ccxt
 PORT = int(os.environ.get("PORT", 10000))
 BRAIN_FILE = "pre_dump_intelligence_memory.json"
 
+bot = None  # Populated on startup
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
-        status = {
-            "engine": "APEX-V16 Pre-Dump Distribution & Microstructure Engine",
-            "streak_status": f"{bot.consecutive_paper_wins}/8 Wins in a row",
-            "mode": "LIVE_AUTHORIZED (8/8 Streak Achieved)" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Hunting 8/8 Streak)",
-            "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses",
-            "active_trades": len(bot.active_cameras),
-            "live_active": bot.live_state["active"],
-            "quarantined_coins": len(bot.coin_cooldowns)
-        }
+        
+        if bot:
+            status = {
+                "engine": "APEX-V16 Dual 10x Gap & Microstructure Engine",
+                "streak_status": f"{bot.consecutive_paper_wins}/{bot.REQUIRED_WIN_STREAK} Wins in a row",
+                "mode": "LIVE_AUTHORIZED (8/8 Streak Achieved)" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Hunting 8/8 Streak)",
+                "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses",
+                "active_trades": len(bot.active_cameras),
+                "live_active": bot.live_state["active"],
+                "quarantined_coins": len(bot.coin_cooldowns)
+            }
+        else:
+            status = {"status": "initializing"}
+            
         self.wfile.write(json.dumps(status, indent=2).encode('utf-8'))
 
     def log_message(self, format, *args):
@@ -38,7 +46,7 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. PRE-DUMP DISTRIBUTION & MICROSTRUCTURE ENGINE
+# 2. DUAL 10x GAP & MICROSTRUCTURE ENGINE
 # ==============================================================================
 class PreDumpHunterBot:
     def __init__(self):
@@ -54,24 +62,25 @@ class PreDumpHunterBot:
         self.all_time_wins = 0
         self.all_time_losses = 0
 
-        # 3. Market Quality Filters
-        self.MAX_ALLOWED_SPREAD_PCT = 0.0012   # Maximum 0.12% spread allowed
-        self.MIN_RESTING_DEPTH_USD = 20_000.0  # Real institutional order books
-        self.QUARANTINE_DURATION_SEC = 3600    # 1-Hour ban on any coin that stops out
+        # 3. Liquid Crypto Market Filters (Rejects dead coins)
+        self.MAX_ALLOWED_SPREAD_PCT = 0.0006   # Max 0.06% spread (must be tight)
+        self.MIN_BASELINE_DEPTH_USD = 40_000.0 # Floor must have had at least $40k before collapse
+        self.QUARANTINE_DURATION_SEC = 3600    # 1-Hour lockout for any failed trade
 
-        # Non-Crypto Blacklist
+        # Non-Crypto / Low-Liquidity Equity Perps Blacklist
         self.BLACKLIST = {
             'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META',
-            'CL', 'BZ', 'XAU', 'XAG', 'SPX', 'NDX', 'DJI', 'KORU', 'MU'
+            'CL', 'BZ', 'XAU', 'XAG', 'SPX', 'NDX', 'DJI', 'KORU', 'MU',
+            'SKHYNIX', 'SKHY', 'SNDK', 'SNXX', 'BABA', 'COIN', 'MSTR', 'ARM', 'INTC'
         }
 
         # 4. Memory & Tracking
         self.active_cameras = []
-        self.market_history = {}    # Tracks depth & price evolution over 15-30m
+        self.market_history = {}
         self.coin_cooldowns = {}
         self.load_brain()
 
-        # 5. Live Trade Tracker (Bound directly to self)
+        # 5. Live Trade Tracker
         self.live_state = {
             "active": False,
             "symbol": None,
@@ -142,9 +151,33 @@ class PreDumpHunterBot:
             self.consecutive_paper_wins = 0
         self.save_brain()
 
+    # --------------------------------------------------------------------------
+    # 1. TAPE VELOCITY: CONFIRM ACTIVE REAL-TIME FLOW
+    # --------------------------------------------------------------------------
+    def is_market_actively_trading(self, symbol):
+        """Rejects ghost books. Requires trades within the last 6 seconds."""
+        try:
+            trades = self.bitget.fetch_trades(symbol, limit=10)
+            if not trades or len(trades) < 5:
+                return False
+
+            now_ms = time.time() * 1000
+            latest_trade_time = trades[-1]['timestamp']
+
+            # If no trade occurred in the last 6 seconds, coin is too inactive
+            if (now_ms - latest_trade_time) > 6000:
+                return False
+
+            return True
+        except Exception:
+            return False
+
+    # --------------------------------------------------------------------------
+    # 2. ORDER BOOK DEPTH & SPREAD INSPECTION
+    # --------------------------------------------------------------------------
     def get_order_book_metrics(self, symbol):
         try:
-            ob = self.bitget.fetch_order_book(symbol, limit=25)
+            ob = self.bitget.fetch_order_book(symbol, limit=50)
             bids = ob.get('bids', [])
             asks = ob.get('asks', [])
 
@@ -159,11 +192,9 @@ class PreDumpHunterBot:
             if spread_pct > self.MAX_ALLOWED_SPREAD_PCT:
                 return None
 
-            bid_usd = sum([p * q for p, q in bids if p >= mid * 0.988])
-            ask_usd = sum([p * q for p, q in asks if p <= mid * 1.012])
-
-            if bid_usd < self.MIN_RESTING_DEPTH_USD or ask_usd < self.MIN_RESTING_DEPTH_USD:
-                return None
+            # Calculate resting depth within 0.8% of mid price
+            bid_usd = sum([p * q for p, q in bids if p >= mid * 0.992])
+            ask_usd = sum([p * q for p, q in asks if p <= mid * 1.008])
 
             return {
                 "mid": mid,
@@ -175,117 +206,113 @@ class PreDumpHunterBot:
             return None
 
     # --------------------------------------------------------------------------
-    # AUDIT PRE-DUMP DISTRIBUTION (BEFORE THE DUMP BEGINS)
+    # 3. DUAL 10x GAP DETECTION LOGIC
     # --------------------------------------------------------------------------
     def audit_pre_dump_behavior(self, symbol, vol_24h):
         base = symbol.split('/')[0].split(':')[0].upper()
         if base in self.BLACKLIST or time.time() < self.coin_cooldowns.get(symbol, 0):
             return None
 
-        now = time.time()
+        # Verify active market tape first
+        if not self.is_market_actively_trading(symbol):
+            return None
+
         metrics = self.get_order_book_metrics(symbol)
         if not metrics:
             return None
 
+        now = time.time()
         if symbol not in self.market_history:
             self.market_history[symbol] = []
 
         self.market_history[symbol].append({
             "t": now,
-            "vol_24h": vol_24h,
             "bid_usd": metrics["bid_usd"],
             "ask_usd": metrics["ask_usd"],
             "price": metrics["mid"]
         })
-        self.market_history[symbol] = [s for s in self.market_history[symbol] if now - s["t"] <= 1500.0]
+        self.market_history[symbol] = [s for s in self.market_history[symbol] if now - s["t"] <= 600.0]
 
         history = self.market_history[symbol]
-        # Look back 5 to 12 minutes
-        past_snaps = [s for s in history if 300.0 <= (now - s["t"]) <= 720.0]
+        # Look back 2 to 6 minutes for historical baseline
+        past_snaps = [s for s in history if 120.0 <= (now - s["t"]) <= 360.0]
         if not past_snaps:
             return None
 
         baseline = past_snaps[0]
-        elapsed_min = (now - baseline["t"]) / 60.0
-        delta_vol = vol_24h - baseline["vol_24h"]
+        mid = metrics["mid"]
+        cur_bid = metrics["bid_usd"]
+        cur_ask = metrics["ask_usd"]
 
-        # Must have active volume turnover
-        if delta_vol < 35_000:
+        if cur_bid <= 0 or cur_ask <= 0:
             return None
 
-        mid = metrics["mid"]
+        # ======================================================================
+        # DUAL 10x SHORT SETUP:
+        # 1. Bids fell by 10x from baseline
+        # 2. Asks are currently 10x larger than resting Bids
+        # ======================================================================
+        bid_collapse_factor = baseline["bid_usd"] / cur_bid
+        ask_to_bid_gap = cur_ask / cur_bid
 
-        # Track extremes over the window
-        peak_price = max([s["price"] for s in history])
-        max_bids_seen = max([s["bid_usd"] for s in history])
-        baseline_asks = baseline["ask_usd"]
+        if (baseline["bid_usd"] >= self.MIN_BASELINE_DEPTH_USD and 
+            bid_collapse_factor >= 10.0 and 
+            ask_to_bid_gap >= 10.0):
+
+            peak_price = max([s["price"] for s in history])
+            slip_pct = ((peak_price - mid) / peak_price) * 100.0
+
+            # Price begins cracking downward into the void
+            if 0.05 <= slip_pct <= 0.50:
+                return {
+                    "symbol": symbol,
+                    "side": "short",
+                    "mid": mid,
+                    "target_price": mid * 0.9920,       # 0.8% profit target
+                    "stop_price": peak_price * 1.0015,   # Invalidation above wall
+                    "reason": (
+                        f"DUAL 10x DUMP: Bids collapsed {bid_collapse_factor:.1f}x "
+                        f"(${baseline['bid_usd']:,.0f} -> ${cur_bid:,.0f}) AND "
+                        f"Asks are {ask_to_bid_gap:.1f}x larger (${cur_ask:,.0f} vs ${cur_bid:,.0f})! "
+                        f"Price cracked -{slip_pct:.2f}% into void."
+                    )
+                }
 
         # ======================================================================
-        # THE PRE-DUMP SIGNATURE (SHORT BEFORE THE DROP)
+        # DUAL 10x LONG SETUP:
+        # 1. Asks fell by 10x from baseline
+        # 2. Bids are currently 10x larger than resting Asks
         # ======================================================================
-        # 1. Bids have hollowed out by at least 2.5x to 5x+ from the baseline
-        # 2. Asks overhead have expanded (sellers stacking walls)
-        # 3. Price is still near its highs (within 0.35% of peak) but struggling
-        # 4. The Crack: Price just broke down by -0.15% to -0.35% off the peak
-        bid_hollowing_factor = max_bids_seen / metrics["bid_usd"] if metrics["bid_usd"] > 0 else 1.0
-        ask_stacking_factor = metrics["ask_usd"] / baseline_asks if baseline_asks > 0 else 1.0
-        slip_from_peak_pct = ((peak_price - mid) / peak_price) * 100.0
+        ask_collapse_factor = baseline["ask_usd"] / cur_ask
+        bid_to_ask_gap = cur_bid / cur_ask
 
-        if (bid_hollowing_factor >= 2.5 and ask_stacking_factor >= 1.3 and 
-            0.15 <= slip_from_peak_pct <= 0.40):
+        if (baseline["ask_usd"] >= self.MIN_BASELINE_DEPTH_USD and 
+            ask_collapse_factor >= 10.0 and 
+            bid_to_ask_gap >= 10.0):
 
-            # Invalidation: Stop sits safely right above the distribution peak
-            stop_price = peak_price * 1.0020
-            # Target: Down into the hollow void below
-            target_price = mid * 0.9930
+            trough_price = min([s["price"] for s in history])
+            lift_pct = ((mid - trough_price) / trough_price) * 100.0
 
-            return {
-                "symbol": symbol,
-                "side": "short",
-                "mid": mid,
-                "target_price": target_price,
-                "stop_price": stop_price,
-                "reason": (
-                    f"PRE-DUMP CAUGHT: Bids hollowed out {bid_hollowing_factor:.1f}x (${max_bids_seen:,.0f} -> ${metrics['bid_usd']:,.0f}) "
-                    f"while Asks stacked {ask_stacking_factor:.1f}x with ${delta_vol:,.0f} churn! "
-                    f"Price cracked -{slip_from_peak_pct:.2f}% off peak. Floor is gone, entering SHORT before freefall!"
-                )
-            }
-
-        # ======================================================================
-        # MIRROR: PRE-PUMP ACCUMULATION (LONG BEFORE THE SURGE)
-        # ======================================================================
-        trough_price = min([s["price"] for s in history])
-        max_asks_seen = max([s["ask_usd"] for s in history])
-        baseline_bids = baseline["bid_usd"]
-
-        ask_hollowing_factor = max_asks_seen / metrics["ask_usd"] if metrics["ask_usd"] > 0 else 1.0
-        bid_stacking_factor = metrics["bid_usd"] / baseline_bids if baseline_bids > 0 else 1.0
-        rise_from_trough_pct = ((mid - trough_price) / trough_price) * 100.0
-
-        if (ask_hollowing_factor >= 2.5 and bid_stacking_factor >= 1.3 and 
-            0.15 <= rise_from_trough_pct <= 0.40):
-
-            stop_price = trough_price * 0.9980
-            target_price = mid * 1.0070
-
-            return {
-                "symbol": symbol,
-                "side": "long",
-                "mid": mid,
-                "target_price": target_price,
-                "stop_price": stop_price,
-                "reason": (
-                    f"PRE-PUMP CAUGHT: Asks hollowed out {ask_hollowing_factor:.1f}x (${max_asks_seen:,.0f} -> ${metrics['ask_usd']:,.0f}) "
-                    f"while Bids stacked {bid_stacking_factor:.1f}x with ${delta_vol:,.0f} churn! "
-                    f"Price lifted +{rise_from_trough_pct:.2f}% off floor. Ceiling is gone, entering LONG before breakout!"
-                )
-            }
+            # Price begins lifting through the ceiling
+            if 0.05 <= lift_pct <= 0.50:
+                return {
+                    "symbol": symbol,
+                    "side": "long",
+                    "mid": mid,
+                    "target_price": mid * 1.0080,         # 0.8% profit target
+                    "stop_price": trough_price * 0.9985,   # Invalidation below floor
+                    "reason": (
+                        f"DUAL 10x PUMP: Asks collapsed {ask_collapse_factor:.1f}x "
+                        f"(${baseline['ask_usd']:,.0f} -> ${cur_ask:,.0f}) AND "
+                        f"Bids are {bid_to_ask_gap:.1f}x larger (${cur_bid:,.0f} vs ${cur_ask:,.0f})! "
+                        f"Price lifted +{lift_pct:.2f}% into gap."
+                    )
+                }
 
         return None
 
     # --------------------------------------------------------------------------
-    # MONITOR OBSERVATION LAB
+    # 4. MONITOR PAPER TRADE OBSERVATION LAB
     # --------------------------------------------------------------------------
     def update_cameras(self):
         remaining = []
@@ -312,7 +339,7 @@ class PreDumpHunterBot:
             delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
             net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-            # Trailing stop: If trade reaches +0.35% spot, lock in +0.10% profit floor
+            # Trailing stop: Once up +0.35%, move stop to +0.10% profit floor
             if delta >= 0.35 and not cam["trailed"]:
                 cam["trailed"] = True
                 cam["stop_p"] = entry * 1.0010 if side == "long" else entry * 0.9990
@@ -349,7 +376,7 @@ class PreDumpHunterBot:
         self.active_cameras = remaining
 
     # --------------------------------------------------------------------------
-    # MONITOR LIVE TRADE GUARDIAN
+    # 5. MONITOR LIVE TRADE EXECUTION
     # --------------------------------------------------------------------------
     def poll_live_trade(self):
         if not self.live_state["active"]:
@@ -388,7 +415,7 @@ class PreDumpHunterBot:
                     self.bitget.create_order(
                         sym, 'market', order_side,
                         self.live_state["contracts"],
-                        params={'reduceOnly': True, 'tradeSide': 'close'}
+                        params={'reduceOnly': True}
                     )
                     break
                 except Exception:
@@ -414,11 +441,11 @@ class PreDumpHunterBot:
             self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # MAIN ENGINE LOOP
+    # 6. MAIN ENGINE LOOP
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX-V16 Pre-Dump Intelligence Bot online.", flush=True)
+        print("[SYSTEM] APEX-V16 Dual 10x Gap Intelligence Bot online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -448,16 +475,19 @@ class PreDumpHunterBot:
                     continue
 
                 active_syms = {c["symbol"] for c in self.active_cameras}
+                
+                # Filter for liquid crypto pairs ($15M+ turnover, no stocks)
                 candidates = [
                     s for s, t in tickers.items()
                     if s.endswith(":USDT")
-                    and float(t.get('quoteVolume', 0) or 0) >= 1_000_000
+                    and float(t.get('quoteVolume', 0) or 0) >= 15_000_000
+                    and not any(s.startswith(x) for x in ['SOX', 'SKHY', 'SNDK', 'SNXX', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'KORU'])
                     and s not in active_syms
                 ]
                 candidates.sort(key=lambda s: float(tickers[s].get('quoteVolume', 0) or 0), reverse=True)
 
-                # Scan for Pre-Dump Behavior
-                for sym in candidates[:25]:
+                # Scan top candidates
+                for sym in candidates[:30]:
                     if len(self.active_cameras) >= 3:
                         break
 
@@ -496,7 +526,7 @@ class PreDumpHunterBot:
                                 "target_p": target_p, "stop_p": stop_p,
                                 "trailed": False, "start_t": time.time()
                             })
-                            print(f"\n[PRE-DUMP LOCKED] {sym} ({side.upper()}) | {setup['reason']}", flush=True)
+                            print(f"\n[10x GAP LOCKED] {sym} ({side.upper()}) | {setup['reason']}", flush=True)
 
                 if cycle % 6 == 0:
                     status = "LIVE_READY (8/8 Achieved)" if self.is_qualified_for_live() else f"HUNTING STREAK ({self.consecutive_paper_wins}/8 in a row)"
