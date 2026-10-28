@@ -10,7 +10,7 @@ import ccxt
 # 1. LIVE KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT ON RENDER)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-BRAIN_FILE = "streak_engine_memory.json"
+BRAIN_FILE = "steamroller_reversal_memory.json"
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -18,12 +18,12 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "application/json")
         self.end_headers()
         status = {
-            "engine": "APEX-V16 Consecutive 8-Streak Reversal Engine",
+            "engine": "APEX-V16 Steamroller & 10x Reversal Engine",
             "streak_status": f"{bot.consecutive_paper_wins}/8 Wins in a row",
-            "mode": "LIVE_UNLOCKED (8/8 Streak Achieved)" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Hunting 8/8 streak)",
+            "mode": "LIVE_AUTHORIZED (8/8 Streak Achieved)" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Hunting 8/8 Streak)",
+            "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses",
             "active_trades": len(bot.active_cameras),
-            "live_trade_active": bot.live_state["active"],
-            "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses"
+            "live_active": bot.live_state["active"]
         }
         self.wfile.write(json.dumps(status, indent=2).encode('utf-8'))
 
@@ -37,17 +37,17 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. THE 8-WIN CONSECUTIVE STREAK ENGINE
+# 2. THE STEAMROLLER & 10X REVERSAL ENGINE
 # ==============================================================================
-class ConsecutiveStreakBot:
+class SteamrollerReversalBot:
     def __init__(self):
-        # 1. Capital & Leverage
+        # 1. Capital & Risk Vault
         self.leverage = 4
         self.equity_floor = 1.50
         self.consecutive_live_losses = 0
         self.max_live_losses = 2
 
-        # 2. Football-Style Winning Streak (Must reach 8 in a row)
+        # 2. Strict 8-in-a-Row Streak Controller
         self.consecutive_paper_wins = 0
         self.REQUIRED_WIN_STREAK = 8
         self.all_time_wins = 0
@@ -55,11 +55,11 @@ class ConsecutiveStreakBot:
 
         # 3. Memory & Tracking
         self.active_cameras = []
-        self.market_history = {}    # Tracks 10-15m depth and price history
-        self.coin_cooldowns = {}    # Prevents instant re-entry on the same coin
+        self.market_history = {}    # Tracks 10-25m volume and depth flow
+        self.coin_cooldowns = {}    # 5-minute cooldown to prevent instant re-entry
         self.load_brain()
 
-        # 4. Live Trade State (Bound directly to self)
+        # 4. Live Trade Tracker (Bound to self)
         self.live_state = {
             "active": False,
             "symbol": None,
@@ -78,7 +78,7 @@ class ConsecutiveStreakBot:
         self.passphrase = os.environ.get("PASSPHRASE")
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing Bitget credentials in environment variables!", flush=True)
+            print("[FATAL] Missing Bitget credentials!", flush=True)
             sys.exit(1)
 
         self.bitget = ccxt.bitget({
@@ -111,24 +111,21 @@ class ConsecutiveStreakBot:
         except Exception:
             pass
 
-    # --------------------------------------------------------------------------
-    # FOOTBALL-STYLE STREAK CONTROLLER
-    # --------------------------------------------------------------------------
     def is_qualified_for_live(self):
-        # Strict Rule: Must have 8 wins in a row without a single loss
+        # Strict Rule: Must achieve 8 consecutive wins in a row without a loss
         return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
 
     def record_trade_outcome(self, is_win):
         if is_win:
             self.all_time_wins += 1
             self.consecutive_paper_wins += 1
-            print(f"\n🔥 [STREAK GROWING] {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} Wins in a row!", flush=True)
+            print(f"\n🔥 [STREAK PROGRESS] {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} Wins in a row!", flush=True)
             if self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK:
-                print(f"🎉 [8/8 STREAK UNLOCKED] Live real-money trading is now AUTHORIZED!\n", flush=True)
+                print(f"🎉 [8/8 STREAK ACHIEVED] Real capital trading is now AUTHORIZED!\n", flush=True)
         else:
             self.all_time_losses += 1
-            print(f"\n💥 [STREAK BROKEN] Lost game! Resetting streak from {self.consecutive_paper_wins} back to 0/{self.REQUIRED_WIN_STREAK}.", flush=True)
-            self.consecutive_paper_wins = 0  # Resets back to Game 1
+            print(f"\n💥 [STREAK BROKEN] Lost trade! Resetting streak from {self.consecutive_paper_wins} back to 0/{self.REQUIRED_WIN_STREAK}.", flush=True)
+            self.consecutive_paper_wins = 0  # Resets completely back to Game 1
         self.save_brain()
 
     def get_resting_depth(self, symbol):
@@ -153,16 +150,9 @@ class ConsecutiveStreakBot:
             return None
 
     # --------------------------------------------------------------------------
-    # AUDIT THE "LIGHT-UP" REVERSAL IGNITION
+    # AUDIT STEAMROLLER WAVES & 10X REVERSAL IGNITIONS
     # --------------------------------------------------------------------------
-    def audit_reversal_ignition(self, symbol, vol_24h):
-        """
-        1. Identifies coins that dumped hard over the last 10-15 minutes (bids crushed 4x to 10x).
-        2. Detects the 'Light-Up': The dump stops, resting bids increase by 15%+ from the low,
-           and price ticks up.
-        3. Enters LONG to catch the massive V-bottom relief rally.
-        (And reverse for exhausted pumps to enter SHORT).
-        """
+    def evaluate_market_setups(self, symbol, vol_24h):
         if time.time() < self.coin_cooldowns.get(symbol, 0):
             return None
 
@@ -181,10 +171,11 @@ class ConsecutiveStreakBot:
             "ask_usd": depth["ask_usd"],
             "price": depth["mid"]
         })
-        self.market_history[symbol] = [s for s in self.market_history[symbol] if now - s["t"] <= 900.0]
+        self.market_history[symbol] = [s for s in self.market_history[symbol] if now - s["t"] <= 1200.0]
 
         history = self.market_history[symbol]
-        past_snaps = [s for s in history if 300.0 <= (now - s["t"]) <= 720.0]
+        # Look back across 8 to 15 minutes
+        past_snaps = [s for s in history if 480.0 <= (now - s["t"]) <= 900.0]
         if not past_snaps:
             return None
 
@@ -192,63 +183,83 @@ class ConsecutiveStreakBot:
         elapsed_min = (now - baseline["t"]) / 60.0
         delta_vol = vol_24h - baseline["vol_24h"]
 
-        if delta_vol < 30_000:
+        # Filter out dead illiquid coins (must have at least $40k fresh volume)
+        if delta_vol < 40_000:
             return None
 
         mid = depth["mid"]
-        price_drop_10m = ((mid - baseline["price"]) / baseline["price"]) * 100.0
+        price_change_pct = ((mid - baseline["price"]) / baseline["price"]) * 100.0
 
+        # Lowest and highest points recorded during the window
         min_bids_seen = min([s["bid_usd"] for s in history])
-        trough_price_seen = min([s["price"] for s in history])
+        max_bids_seen = max([s["bid_usd"] for s in history])
+        trough_price = min([s["price"] for s in history])
 
-        # ----------------------------------------------------------------------
-        # SETUP 1: CATCH THE BIG REVERSE (LONG)
-        # Condition A: Coin dumped heavily (-1.2% to -4.5%) over the last 10m.
-        # Condition B: The dump stalled (current price is higher than trough).
-        # Condition C: The 'Light-Up' -> Bids increased by >= 15% from the floor!
-        # ----------------------------------------------------------------------
-        bids_recovering = (depth["bid_usd"] >= min_bids_seen * 1.15) if min_bids_seen > 0 else False
-        price_sparking_up = (mid > trough_price_seen * 1.0012)
+        min_asks_seen = min([s["ask_usd"] for s in history])
+        max_asks_seen = max([s["ask_usd"] for s in history])
+        peak_price = max([s["price"] for s in history])
 
-        if -4.50 <= price_drop_10m <= -1.20 and bids_recovering and price_sparking_up:
+        # ======================================================================
+        # SETUP A: THE 10X CRASH + 15% REVERSAL IGNITION (CATCH THE BIG REVERSE)
+        # ======================================================================
+        # 1. Bids collapsed by 5x to 10x+ (e.g. $1M down to $100k or less)
+        # 2. Price stopped crashing (mid > trough)
+        # 3. New USDT entered: Bids expanded >= 15% from the lowest point!
+        bid_crash_factor = max_bids_seen / min_bids_seen if min_bids_seen > 0 else 1.0
+        bids_re_expanding = (depth["bid_usd"] >= min_bids_seen * 1.15) if min_bids_seen > 0 else False
+        price_sparking_up = (mid > trough_price * 1.0015)
+
+        if bid_crash_factor >= 5.0 and bids_re_expanding and price_sparking_up and (-6.0 <= price_change_pct <= -1.2):
             recovery_pct = ((depth["bid_usd"] - min_bids_seen) / min_bids_seen) * 100.0
             return {
                 "symbol": symbol,
                 "side": "long",
                 "mid": mid,
+                "hold_minutes": 15.0,
                 "reason": (
-                    f"V-BOTTOM REVERSAL: Dumped {price_drop_10m:.2f}% over {elapsed_min:.1f}m. "
-                    f"Bids lit up +{recovery_pct:.1f}% from the floor (${min_bids_seen:,.0f} -> ${depth['bid_usd']:,.0f})! "
-                    f"Entering LONG to catch the squeeze bounce."
+                    f"10x CRASH + 15% IGNITION: Bids collapsed {bid_crash_factor:.1f}x during dump, "
+                    f"then fresh USDT lit up +{recovery_pct:.1f}% from the floor (${min_bids_seen:,.0f} -> ${depth['bid_usd']:,.0f})! "
+                    f"Entering LONG for the Big Reversal."
                 )
             }
 
-        # ----------------------------------------------------------------------
-        # SETUP 2: CATCH THE BLOW-OFF TOP REVERSE (SHORT)
-        # Condition A: Coin pumped heavily (+1.5% to +5.0%) over 10m.
-        # Condition B: Price stalled below peak.
-        # Condition C: The 'Fade Light-Up' -> Asks increased by >= 15% to trap buyers.
-        # ----------------------------------------------------------------------
-        min_asks_seen = min([s["ask_usd"] for s in history])
-        peak_price_seen = max([s["price"] for s in history])
-        asks_recovering = (depth["ask_usd"] >= min_asks_seen * 1.15) if min_asks_seen > 0 else False
-        price_sparking_down = (mid < peak_price_seen * 0.9988)
-
-        if 1.50 <= price_drop_10m <= 5.00 and asks_recovering and price_sparking_down:
+        # ======================================================================
+        # SETUP B: THE STEAMROLLER AVALANCHE (RELENTLESS SELL CONTINUATION)
+        # ======================================================================
+        # Enormous selling dollars where new buyer USDT cannot recover it.
+        # Dump is persistent (-1.0% to -3.0%) over 10m with relentless volume.
+        if -3.00 <= price_change_pct <= -1.00 and delta_vol >= 80_000:
             return {
                 "symbol": symbol,
                 "side": "short",
                 "mid": mid,
+                "hold_minutes": 15.0,
                 "reason": (
-                    f"TOP BLOW-OFF REVERSAL: Pumped +{price_drop_10m:.2f}% over {elapsed_min:.1f}m. "
-                    f"Asks reloaded resistance! Entering SHORT to catch the dump reversal."
+                    f"STEAMROLLER SHORT: Relentless selling (${delta_vol:,.0f} volume churned in {elapsed_min:.1f}m). "
+                    f"Price down {price_change_pct:.2f}%. New buyer USDT cannot recover it; cascade will continue."
+                )
+            }
+
+        # ======================================================================
+        # SETUP C: THE STEAMROLLER RUNAWAY (RELENTLESS BUY CONTINUATION)
+        # ======================================================================
+        # Enormous buying dollars steamrolling any sellers trying to dump.
+        if 1.00 <= price_change_pct <= 3.00 and delta_vol >= 80_000:
+            return {
+                "symbol": symbol,
+                "side": "long",
+                "mid": mid,
+                "hold_minutes": 15.0,
+                "reason": (
+                    f"STEAMROLLER LONG: Enormous buying (${delta_vol:,.0f} volume churned in {elapsed_min:.1f}m). "
+                    f"Price up +{price_change_pct:.2f}%. Seller supply swallowed; trend will continue."
                 )
             }
 
         return None
 
     # --------------------------------------------------------------------------
-    # MONITOR OBSERVATION LAB (REAL STRUCTURAL WAVE: 5 TO 12 MINUTES)
+    # MONITOR OBSERVATION LAB (15-MINUTE DURATION + EXPLICIT PROFIT/LOSS)
     # --------------------------------------------------------------------------
     def update_cameras(self):
         remaining = []
@@ -260,6 +271,7 @@ class ConsecutiveStreakBot:
             entry = cam["entry_p"]
             target = cam["target_p"]
             stop = cam["stop_p"]
+            max_hold = cam["max_hold"]
             elapsed_m = (now - cam["start_t"]) / 60.0
 
             depth = self.get_resting_depth(sym)
@@ -271,7 +283,7 @@ class ConsecutiveStreakBot:
             delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
             net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-            # Trailing Profit Lock: If trade reaches +0.40% spot (+1.12% ROE), move stop to lock in +0.10% profit floor
+            # Trailing Stop: If profit hits +0.40% spot (+1.12% ROE), move stop to lock in +0.10% profit floor
             if delta >= 0.40 and not cam["trailed"]:
                 cam["trailed"] = True
                 cam["stop_p"] = entry * 1.0010 if side == "long" else entry * 0.9990
@@ -279,29 +291,31 @@ class ConsecutiveStreakBot:
 
             hit_target = (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target)
             hit_stop = (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop)
-            timed_out = elapsed_m >= 12.0  # 12 minutes natural duration for the wave to complete
+            timed_out = elapsed_m >= max_hold
 
             if hit_target or hit_stop or timed_out:
                 is_win = hit_target or (timed_out and net_roe > 0)
-                
+
                 print(f"\n=======================================================", flush=True)
                 if is_win:
                     print(f"🟢 [TRADE RESULT: YOU MADE PROFIT!]", flush=True)
                     print(f"Coin       : {sym} ({side.upper()})", flush=True)
                     print(f"Net Profit : +{net_roe:.2f}% ROE", flush=True)
                     print(f"Duration   : {elapsed_m:.1f} minutes", flush=True)
+                    print(f"Exit Price : {cur_price} (Entry: {entry})", flush=True)
                 else:
                     print(f"🔴 [TRADE RESULT: YOU LOST!]", flush=True)
                     print(f"Coin       : {sym} ({side.upper()})", flush=True)
                     print(f"Net Loss   : {net_roe:.2f}% ROE", flush=True)
                     print(f"Duration   : {elapsed_m:.1f} minutes", flush=True)
+                    print(f"Exit Price : {cur_price} (Entry: {entry})", flush=True)
 
                 # Record streak (Win: +1 in a row | Loss: resets streak to 0/8)
                 self.record_trade_outcome(is_win)
 
                 # 5-minute cooldown to prevent machine-gunning the same coin
                 self.coin_cooldowns[sym] = time.time() + 300
-                print(f"Streak     : {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} Wins in a row! (Target: 8/8 to unlock Live)", flush=True)
+                print(f"Streak     : {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} Wins in a row! (Need 8/8 to unlock Live)", flush=True)
                 print(f"Record     : {self.all_time_wins} Wins / {self.all_time_losses} Losses all-time", flush=True)
                 print(f"=======================================================\n", flush=True)
             else:
@@ -338,7 +352,7 @@ class ConsecutiveStreakBot:
 
         hit_target = (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target)
         hit_stop = (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop)
-        timed_out = elapsed_m >= 12.0
+        timed_out = elapsed_m >= 15.0
 
         if hit_target or hit_stop or timed_out:
             is_win = hit_target or (timed_out and net_roe > 0)
@@ -365,7 +379,7 @@ class ConsecutiveStreakBot:
                 self.coin_cooldowns[sym] = time.time() + 300
                 print(f"🔴 [LIVE TRADE: YOU LOST!]", flush=True)
                 print(f"Coin       : {sym} ({side.upper()}) | Loss: {net_roe:.2f}% ROE", flush=True)
-                print(f"Strikes    : {self.consecutive_live_losses}/{self.max_live_losses}", flush=True)
+                print(f"Live Strikes: {self.consecutive_live_losses}/{self.max_live_losses}", flush=True)
 
                 if self.consecutive_live_losses >= self.max_live_losses:
                     print(f"\n[DEMOTION ACTIVE] 2 consecutive live losses! Resetting streak. Must win 8/8 in paper to re-enter.\n", flush=True)
@@ -380,7 +394,7 @@ class ConsecutiveStreakBot:
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX-V16 Consecutive 8-Streak Engine active.", flush=True)
+        print("[SYSTEM] APEX-V16 Steamroller & 10x Reversal Bot online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -418,23 +432,23 @@ class ConsecutiveStreakBot:
                 ]
                 candidates.sort(key=lambda s: float(tickers[s].get('quoteVolume', 0) or 0), reverse=True)
 
-                # Scan for Reversal Ignitions
+                # Scan for Steamroller waves and 10x Reversal Ignitions
                 for sym in candidates[:25]:
                     if len(self.active_cameras) >= 4:
                         break
 
                     vol_24h = float(tickers[sym].get('quoteVolume', 0) or 0)
-                    reversal = self.audit_reversal_ignition(sym, vol_24h)
+                    setup = self.evaluate_market_setups(sym, vol_24h)
 
-                    if reversal:
-                        side = reversal["side"]
-                        mid = reversal["mid"]
+                    if setup:
+                        side = setup["side"]
+                        mid = setup["mid"]
+                        max_hold = setup["hold_minutes"]
 
-                        # Target: +0.75% spot move = +2.52% Net ROE on 4x leverage
-                        target_p = mid * 1.0075 if side == "long" else mid * 0.9925
+                        # Targets: +0.70% spot move = +2.32% Net ROE on 4x leverage
+                        target_p = mid * 1.0070 if side == "long" else mid * 0.9930
                         stop_p = mid * 0.9940 if side == "long" else mid * 1.0060
 
-                        # Check Qualification Status (Strict 8/8 Consecutive Wins in a Row)
                         can_trade_live = self.is_qualified_for_live()
 
                         if can_trade_live and not self.live_state["active"]:
@@ -453,15 +467,15 @@ class ConsecutiveStreakBot:
                                 "target_price": target_p, "stop_price": stop_p,
                                 "trailed": False, "start_time": time.time()
                             }
-                            print(f"\n[LIVE 8/8 QUALIFIED ORDER ENTERED] {sym} ({side.upper()}) | {reversal['reason']}", flush=True)
+                            print(f"\n[LIVE 8/8 QUALIFIED ORDER ENTERED] {sym} ({side.upper()}) | {setup['reason']}", flush=True)
                             break
                         elif sym not in [c["symbol"] for c in self.active_cameras]:
                             self.active_cameras.append({
                                 "symbol": sym, "side": side, "entry_p": mid,
                                 "target_p": target_p, "stop_p": stop_p,
-                                "trailed": False, "start_t": time.time()
+                                "max_hold": max_hold, "trailed": False, "start_t": time.time()
                             })
-                            print(f"\n[STREAK HUNT LOCKED] {sym} ({side.upper()}) | {reversal['reason']}", flush=True)
+                            print(f"\n[OPPORTUNITY LOCKED] {sym} ({side.upper()}) | {setup['reason']}", flush=True)
 
                 if cycle % 6 == 0:
                     status = "LIVE_READY (8/8 Achieved)" if self.is_qualified_for_live() else f"HUNTING STREAK ({self.consecutive_paper_wins}/8 in a row)"
@@ -484,5 +498,5 @@ class ConsecutiveStreakBot:
 # START BOT
 # ==============================================================================
 if __name__ == "__main__":
-    bot = ConsecutiveStreakBot()
+    bot = SteamrollerReversalBot()
     bot.run()
