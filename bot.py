@@ -10,7 +10,7 @@ import ccxt
 # 1. LIVE KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT ON RENDER)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-BRAIN_FILE = "self_relative_reversal_memory.json"
+BRAIN_FILE = "pre_dump_intelligence_memory.json"
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -18,7 +18,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "application/json")
         self.end_headers()
         status = {
-            "engine": "APEX-V16 Self-Relative Unusual Volume & Rollover Engine",
+            "engine": "APEX-V16 Pre-Dump Distribution & Microstructure Engine",
             "streak_status": f"{bot.consecutive_paper_wins}/8 Wins in a row",
             "mode": "LIVE_AUTHORIZED (8/8 Streak Achieved)" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Hunting 8/8 Streak)",
             "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses",
@@ -38,11 +38,11 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. SELF-RELATIVE REVERSAL ENGINE (NO FIXED DOLLAR THRESHOLDS)
+# 2. PRE-DUMP DISTRIBUTION & MICROSTRUCTURE ENGINE
 # ==============================================================================
-class SelfRelativeReversalBot:
+class PreDumpHunterBot:
     def __init__(self):
-        # 1. Capital, Leverage & Vault
+        # 1. Capital, Leverage & Risk Vault
         self.leverage = 4
         self.equity_floor = 1.50
         self.consecutive_live_losses = 0
@@ -54,11 +54,9 @@ class SelfRelativeReversalBot:
         self.all_time_wins = 0
         self.all_time_losses = 0
 
-        # 3. Relative Multipliers (Zero Fixed Dollar Thresholds)
-        self.MIN_CRASH_FACTOR = 10.0           # Coin's own bids must collapse 10x
-        self.MIN_UNUSUAL_VOLUME_MULT = 3.0     # Volume must be 3x+ higher than normal rate
-        self.MAX_SINGLE_ORDER_DOMINANCE = 0.35 # Max 35% in one order (Proves many traders)
-        self.MAX_ALLOWED_SPREAD_PCT = 0.0020   # Maximum 0.20% spread allowed
+        # 3. Market Quality Filters
+        self.MAX_ALLOWED_SPREAD_PCT = 0.0012   # Maximum 0.12% spread allowed
+        self.MIN_RESTING_DEPTH_USD = 20_000.0  # Real institutional order books
         self.QUARANTINE_DURATION_SEC = 3600    # 1-Hour ban on any coin that stops out
 
         # Non-Crypto Blacklist
@@ -69,7 +67,7 @@ class SelfRelativeReversalBot:
 
         # 4. Memory & Tracking
         self.active_cameras = []
-        self.market_history = {}    # Tracks 15-30m price and depth history
+        self.market_history = {}    # Tracks depth & price evolution over 15-30m
         self.coin_cooldowns = {}
         self.load_brain()
 
@@ -86,7 +84,7 @@ class SelfRelativeReversalBot:
             "start_time": 0.0
         }
 
-        # 6. Bitget Connection
+        # 6. Bitget Exchange Connection
         self.api_key = os.environ.get("API_KEY")
         self.secret_key = os.environ.get("SECRET_KEY")
         self.passphrase = os.environ.get("PASSPHRASE")
@@ -145,17 +143,12 @@ class SelfRelativeReversalBot:
         self.save_brain()
 
     def get_order_book_metrics(self, symbol):
-        """
-        Inspects the order book relative to itself:
-        1. Verifies spread is healthy (< 0.20%).
-        2. Proves MANY TRADERS: No single order controls > 35% of the book depth.
-        """
         try:
             ob = self.bitget.fetch_order_book(symbol, limit=25)
             bids = ob.get('bids', [])
             asks = ob.get('asks', [])
 
-            if len(bids) < 15 or len(asks) < 15:
+            if not bids or not asks:
                 return None
 
             best_bid = bids[0][0]
@@ -166,48 +159,33 @@ class SelfRelativeReversalBot:
             if spread_pct > self.MAX_ALLOWED_SPREAD_PCT:
                 return None
 
-            bid_values = [p * q for p, q in bids if p >= mid * 0.988]
-            ask_values = [p * q for p, q in asks if p <= mid * 1.012]
+            bid_usd = sum([p * q for p, q in bids if p >= mid * 0.988])
+            ask_usd = sum([p * q for p, q in asks if p <= mid * 1.012])
 
-            total_bids = sum(bid_values)
-            total_asks = sum(ask_values)
-
-            if total_bids <= 0 or total_asks <= 0:
+            if bid_usd < self.MIN_RESTING_DEPTH_USD or ask_usd < self.MIN_RESTING_DEPTH_USD:
                 return None
-
-            # ANTI-WHALE CHECK: Check largest single order
-            largest_single_bid = max(bid_values)
-            largest_single_ask = max(ask_values)
-
-            bid_whale_dominance = largest_single_bid / total_bids
-            ask_whale_dominance = largest_single_ask / total_asks
-
-            # If a single order controls > 35%, it's a whale! We only accept many traders.
-            is_many_traders = (bid_whale_dominance <= self.MAX_SINGLE_ORDER_DOMINANCE and
-                               ask_whale_dominance <= self.MAX_SINGLE_ORDER_DOMINANCE)
 
             return {
                 "mid": mid,
                 "spread_pct": spread_pct,
-                "bid_depth": total_bids,
-                "ask_depth": total_asks,
-                "is_many_traders": is_many_traders
+                "bid_usd": bid_usd,
+                "ask_usd": ask_usd
             }
         except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # AUDIT RELATIVE 10X CRASH & 5% REBOUND ROLLOVER
+    # AUDIT PRE-DUMP DISTRIBUTION (BEFORE THE DUMP BEGINS)
     # --------------------------------------------------------------------------
-    def audit_relative_rollover(self, symbol, vol_24h):
+    def audit_pre_dump_behavior(self, symbol, vol_24h):
         base = symbol.split('/')[0].split(':')[0].upper()
         if base in self.BLACKLIST or time.time() < self.coin_cooldowns.get(symbol, 0):
             return None
 
         now = time.time()
         metrics = self.get_order_book_metrics(symbol)
-        if not metrics or not metrics["is_many_traders"]:
-            return None  # Rejects single-whale market manipulation
+        if not metrics:
+            return None
 
         if symbol not in self.market_history:
             self.market_history[symbol] = []
@@ -215,124 +193,94 @@ class SelfRelativeReversalBot:
         self.market_history[symbol].append({
             "t": now,
             "vol_24h": vol_24h,
-            "bid_depth": metrics["bid_depth"],
-            "ask_depth": metrics["ask_depth"],
+            "bid_usd": metrics["bid_usd"],
+            "ask_usd": metrics["ask_usd"],
             "price": metrics["mid"]
         })
-        self.market_history[symbol] = [s for s in self.market_history[symbol] if now - s["t"] <= 1800.0]
+        self.market_history[symbol] = [s for s in self.market_history[symbol] if now - s["t"] <= 1500.0]
 
         history = self.market_history[symbol]
-        past_snaps = [s for s in history if 600.0 <= (now - s["t"]) <= 1500.0]
+        # Look back 5 to 12 minutes
+        past_snaps = [s for s in history if 300.0 <= (now - s["t"]) <= 720.0]
         if not past_snaps:
             return None
 
         baseline = past_snaps[0]
         elapsed_min = (now - baseline["t"]) / 60.0
-        delta_vol_10m = vol_24h - baseline["vol_24h"]
+        delta_vol = vol_24h - baseline["vol_24h"]
 
-        # ----------------------------------------------------------------------
-        # 1. UNUSUAL VOLUME TO ITSELF (R-VOL)
-        # Normal 10-minute volume rate for this specific coin = 24h Vol / 144
-        # ----------------------------------------------------------------------
-        normal_10m_volume_rate = vol_24h / 144.0 if vol_24h > 0 else 1.0
-        rvol = delta_vol_10m / normal_10m_volume_rate if normal_10m_volume_rate > 0 else 0
-
-        # Reject if volume is not unusual (must be at least 3x its own normal rate)
-        if rvol < self.MIN_UNUSUAL_VOLUME_MULT:
+        # Must have active volume turnover
+        if delta_vol < 35_000:
             return None
 
         mid = metrics["mid"]
 
-        # Track extremes across the coin's own history
-        max_bids = max([s["bid_depth"] for s in history])
-        min_bids = min([s["bid_depth"] for s in history])
-        crash_low_price = min([s["price"] for s in history])
-
-        # ----------------------------------------------------------------------
-        # 2. THE COIN'S OWN 10X BID COLLAPSE
-        # ----------------------------------------------------------------------
-        bid_crash_factor = max_bids / min_bids if min_bids > 0 else 1.0
-        if bid_crash_factor < self.MIN_CRASH_FACTOR:
-            return None  # Must be 10x collapse of its own depth
-
-        # ----------------------------------------------------------------------
-        # 3. TRACK THE REBOUND PEAK
-        # ----------------------------------------------------------------------
-        crash_snap_time = [x["t"] for x in history if x["price"] == crash_low_price][0]
-        post_crash_snaps = [s for s in history if s["t"] > crash_snap_time]
-        if not post_crash_snaps:
-            return None
-
-        bounce_peak_price = max([s["price"] for s in post_crash_snaps])
-        bounce_height = bounce_peak_price - crash_low_price
-        bounce_pct = (bounce_height / crash_low_price) * 100.0
-
-        if bounce_pct < 0.40:
-            return None  # Needs an actual rebound to occur
-
-        # ----------------------------------------------------------------------
-        # 4. THE 5% ROLLOVER TRIGGER (Dropped 5% of bounce height off peak)
-        # ----------------------------------------------------------------------
-        drop_from_peak = bounce_peak_price - mid
-        percent_dropped_of_bounce = (drop_from_peak / bounce_height) * 100.0
-
-        if 5.0 <= percent_dropped_of_bounce <= 18.0 and mid < bounce_peak_price:
-            stop_price = bounce_peak_price * 1.0020
-            target_price = crash_low_price * 1.0010
-
-            if (mid - target_price) > (stop_price - mid) * 1.5:
-                return {
-                    "symbol": symbol,
-                    "side": "short",
-                    "mid": mid,
-                    "target_price": target_price,
-                    "stop_price": stop_price,
-                    "reason": (
-                        f"UNUSUAL DUMP ({rvol:.1f}x its normal volume by MANY TRADERS)! "
-                        f"Bids collapsed {bid_crash_factor:.1f}x to itself. "
-                        f"Rebounded +{bounce_pct:.2f}% to {bounce_peak_price:.4f}, now dropped {percent_dropped_of_bounce:.1f}% "
-                        f"off peak! QUICKLY ENTERING SHORT to ride the re-dump."
-                    )
-                }
+        # Track extremes over the window
+        peak_price = max([s["price"] for s in history])
+        max_bids_seen = max([s["bid_usd"] for s in history])
+        baseline_asks = baseline["ask_usd"]
 
         # ======================================================================
-        # MIRROR: UNUSUAL 10X PUMP (5% DIP ROLLOVER LONG)
+        # THE PRE-DUMP SIGNATURE (SHORT BEFORE THE DROP)
         # ======================================================================
-        max_asks = max([s["ask_depth"] for s in history])
-        min_asks = min([s["ask_depth"] for s in history])
-        pump_high_price = max([s["price"] for s in history])
+        # 1. Bids have hollowed out by at least 2.5x to 5x+ from the baseline
+        # 2. Asks overhead have expanded (sellers stacking walls)
+        # 3. Price is still near its highs (within 0.35% of peak) but struggling
+        # 4. The Crack: Price just broke down by -0.15% to -0.35% off the peak
+        bid_hollowing_factor = max_bids_seen / metrics["bid_usd"] if metrics["bid_usd"] > 0 else 1.0
+        ask_stacking_factor = metrics["ask_usd"] / baseline_asks if baseline_asks > 0 else 1.0
+        slip_from_peak_pct = ((peak_price - mid) / peak_price) * 100.0
 
-        ask_vacuum_factor = max_asks / min_asks if min_asks > 0 else 1.0
-        if ask_vacuum_factor >= self.MIN_CRASH_FACTOR:
-            pump_snap_time = [x["t"] for x in history if x["price"] == pump_high_price][0]
-            post_pump_snaps = [s for s in history if s["t"] > pump_snap_time]
-            if post_pump_snaps:
-                dip_trough_price = min([s["price"] for s in post_pump_snaps])
-                dip_depth = pump_high_price - dip_trough_price
-                dip_pct = (dip_depth / pump_high_price) * 100.0
+        if (bid_hollowing_factor >= 2.5 and ask_stacking_factor >= 1.3 and 
+            0.15 <= slip_from_peak_pct <= 0.40):
 
-                if dip_pct >= 0.40:
-                    rise_from_trough = mid - dip_trough_price
-                    percent_rebounded_of_dip = (rise_from_trough / dip_depth) * 100.0
+            # Invalidation: Stop sits safely right above the distribution peak
+            stop_price = peak_price * 1.0020
+            # Target: Down into the hollow void below
+            target_price = mid * 0.9930
 
-                    if 5.0 <= percent_rebounded_of_dip <= 18.0 and mid > dip_trough_price:
-                        stop_price = dip_trough_price * 0.9980
-                        target_price = pump_high_price * 0.9990
+            return {
+                "symbol": symbol,
+                "side": "short",
+                "mid": mid,
+                "target_price": target_price,
+                "stop_price": stop_price,
+                "reason": (
+                    f"PRE-DUMP CAUGHT: Bids hollowed out {bid_hollowing_factor:.1f}x (${max_bids_seen:,.0f} -> ${metrics['bid_usd']:,.0f}) "
+                    f"while Asks stacked {ask_stacking_factor:.1f}x with ${delta_vol:,.0f} churn! "
+                    f"Price cracked -{slip_from_peak_pct:.2f}% off peak. Floor is gone, entering SHORT before freefall!"
+                )
+            }
 
-                        if (target_price - mid) > (mid - stop_price) * 1.5:
-                            return {
-                                "symbol": symbol,
-                                "side": "long",
-                                "mid": mid,
-                                "target_price": target_price,
-                                "stop_price": stop_price,
-                                "reason": (
-                                    f"UNUSUAL PUMP ({rvol:.1f}x its normal volume by MANY TRADERS)! "
-                                    f"Asks collapsed {ask_vacuum_factor:.1f}x to itself. "
-                                    f"Dipped -{dip_pct:.2f}% to {dip_trough_price:.4f}, now rebounded {percent_rebounded_of_dip:.1f}% "
-                                    f"off trough! QUICKLY ENTERING LONG to ride the continuation."
-                                )
-                            }
+        # ======================================================================
+        # MIRROR: PRE-PUMP ACCUMULATION (LONG BEFORE THE SURGE)
+        # ======================================================================
+        trough_price = min([s["price"] for s in history])
+        max_asks_seen = max([s["ask_usd"] for s in history])
+        baseline_bids = baseline["bid_usd"]
+
+        ask_hollowing_factor = max_asks_seen / metrics["ask_usd"] if metrics["ask_usd"] > 0 else 1.0
+        bid_stacking_factor = metrics["bid_usd"] / baseline_bids if baseline_bids > 0 else 1.0
+        rise_from_trough_pct = ((mid - trough_price) / trough_price) * 100.0
+
+        if (ask_hollowing_factor >= 2.5 and bid_stacking_factor >= 1.3 and 
+            0.15 <= rise_from_trough_pct <= 0.40):
+
+            stop_price = trough_price * 0.9980
+            target_price = mid * 1.0070
+
+            return {
+                "symbol": symbol,
+                "side": "long",
+                "mid": mid,
+                "target_price": target_price,
+                "stop_price": stop_price,
+                "reason": (
+                    f"PRE-PUMP CAUGHT: Asks hollowed out {ask_hollowing_factor:.1f}x (${max_asks_seen:,.0f} -> ${metrics['ask_usd']:,.0f}) "
+                    f"while Bids stacked {bid_stacking_factor:.1f}x with ${delta_vol:,.0f} churn! "
+                    f"Price lifted +{rise_from_trough_pct:.2f}% off floor. Ceiling is gone, entering LONG before breakout!"
+                )
+            }
 
         return None
 
@@ -364,8 +312,8 @@ class SelfRelativeReversalBot:
             delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
             net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-            # Trailing stop: If trade hits +0.40% spot, lock +0.10% profit floor
-            if delta >= 0.40 and not cam["trailed"]:
+            # Trailing stop: If trade reaches +0.35% spot, lock in +0.10% profit floor
+            if delta >= 0.35 and not cam["trailed"]:
                 cam["trailed"] = True
                 cam["stop_p"] = entry * 1.0010 if side == "long" else entry * 0.9990
                 stop = cam["stop_p"]
@@ -422,7 +370,7 @@ class SelfRelativeReversalBot:
         delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
         net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-        if delta >= 0.40 and not self.live_state["trailed"]:
+        if delta >= 0.35 and not self.live_state["trailed"]:
             self.live_state["trailed"] = True
             self.live_state["stop_price"] = entry * 1.0010 if side == "long" else entry * 0.9990
             stop = self.live_state["stop_price"]
@@ -470,7 +418,7 @@ class SelfRelativeReversalBot:
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX-V16 Self-Relative Unusual Volume Engine active.", flush=True)
+        print("[SYSTEM] APEX-V16 Pre-Dump Intelligence Bot online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -503,17 +451,18 @@ class SelfRelativeReversalBot:
                 candidates = [
                     s for s, t in tickers.items()
                     if s.endswith(":USDT")
-                    and float(t.get('quoteVolume', 0) or 0) >= 30_000  # Basic sanity floor
+                    and float(t.get('quoteVolume', 0) or 0) >= 1_000_000
                     and s not in active_syms
                 ]
+                candidates.sort(key=lambda s: float(tickers[s].get('quoteVolume', 0) or 0), reverse=True)
 
-                # Scan across all coins (low-caps, mid-caps, high-caps)
-                for sym in candidates[:30]:
+                # Scan for Pre-Dump Behavior
+                for sym in candidates[:25]:
                     if len(self.active_cameras) >= 3:
                         break
 
                     vol_24h = float(tickers[sym].get('quoteVolume', 0) or 0)
-                    setup = self.audit_relative_rollover(sym, vol_24h)
+                    setup = self.audit_pre_dump_behavior(sym, vol_24h)
 
                     if setup:
                         side = setup["side"]
@@ -547,7 +496,7 @@ class SelfRelativeReversalBot:
                                 "target_p": target_p, "stop_p": stop_p,
                                 "trailed": False, "start_t": time.time()
                             })
-                            print(f"\n[UNUSUAL VOLUME SETUP LOCKED] {sym} ({side.upper()}) | {setup['reason']}", flush=True)
+                            print(f"\n[PRE-DUMP LOCKED] {sym} ({side.upper()}) | {setup['reason']}", flush=True)
 
                 if cycle % 6 == 0:
                     status = "LIVE_READY (8/8 Achieved)" if self.is_qualified_for_live() else f"HUNTING STREAK ({self.consecutive_paper_wins}/8 in a row)"
@@ -570,5 +519,5 @@ class SelfRelativeReversalBot:
 # START BOT
 # ==============================================================================
 if __name__ == "__main__":
-    bot = SelfRelativeReversalBot()
+    bot = PreDumpHunterBot()
     bot.run()
