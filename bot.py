@@ -10,20 +10,20 @@ import ccxt
 # 1. LIVE KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT ON RENDER)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-BRAIN_FILE = "reversal_engine_memory.json"
+BRAIN_FILE = "streak_engine_memory.json"
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
-        net_score = bot.total_wins - bot.total_losses
         status = {
-            "engine": "APEX-V16 True Net-Score Reversal Ignition Engine",
-            "net_score": f"{net_score}/10 (Wins: {bot.total_wins}, Losses: {bot.total_losses})",
-            "mode": "DEMOTED_TO_PAPER (Needs +6 streak)" if bot.is_demoted else ("LIVE_READY" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Needs +9 Net)"),
-            "active_reversals": len(bot.active_cameras),
-            "live_trade_active": bot.live_state["active"]
+            "engine": "APEX-V16 Consecutive 8-Streak Reversal Engine",
+            "streak_status": f"{bot.consecutive_paper_wins}/8 Wins in a row",
+            "mode": "LIVE_UNLOCKED (8/8 Streak Achieved)" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Hunting 8/8 streak)",
+            "active_trades": len(bot.active_cameras),
+            "live_trade_active": bot.live_state["active"],
+            "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses"
         }
         self.wfile.write(json.dumps(status, indent=2).encode('utf-8'))
 
@@ -37,21 +37,21 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. REVERSAL IGNITION & TRUE NET-SCORE ENGINE
+# 2. THE 8-WIN CONSECUTIVE STREAK ENGINE
 # ==============================================================================
-class ReversalIgnitionBot:
+class ConsecutiveStreakBot:
     def __init__(self):
         # 1. Capital & Leverage
         self.leverage = 4
         self.equity_floor = 1.50
         self.consecutive_live_losses = 0
         self.max_live_losses = 2
-        self.is_demoted = False
 
-        # 2. True Net Score Tracker: Net = Wins - Losses
-        self.total_wins = 0
-        self.total_losses = 0
-        self.demoted_streak = 0  # Counts clean wins after demotion (needs 6)
+        # 2. Football-Style Winning Streak (Must reach 8 in a row)
+        self.consecutive_paper_wins = 0
+        self.REQUIRED_WIN_STREAK = 8
+        self.all_time_wins = 0
+        self.all_time_losses = 0
 
         # 3. Memory & Tracking
         self.active_cameras = []
@@ -59,7 +59,7 @@ class ReversalIgnitionBot:
         self.coin_cooldowns = {}    # Prevents instant re-entry on the same coin
         self.load_brain()
 
-        # 4. Live Trade Tracker (Bound directly to self)
+        # 4. Live Trade State (Bound directly to self)
         self.live_state = {
             "active": False,
             "symbol": None,
@@ -78,7 +78,7 @@ class ReversalIgnitionBot:
         self.passphrase = os.environ.get("PASSPHRASE")
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing Bitget credentials!", flush=True)
+            print("[FATAL] Missing Bitget credentials in environment variables!", flush=True)
             sys.exit(1)
 
         self.bitget = ccxt.bitget({
@@ -94,10 +94,9 @@ class ReversalIgnitionBot:
             try:
                 with open(BRAIN_FILE, "r") as f:
                     data = json.load(f)
-                    self.total_wins = data.get("total_wins", 0)
-                    self.total_losses = data.get("total_losses", 0)
-                    self.is_demoted = data.get("is_demoted", False)
-                    self.demoted_streak = data.get("demoted_streak", 0)
+                    self.consecutive_paper_wins = data.get("consecutive_paper_wins", 0)
+                    self.all_time_wins = data.get("all_time_wins", 0)
+                    self.all_time_losses = data.get("all_time_losses", 0)
             except Exception:
                 pass
 
@@ -105,40 +104,31 @@ class ReversalIgnitionBot:
         try:
             with open(BRAIN_FILE, "w") as f:
                 json.dump({
-                    "total_wins": self.total_wins,
-                    "total_losses": self.total_losses,
-                    "is_demoted": self.is_demoted,
-                    "demoted_streak": self.demoted_streak
+                    "consecutive_paper_wins": self.consecutive_paper_wins,
+                    "all_time_wins": self.all_time_wins,
+                    "all_time_losses": self.all_time_losses
                 }, f, indent=2)
         except Exception:
             pass
 
     # --------------------------------------------------------------------------
-    # TRUE NET SCORECARD MATH (WINS MINUS LOSSES)
+    # FOOTBALL-STYLE STREAK CONTROLLER
     # --------------------------------------------------------------------------
     def is_qualified_for_live(self):
-        if self.is_demoted:
-            # Re-entry requires a clean 6/6 consecutive win streak
-            return self.demoted_streak >= 6
-        # Initial rule: Net score (Wins - Losses) must reach +9
-        net_score = self.total_wins - self.total_losses
-        return net_score >= 9
-
-    def get_score_status(self):
-        net_score = self.total_wins - self.total_losses
-        if self.is_demoted:
-            return f"DEMOTED: {self.demoted_streak}/6 streak needed"
-        return f"Net Score: {net_score}/10 ({self.total_wins} Wins, {self.total_losses} Losses | Need +9 for Live)"
+        # Strict Rule: Must have 8 wins in a row without a single loss
+        return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
 
     def record_trade_outcome(self, is_win):
         if is_win:
-            self.total_wins += 1
-            if self.is_demoted:
-                self.demoted_streak += 1
+            self.all_time_wins += 1
+            self.consecutive_paper_wins += 1
+            print(f"\n🔥 [STREAK GROWING] {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} Wins in a row!", flush=True)
+            if self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK:
+                print(f"🎉 [8/8 STREAK UNLOCKED] Live real-money trading is now AUTHORIZED!\n", flush=True)
         else:
-            self.total_losses += 1
-            if self.is_demoted:
-                self.demoted_streak = 0  # A loss resets the demotion streak to 0
+            self.all_time_losses += 1
+            print(f"\n💥 [STREAK BROKEN] Lost game! Resetting streak from {self.consecutive_paper_wins} back to 0/{self.REQUIRED_WIN_STREAK}.", flush=True)
+            self.consecutive_paper_wins = 0  # Resets back to Game 1
         self.save_brain()
 
     def get_resting_depth(self, symbol):
@@ -208,7 +198,6 @@ class ReversalIgnitionBot:
         mid = depth["mid"]
         price_drop_10m = ((mid - baseline["price"]) / baseline["price"]) * 100.0
 
-        # Find the lowest depth and lowest price seen during this lookback window
         min_bids_seen = min([s["bid_usd"] for s in history])
         trough_price_seen = min([s["price"] for s in history])
 
@@ -259,7 +248,7 @@ class ReversalIgnitionBot:
         return None
 
     # --------------------------------------------------------------------------
-    # MONITOR OBSERVATION LAB (SUSTAINED 12-MINUTE HOLD TIME)
+    # MONITOR OBSERVATION LAB (REAL STRUCTURAL WAVE: 5 TO 12 MINUTES)
     # --------------------------------------------------------------------------
     def update_cameras(self):
         remaining = []
@@ -282,7 +271,7 @@ class ReversalIgnitionBot:
             delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
             net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-            # Trailing Stop: Once profit reaches +0.40% spot (+1.12% ROE), move stop to lock in +0.10% spot (+0.40% ROE)
+            # Trailing Profit Lock: If trade reaches +0.40% spot (+1.12% ROE), move stop to lock in +0.10% profit floor
             if delta >= 0.40 and not cam["trailed"]:
                 cam["trailed"] = True
                 cam["stop_p"] = entry * 1.0010 if side == "long" else entry * 0.9990
@@ -290,12 +279,11 @@ class ReversalIgnitionBot:
 
             hit_target = (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target)
             hit_stop = (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop)
-            timed_out = elapsed_m >= 12.0  # Gives 12 minutes for the big reversal to unfold
+            timed_out = elapsed_m >= 12.0  # 12 minutes natural duration for the wave to complete
 
             if hit_target or hit_stop or timed_out:
                 is_win = hit_target or (timed_out and net_roe > 0)
-                self.record_trade_outcome(is_win)
-
+                
                 print(f"\n=======================================================", flush=True)
                 if is_win:
                     print(f"🟢 [TRADE RESULT: YOU MADE PROFIT!]", flush=True)
@@ -308,9 +296,13 @@ class ReversalIgnitionBot:
                     print(f"Net Loss   : {net_roe:.2f}% ROE", flush=True)
                     print(f"Duration   : {elapsed_m:.1f} minutes", flush=True)
 
-                # 5-minute cooldown on the coin to prevent instant re-entry
+                # Record streak (Win: +1 in a row | Loss: resets streak to 0/8)
+                self.record_trade_outcome(is_win)
+
+                # 5-minute cooldown to prevent machine-gunning the same coin
                 self.coin_cooldowns[sym] = time.time() + 300
-                print(f"Scorecard  : {self.get_score_status()}", flush=True)
+                print(f"Streak     : {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} Wins in a row! (Target: 8/8 to unlock Live)", flush=True)
+                print(f"Record     : {self.all_time_wins} Wins / {self.all_time_losses} Losses all-time", flush=True)
                 print(f"=======================================================\n", flush=True)
             else:
                 remaining.append(cam)
@@ -376,9 +368,8 @@ class ReversalIgnitionBot:
                 print(f"Strikes    : {self.consecutive_live_losses}/{self.max_live_losses}", flush=True)
 
                 if self.consecutive_live_losses >= self.max_live_losses:
-                    self.is_demoted = True
-                    self.demoted_streak = 0
-                    print(f"\n[DEMOTION ACTIVE] 2 consecutive live losses! Real money locked until 6/6 paper streak.\n", flush=True)
+                    print(f"\n[DEMOTION ACTIVE] 2 consecutive live losses! Resetting streak. Must win 8/8 in paper to re-enter.\n", flush=True)
+                    self.consecutive_paper_wins = 0  # Streak reset back to Game 1
 
             self.save_brain()
             print(f"=======================================================\n", flush=True)
@@ -389,7 +380,7 @@ class ReversalIgnitionBot:
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX-V16 Reversal Ignition Engine active.", flush=True)
+        print("[SYSTEM] APEX-V16 Consecutive 8-Streak Engine active.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -443,6 +434,7 @@ class ReversalIgnitionBot:
                         target_p = mid * 1.0075 if side == "long" else mid * 0.9925
                         stop_p = mid * 0.9940 if side == "long" else mid * 1.0060
 
+                        # Check Qualification Status (Strict 8/8 Consecutive Wins in a Row)
                         can_trade_live = self.is_qualified_for_live()
 
                         if can_trade_live and not self.live_state["active"]:
@@ -461,7 +453,7 @@ class ReversalIgnitionBot:
                                 "target_price": target_p, "stop_price": stop_p,
                                 "trailed": False, "start_time": time.time()
                             }
-                            print(f"\n[LIVE REVERSAL ORDER EXECUTED] {sym} ({side.upper()}) | {reversal['reason']}", flush=True)
+                            print(f"\n[LIVE 8/8 QUALIFIED ORDER ENTERED] {sym} ({side.upper()}) | {reversal['reason']}", flush=True)
                             break
                         elif sym not in [c["symbol"] for c in self.active_cameras]:
                             self.active_cameras.append({
@@ -469,14 +461,14 @@ class ReversalIgnitionBot:
                                 "target_p": target_p, "stop_p": stop_p,
                                 "trailed": False, "start_t": time.time()
                             })
-                            print(f"\n[REVERSAL IGNITION LOCKED] {sym} ({side.upper()}) | {reversal['reason']}", flush=True)
+                            print(f"\n[STREAK HUNT LOCKED] {sym} ({side.upper()}) | {reversal['reason']}", flush=True)
 
                 if cycle % 6 == 0:
-                    status = "DEMOTED (Need 6/6)" if self.is_demoted else ("LIVE_READY" if self.is_qualified_for_live() else "QUALIFYING (Need +9 Net)")
+                    status = "LIVE_READY (8/8 Achieved)" if self.is_qualified_for_live() else f"HUNTING STREAK ({self.consecutive_paper_wins}/8 in a row)"
                     print(
                         f"[STATUS PULSE] Active Trades: {len(self.active_cameras)}/4 | "
                         f"Vault: ${balance:.2f} ({self.leverage}x) | "
-                        f"Status: {status} | {self.get_score_status()}",
+                        f"Streak: {self.consecutive_paper_wins}/8 IN A ROW | Status: {status}",
                         flush=True
                     )
 
@@ -492,5 +484,5 @@ class ReversalIgnitionBot:
 # START BOT
 # ==============================================================================
 if __name__ == "__main__":
-    bot = ReversalIgnitionBot()
+    bot = ConsecutiveStreakBot()
     bot.run()
