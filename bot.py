@@ -17,12 +17,13 @@ class HealthCheckServer(BaseHTTPRequestHandler):
         self.send_header("Content-type", "application/json")
         self.end_headers()
         status = {
-            "engine": "APEX-V16 Pure Liquidity Vacuum & Capital Velocity Engine",
-            "active_vacuums": len(bot.active_cameras),
-            "scorecard": f"{sum(bot.trade_history)}/{len(bot.trade_history)} wins",
-            "live_active": bot.live_state["active"]
+            "engine": "APEX-V16 Dual-Procedure Vacuum & Fade Lab",
+            "active_cameras": len(bot.active_cameras),
+            "procedure_scorecard": bot.get_scorecard(),
+            "live_trade": bot.live_state["active"],
+            "tracked_pairs": len(bot.market_memory)
         }
-        self.wfile.write(json.dumps(status).encode('utf-8'))
+        self.wfile.write(json.dumps(status, indent=2).encode('utf-8'))
 
     def log_message(self, format, *args):
         return
@@ -34,24 +35,24 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. PURE LIQUIDITY VACUUM ENGINE (NO BID/ASK COMPARISONS)
+# 2. DUAL-PROCEDURE VACUUM ENGINE (ALL BOUND TO self. TO PREVENT SCOPE BUGS)
 # ==============================================================================
-class PureLiquidityVacuumBot:
+class DualProcedureVacuumBot:
     def __init__(self):
-        # 1. Capital & Risk Protection
+        # 1. Risk & Leverage Settings
         self.leverage = 4
         self.equity_floor = 1.50
         self.consecutive_losses = 0
         self.max_losses = 2
 
-        # 2. Rolling Memory & Active Cameras
-        self.trade_history = []
-        self.active_cameras = []
+        # 2. Scorecard for Both Procedures (Rolling 15-Trade Window)
+        self.history_fixed_tp_sl = []  # Tracks Procedure A (Fixed TP/SL)
+        self.history_fade_exit = []    # Tracks Procedure B (Dynamic Fade)
         
-        # Tracks resting circulating depth over time: { symbol: [ {"t": time, "ask_depth": $, "bid_depth": $, "price": $}, ... ] }
-        self.circulating_depth_history = {}
+        self.active_cameras = []
+        self.market_memory = {}        # 5-minute rolling market data store
 
-        # 3. Live State (Bound directly to self to prevent any UnboundLocalError)
+        # 3. Live Trade Tracker (Directly attached to self)
         self.live_state = {
             "active": False,
             "symbol": None,
@@ -60,11 +61,14 @@ class PureLiquidityVacuumBot:
             "entry_price": 0.0,
             "target_price": 0.0,
             "stop_price": 0.0,
+            "min_resistance_seen": 0.0,
+            "peak_price": 0.0,
+            "trough_price": 0.0,
             "start_time": 0.0,
-            "max_minutes": 10.0
+            "max_minutes": 8.0
         }
 
-        # 4. Exchange Setup
+        # 4. Exchange Connection
         self.api_key = os.environ.get("API_KEY")
         self.secret_key = os.environ.get("SECRET_KEY")
         self.passphrase = os.environ.get("PASSPHRASE")
@@ -82,13 +86,9 @@ class PureLiquidityVacuumBot:
         })
 
     # --------------------------------------------------------------------------
-    # MEASURE RESTING CIRCULATING DEPTH
+    # MEASURE RESTING DEPTH WITHIN 1.0% OF MID-PRICE
     # --------------------------------------------------------------------------
-    def measure_resting_circulating_depth(self, symbol):
-        """
-        Measures the actual dollars sitting on the book within 1.5% of price.
-        Does NOT compare bids to asks.
-        """
+    def get_resting_depth(self, symbol):
         try:
             ob = self.bitget.fetch_order_book(symbol, limit=25)
             bids = ob.get('bids', [])
@@ -97,11 +97,12 @@ class PureLiquidityVacuumBot:
             if not bids or not asks:
                 return None
 
-            mid = (bids[0][0] + asks[0][0]) / 2.0
+            best_bid = bids[0][0]
+            best_ask = asks[0][0]
+            mid = (best_bid + best_ask) / 2.0
 
-            # Available circulating sell orders (Asks) and buy orders (Bids)
-            ask_dollars = sum([p * q for p, q in asks if p <= mid * 1.015])
-            bid_dollars = sum([p * q for p, q in bids if p >= mid * 0.985])
+            ask_dollars = sum([p * q for p, q in asks if p <= mid * 1.010])
+            bid_dollars = sum([p * q for p, q in bids if p >= mid * 0.990])
 
             return {
                 "mid": mid,
@@ -112,103 +113,87 @@ class PureLiquidityVacuumBot:
             return None
 
     # --------------------------------------------------------------------------
-    # AUDIT LIQUIDITY VACUUM & CAPITAL VELOCITY
+    # AUDIT THE 5-MINUTE VACUUM ENTRY
     # --------------------------------------------------------------------------
-    def audit_liquidity_vacuum(self, symbol, vol_24h):
-        """
-        Examines:
-        1. Is there massive volume churning? (Hundreds of thousands or millions).
-        2. Did circulating resting capital collapse over the last 1 to 4 minutes?
-           - For Long: Did Asks collapse from $10k to $100?
-           - For Short: Did Bids collapse from $100k to dust?
-        3. Is price aligned with the direction of the vacuum?
-        """
+    def audit_5m_vacuum(self, symbol, vol_24h):
         now = time.time()
-        depth = self.measure_resting_circulating_depth(symbol)
+        depth = self.get_resting_depth(symbol)
         if not depth:
             return None
 
-        # Store depth snapshot
-        if symbol not in self.circulating_depth_history:
-            self.circulating_depth_history[symbol] = []
+        if symbol not in self.market_memory:
+            self.market_memory[symbol] = []
 
-        self.circulating_depth_history[symbol].append({
+        self.market_memory[symbol].append({
             "t": now,
+            "vol_24h": vol_24h,
             "ask_dollars": depth["ask_dollars"],
             "bid_dollars": depth["bid_dollars"],
             "price": depth["mid"]
         })
-        self.circulating_depth_history[symbol] = [s for s in self.circulating_depth_history[symbol] if now - s["t"] <= 480.0]
 
-        history = self.circulating_depth_history[symbol]
-        # Look back between 45 seconds and 4 minutes ago
-        past_snaps = [s for s in history if 45.0 <= (now - s["t"]) <= 240.0]
+        self.market_memory[symbol] = [s for s in self.market_memory[symbol] if now - s["t"] <= 600.0]
+        history = self.market_memory[symbol]
+
+        # Look back between 3.5 and 6.0 minutes ago
+        past_snaps = [s for s in history if 210.0 <= (now - s["t"]) <= 360.0]
         if not past_snaps:
             return None
 
         baseline = past_snaps[0]
-        elapsed_m = (now - baseline["t"]) / 60.0
+        elapsed_min = (now - baseline["t"]) / 60.0
         mid = depth["mid"]
 
-        # Approximate 1-hour volume turnover rate
-        volume_churn_1h = vol_24h / 24.0
-
-        # Must have at least $50,000/hr in active volume churn to prevent dead coins
-        if volume_churn_1h < 50_000:
+        delta_vol_5m = vol_24h - baseline["vol_24h"]
+        if delta_vol_5m < 20_000:
             return None
 
         # ----------------------------------------------------------------------
-        # SCENARIO A: LONG VACUUM (Ask resistance evaporated while volume churns)
-        # Example: $10,000 asks shrank down to $500 while $2M volume trades!
+        # SETUP 1: LONG VACUUM (Asks collapsed while volume traded)
         # ----------------------------------------------------------------------
         if depth["ask_dollars"] > 0 and baseline["ask_dollars"] > 0:
             ask_depletion = baseline["ask_dollars"] / depth["ask_dollars"]
-            velocity_long = volume_churn_1h / depth["ask_dollars"]
+            velocity_long = delta_vol_5m / depth["ask_dollars"]
+            price_change_pct = ((mid - baseline["price"]) / baseline["price"]) * 100.0
 
-            # Trigger condition:
-            # 1. Asks depleted by at least 60% (depletion >= 2.5x)
-            # 2. Turnover velocity is at least 80x (heavy churn through tiny depth)
-            # 3. Price is moving UP into the vacuum (already winning)
-            if ask_depletion >= 2.5 and velocity_long >= 80.0 and mid > baseline["price"]:
+            if ask_depletion >= 2.0 and velocity_long >= 15.0 and price_change_pct >= 0.10:
                 return {
                     "symbol": symbol,
                     "side": "long",
                     "mid": mid,
+                    "initial_resistance": depth["ask_dollars"],
                     "reason": (
-                        f"LONG VACUUM: Asks evaporated from ${baseline['ask_dollars']:,.0f} down to ${depth['ask_dollars']:,.0f} "
-                        f"({ask_depletion:.1f}x depletion) in {elapsed_m:.1f}m while ${volume_churn_1h:,.0f}/hr is churning! "
-                        f"Velocity: {velocity_long:,.0f}x turnover!"
+                        f"5M LONG VACUUM: ${delta_vol_5m:,.0f} volume churned in {elapsed_min:.1f}m while Asks "
+                        f"collapsed from ${baseline['ask_dollars']:,.0f} down to ${depth['ask_dollars']:,.0f} "
+                        f"({ask_depletion:.1f}x)! Velocity: {velocity_long:.0f}x | Price: +{price_change_pct:.2f}%"
                     )
                 }
 
         # ----------------------------------------------------------------------
-        # SCENARIO B: SHORT SINKHOLE (Bid support evaporated while volume churns)
-        # Example: $100,000 bids shrank down to dust while volume trades!
+        # SETUP 2: SHORT SINKHOLE (Bids collapsed while volume traded)
         # ----------------------------------------------------------------------
         if depth["bid_dollars"] > 0 and baseline["bid_dollars"] > 0:
             bid_depletion = baseline["bid_dollars"] / depth["bid_dollars"]
-            velocity_short = volume_churn_1h / depth["bid_dollars"]
+            velocity_short = delta_vol_5m / depth["bid_dollars"]
+            price_change_pct = ((baseline["price"] - mid) / baseline["price"]) * 100.0
 
-            # Trigger condition:
-            # 1. Bids depleted by at least 60% (depletion >= 2.5x)
-            # 2. Turnover velocity is at least 80x
-            # 3. Price is moving DOWN into the sinkhole (already winning)
-            if bid_depletion >= 2.5 and velocity_short >= 80.0 and mid < baseline["price"]:
+            if bid_depletion >= 2.0 and velocity_short >= 15.0 and price_change_pct >= 0.10:
                 return {
                     "symbol": symbol,
                     "side": "short",
                     "mid": mid,
+                    "initial_resistance": depth["bid_dollars"],
                     "reason": (
-                        f"SHORT SINKHOLE: Bids collapsed from ${baseline['bid_dollars']:,.0f} down to ${depth['bid_dollars']:,.0f} "
-                        f"({bid_depletion:.1f}x depletion) in {elapsed_m:.1f}m while ${volume_churn_1h:,.0f}/hr is churning! "
-                        f"Velocity: {velocity_short:,.0f}x turnover!"
+                        f"5M SHORT SINKHOLE: ${delta_vol_5m:,.0f} volume churned in {elapsed_min:.1f}m while Bids "
+                        f"collapsed from ${baseline['bid_dollars']:,.0f} down to ${depth['bid_dollars']:,.0f} "
+                        f"({bid_depletion:.1f}x)! Velocity: {velocity_short:.0f}x | Price: -{price_change_pct:.2f}%"
                     )
                 }
 
         return None
 
     # --------------------------------------------------------------------------
-    # MONITOR PAPER CAMERAS
+    # MONITOR OBSERVATION CAMERAS (A/B TESTING BOTH PROCEDURES)
     # --------------------------------------------------------------------------
     def update_cameras(self):
         remaining = []
@@ -222,43 +207,85 @@ class PureLiquidityVacuumBot:
             stop = cam["stop_p"]
             elapsed_m = (now - cam["start_t"]) / 60.0
 
-            try:
-                cur_price = float(self.bitget.fetch_ticker(sym).get('last', 0) or 0)
-            except Exception:
+            depth = self.get_resting_depth(sym)
+            if not depth:
                 remaining.append(cam)
                 continue
 
-            if cur_price <= 0:
-                remaining.append(cam)
-                continue
+            cur_price = depth["mid"]
+            cur_ask_dollars = depth["ask_dollars"]
+            cur_bid_dollars = depth["bid_dollars"]
 
+            # Calculate True Net ROE at 4x leverage
             delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
             net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-            won = False
-            done = False
-            reason = ""
+            # Track peak prices and thinnest book levels seen during the trade
+            if cur_price > cam["peak_price"]:
+                cam["peak_price"] = cur_price
+            if cur_price < cam["trough_price"]:
+                cam["trough_price"] = cur_price
 
-            if (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target):
-                done = True
-                won = True
-                reason = f"Vacuum Target Hit at +{net_roe:.2f}% Net ROE in {elapsed_m:.1f}m!"
+            if side == "long" and cur_ask_dollars < cam["min_resistance"]:
+                cam["min_resistance"] = cur_ask_dollars
+            elif side == "short" and cur_bid_dollars < cam["min_resistance"]:
+                cam["min_resistance"] = cur_bid_dollars
 
-            elif (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop):
-                done = True
-                won = False
-                reason = f"Stop boundary reached at {net_roe:.2f}% ROE"
+            # ------------------------------------------------------------------
+            # PROCEDURE B AUDIT: HAS THE SETUP FADED?
+            # ------------------------------------------------------------------
+            # Long Fade: Asks refilled 2x above thinnest point AND price ticked down from peak
+            long_faded = (
+                side == "long"
+                and cur_ask_dollars >= (cam["min_resistance"] * 2.0)
+                and cur_price < cam["peak_price"] * 0.9990
+            )
 
-            elif elapsed_m >= 10.0:
-                done = True
-                won = net_roe > 0.20
-                reason = f"10m natural hold concluded at {net_roe:+.2f}% ROE"
+            # Short Fade: Bids refilled 2x above lowest point AND price ticked up from trough
+            short_faded = (
+                side == "short"
+                and cur_bid_dollars >= (cam["min_resistance"] * 2.0)
+                and cur_price > cam["trough_price"] * 1.0010
+            )
 
-            if done:
-                self.trade_history.append(1 if won else 0)
-                self.trade_history = self.trade_history[-15:]
-                print(f"\n[PAPER TEST COMPLETED] {sym} ({side.upper()}) | {reason}", flush=True)
-                print(f"[SCORECARD] {sum(self.trade_history)}/{len(self.trade_history)} passed (+1.5% ROE goal)\n", flush=True)
+            fade_occurred = (long_faded or short_faded)
+            if fade_occurred and cam["fade_captured_roe"] is None:
+                # First time fade is detected: freeze what the fade return was!
+                cam["fade_captured_roe"] = round(net_roe, 2)
+                cam["fade_time_m"] = round(elapsed_m, 1)
+
+            # ------------------------------------------------------------------
+            # PROCEDURE A AUDIT: FIXED TARGET / STOP LOSS / TIMEOUT
+            # ------------------------------------------------------------------
+            hit_target = (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target)
+            hit_stop = (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop)
+            timed_out = elapsed_m >= 8.0
+
+            if hit_target or hit_stop or timed_out:
+                # Trade is officially complete. Log both procedures side-by-side!
+                won_fixed = hit_target or (timed_out and net_roe > 0.20)
+                self.history_fixed_tp_sl.append(1 if won_fixed else 0)
+                self.history_fixed_tp_sl = self.history_fixed_tp_sl[-15:]
+
+                # Record fade procedure performance
+                fade_roe = cam["fade_captured_roe"] if cam["fade_captured_roe"] is not None else round(net_roe, 2)
+                won_fade = fade_roe > 0.15
+                self.history_fade_exit.append(1 if won_fade else 0)
+                self.history_fade_exit = self.history_fade_exit[-15:]
+
+                fixed_status = "TARGET_HIT (+1.5% ROE)" if hit_target else ("STOP_HIT" if hit_stop else "TIMEOUT")
+                fade_status = f"FADED at {fade_roe:+.2f}% ROE in {cam.get('fade_time_m', elapsed_m)}m" if cam["fade_captured_roe"] is not None else "NEVER_FADED"
+
+                print(f"\n=======================================================", flush=True)
+                print(f"[PAPER LAB EXPERIMENT FINISHED] {sym} ({side.upper()})", flush=True)
+                print(f" * Procedure A (Fixed TP/SL) : {fixed_status} -> Net ROE: {net_roe:+.2f}%", flush=True)
+                print(f" * Procedure B (Fade Exit)   : {fade_status}", flush=True)
+                if hit_stop and fade_roe > net_roe:
+                    print(f" -> VERDICT: Procedure B (Fade Exit) saved capital by cutting before Stop!", flush=True)
+                elif hit_target and fade_roe < net_roe:
+                    print(f" -> VERDICT: Procedure A (Fixed Target) captured full run!", flush=True)
+                print(f"[LAB SCORECARD] Fixed TP/SL: {sum(self.history_fixed_tp_sl)}/{len(self.history_fixed_tp_sl)} wins | Fade Exit: {sum(self.history_fade_exit)}/{len(self.history_fade_exit)} wins", flush=True)
+                print(f"=======================================================\n", flush=True)
             else:
                 remaining.append(cam)
 
@@ -278,32 +305,69 @@ class PureLiquidityVacuumBot:
         stop = self.live_state["stop_price"]
         elapsed_m = (time.time() - self.live_state["start_time"]) / 60.0
 
-        try:
-            cur_p = float(self.bitget.fetch_ticker(sym).get('last', 0) or 0)
-        except Exception:
+        depth = self.get_resting_depth(sym)
+        if not depth:
             return
 
-        delta = ((cur_p - entry) / entry) * 100.0 if side == "long" else ((entry - cur_p) / entry) * 100.0
+        cur_price = depth["mid"]
+        cur_ask_dollars = depth["ask_dollars"]
+        cur_bid_dollars = depth["bid_dollars"]
+
+        delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
         net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-        close_now = False
+        # Update high/low tracking
+        if cur_price > self.live_state["peak_price"]:
+            self.live_state["peak_price"] = cur_price
+        if cur_price < self.live_state["trough_price"]:
+            self.live_state["trough_price"] = cur_price
+
+        if side == "long" and cur_ask_dollars < self.live_state["min_resistance_seen"]:
+            self.live_state["min_resistance_seen"] = cur_ask_dollars
+        elif side == "short" and cur_bid_dollars < self.live_state["min_resistance_seen"]:
+            self.live_state["min_resistance_seen"] = cur_bid_dollars
+
+        # Fade Detection for Live Protection
+        long_faded = (
+            side == "long"
+            and cur_ask_dollars >= (self.live_state["min_resistance_seen"] * 2.0)
+            and cur_price < self.live_state["peak_price"] * 0.9990
+        )
+        short_faded = (
+            side == "short"
+            and cur_bid_dollars >= (self.live_state["min_resistance_seen"] * 2.0)
+            and cur_price > self.live_state["trough_price"] * 1.0010
+        )
+
+        close_it = False
         won = False
         reason = ""
 
-        if (side == "long" and cur_p >= target) or (side == "short" and cur_p <= target):
-            close_now = True
+        # 1. Target Hit
+        if (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target):
+            close_it = True
             won = True
-            reason = f"Target Banked (+{net_roe:.2f}% ROE)"
-        elif (side == "long" and cur_p <= stop) or (side == "short" and cur_p >= stop):
-            close_now = True
-            won = False
-            reason = f"Stop Reached ({net_roe:.2f}% ROE)"
-        elif elapsed_m >= 10.0:
-            close_now = True
-            won = net_roe > 0
-            reason = f"10m Hold Complete ({net_roe:+.2f}% ROE)"
+            reason = f"Target Hit (+{net_roe:.2f}% ROE)"
 
-        if close_now:
+        # 2. Stop Hit
+        elif (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop):
+            close_it = True
+            won = False
+            reason = f"Stop Loss Hit ({net_roe:.2f}% ROE)"
+
+        # 3. Dynamic Fade Cut (If resistance/support refilled 2x and price stalled)
+        elif (long_faded or short_faded) and elapsed_m >= 1.5:
+            close_it = True
+            won = net_roe > 0
+            reason = f"Dynamic Fade Cut (Resistance refilled 2x | Net ROE: {net_roe:+.2f}%)"
+
+        # 4. Timeout
+        elif elapsed_m >= self.live_state["max_minutes"]:
+            close_it = True
+            won = net_roe > 0
+            reason = f"Max Duration Elapsed ({elapsed_m:.1f}m)"
+
+        if close_it:
             order_side = 'sell' if side == 'long' else 'buy'
             for _ in range(3):
                 try:
@@ -313,15 +377,23 @@ class PureLiquidityVacuumBot:
                     time.sleep(1)
 
             self.consecutive_losses = 0 if won else self.consecutive_losses + 1
-            print(f"\n[LIVE VACUUM TRADE CLOSED] {sym} ({side.upper()}) | Reason: {reason}\n", flush=True)
+            print(f"\n[LIVE POSITION CLOSED] {sym} ({side.upper()}) | {reason}\n", flush=True)
             self.live_state["active"] = False
+
+    def get_scorecard(self):
+        tot_fixed = len(self.history_fixed_tp_sl)
+        tot_fade = len(self.history_fade_exit)
+        return (
+            f"Fixed TP/SL: {sum(self.history_fixed_tp_sl)}/{tot_fixed} wins | "
+            f"Fade Exit: {sum(self.history_fade_exit)}/{tot_fade} wins"
+        )
 
     # --------------------------------------------------------------------------
     # MAIN ENGINE LOOP
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX-V16 Pure Liquidity Vacuum Engine active (Bids/Asks abandoned).", flush=True)
+        print("[SYSTEM] APEX-V16 Dual-Procedure Vacuum Lab online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -333,11 +405,11 @@ class PureLiquidityVacuumBot:
 
         while True:
             try:
-                # 1. Update Existing Cameras & Live Guardian
+                # 1. Update Observation Cameras & Live Trade
                 self.update_cameras()
                 self.poll_live_trade()
 
-                # 2. Risk & Account Verification
+                # 2. Capital Safety Check
                 balance = float(self.bitget.fetch_balance().get('USDT', {}).get('free', 0) or 0)
                 if balance < self.equity_floor:
                     print(f"[VAULT PAUSE] Balance ${balance:.2f} below ${self.equity_floor:.2f} floor. Sleeping...", flush=True)
@@ -345,13 +417,13 @@ class PureLiquidityVacuumBot:
                     continue
 
                 if self.consecutive_losses >= self.max_losses:
-                    print("[VAULT PAUSE] 2 consecutive live losses. Rest pause active. Sleeping...", flush=True)
+                    print("[VAULT PAUSE] 2 consecutive live losses. Rest period active. Sleeping...", flush=True)
                     time.sleep(60)
                     continue
 
                 notional = max(min(balance * 0.85 * self.leverage, 7.50), 5.15)
 
-                # 3. Fetch Market Tickers & Filter Candidates
+                # 3. Fetch Tickers
                 try:
                     tickers = self.bitget.fetch_tickers()
                 except Exception:
@@ -365,34 +437,35 @@ class PureLiquidityVacuumBot:
                     and float(t.get('quoteVolume', 0) or 0) >= 1_000_000
                     and s not in active_syms
                 ]
-
-                # Rank by 24h volume so we evaluate the highest circulating coins first
                 candidates.sort(key=lambda s: float(tickers[s].get('quoteVolume', 0) or 0), reverse=True)
 
-                # 4. Check for Liquidity Vacuums Across Active Coins
+                # 4. Search for 5-Minute Liquidity Vacuums
                 for sym in candidates[:20]:
                     if len(self.active_cameras) >= 8:
                         break
 
                     vol_24h = float(tickers[sym].get('quoteVolume', 0) or 0)
-                    vacuum = self.audit_liquidity_vacuum(sym, vol_24h)
+                    vacuum = self.audit_5m_vacuum(sym, vol_24h)
 
                     if vacuum:
                         side = vacuum["side"]
                         mid = vacuum["mid"]
 
-                        # Targets scaled to 4x leverage: 0.45% move = ~1.50% Net ROE
+                        # Targets: +0.50% spot = +1.52% Net ROE on 4x leverage
                         if side == "long":
-                            target_p = mid * 1.0045
-                            stop_p = mid * 0.9960
+                            target_p = mid * 1.0050
+                            stop_p = mid * 0.9965
                         else:
-                            target_p = mid * 0.9955
-                            stop_p = mid * 1.0040
+                            target_p = mid * 0.9950
+                            stop_p = mid * 1.0035
 
-                        # Unlock real money if 7 out of last 10 paper tests won
-                        is_ready = len(self.trade_history) >= 10 and sum(self.trade_history[-10:]) >= 7
+                        # Live Promotion Check (Requires 7/10 wins on either procedure)
+                        live_qualified = (
+                            (len(self.history_fixed_tp_sl) >= 10 and sum(self.history_fixed_tp_sl[-10:]) >= 7)
+                            or (len(self.history_fade_exit) >= 10 and sum(self.history_fade_exit[-10:]) >= 7)
+                        )
 
-                        if is_ready and not self.live_state["active"]:
+                        if live_qualified and not self.live_state["active"]:
                             try:
                                 self.bitget.set_leverage(self.leverage, sym)
                             except Exception:
@@ -406,26 +479,35 @@ class PureLiquidityVacuumBot:
                                 "active": True, "symbol": sym, "side": side,
                                 "contracts": amount, "entry_price": mid,
                                 "target_price": target_p, "stop_price": stop_p,
-                                "start_time": time.time(), "max_minutes": 10.0
+                                "min_resistance_seen": vacuum["initial_resistance"],
+                                "peak_price": mid, "trough_price": mid,
+                                "start_time": time.time(), "max_minutes": 8.0
                             }
-                            print(f"\n[LIVE VACUUM TRADE EXECUTED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
+                            print(f"\n[LIVE PROMOTION TRADED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
                             break
                         else:
+                            # Open Paper Camera with Dual-Procedure Tracking
                             self.active_cameras.append({
-                                "symbol": sym, "side": side, "entry_p": mid,
-                                "target_p": target_p, "stop_p": stop_p,
-                                "start_t": time.time()
+                                "symbol": sym,
+                                "side": side,
+                                "entry_p": mid,
+                                "target_p": target_p,
+                                "stop_p": stop_p,
+                                "min_resistance": vacuum["initial_resistance"],
+                                "peak_price": mid,
+                                "trough_price": mid,
+                                "start_t": time.time(),
+                                "fade_captured_roe": None,
+                                "fade_time_m": None
                             })
-                            print(f"\n[VACUUM LOCKED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
+                            print(f"\n[PAPER DUAL LAB LOCKED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
 
                 # 5. Heartbeat Status
                 if cycle % 6 == 0:
-                    score = f"{sum(self.trade_history)}/{len(self.trade_history)}"
                     print(
-                        f"\n[PULSE] Cameras: {len(self.active_cameras)}/8 | "
+                        f"\n[LAB HEARTBEAT] Cameras: {len(self.active_cameras)}/8 | "
                         f"Vault: ${balance:.2f} ({self.leverage}x) | "
-                        f"Coins Tracked: {len(self.circulating_depth_history)} | "
-                        f"Scorecard: {score} passed",
+                        f"Scorecard -> [{self.get_scorecard()}]",
                         flush=True
                     )
 
@@ -441,5 +523,5 @@ class PureLiquidityVacuumBot:
 # START BOT
 # ==============================================================================
 if __name__ == "__main__":
-    bot = PureLiquidityVacuumBot()
+    bot = DualProcedureVacuumBot()
     bot.run()
