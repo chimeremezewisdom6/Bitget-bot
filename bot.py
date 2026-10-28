@@ -7,19 +7,20 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
 # ==============================================================================
-# STEP 1: KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT)
+# 1. LIVE KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT ON RENDER)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
 
-class SimpleHandler(BaseHTTPRequestHandler):
+class HealthCheckServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
         status = {
-            "status": "RUNNING",
-            "active_cameras": len(bot.active_cameras),
-            "scorecard": f"{sum(bot.history)}/{len(bot.history)} wins"
+            "engine": "APEX-V16 Pure Liquidity Vacuum & Capital Velocity Engine",
+            "active_vacuums": len(bot.active_cameras),
+            "scorecard": f"{sum(bot.trade_history)}/{len(bot.trade_history)} wins",
+            "live_active": bot.live_state["active"]
         }
         self.wfile.write(json.dumps(status).encode('utf-8'))
 
@@ -27,31 +28,34 @@ class SimpleHandler(BaseHTTPRequestHandler):
         return
 
 def start_server():
-    server = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
+    server = HTTPServer(("0.0.0.0", PORT), HealthCheckServer)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# STEP 2: THE TRADING ENGINE (EVERY VARIABLE USES 'self.' SO IT ALWAYS REACHES IT)
+# 2. PURE LIQUIDITY VACUUM ENGINE (NO BID/ASK COMPARISONS)
 # ==============================================================================
-class SimpleThinkingBot:
+class PureLiquidityVacuumBot:
     def __init__(self):
-        # 1. Account Settings
+        # 1. Capital & Risk Protection
         self.leverage = 4
         self.equity_floor = 1.50
         self.consecutive_losses = 0
         self.max_losses = 2
 
-        # 2. Memory & Scorecard (Rolling window of last 15 trades, never wipes to 0/0)
-        self.history = []
-        self.depth_memory = {}
+        # 2. Rolling Memory & Active Cameras
+        self.trade_history = []
         self.active_cameras = []
+        
+        # Tracks resting circulating depth over time: { symbol: [ {"t": time, "ask_depth": $, "bid_depth": $, "price": $}, ... ] }
+        self.circulating_depth_history = {}
 
-        # 3. Live Trade Tracker (Directly attached to self, so it is ALWAYS accessible)
+        # 3. Live State (Bound directly to self to prevent any UnboundLocalError)
         self.live_state = {
             "active": False,
             "symbol": None,
+            "side": None,
             "contracts": 0,
             "entry_price": 0.0,
             "target_price": 0.0,
@@ -60,13 +64,13 @@ class SimpleThinkingBot:
             "max_minutes": 10.0
         }
 
-        # 4. Exchange Connection
+        # 4. Exchange Setup
         self.api_key = os.environ.get("API_KEY")
         self.secret_key = os.environ.get("SECRET_KEY")
         self.passphrase = os.environ.get("PASSPHRASE")
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing API keys!", flush=True)
+            print("[FATAL] Missing exchange credentials in environment variables!", flush=True)
             sys.exit(1)
 
         self.bitget = ccxt.bitget({
@@ -78,13 +82,12 @@ class SimpleThinkingBot:
         })
 
     # --------------------------------------------------------------------------
-    # STEP 3: ORDER BOOK DEPTH CHECK (5X WALL OR 2X SURGE)
+    # MEASURE RESTING CIRCULATING DEPTH
     # --------------------------------------------------------------------------
-    def inspect_coin(self, symbol):
+    def measure_resting_circulating_depth(self, symbol):
         """
-        Sentence-style rules:
-        1. Are bids 5x higher than asks? OR
-        2. Did bids double (2x) in under 5 minutes with real liquidity?
+        Measures the actual dollars sitting on the book within 1.5% of price.
+        Does NOT compare bids to asks.
         """
         try:
             ob = self.bitget.fetch_order_book(symbol, limit=25)
@@ -94,64 +97,118 @@ class SimpleThinkingBot:
             if not bids or not asks:
                 return None
 
-            best_bid = bids[0][0]
-            best_ask = asks[0][0]
-            mid_price = (best_bid + best_ask) / 2.0
+            mid = (bids[0][0] + asks[0][0]) / 2.0
 
-            # Measure total money in bids and asks within 1.5% of price
-            bid_usd = sum([p * q for p, q in bids if p >= mid_price * 0.985])
-            ask_usd = sum([p * q for p, q in asks if p <= mid_price * 1.015])
+            # Available circulating sell orders (Asks) and buy orders (Bids)
+            ask_dollars = sum([p * q for p, q in asks if p <= mid * 1.015])
+            bid_dollars = sum([p * q for p, q in bids if p >= mid * 0.985])
 
-            if bid_usd < 10_000 or ask_usd <= 0:
-                return None
-
-            now = time.time()
-            current_ratio = bid_usd / ask_usd
-
-            # Remember this snapshot
-            if symbol not in self.depth_memory:
-                self.depth_memory[symbol] = []
-
-            self.depth_memory[symbol].append({"t": now, "b": bid_usd, "a": ask_usd, "p": mid_price})
-            self.depth_memory[symbol] = [s for s in self.depth_memory[symbol] if now - s["t"] <= 600.0]
-
-            # Look back between 20 seconds and 5 minutes ago
-            lookbacks = [s for s in self.depth_memory[symbol] if 20.0 <= (now - s["t"]) <= 300.0]
-            if not lookbacks:
-                return None
-
-            baseline = lookbacks[0]
-            elapsed_m = (now - baseline["t"]) / 60.0
-            bid_growth = bid_usd / baseline["b"] if baseline["b"] > 0 else 1.0
-            total_now = bid_usd + ask_usd
-            total_then = baseline["b"] + baseline["a"]
-            liquidity_growth = total_now / total_then if total_then > 0 else 1.0
-
-            # Condition A: 5x Bids Wall
-            if current_ratio >= 5.0 and bid_growth >= 1.0:
-                return {
-                    "symbol": symbol,
-                    "mid": mid_price,
-                    "reason": f"5x Bid Wall confirmed ({current_ratio:.1f}x higher than asks)",
-                    "hold_minutes": 8.0
-                }
-
-            # Condition B: 2x Surge in < 5 minutes
-            if bid_growth >= 2.0 and liquidity_growth >= 1.3:
-                return {
-                    "symbol": symbol,
-                    "mid": mid_price,
-                    "reason": f"Bids surged {bid_growth:.1f}x in {elapsed_m:.1f}m (Liquidity expanded {liquidity_growth:.1f}x)",
-                    "hold_minutes": 10.0
-                }
-
+            return {
+                "mid": mid,
+                "ask_dollars": ask_dollars,
+                "bid_dollars": bid_dollars
+            }
         except Exception:
             return None
+
+    # --------------------------------------------------------------------------
+    # AUDIT LIQUIDITY VACUUM & CAPITAL VELOCITY
+    # --------------------------------------------------------------------------
+    def audit_liquidity_vacuum(self, symbol, vol_24h):
+        """
+        Examines:
+        1. Is there massive volume churning? (Hundreds of thousands or millions).
+        2. Did circulating resting capital collapse over the last 1 to 4 minutes?
+           - For Long: Did Asks collapse from $10k to $100?
+           - For Short: Did Bids collapse from $100k to dust?
+        3. Is price aligned with the direction of the vacuum?
+        """
+        now = time.time()
+        depth = self.measure_resting_circulating_depth(symbol)
+        if not depth:
+            return None
+
+        # Store depth snapshot
+        if symbol not in self.circulating_depth_history:
+            self.circulating_depth_history[symbol] = []
+
+        self.circulating_depth_history[symbol].append({
+            "t": now,
+            "ask_dollars": depth["ask_dollars"],
+            "bid_dollars": depth["bid_dollars"],
+            "price": depth["mid"]
+        })
+        self.circulating_depth_history[symbol] = [s for s in self.circulating_depth_history[symbol] if now - s["t"] <= 480.0]
+
+        history = self.circulating_depth_history[symbol]
+        # Look back between 45 seconds and 4 minutes ago
+        past_snaps = [s for s in history if 45.0 <= (now - s["t"]) <= 240.0]
+        if not past_snaps:
+            return None
+
+        baseline = past_snaps[0]
+        elapsed_m = (now - baseline["t"]) / 60.0
+        mid = depth["mid"]
+
+        # Approximate 1-hour volume turnover rate
+        volume_churn_1h = vol_24h / 24.0
+
+        # Must have at least $50,000/hr in active volume churn to prevent dead coins
+        if volume_churn_1h < 50_000:
+            return None
+
+        # ----------------------------------------------------------------------
+        # SCENARIO A: LONG VACUUM (Ask resistance evaporated while volume churns)
+        # Example: $10,000 asks shrank down to $500 while $2M volume trades!
+        # ----------------------------------------------------------------------
+        if depth["ask_dollars"] > 0 and baseline["ask_dollars"] > 0:
+            ask_depletion = baseline["ask_dollars"] / depth["ask_dollars"]
+            velocity_long = volume_churn_1h / depth["ask_dollars"]
+
+            # Trigger condition:
+            # 1. Asks depleted by at least 60% (depletion >= 2.5x)
+            # 2. Turnover velocity is at least 80x (heavy churn through tiny depth)
+            # 3. Price is moving UP into the vacuum (already winning)
+            if ask_depletion >= 2.5 and velocity_long >= 80.0 and mid > baseline["price"]:
+                return {
+                    "symbol": symbol,
+                    "side": "long",
+                    "mid": mid,
+                    "reason": (
+                        f"LONG VACUUM: Asks evaporated from ${baseline['ask_dollars']:,.0f} down to ${depth['ask_dollars']:,.0f} "
+                        f"({ask_depletion:.1f}x depletion) in {elapsed_m:.1f}m while ${volume_churn_1h:,.0f}/hr is churning! "
+                        f"Velocity: {velocity_long:,.0f}x turnover!"
+                    )
+                }
+
+        # ----------------------------------------------------------------------
+        # SCENARIO B: SHORT SINKHOLE (Bid support evaporated while volume churns)
+        # Example: $100,000 bids shrank down to dust while volume trades!
+        # ----------------------------------------------------------------------
+        if depth["bid_dollars"] > 0 and baseline["bid_dollars"] > 0:
+            bid_depletion = baseline["bid_dollars"] / depth["bid_dollars"]
+            velocity_short = volume_churn_1h / depth["bid_dollars"]
+
+            # Trigger condition:
+            # 1. Bids depleted by at least 60% (depletion >= 2.5x)
+            # 2. Turnover velocity is at least 80x
+            # 3. Price is moving DOWN into the sinkhole (already winning)
+            if bid_depletion >= 2.5 and velocity_short >= 80.0 and mid < baseline["price"]:
+                return {
+                    "symbol": symbol,
+                    "side": "short",
+                    "mid": mid,
+                    "reason": (
+                        f"SHORT SINKHOLE: Bids collapsed from ${baseline['bid_dollars']:,.0f} down to ${depth['bid_dollars']:,.0f} "
+                        f"({bid_depletion:.1f}x depletion) in {elapsed_m:.1f}m while ${volume_churn_1h:,.0f}/hr is churning! "
+                        f"Velocity: {velocity_short:,.0f}x turnover!"
+                    )
+                }
 
         return None
 
     # --------------------------------------------------------------------------
-    # STEP 4: MONITOR PAPER CAMERAS
+    # MONITOR PAPER CAMERAS
     # --------------------------------------------------------------------------
     def update_cameras(self):
         remaining = []
@@ -159,209 +216,215 @@ class SimpleThinkingBot:
 
         for cam in self.active_cameras:
             sym = cam["symbol"]
-            entry = cam["entry_price"]
-            target = cam["target_price"]
-            stop = cam["stop_price"]
-            max_m = cam["max_minutes"]
-            elapsed_m = (now - cam["start_time"]) / 60.0
+            side = cam["side"]
+            entry = cam["entry_p"]
+            target = cam["target_p"]
+            stop = cam["stop_p"]
+            elapsed_m = (now - cam["start_t"]) / 60.0
 
             try:
-                ticker = self.bitget.fetch_ticker(sym)
-                cur_price = float(ticker.get('last', 0) or 0)
+                cur_price = float(self.bitget.fetch_ticker(sym).get('last', 0) or 0)
             except Exception:
                 remaining.append(cam)
                 continue
 
-            # Calculate Leveraged Profit (ROE)
-            price_change_pct = ((cur_price - entry) / entry) * 100.0
-            net_roe = (price_change_pct * self.leverage) - (0.06 * 2.0 * self.leverage)
+            if cur_price <= 0:
+                remaining.append(cam)
+                continue
 
-            # Check Targets
-            if cur_price >= target:
-                self.history.append(1)
-                self.history = self.history[-15:]
-                print(f"\n[PAPER TARGET HIT] {sym} won with +{net_roe:.2f}% ROE in {elapsed_m:.1f}m!", flush=True)
-                print(f"[SCORECARD] {sum(self.history)}/{len(self.history)} passed\n", flush=True)
+            delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
+            net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-            elif cur_price <= stop:
-                self.history.append(0)
-                self.history = self.history[-15:]
-                print(f"\n[PAPER STOP HIT] {sym} exited at {net_roe:.2f}% ROE", flush=True)
-                print(f"[SCORECARD] {sum(self.history)}/{len(self.history)} passed\n", flush=True)
+            won = False
+            done = False
+            reason = ""
 
-            elif elapsed_m >= max_m:
+            if (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target):
+                done = True
+                won = True
+                reason = f"Vacuum Target Hit at +{net_roe:.2f}% Net ROE in {elapsed_m:.1f}m!"
+
+            elif (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop):
+                done = True
+                won = False
+                reason = f"Stop boundary reached at {net_roe:.2f}% ROE"
+
+            elif elapsed_m >= 10.0:
+                done = True
                 won = net_roe > 0.20
-                self.history.append(1 if won else 0)
-                self.history = self.history[-15:]
-                print(f"\n[PAPER TIME EXPIRED] {sym} closed after {elapsed_m:.1f}m at {net_roe:+.2f}% ROE", flush=True)
-                print(f"[SCORECARD] {sum(self.history)}/{len(self.history)} passed\n", flush=True)
+                reason = f"10m natural hold concluded at {net_roe:+.2f}% ROE"
 
+            if done:
+                self.trade_history.append(1 if won else 0)
+                self.trade_history = self.trade_history[-15:]
+                print(f"\n[PAPER TEST COMPLETED] {sym} ({side.upper()}) | {reason}", flush=True)
+                print(f"[SCORECARD] {sum(self.trade_history)}/{len(self.trade_history)} passed (+1.5% ROE goal)\n", flush=True)
             else:
                 remaining.append(cam)
 
         self.active_cameras = remaining
 
     # --------------------------------------------------------------------------
-    # STEP 5: MONITOR LIVE TRADE GUARDIAN
+    # MONITOR LIVE TRADE GUARDIAN
     # --------------------------------------------------------------------------
-    def poll_live_guardian(self):
-        # Because we use self.live_state, it can ALWAYS access it!
+    def poll_live_trade(self):
         if not self.live_state["active"]:
             return
 
         sym = self.live_state["symbol"]
+        side = self.live_state["side"]
         entry = self.live_state["entry_price"]
         target = self.live_state["target_price"]
         stop = self.live_state["stop_price"]
-        max_m = self.live_state["max_minutes"]
         elapsed_m = (time.time() - self.live_state["start_time"]) / 60.0
 
         try:
-            ticker = self.bitget.fetch_ticker(sym)
-            cur_price = float(ticker.get('last', 0) or 0)
+            cur_p = float(self.bitget.fetch_ticker(sym).get('last', 0) or 0)
         except Exception:
             return
 
-        price_change_pct = ((cur_price - entry) / entry) * 100.0
-        net_roe = (price_change_pct * self.leverage) - (0.06 * 2.0 * self.leverage)
+        delta = ((cur_p - entry) / entry) * 100.0 if side == "long" else ((entry - cur_p) / entry) * 100.0
+        net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-        should_close = False
-        reason = ""
+        close_now = False
         won = False
+        reason = ""
 
-        if cur_price >= target:
-            should_close = True
+        if (side == "long" and cur_p >= target) or (side == "short" and cur_p <= target):
+            close_now = True
             won = True
-            reason = f"Target Hit (+{net_roe:.2f}% ROE)"
-
-        elif cur_price <= stop:
-            should_close = True
+            reason = f"Target Banked (+{net_roe:.2f}% ROE)"
+        elif (side == "long" and cur_p <= stop) or (side == "short" and cur_p >= stop):
+            close_now = True
             won = False
-            reason = f"Stop Hit ({net_roe:.2f}% ROE)"
-
-        elif elapsed_m >= max_m:
-            should_close = True
+            reason = f"Stop Reached ({net_roe:.2f}% ROE)"
+        elif elapsed_m >= 10.0:
+            close_now = True
             won = net_roe > 0
-            reason = f"Max Time Reached ({elapsed_m:.1f}m)"
+            reason = f"10m Hold Complete ({net_roe:+.2f}% ROE)"
 
-        if should_close:
+        if close_now:
+            order_side = 'sell' if side == 'long' else 'buy'
             for _ in range(3):
                 try:
-                    self.bitget.create_order(sym, 'market', 'sell', self.live_state["contracts"], params={'reduceOnly': True, 'tradeSide': 'close'})
+                    self.bitget.create_order(sym, 'market', order_side, self.live_state["contracts"], params={'reduceOnly': True, 'tradeSide': 'close'})
                     break
                 except Exception:
                     time.sleep(1)
 
             self.consecutive_losses = 0 if won else self.consecutive_losses + 1
-            print(f"\n[LIVE TRADE CLOSED] {sym} | Reason: {reason}\n", flush=True)
+            print(f"\n[LIVE VACUUM TRADE CLOSED] {sym} ({side.upper()}) | Reason: {reason}\n", flush=True)
             self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # STEP 6: MAIN RUNNER LOOP
+    # MAIN ENGINE LOOP
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] Simple Thinking Bot running smoothly.", flush=True)
+        print("[SYSTEM] APEX-V16 Pure Liquidity Vacuum Engine active (Bids/Asks abandoned).", flush=True)
 
         try:
             self.bitget.load_markets()
+            print(f"[SYSTEM] Loaded {len(self.bitget.markets)} pairs from Bitget.", flush=True)
         except Exception as e:
-            print(f"[WARN] Markets load: {e}", flush=True)
+            print(f"[WARN] Market load warning: {e}", flush=True)
 
         cycle = 0
 
         while True:
             try:
-                # 1. Update Paper Cameras & Live Trade
+                # 1. Update Existing Cameras & Live Guardian
                 self.update_cameras()
-                self.poll_live_guardian()
+                self.poll_live_trade()
 
-                # 2. Check Capital Safety
-                balance_data = self.bitget.fetch_balance()
-                usdt_free = float(balance_data.get('USDT', {}).get('free', 0) or 0)
-
-                if usdt_free < self.equity_floor:
-                    print(f"[PAUSE] Balance ${usdt_free:.2f} below ${self.equity_floor:.2f} floor. Sleeping...", flush=True)
+                # 2. Risk & Account Verification
+                balance = float(self.bitget.fetch_balance().get('USDT', {}).get('free', 0) or 0)
+                if balance < self.equity_floor:
+                    print(f"[VAULT PAUSE] Balance ${balance:.2f} below ${self.equity_floor:.2f} floor. Sleeping...", flush=True)
                     time.sleep(30)
                     continue
 
                 if self.consecutive_losses >= self.max_losses:
-                    print("[PAUSE] 2 consecutive losses. Cooldown active. Sleeping...", flush=True)
+                    print("[VAULT PAUSE] 2 consecutive live losses. Rest pause active. Sleeping...", flush=True)
                     time.sleep(60)
                     continue
 
-                notional = max(min(usdt_free * 0.85 * self.leverage, 7.50), 5.15)
+                notional = max(min(balance * 0.85 * self.leverage, 7.50), 5.15)
 
-                # 3. Scan Coins
+                # 3. Fetch Market Tickers & Filter Candidates
                 try:
                     tickers = self.bitget.fetch_tickers()
                 except Exception:
                     time.sleep(4)
                     continue
 
-                active_symbols = {c["symbol"] for c in self.active_cameras}
+                active_syms = {c["symbol"] for c in self.active_cameras}
                 candidates = [
                     s for s, t in tickers.items()
                     if s.endswith(":USDT")
                     and float(t.get('quoteVolume', 0) or 0) >= 1_000_000
-                    and s not in active_symbols
-                ][:15]
+                    and s not in active_syms
+                ]
 
-                # 4. Check for Order Flow Setups
-                for sym in candidates:
+                # Rank by 24h volume so we evaluate the highest circulating coins first
+                candidates.sort(key=lambda s: float(tickers[s].get('quoteVolume', 0) or 0), reverse=True)
+
+                # 4. Check for Liquidity Vacuums Across Active Coins
+                for sym in candidates[:20]:
                     if len(self.active_cameras) >= 8:
                         break
 
-                    signal = self.inspect_coin(sym)
-                    if signal:
-                        mid = signal["mid"]
-                        # Set realistic targets (0.45% move = 1.5% profit on 4x leverage)
-                        target_price = mid * 1.0045
-                        stop_price = mid * 0.9965
-                        hold_time = signal["hold_minutes"]
+                    vol_24h = float(tickers[sym].get('quoteVolume', 0) or 0)
+                    vacuum = self.audit_liquidity_vacuum(sym, vol_24h)
 
-                        # Check if paper score qualifies for Real Money (7 out of last 10 wins)
-                        is_ready = len(self.history) >= 10 and sum(self.history[-10:]) >= 7
+                    if vacuum:
+                        side = vacuum["side"]
+                        mid = vacuum["mid"]
+
+                        # Targets scaled to 4x leverage: 0.45% move = ~1.50% Net ROE
+                        if side == "long":
+                            target_p = mid * 1.0045
+                            stop_p = mid * 0.9960
+                        else:
+                            target_p = mid * 0.9955
+                            stop_p = mid * 1.0040
+
+                        # Unlock real money if 7 out of last 10 paper tests won
+                        is_ready = len(self.trade_history) >= 10 and sum(self.trade_history[-10:]) >= 7
 
                         if is_ready and not self.live_state["active"]:
                             try:
                                 self.bitget.set_leverage(self.leverage, sym)
                             except Exception:
                                 pass
+
                             amount = float(self.bitget.amount_to_precision(sym, notional / mid))
-                            self.bitget.create_order(sym, 'market', 'buy', amount)
+                            order_side = 'buy' if side == 'long' else 'sell'
+                            self.bitget.create_order(sym, 'market', order_side, amount)
 
-                            # Set live trade cleanly
                             self.live_state = {
-                                "active": True,
-                                "symbol": sym,
-                                "contracts": amount,
-                                "entry_price": mid,
-                                "target_price": target_price,
-                                "stop_price": stop_price,
-                                "start_time": time.time(),
-                                "max_minutes": hold_time
+                                "active": True, "symbol": sym, "side": side,
+                                "contracts": amount, "entry_price": mid,
+                                "target_price": target_p, "stop_price": stop_p,
+                                "start_time": time.time(), "max_minutes": 10.0
                             }
-                            print(f"\n[LIVE PROMOTION TRADED] {sym} | {signal['reason']}", flush=True)
+                            print(f"\n[LIVE VACUUM TRADE EXECUTED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
                             break
-
-                        # Otherwise, open in observational paper camera
-                        self.active_cameras.append({
-                            "symbol": sym,
-                            "entry_price": mid,
-                            "target_price": target_price,
-                            "stop_price": stop_price,
-                            "start_time": time.time(),
-                            "max_minutes": hold_time
-                        })
-                        print(f"[CAMERA LOCKED] {sym} -> {signal['reason']} | Hold: {hold_time}m", flush=True)
+                        else:
+                            self.active_cameras.append({
+                                "symbol": sym, "side": side, "entry_p": mid,
+                                "target_p": target_p, "stop_p": stop_p,
+                                "start_t": time.time()
+                            })
+                            print(f"\n[VACUUM LOCKED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
 
                 # 5. Heartbeat Status
                 if cycle % 6 == 0:
-                    score = f"{sum(self.history)}/{len(self.history)}"
+                    score = f"{sum(self.trade_history)}/{len(self.trade_history)}"
                     print(
-                        f"\n[HEARTBEAT] Cameras: {len(self.active_cameras)}/8 | "
-                        f"Vault: ${usdt_free:.2f} ({self.leverage}x) | "
+                        f"\n[PULSE] Cameras: {len(self.active_cameras)}/8 | "
+                        f"Vault: ${balance:.2f} ({self.leverage}x) | "
+                        f"Coins Tracked: {len(self.circulating_depth_history)} | "
                         f"Scorecard: {score} passed",
                         flush=True
                     )
@@ -375,8 +438,8 @@ class SimpleThinkingBot:
                 time.sleep(5)
 
 # ==============================================================================
-# STEP 7: START THE BOT
+# START BOT
 # ==============================================================================
 if __name__ == "__main__":
-    bot = SimpleThinkingBot()
+    bot = PureLiquidityVacuumBot()
     bot.run()
