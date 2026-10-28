@@ -10,21 +10,22 @@ import ccxt
 # 1. LIVE KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT ON RENDER)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-BRAIN_FILE = "autonomous_diagnosis_memory.json"
-CB_FILE = "circuit_breaker.json"
+BRAIN_FILE = "top3_market_memory.json"
 
-class HealthHandler(BaseHTTPRequestHandler):
+class HealthCheckServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
+        wins = sum(bot.history_records)
+        total = len(bot.history_records)
+        losses = total - wins
         status = {
-            "engine": "APEX-V16 Self-Diagnosing Vacuum Bot",
-            "mode": "DEMOTED_TO_PAPER (Needs 6/6)" if bot.is_demoted else ("LIVE_READY" if bot.is_qualified_for_live() else "PAPER_QUALIFYING (Needs 9/10)"),
-            "paper_scorecard": bot.get_paper_score(),
-            "live_strikes": f"{bot.consecutive_live_losses}/2",
-            "active_cameras": len(bot.active_cameras),
-            "current_parameters": bot.parameters
+            "engine": "APEX-V16 Top-3 Global Leaderboard Engine",
+            "mode": "DEMOTED (Needs 6/6)" if bot.is_demoted else ("LIVE_READY" if bot.is_qualified_for_live() else "PAPER (Needs 9/10)"),
+            "record": f"{wins} WINS / {losses} LOSSES",
+            "active_trades": len(bot.active_cameras),
+            "top_3_leaderboard": bot.current_top_3
         }
         self.wfile.write(json.dumps(status, indent=2).encode('utf-8'))
 
@@ -32,40 +33,36 @@ class HealthHandler(BaseHTTPRequestHandler):
         return
 
 def start_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server = HTTPServer(("0.0.0.0", PORT), HealthCheckServer)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. AUTONOMOUS DIAGNOSTIC ENGINE & STATE CONTROLLER
+# 2. TOP-3 GLOBAL RANKING & SUSTAINED VACUUM ENGINE
 # ==============================================================================
-class DiagnosticVacuumBot:
+class TopThreeVacuumBot:
     def __init__(self):
-        # 1. Capital & Leverage
+        # 1. Capital & Risk Protection
         self.leverage = 4
         self.equity_floor = 1.50
         self.consecutive_live_losses = 0
         self.max_live_losses = 2
-        self.is_demoted = False  # Set to True if 2 consecutive live losses occur
+        self.is_demoted = False
 
-        # 2. Dynamic Parameters (The Bot Auto-Tunes These Upon Diagnosis)
-        self.parameters = {
-            "target_pct": 0.0050,         # +0.50% spot move (~+1.52% Net ROE with 4x)
-            "stop_pct": 0.0035,           # -0.35% spot move (~-1.40% Net ROE)
-            "min_depletion_factor": 2.2,  # Resistance must collapse by at least 2.2x
-            "min_velocity_mult": 18.0,    # 5m volume churn must be >= 18x depth
-            "max_hold_minutes": 8.0,      # Natural duration window
-            "fade_buffer_mult": 2.0       # Re-fill multiplier to trigger a Fade Exit
-        }
-
-        # 3. Memory & Tracking (Sliding windows, no 0/0 wiping)
-        self.paper_history = []
+        # 2. Minimum Capital Filters (No More $7,000 EVAA Micro-Dust)
+        self.MIN_RESTING_BOOK_USD = 25_000.0  # Real institutional depth required
+        self.MIN_5M_VOLUME_USD = 40_000.0     # Must have active multi-thousand volume
+        
+        # 3. Memory & Tracking
+        self.history_records = []
         self.active_cameras = []
         self.market_memory = {}
+        self.coin_cooldowns = {}
+        self.current_top_3 = []
         self.load_brain()
 
-        # 4. Live Trade State (Bound to self)
+        # 4. Live Trade Tracker (Bound directly to self)
         self.live_state = {
             "active": False,
             "symbol": None,
@@ -74,13 +71,10 @@ class DiagnosticVacuumBot:
             "entry_price": 0.0,
             "target_price": 0.0,
             "stop_price": 0.0,
-            "min_resistance_seen": 0.0,
-            "peak_price": 0.0,
-            "trough_price": 0.0,
             "start_time": 0.0
         }
 
-        # 5. Bitget Exchange Connection
+        # 5. Exchange Setup
         self.api_key = os.environ.get("API_KEY")
         self.secret_key = os.environ.get("SECRET_KEY")
         self.passphrase = os.environ.get("PASSPHRASE")
@@ -97,16 +91,12 @@ class DiagnosticVacuumBot:
             "options": {"defaultType": "swap"}
         })
 
-    # --------------------------------------------------------------------------
-    # PERSISTENCE & BRAIN STATE
-    # --------------------------------------------------------------------------
     def load_brain(self):
         if os.path.exists(BRAIN_FILE):
             try:
                 with open(BRAIN_FILE, "r") as f:
                     data = json.load(f)
-                    self.parameters.update(data.get("parameters", {}))
-                    self.paper_history = data.get("paper_history", [])
+                    self.history_records = data.get("history_records", [])
                     self.is_demoted = data.get("is_demoted", False)
             except Exception:
                 pass
@@ -115,95 +105,19 @@ class DiagnosticVacuumBot:
         try:
             with open(BRAIN_FILE, "w") as f:
                 json.dump({
-                    "parameters": self.parameters,
-                    "paper_history": self.paper_history,
+                    "history_records": self.history_records,
                     "is_demoted": self.is_demoted
                 }, f, indent=2)
         except Exception:
             pass
 
-    # --------------------------------------------------------------------------
-    # QUALIFICATION GATES (9/10 INITIAL OR 6/6 RE-QUALIFICATION)
-    # --------------------------------------------------------------------------
     def is_qualified_for_live(self):
         if self.is_demoted:
-            # Rule: After 2 live losses, must achieve a clean 6/6 streak in paper
-            if len(self.paper_history) >= 6 and sum(self.paper_history[-6:]) == 6:
-                print("\n[RE-QUALIFIED] Clean 6/6 streak achieved in paper! Live trading re-unlocked.\n", flush=True)
-                self.is_demoted = False
-                self.consecutive_live_losses = 0
-                self.save_brain()
-                return True
-            return False
-        else:
-            # Standard Rule: Requires 9 wins out of the last 10 paper trades (9/10)
-            return len(self.paper_history) >= 10 and sum(self.paper_history[-10:]) >= 9
+            # Requires clean 6/6 consecutive paper wins to re-enter live
+            return len(self.history_records) >= 6 and sum(self.history_records[-6:]) == 6
+        # Standard: 9 out of last 10 wins (9/10)
+        return len(self.history_records) >= 10 and sum(self.history_records[-10:]) >= 9
 
-    def get_paper_score(self):
-        tot = len(self.paper_history)
-        w = sum(self.paper_history)
-        if self.is_demoted:
-            streak = 0
-            for r in reversed(self.paper_history):
-                if r == 1: streak += 1
-                else: break
-            return f"DEMOTED: {streak}/6 streak needed"
-        return f"{w}/{tot} (Last 10: {sum(self.paper_history[-10:])}/10 | Target: 9/10)"
-
-    # --------------------------------------------------------------------------
-    # AUTONOMOUS DIAGNOSIS & REPAIR (THE BOT FIXES ITS OWN MISTAKES)
-    # --------------------------------------------------------------------------
-    def diagnose_and_repair(self, outcome, peak_roe, net_roe, elapsed_m, symbol):
-        """
-        Diagnoses why a trade failed or succeeded, and auto-tunes parameters
-        BEFORE the next trade runs.
-        """
-        p = self.parameters
-        repaired = False
-        action_note = ""
-
-        # MISTAKE CASE 1: Stopped out quickly (< 2.5 min)
-        # Diagnosis: Entered into a fake vacuum; resistance wasn't depleted enough.
-        # Action: Raise minimum depletion and velocity filters to demand stronger proof.
-        if outcome == "STOP_HIT" and elapsed_m <= 2.5:
-            old_dep = p["min_depletion_factor"]
-            p["min_depletion_factor"] = min(round(p["min_depletion_factor"] + 0.2, 2), 3.5)
-            p["min_velocity_mult"] = min(round(p["min_velocity_mult"] + 2.0, 1), 35.0)
-            action_note = f"Early reversal detected. Tightened entry filters: Depletion {old_dep}x -> {p['min_depletion_factor']}x, Velocity -> {p['min_velocity_mult']}x"
-            repaired = True
-
-        # MISTAKE CASE 2: Price had good profit (Peak >= +0.80% ROE) but died at timeout/stop
-        # Diagnosis: Profit greed. Target was set slightly too far for current market conditions.
-        # Action: Micro-adjust target closer so money gets banked.
-        elif outcome in ["STOP_HIT", "TIMEOUT"] and peak_roe >= 0.80:
-            old_tgt = p["target_pct"] * 100.0
-            p["target_pct"] = max(round(p["target_pct"] - 0.0004, 4), 0.0038)
-            action_note = f"Greed trap detected (peaked at {peak_roe:+.2f}% ROE). Adjusted target: {old_tgt:.2f}% -> {p['target_pct']*100:.2f}%"
-            repaired = True
-
-        # MISTAKE CASE 3: Timed out while lingering near breakeven
-        # Diagnosis: Market velocity decayed and liquidity dried up.
-        # Action: Shorten hold time slightly to prevent capital tie-up.
-        elif outcome == "TIMEOUT" and abs(net_roe) < 0.30:
-            old_hold = p["max_hold_minutes"]
-            p["max_hold_minutes"] = max(round(p["max_hold_minutes"] - 0.5, 1), 5.5)
-            action_note = f"Chop stagnation. Reduced hold timer: {old_hold}m -> {p['max_hold_minutes']}m"
-            repaired = True
-
-        # SUCCESS CASE: Clean win on target
-        # Action: Maintain current settings or gently expand target if momentum was effortless (< 3 min)
-        elif outcome == "TARGET_HIT" and elapsed_m <= 3.0:
-            p["target_pct"] = min(round(p["target_pct"] + 0.0002, 4), 0.0060)
-            action_note = f"Effortless win in {elapsed_m:.1f}m. Slightly expanded target to {p['target_pct']*100:.2f}%"
-            repaired = True
-
-        if repaired:
-            print(f"\n[AUTONOMOUS DIAGNOSIS & REPAIR on {symbol}] {action_note}\n", flush=True)
-            self.save_brain()
-
-    # --------------------------------------------------------------------------
-    # MEASURE RESTING DEPTH WITHIN 1.0% OF MID-PRICE
-    # --------------------------------------------------------------------------
     def get_resting_depth(self, symbol):
         try:
             ob = self.bitget.fetch_order_book(symbol, limit=25)
@@ -213,28 +127,32 @@ class DiagnosticVacuumBot:
             if not bids or not asks:
                 return None
 
-            best_bid = bids[0][0]
-            best_ask = asks[0][0]
-            mid = (best_bid + best_ask) / 2.0
-
-            ask_dollars = sum([p * q for p, q in asks if p <= mid * 1.010])
-            bid_dollars = sum([p * q for p, q in bids if p >= mid * 0.990])
+            mid = (bids[0][0] + asks[0][0]) / 2.0
+            ask_usd = sum([p * q for p, q in asks if p <= mid * 1.012])
+            bid_usd = sum([p * q for p, q in bids if p >= mid * 0.988])
 
             return {
                 "mid": mid,
-                "ask_dollars": ask_dollars,
-                "bid_dollars": bid_dollars
+                "ask_usd": ask_usd,
+                "bid_usd": bid_usd
             }
         except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # AUDIT THE 5-MINUTE VACUUM USING AUTO-TUNED PARAMETERS
+    # GLOBAL MARKET SCANNER: CALCULATE METRICS FOR EVERY COIN
     # --------------------------------------------------------------------------
-    def audit_5m_vacuum(self, symbol, vol_24h):
+    def evaluate_coin_metrics(self, symbol, vol_24h):
+        if time.time() < self.coin_cooldowns.get(symbol, 0):
+            return None
+
         now = time.time()
         depth = self.get_resting_depth(symbol)
         if not depth:
+            return None
+
+        # FILTER 1: Ban micro-dust books. Both sides must have real depth.
+        if depth["ask_usd"] < self.MIN_RESTING_BOOK_USD or depth["bid_usd"] < self.MIN_RESTING_BOOK_USD:
             return None
 
         if symbol not in self.market_memory:
@@ -243,61 +161,90 @@ class DiagnosticVacuumBot:
         self.market_memory[symbol].append({
             "t": now,
             "vol_24h": vol_24h,
-            "ask_dollars": depth["ask_dollars"],
-            "bid_dollars": depth["bid_dollars"],
+            "ask_usd": depth["ask_usd"],
+            "bid_usd": depth["bid_usd"],
             "price": depth["mid"]
         })
         self.market_memory[symbol] = [s for s in self.market_memory[symbol] if now - s["t"] <= 600.0]
 
         history = self.market_memory[symbol]
-        past_snaps = [s for s in history if 210.0 <= (now - s["t"]) <= 360.0]
+        # Lookback 3 to 6 minutes
+        past_snaps = [s for s in history if 180.0 <= (now - s["t"]) <= 360.0]
         if not past_snaps:
             return None
 
         baseline = past_snaps[0]
-        elapsed_min = (now - baseline["t"]) / 60.0
-        mid = depth["mid"]
-
         delta_vol_5m = vol_24h - baseline["vol_24h"]
-        if delta_vol_5m < 20_000:
+        if delta_vol_5m < self.MIN_5M_VOLUME_USD:
             return None
 
-        p = self.parameters
+        mid = depth["mid"]
 
-        # SETUP 1: LONG VACUUM
-        if depth["ask_dollars"] > 0 and baseline["ask_dollars"] > 0:
-            ask_depletion = baseline["ask_dollars"] / depth["ask_dollars"]
-            velocity_long = delta_vol_5m / depth["ask_dollars"]
-            price_change = ((mid - baseline["price"]) / baseline["price"]) * 100.0
+        # Long Evaluation: Resistance (Asks) fading while volume is surging
+        ask_depletion = baseline["ask_usd"] / depth["ask_usd"] if depth["ask_usd"] > 0 else 1.0
+        velocity_long = delta_vol_5m / depth["ask_usd"] if depth["ask_usd"] > 0 else 0
+        price_change_long = ((mid - baseline["price"]) / baseline["price"]) * 100.0
 
-            if ask_depletion >= p["min_depletion_factor"] and velocity_long >= p["min_velocity_mult"] and price_change >= 0.10:
-                return {
-                    "symbol": symbol,
-                    "side": "long",
-                    "mid": mid,
-                    "initial_resistance": depth["ask_dollars"],
-                    "reason": f"5M LONG VACUUM (Depletion: {ask_depletion:.1f}x >= {p['min_depletion_factor']}x | Velocity: {velocity_long:.0f}x)"
-                }
+        # Short Evaluation: Support (Bids) fading while volume is surging
+        bid_depletion = baseline["bid_usd"] / depth["bid_usd"] if depth["bid_usd"] > 0 else 1.0
+        velocity_short = delta_vol_5m / depth["bid_usd"] if depth["bid_usd"] > 0 else 0
+        price_change_short = ((baseline["price"] - mid) / baseline["price"]) * 100.0
 
-        # SETUP 2: SHORT SINKHOLE
-        if depth["bid_dollars"] > 0 and baseline["bid_dollars"] > 0:
-            bid_depletion = baseline["bid_dollars"] / depth["bid_dollars"]
-            velocity_short = delta_vol_5m / depth["bid_dollars"]
-            price_change = ((baseline["price"] - mid) / baseline["price"]) * 100.0
+        best_setup = None
 
-            if bid_depletion >= p["min_depletion_factor"] and velocity_short >= p["min_velocity_mult"] and price_change >= 0.10:
-                return {
+        # LONG CHECK: Early move (+0.10% to +0.45%), resistance fading >= 2.0x, velocity >= 15x
+        if ask_depletion >= 2.0 and velocity_long >= 15.0 and (0.10 <= price_change_long <= 0.45):
+            score_long = (ask_depletion * 30.0) + (velocity_long * 0.4) + (price_change_long * 20.0)
+            best_setup = {
+                "symbol": symbol,
+                "side": "long",
+                "mid": mid,
+                "score": round(score_long, 2),
+                "depletion": round(ask_depletion, 1),
+                "velocity": round(velocity_long, 0),
+                "price_change": round(price_change_long, 2),
+                "depth_now": depth["ask_usd"],
+                "depth_before": baseline["ask_usd"],
+                "vol_5m": delta_vol_5m
+            }
+
+        # SHORT CHECK: Early move (-0.10% to -0.45%), support fading >= 2.0x, velocity >= 15x
+        if bid_depletion >= 2.0 and velocity_short >= 15.0 and (0.10 <= price_change_short <= 0.45):
+            score_short = (bid_depletion * 30.0) + (velocity_short * 0.4) + (price_change_short * 20.0)
+            if not best_setup or score_short > best_setup["score"]:
+                best_setup = {
                     "symbol": symbol,
                     "side": "short",
                     "mid": mid,
-                    "initial_resistance": depth["bid_dollars"],
-                    "reason": f"5M SHORT SINKHOLE (Depletion: {bid_depletion:.1f}x >= {p['min_depletion_factor']}x | Velocity: {velocity_short:.0f}x)"
+                    "score": round(score_short, 2),
+                    "depletion": round(bid_depletion, 1),
+                    "velocity": round(velocity_short, 0),
+                    "price_change": round(-price_change_short, 2),
+                    "depth_now": depth["bid_usd"],
+                    "depth_before": baseline["bid_usd"],
+                    "vol_5m": delta_vol_5m
                 }
 
-        return None
+        return best_setup
 
     # --------------------------------------------------------------------------
-    # MONITOR OBSERVATION CAMERAS (PAPER EXPERIMENT + DIAGNOSIS)
+    # PICK THE TOP 3 MARKETS ACROSS ALL CANDIDATES
+    # --------------------------------------------------------------------------
+    def get_top_3_markets(self, candidates, tickers):
+        evaluated = []
+        for sym in candidates:
+            vol_24h = float(tickers.get(sym, {}).get('quoteVolume', 0) or 0)
+            result = self.evaluate_coin_metrics(sym, vol_24h)
+            if result:
+                evaluated.append(result)
+
+        # Sort all valid candidates by total Market Strength Score
+        evaluated.sort(key=lambda x: x["score"], reverse=True)
+        self.current_top_3 = evaluated[:3]
+        return self.current_top_3
+
+    # --------------------------------------------------------------------------
+    # MONITOR OBSERVATION LAB (EXPLICIT PROFIT / LOSS)
     # --------------------------------------------------------------------------
     def update_cameras(self):
         remaining = []
@@ -317,56 +264,39 @@ class DiagnosticVacuumBot:
                 continue
 
             cur_price = depth["mid"]
-            cur_ask_dollars = depth["ask_dollars"]
-            cur_bid_dollars = depth["bid_dollars"]
-
             delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
             net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-            if net_roe > cam["peak_roe"]:
-                cam["peak_roe"] = net_roe
-
-            # Track thinnest resistance
-            if side == "long" and cur_ask_dollars < cam["min_resistance"]:
-                cam["min_resistance"] = cur_ask_dollars
-            elif side == "short" and cur_bid_dollars < cam["min_resistance"]:
-                cam["min_resistance"] = cur_bid_dollars
-
-            # Fade Check: Did resistance refill 2x and price tick against trade?
-            long_faded = (side == "long" and cur_ask_dollars >= (cam["min_resistance"] * self.parameters["fade_buffer_mult"]) and cur_price < entry)
-            short_faded = (side == "short" and cur_bid_dollars >= (cam["min_resistance"] * self.parameters["fade_buffer_mult"]) and cur_price > entry)
-
             hit_target = (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target)
             hit_stop = (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop)
-            timed_out = elapsed_m >= self.parameters["max_hold_minutes"]
+            timed_out = elapsed_m >= 10.0  # Gives 10 full minutes to let sustained moves play out
 
-            is_finished = False
-            outcome = ""
+            if hit_target or hit_stop or timed_out:
+                is_profit = hit_target or (timed_out and net_roe > 0)
+                self.history_records.append(1 if is_profit else 0)
+                self.history_records = self.history_records[-15:]
+                self.save_brain()
 
-            if hit_target:
-                is_finished = True
-                outcome = "TARGET_HIT"
-            elif hit_stop:
-                is_finished = True
-                outcome = "STOP_HIT"
-            elif (long_faded or short_faded) and elapsed_m >= 1.5:
-                is_finished = True
-                outcome = "FADE_CUT"
-            elif timed_out:
-                is_finished = True
-                outcome = "TIMEOUT"
-
-            if is_finished:
-                is_win = 1 if (net_roe >= 1.20 or outcome == "TARGET_HIT") else 0
-                self.paper_history.append(is_win)
-                self.paper_history = self.paper_history[-15:]
+                wins = sum(self.history_records)
+                total = len(self.history_records)
+                losses = total - wins
 
                 print(f"\n=======================================================", flush=True)
-                print(f"[PAPER EXPERIMENT FINISHED] {sym} ({side.upper()}) | Result: {outcome} | Net ROE: {net_roe:+.2f}%", flush=True)
-                print(f"[SCORECARD] {self.get_paper_score()}", flush=True)
+                if is_profit:
+                    print(f"🟢 [TRADE RESULT: YOU MADE PROFIT!]", flush=True)
+                    print(f"Coin       : {sym} ({side.upper()})", flush=True)
+                    print(f"Net Profit : +{net_roe:.2f}% ROE", flush=True)
+                    print(f"Duration   : {elapsed_m:.1f} minutes", flush=True)
+                else:
+                    print(f"🔴 [TRADE RESULT: YOU LOST!]", flush=True)
+                    print(f"Coin       : {sym} ({side.upper()})", flush=True)
+                    print(f"Net Loss   : {net_roe:.2f}% ROE", flush=True)
+                    print(f"Duration   : {elapsed_m:.1f} minutes", flush=True)
+                    self.coin_cooldowns[sym] = time.time() + 600
+                    print(f"Action     : Put {sym} on 10-minute timeout (No Revenge Trading)", flush=True)
 
-                # DIAGNOSE AND REPAIR IMMEDIATELY
-                self.diagnose_and_repair(outcome, cam["peak_roe"], net_roe, elapsed_m, sym)
+                status = "DEMOTED (Need 6/6 streak)" if self.is_demoted else f"{wins}/10 (Need 9/10 for Live)"
+                print(f"Scorecard  : {wins} Wins / {losses} Losses | Status: {status}", flush=True)
                 print(f"=======================================================\n", flush=True)
             else:
                 remaining.append(cam)
@@ -374,7 +304,7 @@ class DiagnosticVacuumBot:
         self.active_cameras = remaining
 
     # --------------------------------------------------------------------------
-    # MONITOR LIVE TRADE GUARDIAN (2-STRIKE DEMOTION RULE)
+    # MONITOR LIVE TRADE GUARDIAN
     # --------------------------------------------------------------------------
     def poll_live_trade(self):
         if not self.live_state["active"]:
@@ -395,52 +325,43 @@ class DiagnosticVacuumBot:
         delta = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
         net_roe = (delta * self.leverage) - (0.06 * 2.0 * self.leverage)
 
-        close_now = False
-        won = False
-        reason = ""
+        hit_target = (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target)
+        hit_stop = (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop)
+        timed_out = elapsed_m >= 10.0
 
-        if (side == "long" and cur_price >= target) or (side == "short" and cur_price <= target):
-            close_now = True
-            won = True
-            reason = f"Target Hit (+{net_roe:.2f}% ROE)"
-        elif (side == "long" and cur_price <= stop) or (side == "short" and cur_price >= stop):
-            close_now = True
-            won = False
-            reason = f"Stop Loss Hit ({net_roe:.2f}% ROE)"
-        elif elapsed_m >= self.parameters["max_hold_minutes"]:
-            close_now = True
-            won = net_roe > 0
-            reason = f"Max Duration Elapsed ({elapsed_m:.1f}m)"
-
-        if close_now:
+        if hit_target or hit_stop or timed_out:
+            is_profit = hit_target or (timed_out and net_roe > 0)
             order_side = 'sell' if side == 'long' else 'buy'
+
             for _ in range(3):
                 try:
-                    self.bitget.create_order(sym, 'market', order_side, self.live_state["contracts"], params={'reduceOnly': True, 'tradeSide': 'close'})
+                    self.bitget.create_order(
+                        sym, 'market', order_side,
+                        self.live_state["contracts"],
+                        params={'reduceOnly': True, 'tradeSide': 'close'}
+                    )
                     break
                 except Exception:
                     time.sleep(1)
 
-            # Update live strikes
-            if won:
+            print(f"\n=======================================================", flush=True)
+            if is_profit:
                 self.consecutive_live_losses = 0
-                print(f"\n[LIVE WIN RECORDED] {sym} won with {net_roe:+.2f}% ROE! Strikes reset to 0.\n", flush=True)
+                print(f"🟢 [LIVE TRADE: YOU MADE PROFIT!]", flush=True)
+                print(f"Coin       : {sym} ({side.upper()}) | Profit: +{net_roe:.2f}% ROE", flush=True)
             else:
                 self.consecutive_live_losses += 1
-                print(f"\n[LIVE LOSS RECORDED] Strikes: {self.consecutive_live_losses}/{self.max_live_losses} on {sym} ({net_roe:+.2f}% ROE)\n", flush=True)
+                self.coin_cooldowns[sym] = time.time() + 600
+                print(f"🔴 [LIVE TRADE: YOU LOST!]", flush=True)
+                print(f"Coin       : {sym} ({side.upper()}) | Loss: {net_roe:.2f}% ROE", flush=True)
+                print(f"Strikes    : {self.consecutive_live_losses}/{self.max_live_losses}", flush=True)
 
-                # ==============================================================
-                # THE 2-STRIKE DEMOTION RULE
-                # ==============================================================
                 if self.consecutive_live_losses >= self.max_live_losses:
                     self.is_demoted = True
-                    print(f"\n*******************************************************", flush=True)
-                    print(f"[EMERGENCY 2-STRIKE DEMOTION TRIGGERED]", flush=True)
-                    print(f"2 consecutive live losses encountered! Real trading LOCKED.", flush=True)
-                    print(f"Returning to Paper Trading. Must score a clean 6/6 streak to re-enter.", flush=True)
-                    print(f"*******************************************************\n", flush=True)
+                    print(f"\n[DEMOTED TO PAPER] 2 consecutive live losses! Must score 6/6 in paper to re-enter.\n", flush=True)
 
             self.save_brain()
+            print(f"=======================================================\n", flush=True)
             self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
@@ -448,7 +369,7 @@ class DiagnosticVacuumBot:
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX-V16 Autonomous Diagnosing Engine active.", flush=True)
+        print("[SYSTEM] APEX-V16 Top-3 Global Leaderboard Engine active.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -460,20 +381,17 @@ class DiagnosticVacuumBot:
 
         while True:
             try:
-                # 1. Update Paper Cameras & Live Position
                 self.update_cameras()
                 self.poll_live_trade()
 
-                # 2. Risk & Vault Floor Check
                 balance = float(self.bitget.fetch_balance().get('USDT', {}).get('free', 0) or 0)
                 if balance < self.equity_floor:
-                    print(f"[VAULT PAUSE] Balance ${balance:.2f} below ${self.equity_floor:.2f} floor. Sleeping...", flush=True)
+                    print(f"[VAULT PAUSE] Balance ${balance:.2f} below floor. Sleeping...", flush=True)
                     time.sleep(30)
                     continue
 
                 notional = max(min(balance * 0.85 * self.leverage, 7.50), 5.15)
 
-                # 3. Fetch Tickers
                 try:
                     tickers = self.bitget.fetch_tickers()
                 except Exception:
@@ -487,69 +405,68 @@ class DiagnosticVacuumBot:
                     and float(t.get('quoteVolume', 0) or 0) >= 1_000_000
                     and s not in active_syms
                 ]
-                candidates.sort(key=lambda s: float(tickers[s].get('quoteVolume', 0) or 0), reverse=True)
 
-                # 4. Search for 5-Minute Liquidity Vacuums
-                for sym in candidates[:20]:
-                    if len(self.active_cameras) >= 8:
+                # --------------------------------------------------------------
+                # SCAN THE ENTIRE MARKET AND EXTRACT THE ABSOLUTE TOP 3
+                # --------------------------------------------------------------
+                top_3_movers = self.get_top_3_markets(candidates, tickers)
+
+                # Print Leaderboard on Cycle Heartbeat
+                if cycle % 6 == 0 and top_3_movers:
+                    print("\n--- [TOP 3 GLOBAL LEADERBOARD] ---", flush=True)
+                    for idx, coin in enumerate(top_3_movers, 1):
+                        print(f" #{idx}: {coin['symbol']} ({coin['side'].upper()}) | Score: {coin['score']} | Vol 5m: ${coin['vol_5m']:,.0f} | Move: {coin['price_change']:+.2f}% | Depth: ${coin['depth_now']:,.0f}", flush=True)
+                    print("----------------------------------\n", flush=True)
+
+                # Enter ONLY from the verified Top 3
+                for best in top_3_movers:
+                    if len(self.active_cameras) >= 3:  # Focus on maximum 3 quality trades at a time
                         break
 
-                    vol_24h = float(tickers[sym].get('quoteVolume', 0) or 0)
-                    vacuum = self.audit_5m_vacuum(sym, vol_24h)
+                    sym = best["symbol"]
+                    side = best["side"]
+                    mid = best["mid"]
 
-                    if vacuum:
-                        side = vacuum["side"]
-                        mid = vacuum["mid"]
-                        tgt_dist = mid * self.parameters["target_pct"]
-                        stop_dist = mid * self.parameters["stop_pct"]
+                    target_p = mid * 1.0050 if side == "long" else mid * 0.9950
+                    stop_p = mid * 0.9965 if side == "long" else mid * 1.0035
 
-                        target_p = mid + tgt_dist if side == "long" else mid - tgt_dist
-                        stop_p = mid - stop_dist if side == "long" else mid + stop_dist
+                    # Qualification Check (9/10 initial or 6/6 re-entry)
+                    can_trade_live = self.is_qualified_for_live()
 
-                        # CHECK QUALIFICATION STATUS (9/10 Initial OR 6/6 Re-qualification)
-                        can_trade_live = self.is_qualified_for_live()
+                    if can_trade_live and not self.live_state["active"]:
+                        try:
+                            self.bitget.set_leverage(self.leverage, sym)
+                        except Exception:
+                            pass
 
-                        if can_trade_live and not self.live_state["active"]:
-                            try:
-                                self.bitget.set_leverage(self.leverage, sym)
-                            except Exception:
-                                pass
+                        amount = float(self.bitget.amount_to_precision(sym, notional / mid))
+                        order_side = 'buy' if side == 'long' else 'sell'
+                        self.bitget.create_order(sym, 'market', order_side, amount)
 
-                            amount = float(self.bitget.amount_to_precision(sym, notional / mid))
-                            order_side = 'buy' if side == 'long' else 'sell'
-                            self.bitget.create_order(sym, 'market', order_side, amount)
+                        self.live_state = {
+                            "active": True, "symbol": sym, "side": side,
+                            "contracts": amount, "entry_price": mid,
+                            "target_price": target_p, "stop_price": stop_p,
+                            "start_time": time.time()
+                        }
+                        print(f"\n[LIVE ORDER ENTERED] {sym} ({side.upper()}) Ranked #{top_3_movers.index(best)+1} Globally!", flush=True)
+                        break
+                    elif sym not in [c["symbol"] for c in self.active_cameras]:
+                        self.active_cameras.append({
+                            "symbol": sym, "side": side, "entry_p": mid,
+                            "target_p": target_p, "stop_p": stop_p,
+                            "start_t": time.time()
+                        })
+                        print(f"[QUALITY CAMERA LOCKED] {sym} ({side.upper()}) | Ranked #{top_3_movers.index(best)+1} Globally (Score: {best['score']})", flush=True)
 
-                            self.live_state = {
-                                "active": True, "symbol": sym, "side": side,
-                                "contracts": amount, "entry_price": mid,
-                                "target_price": target_p, "stop_price": stop_p,
-                                "min_resistance_seen": vacuum["initial_resistance"],
-                                "peak_price": mid, "trough_price": mid,
-                                "start_time": time.time()
-                            }
-                            print(f"\n[LIVE ORDER EXECUTED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
-                            break
-                        else:
-                            # Run in Observational Paper Lab
-                            self.active_cameras.append({
-                                "symbol": sym,
-                                "side": side,
-                                "entry_p": mid,
-                                "target_p": target_p,
-                                "stop_p": stop_p,
-                                "min_resistance": vacuum["initial_resistance"],
-                                "peak_roe": 0.0,
-                                "start_t": time.time()
-                            })
-                            print(f"[PAPER CAMERA LOCKED] {sym} ({side.upper()}) | {vacuum['reason']}", flush=True)
-
-                # 5. Heartbeat Status
                 if cycle % 6 == 0:
-                    status_mode = "DEMOTED (Needs 6/6)" if self.is_demoted else ("LIVE_READY" if self.is_qualified_for_live() else "QUALIFYING (Needs 9/10)")
+                    wins = sum(self.history_records)
+                    losses = len(self.history_records) - wins
+                    status = "DEMOTED (Need 6/6)" if self.is_demoted else ("LIVE_READY" if self.is_qualified_for_live() else f"{wins}/10 (Need 9/10)")
                     print(
-                        f"\n[ENGINE PULSE] Status: {status_mode} | Cameras: {len(self.active_cameras)}/8 | "
-                        f"Vault: ${balance:.2f} ({self.leverage}x) | Strikes: {self.consecutive_live_losses}/2 | "
-                        f"Score: {self.get_paper_score()}",
+                        f"[STATUS PULSE] Open Quality Trades: {len(self.active_cameras)}/3 | "
+                        f"Vault: ${balance:.2f} ({self.leverage}x) | "
+                        f"Status: {status} | Total: {wins} WINS / {losses} LOSSES",
                         flush=True
                     )
 
@@ -565,5 +482,5 @@ class DiagnosticVacuumBot:
 # START BOT
 # ==============================================================================
 if __name__ == "__main__":
-    bot = DiagnosticVacuumBot()
+    bot = TopThreeVacuumBot()
     bot.run()
