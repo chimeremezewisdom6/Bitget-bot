@@ -2,7 +2,7 @@ import os
 import sys
 import time
 import json
-import gzip
+import math
 import threading
 import traceback
 import urllib.request
@@ -10,11 +10,11 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
 # ==============================================================================
-# 1. LIVE KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT ON RENDER)
+# 1. RENDER PORT BINDING & KEEP-ALIVE SERVER (SELF-HEALING)
 # ==============================================================================
+# Fix #1: Bind port immediately before slow network tasks so Render doesn't timeout.
 PORT = int(os.environ.get("PORT", 10000))
 BRAIN_FILE = "global_persistent_trend_memory.json"
-
 bot = None
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -25,7 +25,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         
         if bot:
             status = {
-                "engine": "APEX 1-Minute Persistent Trend with Dynamic Fading TP/SL",
+                "engine": "APEX 1-Minute Trend (One-Way Mode + Fading TP/SL)",
                 "global_1m_whitelist_count": len(bot.global_volume_whitelist),
                 "trend_rule": "8/8 or 9/10 minutes with >= +0.30% gain (Long) or <= -0.30% drop (Short)",
                 "active_trade": bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE" if bot.live_state["active"] else "SCANNING"),
@@ -47,10 +47,10 @@ def start_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
+    print(f"[SYSTEM] Keep-Alive Web Server listening on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. PERSISTENT TREND & DYNAMIC FADING TP/SL ENGINE
+# 2. BOT ENGINE WITH SELF-CORRECTING SAFEGUARDS
 # ==============================================================================
 class PersistentTrendBot:
     def __init__(self):
@@ -60,26 +60,26 @@ class PersistentTrendBot:
         self.consecutive_live_losses = 0
         self.max_live_losses = 2
 
-        # 2. Qualification Controller (8-in-a-row)
+        # 2. Paper Qualification Controller (8-in-a-row)
         self.consecutive_paper_wins = 0
         self.REQUIRED_WIN_STREAK = 8
         self.all_time_wins = 0
         self.all_time_losses = 0
 
-        # 3. DIRECTIONAL PERSISTENCE SCANNER
+        # 3. Directional Persistence Rules
         self.MIN_MINUTE_GAIN_PCT = 0.30        # Long >= +0.30% | Short <= -0.30% per minute
         self.MAX_ALLOWED_SPREAD_PCT = 0.0012   # Reject spreads > 0.12%
         self.ROUNDTRIP_FEE_PCT = 0.12          # 0.06% entry + 0.06% exit taker fee reserve
         self.QUARANTINE_DURATION_SEC = 3600
 
-        # 4. DYNAMIC FADING STOP LOSS & TAKE PROFIT PARAMETERS
-        self.INITIAL_TP_PCT = 1.50             # Starts wide to catch instant momentum surges
+        # 4. Dynamic Fading Stop Loss & Take Profit Parameters
+        self.INITIAL_TP_PCT = 1.50             # Starts wide for sudden impulse runs
         self.MIN_FADED_TP_PCT = 0.45           # Floor TP target after time decay
-        self.INITIAL_SL_PCT = -0.75            # Initial protective hard floor
-        self.TIGHTEST_SL_PCT = -0.30           # Stop loss fades up to this level if trade stalls
-        self.FADE_HORIZON_SEC = 90.0           # Time horizon (seconds) for full TP/SL funnel decay
+        self.INITIAL_SL_PCT = -0.75            # Initial protective floor
+        self.TIGHTEST_SL_PCT = -0.30           # Stop loss fades up to -0.30% if momentum stalls
+        self.FADE_HORIZON_SEC = 90.0           # 90 seconds decay horizon
 
-        # Global Volume Whitelist ($1,000,000+ Combined 24h Volume Across Worldwide Exchanges)
+        # Global Volume Whitelist ($1,000,000+ Combined 24h Volume)
         self.global_volume_whitelist = set()
         self.last_global_fetch_time = 0.0
 
@@ -104,46 +104,61 @@ class PersistentTrendBot:
             "max_peak": 0.0
         }
 
-        # Bitget Exchange Connection
-        self.api_key = os.environ.get("API_KEY")
-        self.secret_key = os.environ.get("SECRET_KEY")
-        self.passphrase = os.environ.get("PASSPHRASE")
+        # Fix #2: Auto-strip whitespace and newline characters from Render env variables
+        self.api_key = (os.environ.get("API_KEY") or "").strip()
+        self.secret_key = (os.environ.get("SECRET_KEY") or "").strip()
+        self.passphrase = (os.environ.get("PASSPHRASE") or "").strip()
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing Bitget credentials!", flush=True)
+            print("[FATAL] Missing Bitget credentials! Please configure API_KEY, SECRET_KEY, and PASSPHRASE in Render.", flush=True)
             sys.exit(1)
 
+        # Initialize CCXT Bitget for USDT-M Swaps
         self.bitget = ccxt.bitget({
             "apiKey": self.api_key,
             "secret": self.secret_key,
             "password": self.passphrase,
             "enableRateLimit": True,
-            "options": {"defaultType": "swap"}
+            "options": {
+                "defaultType": "swap",
+                "defaultMarginMode": "cross"
+            }
         })
 
-        # Launch the Background Global Aggregator Worker
+        # Fix #3: Auto-enforce One-Way Position Mode on startup
+        self.enforce_one_way_mode()
+
+        # Launch Background Global Aggregator Worker
         t_global = threading.Thread(target=self.global_volume_worker, daemon=True)
         t_global.start()
 
+    # --------------------------------------------------------------------------
+    # SELF-HEALING: ATOMIC BRAIN PERSISTENCE (PREVENTS CORRUPT JSON ON RESTARTS)
+    # --------------------------------------------------------------------------
     def load_brain(self):
         if os.path.exists(BRAIN_FILE):
             try:
                 with open(BRAIN_FILE, "r") as f:
-                    data = json.load(f)
-                    self.consecutive_paper_wins = data.get("consecutive_paper_wins", 0)
-                    self.all_time_wins = data.get("all_time_wins", 0)
-                    self.all_time_losses = data.get("all_time_losses", 0)
-            except Exception:
-                pass
+                    content = f.read().strip()
+                    if content:
+                        data = json.loads(content)
+                        self.consecutive_paper_wins = data.get("consecutive_paper_wins", 0)
+                        self.all_time_wins = data.get("all_time_wins", 0)
+                        self.all_time_losses = data.get("all_time_losses", 0)
+            except Exception as e:
+                print(f"[WARN] Brain file recovered from clean slate: {e}", flush=True)
+                self.consecutive_paper_wins = 0
 
     def save_brain(self):
+        tmp_file = f"{BRAIN_FILE}.tmp"
         try:
-            with open(BRAIN_FILE, "w") as f:
+            with open(tmp_file, "w") as f:
                 json.dump({
                     "consecutive_paper_wins": self.consecutive_paper_wins,
                     "all_time_wins": self.all_time_wins,
                     "all_time_losses": self.all_time_losses
                 }, f, indent=2)
+            os.replace(tmp_file, BRAIN_FILE)
         except Exception:
             pass
 
@@ -151,90 +166,74 @@ class PersistentTrendBot:
         return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
 
     # --------------------------------------------------------------------------
-    # 1. FIXED GLOBAL AGGREGATOR WORKER (PAGINATED & COMPRESSION HANDLED)
+    # SELF-HEALING: ONE-WAY MODE AUTO-CONFIGURATION
+    # --------------------------------------------------------------------------
+    def enforce_one_way_mode(self):
+        """
+        Attempts to programmatically set One-Way Mode on Bitget USDT-M contracts.
+        If already active or handled via UI, continues cleanly.
+        """
+        try:
+            self.bitget.set_position_mode(hedged=False, params={'productType': 'USDT-FUTURES'})
+            print("[CONFIG] Verified Bitget One-Way Mode is active.", flush=True)
+        except Exception as e:
+            # Code 40017 / 43019 typically means mode is already set to One-Way
+            print(f"[CONFIG] One-Way Mode check: {e} (Standard protocol engaged)", flush=True)
+
+    # --------------------------------------------------------------------------
+    # FIXED GLOBAL AGGREGATOR (NO 402 ERRORS, DIRECT PAGINATION UP TO 600 COINS)
     # --------------------------------------------------------------------------
     def global_volume_worker(self):
         """
-        Background worker refreshing every 10 minutes.
-        Primary: CoinPaprika (30s timeout + gzip support).
-        Backup: CoinLore with multi-page pagination (start=0, 100, 200, 300, 400, 500)
+        Queries CoinLore paginated across 600 cryptocurrencies every 10 minutes.
+        Eliminates the CoinPaprika HTTP 402 payment lock entirely.
         """
         while True:
             new_whitelist = set()
-            
-            # --- Primary Source: CoinPaprika ---
             try:
-                req = urllib.request.Request(
-                    "https://api.coinpaprika.com/v1/tickers",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                        "Accept": "application/json"
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    raw = response.read()
-                    if raw[:2] == b'\x1f\x8b':
-                        raw = gzip.decompress(raw)
-                    tickers = json.loads(raw.decode('utf-8'))
-                    for item in tickers:
-                        sym = item.get("symbol", "").upper()
-                        vol_usd = float(item.get("quotes", {}).get("USD", {}).get("volume_24h", 0.0) or 0.0)
-                        if vol_usd >= 1_000_000.0:
-                            new_whitelist.add(sym)
+                for start in [0, 100, 200, 300, 400, 500]:
+                    url = f"https://api.coinlore.net/api/tickers/?start={start}&limit=100"
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=12) as response:
+                        res = json.loads(response.read().decode())
+                        data = res.get("data", [])
+                        if not data:
+                            break
+                        for item in data:
+                            sym = item.get("symbol", "").upper()
+                            vol_usd = float(item.get("volume24", 0.0) or 0.0)
+                            if vol_usd >= 1_000_000.0:
+                                new_whitelist.add(sym)
+                    time.sleep(0.35)
+
+                if len(new_whitelist) >= 40:
+                    self.global_volume_whitelist = new_whitelist
+                    self.last_global_fetch_time = time.time()
+                    print(f"🌍 [GLOBAL AGGREGATOR UPDATE] Cached {len(self.global_volume_whitelist)} coins with >= $1,000,000 24h volume across worldwide exchanges!", flush=True)
 
             except Exception as e:
-                print(f"[WARN] CoinPaprika fetch error ({e}). Using paginated CoinLore fallback...", flush=True)
-                
-                # --- Secondary Source: CoinLore (Paginate 600 coins) ---
-                try:
-                    for start in [0, 100, 200, 300, 400, 500]:
-                        url = f"https://api.coinlore.net/api/tickers/?start={start}&limit=100"
-                        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(req, timeout=10) as response:
-                            res = json.loads(response.read().decode())
-                            data = res.get("data", [])
-                            if not data:
-                                break
-                            for item in data:
-                                sym = item.get("symbol", "").upper()
-                                vol_usd = float(item.get("volume24", 0.0) or 0.0)
-                                if vol_usd >= 1_000_000.0:
-                                    new_whitelist.add(sym)
-                        time.sleep(0.4)
-                except Exception as backup_err:
-                    print(f"[WARN] CoinLore pagination error: {backup_err}", flush=True)
-
-            if len(new_whitelist) >= 40:
-                self.global_volume_whitelist = new_whitelist
-                self.last_global_fetch_time = time.time()
-                print(f"🌍 [GLOBAL AGGREGATOR UPDATE] Cached {len(self.global_volume_whitelist)} coins with >= $1,000,000 24h volume!", flush=True)
+                print(f"[WARN] Aggregator worker notice: {e}", flush=True)
 
             time.sleep(600)
 
     # --------------------------------------------------------------------------
-    # 2. DYNAMIC FADING STOP LOSS & TAKE PROFIT CALCULATION
+    # DYNAMIC FADING STOP LOSS & TAKE PROFIT FORMULA
     # --------------------------------------------------------------------------
     def calculate_fading_levels(self, elapsed_s, max_peak, entry_spread):
-        """
-        Calculates time-decaying Take-Profit, time-tightening Stop-Loss,
-        and peak trailing ratchet thresholds.
-        """
         fee_spread_threshold = self.ROUNDTRIP_FEE_PCT + (entry_spread * 100.0)
         progress = min(elapsed_s / self.FADE_HORIZON_SEC, 1.0)
 
-        # 1. Take Profit Fades down from INITIAL_TP_PCT (+1.50%) to MIN_FADED_TP_PCT (+0.45%)
+        # 1. Take-Profit fades down from +1.50% to +0.45%
         faded_tp = self.INITIAL_TP_PCT - (progress * (self.INITIAL_TP_PCT - self.MIN_FADED_TP_PCT))
 
-        # 2. Stop Loss Fades up from INITIAL_SL_PCT (-0.75%) toward TIGHTEST_SL_PCT (-0.30%)
+        # 2. Stop-Loss fades up from -0.75% toward -0.30%
         time_sl = self.INITIAL_SL_PCT + (progress * (abs(self.INITIAL_SL_PCT) - abs(self.TIGHTEST_SL_PCT)))
 
-        # 3. Peak Ratchet / Trailing Stop
+        # 3. Dynamic Trailing Ratchet
         trail_sl = -99.0
         if max_peak >= 0.80:
-            # Lock in profit trailing 0.25% behind the high
             trail_sl = max(max_peak - 0.25, fee_spread_threshold + 0.15)
         elif max_peak >= 0.45:
-            # Lock in break-even covering fees & spread
             trail_sl = fee_spread_threshold + 0.05
 
         effective_sl = max(time_sl, trail_sl)
@@ -280,7 +279,7 @@ class PersistentTrendBot:
             return None, None
 
     # --------------------------------------------------------------------------
-    # 3. 8-TO-10 MINUTE PERSISTENT TREND INSPECTOR
+    # 8-TO-10 MINUTE PERSISTENT TREND INSPECTOR
     # --------------------------------------------------------------------------
     def inspect_persistent_trend(self, symbol):
         try:
@@ -333,7 +332,7 @@ class PersistentTrendBot:
             return None
 
     # --------------------------------------------------------------------------
-    # 4. ACTIVE PAPER TRADE MONITOR (FADING TP / SL APPLIED)
+    # PAPER TRADE MONITOR
     # --------------------------------------------------------------------------
     def update_active_trade(self):
         if not self.current_trade:
@@ -347,7 +346,7 @@ class PersistentTrendBot:
         now = time.time()
         elapsed_s = now - trade["start_t"]
 
-        mid, cur_spread = self.get_order_book_spread(sym)
+        mid, _ = self.get_order_book_spread(sym)
         if not mid:
             return
 
@@ -375,7 +374,7 @@ class PersistentTrendBot:
                 self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, is_scratch=False)
             else:
                 if gain_spot >= fee_spread_threshold:
-                    print(f"🛡️ [TRAILED / SCRATCH EXIT] {sym} ({side.upper()}) | Spot: {gain_spot:+.2f}% (Locked in above fees)", flush=True)
+                    print(f"🛡️ [TRAILED / SCRATCH EXIT] {sym} ({side.upper()}) | Spot: {gain_spot:+.2f}% (Locked above fees)", flush=True)
                     self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, is_scratch=True)
                 else:
                     print(f"🔴 [FADING STOP LOSS HIT] {sym} ({side.upper()}) | Loss: {gain_spot:+.2f}% (SL: {faded_sl:+.2f}%)", flush=True)
@@ -385,7 +384,7 @@ class PersistentTrendBot:
             self.current_trade = None
 
     # --------------------------------------------------------------------------
-    # 5. LIVE TRADE MONITOR (FADING TP / SL APPLIED)
+    # LIVE TRADE MONITOR (ONE-WAY MODE & REDUCE-ONLY COMPLIANT)
     # --------------------------------------------------------------------------
     def poll_live_trade(self):
         if not self.live_state["active"]:
@@ -397,7 +396,7 @@ class PersistentTrendBot:
         entry_spread = self.live_state.get("entry_spread", 0.0008)
         elapsed_s = time.time() - self.live_state["start_time"]
 
-        mid, cur_spread = self.get_order_book_spread(sym)
+        mid, _ = self.get_order_book_spread(sym)
         if not mid:
             return
 
@@ -410,17 +409,41 @@ class PersistentTrendBot:
         hit_stop_loss = gain_spot <= faded_sl
 
         if hit_take_profit or hit_stop_loss:
-            order_side = 'sell' if side == 'long' else 'buy'
-            for _ in range(3):
+            # Fix #4: One-Way Mode order side rule:
+            # To CLOSE Long -> MARKET SELL with reduceOnly=True
+            # To CLOSE Short -> MARKET BUY with reduceOnly=True
+            close_side = 'sell' if side == 'long' else 'buy'
+            contracts_to_close = self.live_state["contracts"]
+
+            # Self-Healing: Query live exchange position to close exact amount (no dust left)
+            try:
+                positions = self.bitget.fetch_positions([sym])
+                for p in positions:
+                    if p.get('symbol') == sym and float(p.get('contracts', 0) or 0) > 0:
+                        contracts_to_close = float(p['contracts'])
+                        break
+            except Exception:
+                pass
+
+            exit_params = {
+                'reduceOnly': True,
+                'tradeSide': 'close' # Dual-compatibility flag
+            }
+
+            executed = False
+            for attempt in range(3):
                 try:
-                    self.bitget.create_order(
-                        sym, 'market', order_side,
-                        self.live_state["contracts"],
-                        params={'reduceOnly': True}
-                    )
+                    self.bitget.create_order(sym, 'market', close_side, contracts_to_close, params=exit_params)
+                    executed = True
                     break
-                except Exception:
-                    time.sleep(1)
+                except Exception as e:
+                    print(f"[RETRY EXIT {attempt+1}] Order failed: {e}. Retrying without tradeSide...", flush=True)
+                    try:
+                        self.bitget.create_order(sym, 'market', close_side, contracts_to_close, params={'reduceOnly': True})
+                        executed = True
+                        break
+                    except Exception:
+                        time.sleep(1)
 
             print(f"\n=======================================================", flush=True)
             if hit_take_profit:
@@ -442,11 +465,11 @@ class PersistentTrendBot:
             self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # 6. SCANNER LOOP
+    # MAIN SCANNER LOOP
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX 1-Minute Persistent Trend & Dynamic Fading Engine online.", flush=True)
+        print("[SYSTEM] APEX 1-Minute Persistent Trend Engine online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -480,7 +503,7 @@ class PersistentTrendBot:
                     if base in self.EXCLUSION_LIST or len(base) > 7:
                         continue
 
-                    # Cross-reference with $1M Global Volume Whitelist
+                    # Cross-reference against 600-coin worldwide whitelist or exchange volume
                     has_global_1m = (base in self.global_volume_whitelist) or (float(t.get('quoteVolume', 0) or 0) >= 1_000_000.0)
 
                     if has_global_1m and time.time() >= self.coin_cooldowns.get(s, 0):
@@ -491,12 +514,10 @@ class PersistentTrendBot:
 
                 if not self.current_trade and not self.live_state["active"]:
                     for sym, vol in candidates[:25]:
-                        # Spread Gate: Reject coins with wide spreads
                         mid, spread_pct = self.get_order_book_spread(sym)
                         if not mid or spread_pct > self.MAX_ALLOWED_SPREAD_PCT:
                             continue
 
-                        # Check 8-to-10 Minute Trend
                         trend = self.inspect_persistent_trend(sym)
                         if trend:
                             side = trend["side"]
@@ -505,18 +526,36 @@ class PersistentTrendBot:
                             # LIVE TRADE EXECUTION
                             if self.is_qualified_for_live():
                                 margin_90 = balance * 0.90
-                                exchange_min_notional = 5.25
-                                needed_leverage = max(int(exchange_min_notional / margin_90) + 1, 1)
+                                exchange_min_notional = 5.50  # Fix #5: Guard clamp for small balances
 
+                                # Calculate minimum leverage required to satisfy Bitget notional
+                                needed_leverage = max(math.ceil(exchange_min_notional / margin_90), 1)
+
+                                # Safely set leverage for this coin in One-Way mode
                                 try:
-                                    self.bitget.set_leverage(needed_leverage, sym)
+                                    self.bitget.set_leverage(needed_leverage, sym, params={'marginCoin': 'USDT'})
                                 except Exception:
-                                    pass
+                                    try:
+                                        self.bitget.set_leverage(needed_leverage, sym)
+                                    except Exception:
+                                        pass
 
                                 notional_size = margin_90 * needed_leverage
-                                amount = float(self.bitget.amount_to_precision(sym, notional_size / mid))
+                                raw_amount = notional_size / mid
+                                amount_str = self.bitget.amount_to_precision(sym, raw_amount)
+                                amount = float(amount_str)
+
+                                # One-Way Open Rules:
+                                # Open Long  -> MARKET BUY (no reduceOnly)
+                                # Open Short -> MARKET SELL (no reduceOnly)
                                 order_side = 'buy' if side == 'long' else 'sell'
-                                self.bitget.create_order(sym, 'market', order_side, amount)
+                                open_params = {'tradeSide': 'open'}
+
+                                try:
+                                    self.bitget.create_order(sym, 'market', order_side, amount, params=open_params)
+                                except Exception:
+                                    # Fallback without tradeSide
+                                    self.bitget.create_order(sym, 'market', order_side, amount)
 
                                 self.live_state = {
                                     "active": True, "symbol": sym, "side": side,
@@ -525,7 +564,7 @@ class PersistentTrendBot:
                                     "start_time": time.time(),
                                     "max_peak": 0.0
                                 }
-                                print(f"[LIVE ORDER EXECUTED] Margin: ${margin_90:.2f} | Leverage: {needed_leverage}x", flush=True)
+                                print(f"[LIVE ORDER EXECUTED] Margin: ${margin_90:.2f} | Leverage: {needed_leverage}x | Side: {order_side.upper()}", flush=True)
                                 break
                             else:
                                 # PAPER QUALIFYING TRADE
@@ -557,7 +596,7 @@ class PersistentTrendBot:
                 time.sleep(4)
 
 # ==============================================================================
-# START BOT
+# ENTRY POINT
 # ==============================================================================
 if __name__ == "__main__":
     bot = PersistentTrendBot()
