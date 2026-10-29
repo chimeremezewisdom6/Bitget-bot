@@ -13,7 +13,7 @@ import ccxt
 # 1. RENDER KEEP-ALIVE SERVER (PORT 10000 BOUND FIRST)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-MEMORY_FILE = "dual_engine_trading_memory.json"
+MEMORY_FILE = "master_30d_eligible_memory.json"
 bot = None
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -24,15 +24,15 @@ class HealthHandler(BaseHTTPRequestHandler):
         
         if bot:
             status = {
-                "engine": "APEX DUAL-ENGINE: 50D Scenario Matcher + James vs. David Front-Runner",
+                "engine": "APEX 30-Day Strict Single-Day 50%+ Gated Engine",
                 "pool_count": len(bot.global_volume_whitelist),
-                "eligible_50d_coins": len(bot.eligible_scenarios),
-                "active_trade": bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE" if bot.live_state["active"] else "SCANNING_DUAL_PIPELINE"),
-                "active_engine": bot.current_trade.get("engine_source") if bot.current_trade else (bot.live_state.get("engine_source") if bot.live_state["active"] else "NONE"),
+                "eligible_30d_coins_count": len(bot.eligible_30d_coins),
+                "eligible_coins_list": list(bot.eligible_30d_coins.keys()),
+                "active_trade": bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE" if bot.live_state["active"] else "SCANNING_ELIGIBLE_ONLY"),
                 "total_wins": bot.all_time_wins,
                 "total_losses": bot.all_time_losses,
                 "win_rate": f"{(bot.all_time_wins / max(1, bot.all_time_wins + bot.all_time_losses) * 100):.1f}%",
-                "quarantined_coins": len(bot.quarantined_coins)
+                "quarantined_ineligible": len(bot.ineligible_quarantine)
             }
         else:
             status = {"status": "initializing"}
@@ -49,31 +49,39 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive Web Server listening on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. DUAL-ENGINE TRADING BOT
+# 2. STRICT 30-DAY 50%+ GATED DUAL-ENGINE BOT
 # ==============================================================================
-class DualEngineBot:
+class Strict30dGatedBot:
     def __init__(self):
         # Risk & Capital Controls
         self.equity_floor = 1.50
         self.ROUNDTRIP_FEE_PCT = 0.12
 
-        # Engine 1 Parameters (50-Day 50%+ Scenario)
-        self.LOOKBACK_DAYS = 50
-        self.MIN_SINGLE_DAY_MOVE_PCT = 50.0
+        # STRICT 30-DAY ELIGIBILITY CRITERIA
+        self.LOOKBACK_DAYS = 30
+        self.MIN_SINGLE_DAY_MOVE_PCT = 50.0  # Must be >= 50% in < 24 hours
 
-        # Engine 2 Parameters (James vs. David Front-Runner)
+        # Engine 2 (James vs David) Displacement Parameters
         self.MIN_LEAD_DISPLACEMENT_PCT = 1.5
         self.MAX_CHASE_LEAD_PCT = 4.5
         self.MIN_OPEN_RUNWAY_PCT = 10.0
 
-        # Performance & Memory Storage
+        # Memory Stores
         self.all_time_wins = 0
         self.all_time_losses = 0
-        self.eligible_scenarios = {}       # {symbol: scenario_profile}
-        self.audited_50d_timestamps = {}   # {symbol: time}
-        self.coin_mistakes = {}            # {symbol: count}
-        self.quarantined_coins = set()
+        self.eligible_30d_coins = {}        # {symbol: profile} -> ONLY THESE GET SCANNED
+        self.ineligible_quarantine = set()   # Failed 30d test -> NEVER SCANNED
+        self.audited_timestamps = {}        # {symbol: time}
+        self.coin_mistakes = {}
+
         self.global_volume_whitelist = set()
+
+        # Strict Exclusion List (No Gold, Stocks, or Flatline Commodities)
+        self.EXCLUSION_LIST = {
+            'PAXG', 'XAUT', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 
+            'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META',
+            'CL', 'BZ', 'XAU', 'XAG', 'SPX', 'NDX', 'DJI', 'KORU', 'MU'
+        }
 
         self.current_trade = None
         self.live_state = {
@@ -88,7 +96,7 @@ class DualEngineBot:
         self.passphrase = (os.environ.get("PASSPHRASE") or "").strip()
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing credentials in Render!", flush=True)
+            print("[FATAL] Missing credentials in Render environment!", flush=True)
             sys.exit(1)
 
         self.bitget = ccxt.bitget({
@@ -123,11 +131,10 @@ class DualEngineBot:
                     data = json.load(f)
                     self.all_time_wins = data.get("all_time_wins", 0)
                     self.all_time_losses = data.get("all_time_losses", 0)
-                    self.eligible_scenarios = data.get("eligible_scenarios", {})
-                    self.audited_50d_timestamps = data.get("audited_50d_timestamps", {})
-                    self.coin_mistakes = data.get("coin_mistakes", {})
-                    self.quarantined_coins = set(data.get("quarantined_coins", []))
-                    print(f"[MEMORY] Loaded state: {self.all_time_wins}W - {self.all_time_losses}L | {len(self.eligible_scenarios)} 50d profiles", flush=True)
+                    self.eligible_30d_coins = data.get("eligible_30d_coins", {})
+                    self.ineligible_quarantine = set(data.get("ineligible_quarantine", []))
+                    self.audited_timestamps = data.get("audited_timestamps", {})
+                    print(f"[MEMORY] Loaded: {len(self.eligible_30d_coins)} eligible coins | {len(self.ineligible_quarantine)} quarantined", flush=True)
             except Exception as e:
                 print(f"[WARN] Memory load note: {e}", flush=True)
 
@@ -138,17 +145,16 @@ class DualEngineBot:
                 json.dump({
                     "all_time_wins": self.all_time_wins,
                     "all_time_losses": self.all_time_losses,
-                    "eligible_scenarios": self.eligible_scenarios,
-                    "audited_50d_timestamps": self.audited_50d_timestamps,
-                    "coin_mistakes": self.coin_mistakes,
-                    "quarantined_coins": list(self.quarantined_coins)
+                    "eligible_30d_coins": self.eligible_30d_coins,
+                    "ineligible_quarantine": list(self.ineligible_quarantine),
+                    "audited_timestamps": self.audited_timestamps
                 }, f, indent=2)
             os.replace(tmp_file, MEMORY_FILE)
         except Exception:
             pass
 
     # --------------------------------------------------------------------------
-    # GLOBAL AGGREGATOR ($1M+ Combined Volume)
+    # GLOBAL AGGREGATOR ($1M+ VOLUME)
     # --------------------------------------------------------------------------
     def global_volume_worker(self):
         while True:
@@ -179,26 +185,33 @@ class DualEngineBot:
             time.sleep(600)
 
     # --------------------------------------------------------------------------
-    # ENGINE 1: 50-DAY SINGLE-DAY 50%+ AUDITOR
+    # 1. THE MASTER GATE: STRICT 30-DAY SINGLE-DAY 50%+ AUDITOR
     # --------------------------------------------------------------------------
-    def audit_coin_50d_eligibility(self, symbol):
+    def audit_coin_30d_eligibility(self, symbol):
+        """
+        Audits last 30 daily candles:
+        - Must have achieved >= +50% or <= -50% in a SINGLE 24h DAY.
+        - Fails? -> INELIGIBLE -> Quarantined (NEVER SCANNED).
+        - Passes? -> ELIGIBLE -> Added to Exclusive 30d Scanning Pool.
+        """
         try:
-            candles = self.bitget.fetch_ohlcv(symbol, timeframe='1d', limit=55)
-            if not candles or len(candles) < 45:
+            candles = self.bitget.fetch_ohlcv(symbol, timeframe='1d', limit=35)
+            if not candles or len(candles) < 25:
                 return False
 
-            daily_candles = candles[-50:]
+            daily_candles = candles[-30:]
             pumps_50 = []
             dumps_50 = []
 
-            for i in range(7, len(daily_candles)):
+            for i in range(5, len(daily_candles)):
                 c = daily_candles[i]
                 open_p, high_p, low_p, vol = c[1], c[2], c[3], c[5]
 
+                # Single-day move in < 24 hours
                 day_gain_pct = ((high_p - open_p) / open_p) * 100.0
                 day_dump_pct = ((open_p - low_p) / open_p) * 100.0
 
-                prior_vols = [x[5] for x in daily_candles[i-7:i]]
+                prior_vols = [x[5] for x in daily_candles[i-5:i]]
                 avg_prior_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 1.0
                 vol_mult = vol / avg_prior_vol if avg_prior_vol > 0 else 1.0
 
@@ -208,111 +221,49 @@ class DualEngineBot:
                     dumps_50.append(vol_mult)
 
             total_events = len(pumps_50) + len(dumps_50)
-            self.audited_50d_timestamps[symbol] = time.time()
+            self.audited_timestamps[symbol] = time.time()
 
+            # MASTER RULE: If it never moved 50%+ in <24h in the last 30 days, ISOLATE IT!
             if total_events == 0:
+                self.ineligible_quarantine.add(symbol)
+                if symbol in self.eligible_30d_coins:
+                    del self.eligible_30d_coins[symbol]
                 return False
 
             all_mults = pumps_50 + dumps_50
             avg_vol_mult = sum(all_mults) / len(all_mults)
 
-            self.eligible_scenarios[symbol] = {
+            self.eligible_30d_coins[symbol] = {
+                "total_events": total_events,
                 "pumps_count": len(pumps_50),
                 "dumps_count": len(dumps_50),
-                "best_vol_mult": round(min(max(avg_vol_mult, 1.8), 4.5), 2),
+                "required_vol_mult": round(min(max(avg_vol_mult, 1.8), 4.5), 2),
                 "can_long": len(pumps_50) > 0,
                 "can_short": len(dumps_50) > 0
             }
-            print(f"🧬 [ENGINE 1 AUDIT] {symbol} has {total_events} events in 50d | Trigger Vol: {self.eligible_scenarios[symbol]['best_vol_mult']}x", flush=True)
+
+            if symbol in self.ineligible_quarantine:
+                self.ineligible_quarantine.remove(symbol)
+
+            print(f"✅ [30D QUALIFIED] {symbol} | Hit 50%+ in <24h {total_events} times in last 30 days! Added to scanner pool.", flush=True)
             return True
         except Exception:
             return False
 
-    def check_engine1_scenario(self, symbol, current_c, avg_vol_24, ema9, ema21):
-        """Engine 1: 50-Day Scenario Match with Winner Confirmation."""
-        scenario = self.eligible_scenarios.get(symbol)
+    # --------------------------------------------------------------------------
+    # 2. TRADE TRIGGER INSPECTORS (ONLY APPLIED TO 30D ELIGIBLE COINS)
+    # --------------------------------------------------------------------------
+    def inspect_eligible_coin(self, symbol):
+        """
+        Checks an ELIGIBLE coin for:
+        1. 30d Ignition Scenario Match
+        2. James vs. David Front-Runner Displacement
+        ENFORCES WINNER RULE:
+        - Enter LONG only when Longs are winning (green 1H, above EMA-9/21).
+        - Enter SHORT only when Shorts are winning (red 1H, below EMA-9/21).
+        """
+        scenario = self.eligible_30d_coins.get(symbol)
         if not scenario:
-            return None
-
-        cur_open = current_c[1]
-        cur_price = current_c[4]
-        cur_vol = current_c[5]
-        cur_vol_mult = cur_vol / avg_vol_24 if avg_vol_24 > 0 else 1.0
-
-        # Long: Longs actively winning
-        if scenario["can_long"] and cur_price > cur_open and cur_price > ema9 and ema9 > ema21:
-            gain_1h = ((cur_price - cur_open) / cur_open) * 100.0
-            if gain_1h >= 1.5 and cur_vol_mult >= scenario["best_vol_mult"]:
-                return {
-                    "side": "long", "engine": "50D_SCENARIO_ENGINE",
-                    "pivot": cur_open, "desc": f"50d Scenario Match (+{gain_1h:.1f}% on {cur_vol_mult:.1f}x vol)"
-                }
-
-        # Short: Shorts actively winning
-        if scenario["can_short"] and cur_price < cur_open and cur_price < ema9 and ema9 < ema21:
-            dump_1h = ((cur_open - cur_price) / cur_open) * 100.0
-            if dump_1h >= 1.5 and cur_vol_mult >= scenario["best_vol_mult"]:
-                return {
-                    "side": "short", "engine": "50D_SCENARIO_ENGINE",
-                    "pivot": cur_open, "desc": f"50d Scenario Match (-{dump_1h:.1f}% on {cur_vol_mult:.1f}x vol)"
-                }
-
-        return None
-
-    # --------------------------------------------------------------------------
-    # ENGINE 2: JAMES VS. DAVID FRONT-RUNNER DISPLACEMENT
-    # --------------------------------------------------------------------------
-    def check_engine2_frontrunner(self, history, current_c, avg_vol_24):
-        """Engine 2: David has passed James with clear daylight and open runway."""
-        cur_price = current_c[4]
-        cur_vol = current_c[5]
-        vol_mult = cur_vol / avg_vol_24 if avg_vol_24 > 0 else 1.0
-
-        if vol_mult < 1.7:
-            return None
-
-        recent_candles = history[-60:-1]
-        james_ceiling = max([x[2] for x in recent_candles])
-        james_floor = min([x[3] for x in recent_candles])
-
-        # David Long: Passed James's ceiling
-        if cur_price > james_ceiling:
-            lead_pct = ((cur_price - james_ceiling) / james_ceiling) * 100.0
-            if self.MIN_LEAD_DISPLACEMENT_PCT <= lead_pct <= self.MAX_CHASE_LEAD_PCT:
-                # Check runway
-                all_highs = [x[2] for x in history]
-                overhead = [h for h in all_highs if h > cur_price * 1.03]
-                finish_line = min(overhead) if overhead else (cur_price * 1.25)
-                runway_pct = ((finish_line - cur_price) / cur_price) * 100.0
-
-                if runway_pct >= self.MIN_OPEN_RUNWAY_PCT:
-                    return {
-                        "side": "long", "engine": "FRONT_RUNNER_DAVID",
-                        "pivot": james_ceiling, "desc": f"David Leads by +{lead_pct:.1f}% | Runway: +{runway_pct:.1f}%"
-                    }
-
-        # David Short: Passed James's floor
-        if cur_price < james_floor:
-            lead_pct = ((james_floor - cur_price) / james_floor) * 100.0
-            if self.MIN_LEAD_DISPLACEMENT_PCT <= lead_pct <= self.MAX_CHASE_LEAD_PCT:
-                all_lows = [x[3] for x in history]
-                underhead = [l for l in all_lows if l < cur_price * 0.97]
-                finish_line = max(underhead) if underhead else (cur_price * 0.75)
-                runway_pct = ((cur_price - finish_line) / cur_price) * 100.0
-
-                if runway_pct >= self.MIN_OPEN_RUNWAY_PCT:
-                    return {
-                        "side": "short", "engine": "FRONT_RUNNER_DAVID",
-                        "pivot": james_floor, "desc": f"David Leads by -{lead_pct:.1f}% | Runway: +{runway_pct:.1f}%"
-                    }
-
-        return None
-
-    # --------------------------------------------------------------------------
-    # UNIFIED SCANNER: COMBINES BOTH ENGINES
-    # --------------------------------------------------------------------------
-    def scan_for_entry(self, symbol):
-        if symbol in self.quarantined_coins:
             return None
 
         try:
@@ -322,11 +273,14 @@ class DualEngineBot:
 
             history = candles_1h[:-1]
             current_c = candles_1h[-1]
+
+            cur_open = current_c[1]
             cur_price = current_c[4]
-
+            cur_vol = current_c[5]
             avg_vol_24 = sum([x[5] for x in history[-24:]]) / 24.0
+            vol_mult = cur_vol / avg_vol_24 if avg_vol_24 > 0 else 1.0
 
-            # Calculate EMAs
+            # Calculate 1H EMAs
             closes = [x[4] for x in history] + [cur_price]
             def calc_ema(data, period):
                 k = 2 / (period + 1)
@@ -338,22 +292,69 @@ class DualEngineBot:
             ema9 = calc_ema(closes, 9)[-1]
             ema21 = calc_ema(closes, 21)[-1]
 
-            # Priority 1: Check Engine 1 (50-Day Scenario Match)
-            e1 = self.check_engine1_scenario(symbol, current_c, avg_vol_24, ema9, ema21)
-            if e1:
-                return e1
+            # ------------------------------------------------------------------
+            # CHECK A: 30D IGNITION MATCH
+            # ------------------------------------------------------------------
+            if scenario["can_long"] and cur_price > cur_open and cur_price > ema9 and ema9 > ema21:
+                gain_1h = ((cur_price - cur_open) / cur_open) * 100.0
+                if gain_1h >= 1.5 and vol_mult >= scenario["required_vol_mult"]:
+                    return {
+                        "side": "long", "engine": "30D_IGNITION_MATCH",
+                        "pivot": cur_open, "desc": f"30d Ignition Match (+{gain_1h:.1f}% on {vol_mult:.1f}x vol)"
+                    }
 
-            # Priority 2: Check Engine 2 (Front-Runner James vs. David)
-            e2 = self.check_engine2_frontrunner(history, current_c, avg_vol_24)
-            if e2:
-                return e2
+            if scenario["can_short"] and cur_price < cur_open and cur_price < ema9 and ema9 < ema21:
+                dump_1h = ((cur_open - cur_price) / cur_open) * 100.0
+                if dump_1h >= 1.5 and vol_mult >= scenario["required_vol_mult"]:
+                    return {
+                        "side": "short", "engine": "30D_IGNITION_MATCH",
+                        "pivot": cur_open, "desc": f"30d Ignition Match (-{dump_1h:.1f}% on {vol_mult:.1f}x vol)"
+                    }
+
+            # ------------------------------------------------------------------
+            # CHECK B: JAMES VS. DAVID FRONT-RUNNER
+            # ------------------------------------------------------------------
+            if vol_mult >= 1.7:
+                recent_candles = history[-60:-1]
+                james_ceiling = max([x[2] for x in recent_candles])
+                james_floor = min([x[3] for x in recent_candles])
+
+                # David Long: Passed James's ceiling
+                if cur_price > james_ceiling and cur_price > ema9 and ema9 > ema21:
+                    lead_pct = ((cur_price - james_ceiling) / james_ceiling) * 100.0
+                    if self.MIN_LEAD_DISPLACEMENT_PCT <= lead_pct <= self.MAX_CHASE_LEAD_PCT:
+                        all_highs = [x[2] for x in history]
+                        overhead = [h for h in all_highs if h > cur_price * 1.03]
+                        finish_line = min(overhead) if overhead else (cur_price * 1.25)
+                        runway_pct = ((finish_line - cur_price) / cur_price) * 100.0
+
+                        if runway_pct >= self.MIN_OPEN_RUNWAY_PCT:
+                            return {
+                                "side": "long", "engine": "FRONT_RUNNER_DAVID",
+                                "pivot": james_ceiling, "desc": f"David Passed James by +{lead_pct:.1f}% | Runway: +{runway_pct:.1f}%"
+                            }
+
+                # David Short: Passed James's floor
+                if cur_price < james_floor and cur_price < ema9 and ema9 < ema21:
+                    lead_pct = ((james_floor - cur_price) / james_floor) * 100.0
+                    if self.MIN_LEAD_DISPLACEMENT_PCT <= lead_pct <= self.MAX_CHASE_LEAD_PCT:
+                        all_lows = [x[3] for x in history]
+                        underhead = [l for l in all_lows if l < cur_price * 0.97]
+                        finish_line = max(underhead) if underhead else (cur_price * 0.75)
+                        runway_pct = ((cur_price - finish_line) / cur_price) * 100.0
+
+                        if runway_pct >= self.MIN_OPEN_RUNWAY_PCT:
+                            return {
+                                "side": "short", "engine": "FRONT_RUNNER_DAVID",
+                                "pivot": james_floor, "desc": f"David Passed James by -{lead_pct:.1f}% | Runway: +{runway_pct:.1f}%"
+                            }
 
             return None
         except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # UNIFIED EXIT: EXITS THE MOMENT MOMENTUM DIES
+    # 3. TRADE MANAGEMENT: EXITS AS SOON AS MOMENTUM DIES
     # --------------------------------------------------------------------------
     def manage_momentum_and_exits(self):
         trade = self.current_trade or (self.live_state if self.live_state["active"] else None)
@@ -396,9 +397,9 @@ class DualEngineBot:
         is_win = False
         exit_reason = ""
 
-        # --- MOMENTUM DEATH RULES (CLOSES AS SOON AS MOMENTUM DIES) ---
+        # --- MOMENTUM DEATH EXITS (CLOSES THE MOMENT MOMENTUM DIES) ---
 
-        # 1. Structural Inversion (Winning side lost control)
+        # 1. Structural Trend Inversion (Winning side lost control)
         if side == "long" and (cur_price < ema9 or ema9 < ema21):
             should_exit = True
             is_win = gain_pct > 0.3
@@ -447,7 +448,9 @@ class DualEngineBot:
                 self.all_time_losses += 1
                 self.coin_mistakes[sym] = self.coin_mistakes.get(sym, 0) + 1
                 if self.coin_mistakes[sym] >= 2:
-                    self.quarantined_coins.add(sym)
+                    self.ineligible_quarantine.add(sym)
+                    if sym in self.eligible_30d_coins:
+                        del self.eligible_30d_coins[sym]
                     print(f"🚫 [QUARANTINE] {sym} quarantined due to 2 failed breakouts.", flush=True)
 
             self.save_memory()
@@ -471,11 +474,11 @@ class DualEngineBot:
         self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # 5. MAIN SCANNER PIPELINE
+    # 4. MAIN PIPELINE (ONLY SCANS ELIGIBLE COINS)
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX Dual-Engine (50D Scenario + Front-Runner) online.", flush=True)
+        print("[SYSTEM] APEX Strict 30-Day Single-Day 50%+ Gated Engine online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -503,79 +506,83 @@ class DualEngineBot:
                     if not s.endswith(":USDT"):
                         continue
                     base = s.split('/')[0].split(':')[0].upper()
+                    if base in self.EXCLUSION_LIST:
+                        continue
                     has_1m = (base in self.global_volume_whitelist) or (float(t.get('quoteVolume', 0) or 0) >= 1_000_000.0)
 
-                    if has_1m and (s not in self.quarantined_coins):
+                    if has_1m and (s not in self.ineligible_quarantine):
                         vol = float(t.get('quoteVolume', 0) or 0)
                         candidates.append((s, vol))
 
                 candidates.sort(key=lambda x: x[1], reverse=True)
 
-                # Periodic background 50d audit (2 coins per loop)
-                for sym, _ in candidates[:30]:
-                    last_audit = self.audited_50d_timestamps.get(sym, 0)
-                    if time.time() - last_audit > 43200:
-                        self.audit_coin_50d_eligibility(sym)
+                # Step A: Audit 30-Day Eligibility (Batched on un-audited coins)
+                for sym, _ in candidates[:35]:
+                    last_audit = self.audited_timestamps.get(sym, 0)
+                    if time.time() - last_audit > 43200:  # Audit every 12 hours
+                        self.audit_coin_30d_eligibility(sym)
                         self.save_memory()
-                        time.sleep(0.15)
+                        time.sleep(0.12)
 
-                # 3. Dual-Engine Scanning
+                # Step B: STRICT SCANNING GATE: ONLY SCAN COINS THAT PASSED THE 30D AUDIT!
                 if not self.current_trade and not self.live_state["active"]:
-                    for sym, _ in candidates[:40]:
-                        entry_signal = self.scan_for_entry(sym)
-                        if entry_signal:
-                            side = entry_signal["side"]
-                            engine = entry_signal["engine"]
-                            desc = entry_signal["desc"]
-                            pivot = entry_signal["pivot"]
+                    # CRUCIAL RULE: ONLY loop through self.eligible_30d_coins!
+                    for sym in list(self.eligible_30d_coins.keys()):
+                        if sym in tickers:
+                            entry_signal = self.inspect_eligible_coin(sym)
+                            if entry_signal:
+                                side = entry_signal["side"]
+                                engine = entry_signal["engine"]
+                                desc = entry_signal["desc"]
+                                pivot = entry_signal["pivot"]
 
-                            print(f"\n🚀 [DUAL-ENGINE TRIGGER: {engine}] {sym} ({side.upper()})", flush=True)
-                            print(f"📊 Details: {desc}", flush=True)
+                                print(f"\n🚀 [30D QUALIFIED TRIGGER: {engine}] {sym} ({side.upper()})", flush=True)
+                                print(f"📊 Details: {desc}", flush=True)
 
-                            mid = float(tickers[sym]['last'])
+                                mid = float(tickers[sym]['last'])
 
-                            margin_alloc = balance * 0.90
-                            exchange_min_notional = 5.50
-                            needed_leverage = max(math.ceil(exchange_min_notional / margin_alloc), 1)
+                                margin_alloc = balance * 0.90
+                                exchange_min_notional = 5.50
+                                needed_leverage = max(math.ceil(exchange_min_notional / margin_alloc), 1)
 
-                            try:
-                                self.bitget.set_leverage(needed_leverage, sym, params={'marginCoin': 'USDT'})
-                            except Exception:
                                 try:
-                                    self.bitget.set_leverage(needed_leverage, sym)
+                                    self.bitget.set_leverage(needed_leverage, sym, params={'marginCoin': 'USDT'})
                                 except Exception:
-                                    pass
+                                    try:
+                                        self.bitget.set_leverage(needed_leverage, sym)
+                                    except Exception:
+                                        pass
 
-                            notional_size = margin_alloc * needed_leverage
-                            raw_amount = notional_size / mid
-                            amount = float(self.bitget.amount_to_precision(sym, raw_amount))
-                            order_side = 'buy' if side == 'long' else 'sell'
+                                notional_size = margin_alloc * needed_leverage
+                                raw_amount = notional_size / mid
+                                amount = float(self.bitget.amount_to_precision(sym, raw_amount))
+                                order_side = 'buy' if side == 'long' else 'sell'
 
-                            try:
-                                self.bitget.create_order(sym, 'market', order_side, amount, params={'tradeSide': 'open'})
-                                self.live_state = {
-                                    "active": True, "symbol": sym, "side": side,
-                                    "contracts": amount, "entry_price": mid,
-                                    "pivot_point": pivot, "start_time": time.time(),
-                                    "max_peak": 0.0, "engine_source": engine
-                                }
-                                print(f"[LIVE ORDER EXECUTED] Margin: ${margin_alloc:.2f} | Leverage: {needed_leverage}x | Side: {order_side.upper()}\n", flush=True)
-                                break
-                            except Exception as order_err:
-                                print(f"[ORDER NOTE] Executing as paper trade: {order_err}", flush=True)
-                                self.current_trade = {
-                                    "symbol": sym, "side": side,
-                                    "entry_price": mid, "pivot_point": pivot,
-                                    "start_time": time.time(), "max_peak": 0.0,
-                                    "engine_source": engine
-                                }
-                                break
+                                try:
+                                    self.bitget.create_order(sym, 'market', order_side, amount, params={'tradeSide': 'open'})
+                                    self.live_state = {
+                                        "active": True, "symbol": sym, "side": side,
+                                        "contracts": amount, "entry_price": mid,
+                                        "pivot_point": pivot, "start_time": time.time(),
+                                        "max_peak": 0.0, "engine_source": engine
+                                    }
+                                    print(f"[LIVE ORDER EXECUTED] Margin: ${margin_alloc:.2f} | Leverage: {needed_leverage}x | Side: {order_side.upper()}\n", flush=True)
+                                    break
+                                except Exception as order_err:
+                                    print(f"[ORDER NOTE] Executing as paper trade: {order_err}", flush=True)
+                                    self.current_trade = {
+                                        "symbol": sym, "side": side,
+                                        "entry_price": mid, "pivot_point": pivot,
+                                        "start_time": time.time(), "max_peak": 0.0,
+                                        "engine_source": engine
+                                    }
+                                    break
 
                 if cycle % 12 == 0:
-                    state_desc = self.current_trade["symbol"] if self.current_trade else ("LIVE_ACTIVE" if self.live_state["active"] else "SCANNING_DUAL")
+                    state_desc = self.current_trade["symbol"] if self.current_trade else ("LIVE_ACTIVE" if self.live_state["active"] else "SCANNING_30D_ELIGIBLE_ONLY")
                     print(
                         f"[PULSE] State: {state_desc} | Pool: {len(self.global_volume_whitelist)} | "
-                        f"50d Eligible: {len(self.eligible_scenarios)} | Record: {self.all_time_wins}W - {self.all_time_losses}L | Quarantined: {len(self.quarantined_coins)}",
+                        f"30d Verified Eligible: {len(self.eligible_30d_coins)} | Quarantined Ineligible: {len(self.ineligible_quarantine)}",
                         flush=True
                     )
 
@@ -591,5 +598,5 @@ class DualEngineBot:
 # ENTRY POINT
 # ==============================================================================
 if __name__ == "__main__":
-    bot = DualEngineBot()
+    bot = Strict30dGatedBot()
     bot.run()
