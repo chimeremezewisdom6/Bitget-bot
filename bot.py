@@ -4,6 +4,7 @@ import time
 import json
 import threading
 import traceback
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
@@ -11,7 +12,7 @@ import ccxt
 # 1. LIVE KEEP-ALIVE SERVER (PORT 10000 FOR UPTIMEROBOT ON RENDER)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-BRAIN_FILE = "persistent_trend_memory.json"
+BRAIN_FILE = "global_persistent_trend_memory.json"
 
 bot = None
 
@@ -23,12 +24,9 @@ class HealthHandler(BaseHTTPRequestHandler):
         
         if bot:
             status = {
-                "engine": "APEX 1-Minute Persistent Trend & Bail-Out Engine",
-                "rules": {
-                    "long_threshold": ">= +0.30% gain per minute",
-                    "short_threshold": "<= -0.30% dump per minute",
-                    "streak_required": "8 straight or 9/10 minutes"
-                },
+                "engine": "APEX 1-Minute Persistent Trend & Global $1M Radar",
+                "global_1m_whitelist_count": len(bot.global_volume_whitelist),
+                "trend_rule": "8/8 or 9/10 minutes with >= +0.30% gain (Long) or <= -0.30% drop (Short)",
                 "active_trade": bot.current_trade["symbol"] if bot.current_trade else "SCANNING",
                 "streak_status": f"{bot.consecutive_paper_wins}/{bot.REQUIRED_WIN_STREAK} Wins in a row",
                 "mode": "LIVE_AUTHORIZED" if bot.is_qualified_for_live() else "PAPER_QUALIFYING",
@@ -51,7 +49,7 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. PERSISTENT TREND & ZERO-LOSS BAIL-OUT ENGINE
+# 2. PERSISTENT TREND & GLOBAL $1M RADAR ENGINE
 # ==============================================================================
 class PersistentTrendBot:
     def __init__(self):
@@ -74,9 +72,9 @@ class PersistentTrendBot:
         self.ROUNDTRIP_FEE_PCT = 0.12          # 0.06% entry + 0.06% exit taker fee reserve
         self.QUARANTINE_DURATION_SEC = 3600
 
-        # Universe: Mid/Low-Cap Crypto Only ($600k to $10M Volume)
-        self.MIN_24H_VOL_USD = 600_000.0
-        self.MAX_24H_VOL_USD = 10_000_000.0
+        # Global Volume Whitelist ($1,000,000+ Combined 24h Volume Across All Exchanges)
+        self.global_volume_whitelist = set()
+        self.last_global_fetch_time = 0.0
 
         # Strict Blacklist: Blocks all stocks, ETFs, and synthetic tokens
         self.EXCLUSION_LIST = {
@@ -115,6 +113,10 @@ class PersistentTrendBot:
             "options": {"defaultType": "swap"}
         })
 
+        # Start the Background Global Volume Radar Thread
+        t_global = threading.Thread(target=self.global_volume_worker, daemon=True)
+        t_global.start()
+
     def load_brain(self):
         if os.path.exists(BRAIN_FILE):
             try:
@@ -140,10 +142,47 @@ class PersistentTrendBot:
     def is_qualified_for_live(self):
         return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
 
+    # --------------------------------------------------------------------------
+    # 1. BACKGROUND GLOBAL $1M VOLUME RADAR (ZERO LAG ON MAIN LOOP)
+    # --------------------------------------------------------------------------
+    def global_volume_worker(self):
+        """
+        Background worker thread that runs every 12 minutes.
+        Fetches coins with >= $1,000,000 24h aggregate volume across all global exchanges.
+        Stores them in memory so lookup takes 0.0001 seconds!
+        """
+        while True:
+            try:
+                # Query CoinCap / CoinGecko public market aggregator endpoint for aggregate global volume
+                req = urllib.request.Request(
+                    "https://api.coincap.io/v2/assets?limit=500",
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode())
+                    assets = data.get("data", [])
+
+                    new_whitelist = set()
+                    for a in assets:
+                        sym = a.get("symbol", "").upper()
+                        vol_usd = float(a.get("volumeUsd24Hr", 0.0) or 0.0)
+                        if vol_usd >= 1_000_000.0:
+                            new_whitelist.add(sym)
+
+                    if len(new_whitelist) >= 50:
+                        self.global_volume_whitelist = new_whitelist
+                        self.last_global_fetch_time = time.time()
+                        print(f"🌍 [GLOBAL RADAR UPDATE] Cached {len(self.global_volume_whitelist)} coins with >= $1,000,000 global volume across all exchanges.", flush=True)
+
+            except Exception as e:
+                # If public API is temporarily busy, ensure we maintain active crypto fallback
+                pass
+
+            time.sleep(720)  # Refresh every 12 minutes in the background
+
     def record_trade_outcome(self, is_win, symbol, net_spot, is_scratch=False):
         if is_scratch:
             print(f"\n🛡️ [SCRATCH BAIL-OUT COMPLETE] {symbol} | Exited at {net_spot:+.2f}%. Fees covered, wallet 100% safe!", flush=True)
-            # A scratch bail-out protects capital and does NOT break your streak
             return
 
         if is_win:
@@ -163,7 +202,7 @@ class PersistentTrendBot:
         self.save_brain()
 
     # --------------------------------------------------------------------------
-    # 1. SPREAD GATE: REJECTS COINS WITH EXPENSIVE SPREADS (> 0.12%)
+    # 2. SPREAD GATE: REJECTS COINS WITH EXPENSIVE SPREADS (> 0.12%)
     # --------------------------------------------------------------------------
     def get_order_book_spread(self, symbol):
         try:
@@ -184,7 +223,7 @@ class PersistentTrendBot:
             return None, None
 
     # --------------------------------------------------------------------------
-    # 2. 8-TO-10 MINUTE PERSISTENT TREND INSPECTOR (+0.30% LONG / -0.30% SHORT)
+    # 3. 8-TO-10 MINUTE PERSISTENT TREND INSPECTOR (+0.30% LONG / -0.30% SHORT)
     # --------------------------------------------------------------------------
     def inspect_persistent_trend(self, symbol):
         """
@@ -195,7 +234,6 @@ class PersistentTrendBot:
           - SHORT: drop >= 0.30% (price drops -0.30% or lower)
         """
         try:
-            # Fetch last 12 1-minute candles (ignore current unclosed candle)
             candles = self.bitget.fetch_ohlcv(symbol, timeframe='1m', limit=12)
             if not candles or len(candles) < 11:
                 return None
@@ -210,10 +248,10 @@ class PersistentTrendBot:
             for c in completed_candles:
                 open_p, high_p, low_p, close_p = c[1], c[2], c[3], c[4]
                 
-                # 1. Long calculation (Must be >= +0.30%)
+                # 1. Long calculation (Must gain >= +0.30%)
                 long_gain_pct = ((close_p - open_p) / open_p) * 100.0
                 
-                # 2. Short calculation (Must dump by at least 0.30%, i.e. <= -0.30%)
+                # 2. Short calculation (Must dump by >= 0.30%, i.e. <= -0.30%)
                 short_dump_pct = ((open_p - close_p) / open_p) * 100.0
 
                 if long_gain_pct >= self.MIN_MINUTE_GAIN_PCT:
@@ -251,7 +289,7 @@ class PersistentTrendBot:
             return None
 
     # --------------------------------------------------------------------------
-    # 3. ACTIVE TRADE MANAGEMENT WITH ZERO-LOSS BAIL-OUT PROTOCOL
+    # 4. ACTIVE TRADE MANAGEMENT WITH ZERO-LOSS BAIL-OUT PROTOCOL
     # --------------------------------------------------------------------------
     def update_active_trade(self):
         if not self.current_trade:
@@ -324,7 +362,7 @@ class PersistentTrendBot:
             self.current_trade = None
 
     # --------------------------------------------------------------------------
-    # 4. LIVE TRADE MONITOR (90% BALANCE & DYNAMIC MINIMUM LEVERAGE)
+    # 5. LIVE TRADE MONITOR (90% BALANCE & DYNAMIC MINIMUM LEVERAGE)
     # --------------------------------------------------------------------------
     def poll_live_trade(self):
         if not self.live_state["active"]:
@@ -389,11 +427,11 @@ class PersistentTrendBot:
             self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # 5. SCANNER LOOP
+    # 6. SCANNER LOOP (GLOBAL $1M WHITELIST + BITGET FUTURES VERIFICATION)
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX 1-Minute Persistent Trend & Bail-Out Bot online.", flush=True)
+        print("[SYSTEM] APEX 1-Minute Persistent Trend & Global $1M Radar Bot online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -419,7 +457,7 @@ class PersistentTrendBot:
                     time.sleep(3)
                     continue
 
-                # Filter strictly for real mid/low-cap crypto perps ($600k to $10M)
+                # Filter for clean Bitget crypto perps that meet Global $1,000,000+ volume
                 candidates = []
                 for s, t in tickers.items():
                     if not s.endswith(":USDT"):
@@ -428,15 +466,18 @@ class PersistentTrendBot:
                     if base in self.EXCLUSION_LIST or len(base) > 7:
                         continue
 
-                    vol = float(t.get('quoteVolume', 0) or 0)
-                    if self.MIN_24H_VOL_USD <= vol <= self.MAX_24H_VOL_USD and time.time() >= self.coin_cooldowns.get(s, 0):
+                    # Instant In-Memory Global $1M Volume Check (Takes 0.0001 seconds!)
+                    has_global_1m = (base in self.global_volume_whitelist) or (float(t.get('quoteVolume', 0) or 0) >= 1_000_000.0)
+
+                    if has_global_1m and time.time() >= self.coin_cooldowns.get(s, 0):
+                        vol = float(t.get('quoteVolume', 0) or 0)
                         candidates.append((s, vol))
 
                 candidates.sort(key=lambda x: x[1], reverse=True)
 
                 # Scan candidates if no trade is active
                 if not self.current_trade and not self.live_state["active"]:
-                    for sym, vol in candidates[:20]:
+                    for sym, vol in candidates[:25]:
                         # 1. Spread Gate: Reject wide spreads (> 0.12%)
                         mid, spread_pct = self.get_order_book_spread(sym)
                         if not mid or spread_pct > self.MAX_ALLOWED_SPREAD_PCT:
@@ -489,7 +530,7 @@ class PersistentTrendBot:
                     status_desc = "LIVE_AUTHORIZED" if self.is_qualified_for_live() else f"PAPER_QUALIFYING ({self.consecutive_paper_wins}/8)"
                     active_name = self.current_trade["symbol"] if self.current_trade else ("LIVE_ACTIVE" if self.live_state["active"] else "SCANNING")
                     print(
-                        f"[TREND PULSE] State: {active_name} | "
+                        f"[TREND PULSE] State: {active_name} | Global $1M Pool: {len(self.global_volume_whitelist)} | "
                         f"Vault: ${balance:.2f} | Streak: {self.consecutive_paper_wins}/8 | Status: {status_desc}",
                         flush=True
                     )
