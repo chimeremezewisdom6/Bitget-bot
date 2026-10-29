@@ -10,9 +10,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
 # ==============================================================================
-# 1. RENDER PORT BINDING & KEEP-ALIVE SERVER (SELF-HEALING)
+# 1. RENDER KEEP-ALIVE SERVER WITH REAL-TIME LEADERBOARD ENDPOINT
 # ==============================================================================
-# Fix #1: Bind port immediately before slow network tasks so Render doesn't timeout.
 PORT = int(os.environ.get("PORT", 10000))
 BRAIN_FILE = "global_persistent_trend_memory.json"
 bot = None
@@ -24,16 +23,15 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         
         if bot:
+            ranked_models = bot.get_ranked_leaderboard()
             status = {
-                "engine": "APEX 1-Minute Trend (One-Way Mode + Fading TP/SL)",
+                "engine": "APEX 1-Minute Multi-Behavior Trend Engine (10 Models)",
                 "global_1m_whitelist_count": len(bot.global_volume_whitelist),
-                "trend_rule": "8/8 or 9/10 minutes with >= +0.30% gain (Long) or <= -0.30% drop (Short)",
-                "active_trade": bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE" if bot.live_state["active"] else "SCANNING"),
                 "streak_status": f"{bot.consecutive_paper_wins}/{bot.REQUIRED_WIN_STREAK} Wins in a row",
                 "mode": "LIVE_AUTHORIZED" if bot.is_qualified_for_live() else "PAPER_QUALIFYING",
                 "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses",
-                "live_active": bot.live_state["active"],
-                "quarantined_coins": len(bot.coin_cooldowns)
+                "active_trade": bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE" if bot.live_state["active"] else "SCANNING"),
+                "leaderboard_rankings_best_to_worst": ranked_models
             }
         else:
             status = {"status": "initializing"}
@@ -50,40 +48,48 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive Web Server listening on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. BOT ENGINE WITH SELF-CORRECTING SAFEGUARDS
+# 2. BOT ENGINE WITH PATTERN BENCHMARKING & DYNAMIC FADING EXITS
 # ==============================================================================
 class PersistentTrendBot:
     def __init__(self):
-        # 1. Capital & Risk Configuration
         self.leverage = 1
         self.equity_floor = 1.50
         self.consecutive_live_losses = 0
         self.max_live_losses = 2
 
-        # 2. Paper Qualification Controller (8-in-a-row)
         self.consecutive_paper_wins = 0
         self.REQUIRED_WIN_STREAK = 8
         self.all_time_wins = 0
         self.all_time_losses = 0
 
-        # 3. Directional Persistence Rules
-        self.MIN_MINUTE_GAIN_PCT = 0.30        # Long >= +0.30% | Short <= -0.30% per minute
-        self.MAX_ALLOWED_SPREAD_PCT = 0.0012   # Reject spreads > 0.12%
-        self.ROUNDTRIP_FEE_PCT = 0.12          # 0.06% entry + 0.06% exit taker fee reserve
+        self.MAX_ALLOWED_SPREAD_PCT = 0.0012
+        self.ROUNDTRIP_FEE_PCT = 0.12
         self.QUARANTINE_DURATION_SEC = 3600
 
-        # 4. Dynamic Fading Stop Loss & Take Profit Parameters
-        self.INITIAL_TP_PCT = 1.50             # Starts wide for sudden impulse runs
-        self.MIN_FADED_TP_PCT = 0.45           # Floor TP target after time decay
-        self.INITIAL_SL_PCT = -0.75            # Initial protective floor
-        self.TIGHTEST_SL_PCT = -0.30           # Stop loss fades up to -0.30% if momentum stalls
-        self.FADE_HORIZON_SEC = 90.0           # 90 seconds decay horizon
+        # Fading TP/SL Parameters
+        self.INITIAL_TP_PCT = 1.50
+        self.MIN_FADED_TP_PCT = 0.45
+        self.INITIAL_SL_PCT = -0.75
+        self.TIGHTEST_SL_PCT = -0.30
+        self.FADE_HORIZON_SEC = 90.0
 
-        # Global Volume Whitelist ($1,000,000+ Combined 24h Volume)
+        # Performance Tracker for all 10 Models
+        self.pattern_stats = {
+            "STEP_LADDER_MICRO_PULLBACK":   {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "COMPRESSION_SQUEEZE_BREAKOUT": {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "VOLUME_EXPANSION_ESCALATOR":  {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "TRAP_LIQUIDITY_REJECTION":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "5_CANDLE_POWER_IMPULSE":       {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "EMA_5_13_MOMENTUM_RUNWAY":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "6_CANDLE_CLEAN_STAIRCASE":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "VOLUME_IGNITION_BLAST":        {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "DYNAMIC_BASELINE_STRETCH":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
+            "ORIGINAL_8_OR_9_OF_10_STREAK": {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0}
+        }
+
         self.global_volume_whitelist = set()
         self.last_global_fetch_time = 0.0
 
-        # Exclusion list: Major caps, stocks, ETFs, and synthetic tokens
         self.EXCLUSION_LIST = {
             'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'TRX', 'AVAX', 
             'LINK', 'SUI', 'PEPE', 'SHIB', 'NEAR', 'LTC', 'BCH', 'DOT', 'ZEC',
@@ -97,23 +103,20 @@ class PersistentTrendBot:
         self.coin_cooldowns = {}
         self.load_brain()
 
-        # Live Trade State
         self.live_state = {
             "active": False, "symbol": None, "side": None, "contracts": 0,
             "entry_price": 0.0, "entry_spread": 0.0, "start_time": 0.0,
             "max_peak": 0.0
         }
 
-        # Fix #2: Auto-strip whitespace and newline characters from Render env variables
         self.api_key = (os.environ.get("API_KEY") or "").strip()
         self.secret_key = (os.environ.get("SECRET_KEY") or "").strip()
         self.passphrase = (os.environ.get("PASSPHRASE") or "").strip()
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing Bitget credentials! Please configure API_KEY, SECRET_KEY, and PASSPHRASE in Render.", flush=True)
+            print("[FATAL] Missing Bitget credentials! Configure API_KEY, SECRET_KEY, and PASSPHRASE in Render.", flush=True)
             sys.exit(1)
 
-        # Initialize CCXT Bitget for USDT-M Swaps
         self.bitget = ccxt.bitget({
             "apiKey": self.api_key,
             "secret": self.secret_key,
@@ -125,15 +128,56 @@ class PersistentTrendBot:
             }
         })
 
-        # Fix #3: Auto-enforce One-Way Position Mode on startup
         self.enforce_one_way_mode()
 
-        # Launch Background Global Aggregator Worker
         t_global = threading.Thread(target=self.global_volume_worker, daemon=True)
         t_global.start()
 
     # --------------------------------------------------------------------------
-    # SELF-HEALING: ATOMIC BRAIN PERSISTENCE (PREVENTS CORRUPT JSON ON RESTARTS)
+    # LEADERBOARD RANKING ENGINE
+    # --------------------------------------------------------------------------
+    def get_ranked_leaderboard(self):
+        """
+        Sorts all 10 behaviors from best to worst based on:
+        1. Win Rate %
+        2. Total Net PnL %
+        3. Total Executions
+        """
+        board = []
+        for name, data in self.pattern_stats.items():
+            total = data["wins"] + data["losses"]
+            win_rate = (data["wins"] / total * 100.0) if total > 0 else 0.0
+            board.append({
+                "model": name,
+                "win_rate_pct": round(win_rate, 1),
+                "wins": data["wins"],
+                "losses": data["losses"],
+                "scratches": data["scratches"],
+                "total_trades": total + data["scratches"],
+                "net_pnl_pct": round(data["net_pnl"], 2)
+            })
+
+        # Sort: Highest Win Rate first, then Highest Net PnL, then Total Trades
+        board.sort(key=lambda x: (x["win_rate_pct"], x["net_pnl_pct"], x["total_trades"]), reverse=True)
+
+        ranked = []
+        for idx, item in enumerate(board):
+            rank_label = f"#{idx+1} [BEST]" if idx == 0 else (f"#{idx+1} [WORST]" if idx == len(board)-1 else f"#{idx+1}")
+            ranked.append({
+                "rank": rank_label,
+                **item
+            })
+        return ranked
+
+    def print_leaderboard(self):
+        ranks = self.get_ranked_leaderboard()
+        print("\n======================= MODEL LEADERBOARD (BEST TO WORST) =======================", flush=True)
+        for r in ranks:
+            print(f"{r['rank']:<10} | {r['model']:<30} | WinRate: {r['win_rate_pct']:>5.1f}% | Wins: {r['wins']} Losses: {r['losses']} Scratches: {r['scratches']} | Net: {r['net_pnl_pct']:>+6.2f}%", flush=True)
+        print("==================================================================================\n", flush=True)
+
+    # --------------------------------------------------------------------------
+    # ATOMIC BRAIN PERSISTENCE
     # --------------------------------------------------------------------------
     def load_brain(self):
         if os.path.exists(BRAIN_FILE):
@@ -145,9 +189,12 @@ class PersistentTrendBot:
                         self.consecutive_paper_wins = data.get("consecutive_paper_wins", 0)
                         self.all_time_wins = data.get("all_time_wins", 0)
                         self.all_time_losses = data.get("all_time_losses", 0)
+                        saved_stats = data.get("pattern_stats", {})
+                        for k, v in saved_stats.items():
+                            if k in self.pattern_stats:
+                                self.pattern_stats[k] = v
             except Exception as e:
-                print(f"[WARN] Brain file recovered from clean slate: {e}", flush=True)
-                self.consecutive_paper_wins = 0
+                print(f"[WARN] Brain recovery note: {e}", flush=True)
 
     def save_brain(self):
         tmp_file = f"{BRAIN_FILE}.tmp"
@@ -156,7 +203,8 @@ class PersistentTrendBot:
                 json.dump({
                     "consecutive_paper_wins": self.consecutive_paper_wins,
                     "all_time_wins": self.all_time_wins,
-                    "all_time_losses": self.all_time_losses
+                    "all_time_losses": self.all_time_losses,
+                    "pattern_stats": self.pattern_stats
                 }, f, indent=2)
             os.replace(tmp_file, BRAIN_FILE)
         except Exception:
@@ -165,29 +213,14 @@ class PersistentTrendBot:
     def is_qualified_for_live(self):
         return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
 
-    # --------------------------------------------------------------------------
-    # SELF-HEALING: ONE-WAY MODE AUTO-CONFIGURATION
-    # --------------------------------------------------------------------------
     def enforce_one_way_mode(self):
-        """
-        Attempts to programmatically set One-Way Mode on Bitget USDT-M contracts.
-        If already active or handled via UI, continues cleanly.
-        """
         try:
             self.bitget.set_position_mode(hedged=False, params={'productType': 'USDT-FUTURES'})
-            print("[CONFIG] Verified Bitget One-Way Mode is active.", flush=True)
+            print("[CONFIG] Verified Bitget One-Way Mode active.", flush=True)
         except Exception as e:
-            # Code 40017 / 43019 typically means mode is already set to One-Way
-            print(f"[CONFIG] One-Way Mode check: {e} (Standard protocol engaged)", flush=True)
+            print(f"[CONFIG] One-Way Mode check: {e} (Continuing cleanly)", flush=True)
 
-    # --------------------------------------------------------------------------
-    # FIXED GLOBAL AGGREGATOR (NO 402 ERRORS, DIRECT PAGINATION UP TO 600 COINS)
-    # --------------------------------------------------------------------------
     def global_volume_worker(self):
-        """
-        Queries CoinLore paginated across 600 cryptocurrencies every 10 minutes.
-        Eliminates the CoinPaprika HTTP 402 payment lock entirely.
-        """
         while True:
             new_whitelist = set()
             try:
@@ -216,20 +249,13 @@ class PersistentTrendBot:
 
             time.sleep(600)
 
-    # --------------------------------------------------------------------------
-    # DYNAMIC FADING STOP LOSS & TAKE PROFIT FORMULA
-    # --------------------------------------------------------------------------
     def calculate_fading_levels(self, elapsed_s, max_peak, entry_spread):
         fee_spread_threshold = self.ROUNDTRIP_FEE_PCT + (entry_spread * 100.0)
         progress = min(elapsed_s / self.FADE_HORIZON_SEC, 1.0)
 
-        # 1. Take-Profit fades down from +1.50% to +0.45%
         faded_tp = self.INITIAL_TP_PCT - (progress * (self.INITIAL_TP_PCT - self.MIN_FADED_TP_PCT))
-
-        # 2. Stop-Loss fades up from -0.75% toward -0.30%
         time_sl = self.INITIAL_SL_PCT + (progress * (abs(self.INITIAL_SL_PCT) - abs(self.TIGHTEST_SL_PCT)))
 
-        # 3. Dynamic Trailing Ratchet
         trail_sl = -99.0
         if max_peak >= 0.80:
             trail_sl = max(max_peak - 0.25, fee_spread_threshold + 0.15)
@@ -239,26 +265,39 @@ class PersistentTrendBot:
         effective_sl = max(time_sl, trail_sl)
         return faded_tp, effective_sl, fee_spread_threshold
 
-    def record_trade_outcome(self, is_win, symbol, net_spot, is_scratch=False):
+    def record_trade_outcome(self, is_win, symbol, net_spot, pattern_name, is_scratch=False):
+        # Update pattern stats
+        if pattern_name in self.pattern_stats:
+            self.pattern_stats[pattern_name]["net_pnl"] += net_spot
+            if is_scratch:
+                self.pattern_stats[pattern_name]["scratches"] += 1
+            elif is_win:
+                self.pattern_stats[pattern_name]["wins"] += 1
+            else:
+                self.pattern_stats[pattern_name]["losses"] += 1
+
         if is_scratch:
             print(f"\n🛡️ [SCRATCH BAIL-OUT] {symbol} | Exited at {net_spot:+.2f}%. Fees covered, streak protected!", flush=True)
+            self.save_brain()
+            self.print_leaderboard()
             return
 
         if is_win:
             self.all_time_wins += 1
             self.consecutive_paper_wins += 1
             self.coin_cooldowns[symbol] = time.time() + 600
-            print(f"\n🔥 [TREND WIN HARVESTED] {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} in a row! Spot: {net_spot:+.2f}%", flush=True)
+            print(f"\n🔥 [TREND WIN HARVESTED ({pattern_name})] {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} in a row! Spot: {net_spot:+.2f}%", flush=True)
             if self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK:
                 print(f"🎉 [8/8 STREAK UNLOCKED] Live 90% allocation trading AUTHORIZED!\n", flush=True)
         else:
             self.all_time_losses += 1
             self.consecutive_paper_wins = 0
             self.coin_cooldowns[symbol] = time.time() + self.QUARANTINE_DURATION_SEC
-            print(f"\n💥 [STOPPED OUT] Resetting streak to 0/{self.REQUIRED_WIN_STREAK}.", flush=True)
+            print(f"\n💥 [STOPPED OUT ({pattern_name})] Resetting streak to 0/{self.REQUIRED_WIN_STREAK}.", flush=True)
             print(f"🚫 [QUARANTINE] {symbol} locked out for 60 minutes.", flush=True)
             
         self.save_brain()
+        self.print_leaderboard()
 
     def get_order_book_spread(self, symbol):
         try:
@@ -279,55 +318,153 @@ class PersistentTrendBot:
             return None, None
 
     # --------------------------------------------------------------------------
-    # 8-TO-10 MINUTE PERSISTENT TREND INSPECTOR
+    # MULTI-BEHAVIOR TREND INSPECTOR (10 MODELS)
     # --------------------------------------------------------------------------
-    def inspect_persistent_trend(self, symbol):
+    def inspect_trend_behaviors(self, symbol):
         try:
-            candles = self.bitget.fetch_ohlcv(symbol, timeframe='1m', limit=12)
-            if not candles or len(candles) < 11:
+            candles = self.bitget.fetch_ohlcv(symbol, timeframe='1m', limit=20)
+            if not candles or len(candles) < 16:
                 return None
 
-            completed_candles = candles[-11:-1]
-            long_wins = 0
-            short_wins = 0
-            long_streak = 0
-            short_streak = 0
+            c = candles[-16:-1]
+            opens = [x[1] for x in c]
+            highs = [x[2] for x in c]
+            lows = [x[3] for x in c]
+            closes = [x[4] for x in c]
+            vols = [x[5] for x in c]
 
-            for c in completed_candles:
-                open_p, close_p = c[1], c[4]
-                long_gain_pct = ((close_p - open_p) / open_p) * 100.0
-                short_dump_pct = ((open_p - close_p) / open_p) * 100.0
+            avg_vol = sum(vols[-12:]) / 12.0 if sum(vols[-12:]) > 0 else 1.0
 
-                if long_gain_pct >= self.MIN_MINUTE_GAIN_PCT:
-                    long_wins += 1
-                    long_streak += 1
-                else:
-                    long_streak = 0
+            def calc_ema(series, period):
+                k = 2 / (period + 1)
+                ema = [series[0]]
+                for price in series[1:]:
+                    ema.append((price * k) + (ema[-1] * (1 - k)))
+                return ema
 
-                if short_dump_pct >= self.MIN_MINUTE_GAIN_PCT:
-                    short_wins += 1
-                    short_streak += 1
-                else:
-                    short_streak = 0
+            ema5 = calc_ema(closes, 5)
+            ema13 = calc_ema(closes, 13)
 
-            is_long_trend = (long_streak >= 8) or (long_wins >= 9)
-            is_short_trend = (short_streak >= 8) or (short_wins >= 9)
+            for side in ["long", "short"]:
+                # MODEL 1: Micro-Pullback Step-Ladder (RANK #1)
+                impulse_ok = (closes[-4] > opens[-4] and closes[-3] > opens[-3]) if side == "long" else (closes[-4] < opens[-4] and closes[-3] < opens[-3])
+                if impulse_ok:
+                    impulse_dist = abs(closes[-3] - opens[-4])
+                    if impulse_dist > 0:
+                        pause_retrace = (highs[-2] - lows[-2]) / impulse_dist
+                        if pause_retrace <= 0.38:
+                            breakout_now = (closes[-1] > highs[-2] and closes[-1] > closes[-3]) if side == "long" else (closes[-1] < lows[-2] and closes[-1] < closes[-3])
+                            if breakout_now:
+                                move = ((closes[-1] - opens[-4]) / opens[-4]) * 100.0 if side == "long" else ((opens[-4] - closes[-1]) / opens[-4]) * 100.0
+                                return {"side": side, "name": "STEP_LADDER_MICRO_PULLBACK", "move": move}
 
-            if not is_long_trend and not is_short_trend:
-                return None
+                # MODEL 2: Compression Squeeze Breakout (RANK #2)
+                base_high = max(highs[-6:-1])
+                base_low = min(lows[-6:-1])
+                mid_p = (base_high + base_low) / 2.0
+                band_pct = ((base_high - base_low) / mid_p) * 100.0
+                if band_pct <= 0.45:
+                    burst_pct = ((closes[-1] - opens[-1]) / opens[-1]) * 100.0 if side == "long" else ((opens[-1] - closes[-1]) / opens[-1]) * 100.0
+                    if burst_pct >= 0.55 and vols[-1] >= (avg_vol * 2.2):
+                        return {"side": side, "name": "COMPRESSION_SQUEEZE_BREAKOUT", "move": burst_pct}
 
-            side = "long" if is_long_trend else "short"
-            total_10m_move = sum([
-                ((c[4] - c[1]) / c[1]) * 100.0 if side == "long" else ((c[1] - c[4]) / c[1]) * 100.0
-                for c in completed_candles
-            ])
+                # MODEL 3: Volume-Expansion Escalator (RANK #3)
+                b1 = abs(closes[-3] - opens[-3])
+                b2 = abs(closes[-2] - opens[-2])
+                b3 = abs(closes[-1] - opens[-1])
+                v1, v2, v3 = vols[-3], vols[-2], vols[-1]
+                dir_ok = (closes[-3] > opens[-3] and closes[-2] > opens[-2] and closes[-1] > opens[-1]) if side == "long" else (closes[-3] < opens[-3] and closes[-2] < opens[-2] and closes[-1] < opens[-1])
+                if dir_ok and (b3 > b2 > b1) and (v3 > v2 > v1):
+                    move_3m = ((closes[-1] - opens[-3]) / opens[-3]) * 100.0 if side == "long" else ((opens[-3] - closes[-1]) / opens[-3]) * 100.0
+                    if move_3m >= 0.90:
+                        return {"side": side, "name": "VOLUME_EXPANSION_ESCALATOR", "move": move_3m}
 
-            return {
-                "side": side,
-                "consecutive_wins": long_streak if side == "long" else short_streak,
-                "total_10m_wins": long_wins if side == "long" else short_wins,
-                "total_move_pct": total_10m_move
-            }
+                # MODEL 4: Trap Liquidity Rejection (RANK #4)
+                candle_range = highs[-3] - lows[-3]
+                if candle_range > 0:
+                    rejection_wick = (highs[-3] - max(opens[-3], closes[-3])) if side == "short" else (min(opens[-3], closes[-3]) - lows[-3])
+                    wick_ratio = rejection_wick / candle_range
+                    if wick_ratio >= 0.55:
+                        engulf_follow = (closes[-1] > highs[-3] and closes[-2] > opens[-2]) if side == "long" else (closes[-1] < lows[-3] and closes[-2] < opens[-2])
+                        if engulf_follow:
+                            trap_move = ((closes[-1] - opens[-2]) / opens[-2]) * 100.0 if side == "long" else ((opens[-2] - closes[-1]) / opens[-2]) * 100.0
+                            return {"side": side, "name": "TRAP_LIQUIDITY_REJECTION", "move": trap_move}
+
+                # MODEL 5: 5-Candle Power Impulse (RANK #5)
+                c5_valid = True
+                for i in range(-5, 0):
+                    pct = ((closes[i] - opens[i]) / opens[i]) * 100.0 if side == "long" else ((opens[i] - closes[i]) / opens[i]) * 100.0
+                    if pct < 0.20:
+                        c5_valid = False
+                        break
+                if c5_valid:
+                    total_5m = ((closes[-1] - opens[-5]) / opens[-5]) * 100.0 if side == "long" else ((opens[-5] - closes[-1]) / opens[-5]) * 100.0
+                    if total_5m >= 1.30:
+                        return {"side": side, "name": "5_CANDLE_POWER_IMPULSE", "move": total_5m}
+
+                # MODEL 6: EMA 5/13 Momentum Runway (RANK #6)
+                ema_stacked = (ema5[-1] > ema13[-1] and ema5[-2] > ema13[-2] and ema5[-3] > ema13[-3]) if side == "long" else (ema5[-1] < ema13[-1] and ema5[-2] < ema13[-2] and ema5[-3] < ema13[-3])
+                closes_above_ema5 = all([closes[i] > ema5[i] for i in range(-4, 0)]) if side == "long" else all([closes[i] < ema5[i] for i in range(-4, 0)])
+                if ema_stacked and closes_above_ema5:
+                    runway_move = ((closes[-1] - opens[-4]) / opens[-4]) * 100.0 if side == "long" else ((opens[-4] - closes[-1]) / opens[-4]) * 100.0
+                    if runway_move >= 1.00:
+                        return {"side": side, "name": "EMA_5_13_MOMENTUM_RUNWAY", "move": runway_move}
+
+                # MODEL 7: 6-Candle Clean Staircase (RANK #7)
+                stair_ok = True
+                for i in range(-6, -1):
+                    if side == "long":
+                        if not (highs[i+1] > highs[i] and lows[i+1] >= lows[i] and closes[i+1] > opens[i+1]):
+                            stair_ok = False
+                            break
+                    else:
+                        if not (lows[i+1] < lows[i] and highs[i+1] <= highs[i] and closes[i+1] < opens[i+1]):
+                            stair_ok = False
+                            break
+                if stair_ok:
+                    stair_move = ((closes[-1] - opens[-6]) / opens[-6]) * 100.0 if side == "long" else ((opens[-6] - closes[-1]) / opens[-6]) * 100.0
+                    if stair_move >= 1.20:
+                        return {"side": side, "name": "6_CANDLE_CLEAN_STAIRCASE", "move": stair_move}
+
+                # MODEL 8: Volume Ignition Blast (RANK #8)
+                rvol = vols[-1] / avg_vol
+                blast_pct = ((closes[-1] - opens[-1]) / opens[-1]) * 100.0 if side == "long" else ((opens[-1] - closes[-1]) / opens[-1]) * 100.0
+                c_range = highs[-1] - lows[-1]
+                if c_range > 0 and rvol >= 3.5 and blast_pct >= 0.70:
+                    upper_wick = (highs[-1] - closes[-1]) if side == "long" else (closes[-1] - lows[-1])
+                    if (upper_wick / c_range) <= 0.15:
+                        return {"side": side, "name": "VOLUME_IGNITION_BLAST", "move": blast_pct}
+
+                # MODEL 9: Dynamic Baseline Stretch (RANK #9)
+                c_3_ok = True
+                for i in range(-3, 0):
+                    rng = highs[i] - lows[i]
+                    if rng <= 0:
+                        c_3_ok = False
+                        break
+                    body_close_pos = ((closes[i] - lows[i]) / rng) if side == "long" else ((highs[i] - closes[i]) / rng)
+                    if body_close_pos < 0.75:
+                        c_3_ok = False
+                        break
+                if c_3_ok:
+                    stretch_move = ((closes[-1] - opens[-3]) / opens[-3]) * 100.0 if side == "long" else ((opens[-3] - closes[-1]) / opens[-3]) * 100.0
+                    if stretch_move >= 1.10 and vols[-1] >= avg_vol * 1.5:
+                        return {"side": side, "name": "DYNAMIC_BASELINE_STRETCH", "move": stretch_move}
+
+                # MODEL 10: Original 8/8 or 9/10 Persistent Streak (RANK #10)
+                streak = 0
+                wins_10 = 0
+                for i in range(-10, 0):
+                    gain = ((closes[i] - opens[i]) / opens[i]) * 100.0 if side == "long" else ((opens[i] - closes[i]) / opens[i]) * 100.0
+                    if gain >= 0.30:
+                        wins_10 += 1
+                        streak += 1
+                    else:
+                        streak = 0
+                if streak >= 8 or wins_10 >= 9:
+                    return {"side": side, "name": "ORIGINAL_8_OR_9_OF_10_STREAK", "move": ((closes[-1] - opens[-10]) / opens[-10]) * 100.0}
+
+            return None
         except Exception:
             return None
 
@@ -343,6 +480,7 @@ class PersistentTrendBot:
         side = trade["side"]
         entry = trade["entry_p"]
         entry_spread = trade["entry_spread"]
+        pattern = trade["pattern"]
         now = time.time()
         elapsed_s = now - trade["start_t"]
 
@@ -359,7 +497,8 @@ class PersistentTrendBot:
         base_sym = sym.split('/')[0]
 
         print(
-            f"[{t_str}] {base_sym:<6} ({side.upper()}) | Spot:{gain_spot:+.2f}% (Peak:{trade['max_peak']:+.2f}%) | "
+            f"[{t_str}] {base_sym:<6} ({side.upper()}) [{pattern}] | "
+            f"Spot:{gain_spot:+.2f}% (Peak:{trade['max_peak']:+.2f}%) | "
             f"Fading_TP:{faded_tp:+.2f}% | Fading_SL:{faded_sl:+.2f}% | {int(elapsed_s)}s",
             flush=True
         )
@@ -370,21 +509,21 @@ class PersistentTrendBot:
         if hit_take_profit or hit_stop_loss:
             print(f"\n=======================================================", flush=True)
             if hit_take_profit:
-                print(f"🟢 [FADING TARGET HARVESTED] {sym} ({side.upper()}) | Gain: {gain_spot:+.2f}% (Target: {faded_tp:+.2f}%)", flush=True)
-                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, is_scratch=False)
+                print(f"🟢 [FADING TARGET HARVESTED] {sym} ({side.upper()}) | Model: {pattern} | Gain: {gain_spot:+.2f}%", flush=True)
+                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=False)
             else:
                 if gain_spot >= fee_spread_threshold:
-                    print(f"🛡️ [TRAILED / SCRATCH EXIT] {sym} ({side.upper()}) | Spot: {gain_spot:+.2f}% (Locked above fees)", flush=True)
-                    self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, is_scratch=True)
+                    print(f"🛡️ [TRAILED / SCRATCH EXIT] {sym} ({side.upper()}) | Model: {pattern} | Spot: {gain_spot:+.2f}%", flush=True)
+                    self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=True)
                 else:
-                    print(f"🔴 [FADING STOP LOSS HIT] {sym} ({side.upper()}) | Loss: {gain_spot:+.2f}% (SL: {faded_sl:+.2f}%)", flush=True)
-                    self.record_trade_outcome(is_win=False, symbol=sym, net_spot=gain_spot, is_scratch=False)
+                    print(f"🔴 [FADING STOP LOSS HIT] {sym} ({side.upper()}) | Model: {pattern} | Loss: {gain_spot:+.2f}%", flush=True)
+                    self.record_trade_outcome(is_win=False, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=False)
 
             print(f"=======================================================\n", flush=True)
             self.current_trade = None
 
     # --------------------------------------------------------------------------
-    # LIVE TRADE MONITOR (ONE-WAY MODE & REDUCE-ONLY COMPLIANT)
+    # LIVE TRADE MONITOR
     # --------------------------------------------------------------------------
     def poll_live_trade(self):
         if not self.live_state["active"]:
@@ -394,6 +533,7 @@ class PersistentTrendBot:
         side = self.live_state["side"]
         entry = self.live_state["entry_price"]
         entry_spread = self.live_state.get("entry_spread", 0.0008)
+        pattern = self.live_state.get("pattern", "UNKNOWN")
         elapsed_s = time.time() - self.live_state["start_time"]
 
         mid, _ = self.get_order_book_spread(sym)
@@ -409,13 +549,9 @@ class PersistentTrendBot:
         hit_stop_loss = gain_spot <= faded_sl
 
         if hit_take_profit or hit_stop_loss:
-            # Fix #4: One-Way Mode order side rule:
-            # To CLOSE Long -> MARKET SELL with reduceOnly=True
-            # To CLOSE Short -> MARKET BUY with reduceOnly=True
             close_side = 'sell' if side == 'long' else 'buy'
             contracts_to_close = self.live_state["contracts"]
 
-            # Self-Healing: Query live exchange position to close exact amount (no dust left)
             try:
                 positions = self.bitget.fetch_positions([sym])
                 for p in positions:
@@ -425,22 +561,16 @@ class PersistentTrendBot:
             except Exception:
                 pass
 
-            exit_params = {
-                'reduceOnly': True,
-                'tradeSide': 'close' # Dual-compatibility flag
-            }
+            exit_params = {'reduceOnly': True, 'tradeSide': 'close'}
 
-            executed = False
             for attempt in range(3):
                 try:
                     self.bitget.create_order(sym, 'market', close_side, contracts_to_close, params=exit_params)
-                    executed = True
                     break
                 except Exception as e:
-                    print(f"[RETRY EXIT {attempt+1}] Order failed: {e}. Retrying without tradeSide...", flush=True)
+                    print(f"[RETRY EXIT {attempt+1}] Order note: {e}. Retrying...", flush=True)
                     try:
                         self.bitget.create_order(sym, 'market', close_side, contracts_to_close, params={'reduceOnly': True})
-                        executed = True
                         break
                     except Exception:
                         time.sleep(1)
@@ -448,28 +578,28 @@ class PersistentTrendBot:
             print(f"\n=======================================================", flush=True)
             if hit_take_profit:
                 self.consecutive_live_losses = 0
-                print(f"🟢 [LIVE FADING TARGET HIT: {gain_spot:+.2f}% SPOT]", flush=True)
-                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot)
+                print(f"🟢 [LIVE FADING TARGET HIT: {gain_spot:+.2f}% SPOT] Model: {pattern}", flush=True)
+                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern)
             elif gain_spot >= fee_spread_threshold:
-                print(f"🛡️ [LIVE TRAILED PROFIT/SCRATCH: {gain_spot:+.2f}% SPOT] Fees covered!", flush=True)
-                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, is_scratch=True)
+                print(f"🛡️ [LIVE TRAILED PROFIT/SCRATCH: {gain_spot:+.2f}% SPOT] Model: {pattern}", flush=True)
+                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=True)
             else:
                 self.consecutive_live_losses += 1
-                print(f"🔴 [LIVE FADING STOPPED: {gain_spot:+.2f}% SPOT]", flush=True)
+                print(f"🔴 [LIVE FADING STOPPED: {gain_spot:+.2f}% SPOT] Model: {pattern}", flush=True)
                 if self.consecutive_live_losses >= self.max_live_losses:
                     print(f"\n[DEMOTION ACTIVE] Resetting streak back to paper qualification.\n", flush=True)
                     self.consecutive_paper_wins = 0
-                self.record_trade_outcome(is_win=False, symbol=sym, net_spot=gain_spot)
+                self.record_trade_outcome(is_win=False, symbol=sym, net_spot=gain_spot, pattern_name=pattern)
 
             print(f"=======================================================\n", flush=True)
             self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # MAIN SCANNER LOOP
+    # MAIN LOOP
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX 1-Minute Persistent Trend Engine online.", flush=True)
+        print("[SYSTEM] APEX 1-Minute Multi-Behavior Benchmarking Engine online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -503,7 +633,6 @@ class PersistentTrendBot:
                     if base in self.EXCLUSION_LIST or len(base) > 7:
                         continue
 
-                    # Cross-reference against 600-coin worldwide whitelist or exchange volume
                     has_global_1m = (base in self.global_volume_whitelist) or (float(t.get('quoteVolume', 0) or 0) >= 1_000_000.0)
 
                     if has_global_1m and time.time() >= self.coin_cooldowns.get(s, 0):
@@ -518,20 +647,19 @@ class PersistentTrendBot:
                         if not mid or spread_pct > self.MAX_ALLOWED_SPREAD_PCT:
                             continue
 
-                        trend = self.inspect_persistent_trend(sym)
+                        trend = self.inspect_trend_behaviors(sym)
                         if trend:
                             side = trend["side"]
-                            print(f"\n🚀 [PERSISTENT TREND DETECTED] {sym} ({side.upper()}) | {trend['total_10m_wins']}/10 Winning Minutes (Total Move: {trend['total_move_pct']:+.2f}%)", flush=True)
+                            pattern_name = trend["name"]
+                            move_pct = trend["move"]
+                            print(f"\n🚀 [MODEL TRIGGERED: {pattern_name}] {sym} ({side.upper()}) | Run Move: {move_pct:+.2f}%", flush=True)
 
-                            # LIVE TRADE EXECUTION
                             if self.is_qualified_for_live():
                                 margin_90 = balance * 0.90
-                                exchange_min_notional = 5.50  # Fix #5: Guard clamp for small balances
+                                exchange_min_notional = 5.50
 
-                                # Calculate minimum leverage required to satisfy Bitget notional
                                 needed_leverage = max(math.ceil(exchange_min_notional / margin_90), 1)
 
-                                # Safely set leverage for this coin in One-Way mode
                                 try:
                                     self.bitget.set_leverage(needed_leverage, sym, params={'marginCoin': 'USDT'})
                                 except Exception:
@@ -545,32 +673,29 @@ class PersistentTrendBot:
                                 amount_str = self.bitget.amount_to_precision(sym, raw_amount)
                                 amount = float(amount_str)
 
-                                # One-Way Open Rules:
-                                # Open Long  -> MARKET BUY (no reduceOnly)
-                                # Open Short -> MARKET SELL (no reduceOnly)
                                 order_side = 'buy' if side == 'long' else 'sell'
                                 open_params = {'tradeSide': 'open'}
 
                                 try:
                                     self.bitget.create_order(sym, 'market', order_side, amount, params=open_params)
                                 except Exception:
-                                    # Fallback without tradeSide
                                     self.bitget.create_order(sym, 'market', order_side, amount)
 
                                 self.live_state = {
                                     "active": True, "symbol": sym, "side": side,
                                     "contracts": amount, "entry_price": mid,
                                     "entry_spread": spread_pct,
+                                    "pattern": pattern_name,
                                     "start_time": time.time(),
                                     "max_peak": 0.0
                                 }
-                                print(f"[LIVE ORDER EXECUTED] Margin: ${margin_90:.2f} | Leverage: {needed_leverage}x | Side: {order_side.upper()}", flush=True)
+                                print(f"[LIVE ORDER EXECUTED] Margin: ${margin_90:.2f} | Leverage: {needed_leverage}x | Model: {pattern_name}", flush=True)
                                 break
                             else:
-                                # PAPER QUALIFYING TRADE
                                 self.current_trade = {
                                     "symbol": sym,
                                     "side": side,
+                                    "pattern": pattern_name,
                                     "entry_p": mid,
                                     "entry_spread": spread_pct,
                                     "start_t": time.time(),
@@ -582,7 +707,7 @@ class PersistentTrendBot:
                     status_desc = "LIVE_AUTHORIZED" if self.is_qualified_for_live() else f"PAPER_QUALIFYING ({self.consecutive_paper_wins}/8)"
                     active_name = self.current_trade["symbol"] if self.current_trade else ("LIVE_ACTIVE" if self.live_state["active"] else "SCANNING")
                     print(
-                        f"[TREND PULSE] State: {active_name} | Global $1M Pool: {len(self.global_volume_whitelist)} | "
+                        f"[TREND PULSE] State: {active_name} | Global Pool: {len(self.global_volume_whitelist)} | "
                         f"Vault: ${balance:.2f} | Streak: {self.consecutive_paper_wins}/8 | Status: {status_desc}",
                         flush=True
                     )
@@ -595,9 +720,6 @@ class PersistentTrendBot:
                 traceback.print_exc()
                 time.sleep(4)
 
-# ==============================================================================
-# ENTRY POINT
-# ==============================================================================
 if __name__ == "__main__":
     bot = PersistentTrendBot()
     bot.run()
