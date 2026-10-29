@@ -10,10 +10,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
 # ==============================================================================
-# 1. RENDER KEEP-ALIVE SERVER WITH REAL-TIME LEADERBOARD ENDPOINT
+# 1. RENDER KEEP-ALIVE SERVER (PORT 10000 BOUND FIRST)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-BRAIN_FILE = "global_persistent_trend_memory.json"
+MEMORY_FILE = "dual_engine_trading_memory.json"
 bot = None
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -23,15 +23,16 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         
         if bot:
-            ranked_models = bot.get_ranked_leaderboard()
             status = {
-                "engine": "APEX 1-Minute Multi-Behavior Trend Engine (10 Models)",
-                "global_1m_whitelist_count": len(bot.global_volume_whitelist),
-                "streak_status": f"{bot.consecutive_paper_wins}/{bot.REQUIRED_WIN_STREAK} Wins in a row",
-                "mode": "LIVE_AUTHORIZED" if bot.is_qualified_for_live() else "PAPER_QUALIFYING",
-                "all_time_record": f"{bot.all_time_wins} Wins / {bot.all_time_losses} Losses",
-                "active_trade": bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE" if bot.live_state["active"] else "SCANNING"),
-                "leaderboard_rankings_best_to_worst": ranked_models
+                "engine": "APEX DUAL-ENGINE: 50D Scenario Matcher + James vs. David Front-Runner",
+                "pool_count": len(bot.global_volume_whitelist),
+                "eligible_50d_coins": len(bot.eligible_scenarios),
+                "active_trade": bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE" if bot.live_state["active"] else "SCANNING_DUAL_PIPELINE"),
+                "active_engine": bot.current_trade.get("engine_source") if bot.current_trade else (bot.live_state.get("engine_source") if bot.live_state["active"] else "NONE"),
+                "total_wins": bot.all_time_wins,
+                "total_losses": bot.all_time_losses,
+                "win_rate": f"{(bot.all_time_wins / max(1, bot.all_time_wins + bot.all_time_losses) * 100):.1f}%",
+                "quarantined_coins": len(bot.quarantined_coins)
             }
         else:
             status = {"status": "initializing"}
@@ -48,73 +49,46 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive Web Server listening on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. BOT ENGINE WITH PATTERN BENCHMARKING & DYNAMIC FADING EXITS
+# 2. DUAL-ENGINE TRADING BOT
 # ==============================================================================
-class PersistentTrendBot:
+class DualEngineBot:
     def __init__(self):
-        self.leverage = 1
+        # Risk & Capital Controls
         self.equity_floor = 1.50
-        self.consecutive_live_losses = 0
-        self.max_live_losses = 2
+        self.ROUNDTRIP_FEE_PCT = 0.12
 
-        self.consecutive_paper_wins = 0
-        self.REQUIRED_WIN_STREAK = 8
+        # Engine 1 Parameters (50-Day 50%+ Scenario)
+        self.LOOKBACK_DAYS = 50
+        self.MIN_SINGLE_DAY_MOVE_PCT = 50.0
+
+        # Engine 2 Parameters (James vs. David Front-Runner)
+        self.MIN_LEAD_DISPLACEMENT_PCT = 1.5
+        self.MAX_CHASE_LEAD_PCT = 4.5
+        self.MIN_OPEN_RUNWAY_PCT = 10.0
+
+        # Performance & Memory Storage
         self.all_time_wins = 0
         self.all_time_losses = 0
-
-        self.MAX_ALLOWED_SPREAD_PCT = 0.0012
-        self.ROUNDTRIP_FEE_PCT = 0.12
-        self.QUARANTINE_DURATION_SEC = 3600
-
-        # Fading TP/SL Parameters
-        self.INITIAL_TP_PCT = 1.50
-        self.MIN_FADED_TP_PCT = 0.45
-        self.INITIAL_SL_PCT = -0.75
-        self.TIGHTEST_SL_PCT = -0.30
-        self.FADE_HORIZON_SEC = 90.0
-
-        # Performance Tracker for all 10 Models
-        self.pattern_stats = {
-            "STEP_LADDER_MICRO_PULLBACK":   {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "COMPRESSION_SQUEEZE_BREAKOUT": {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "VOLUME_EXPANSION_ESCALATOR":  {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "TRAP_LIQUIDITY_REJECTION":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "5_CANDLE_POWER_IMPULSE":       {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "EMA_5_13_MOMENTUM_RUNWAY":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "6_CANDLE_CLEAN_STAIRCASE":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "VOLUME_IGNITION_BLAST":        {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "DYNAMIC_BASELINE_STRETCH":     {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0},
-            "ORIGINAL_8_OR_9_OF_10_STREAK": {"wins": 0, "losses": 0, "scratches": 0, "net_pnl": 0.0}
-        }
-
+        self.eligible_scenarios = {}       # {symbol: scenario_profile}
+        self.audited_50d_timestamps = {}   # {symbol: time}
+        self.coin_mistakes = {}            # {symbol: count}
+        self.quarantined_coins = set()
         self.global_volume_whitelist = set()
-        self.last_global_fetch_time = 0.0
-
-        self.EXCLUSION_LIST = {
-            'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'TRX', 'AVAX', 
-            'LINK', 'SUI', 'PEPE', 'SHIB', 'NEAR', 'LTC', 'BCH', 'DOT', 'ZEC',
-            'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META',
-            'CL', 'BZ', 'XAU', 'XAG', 'SPX', 'NDX', 'DJI', 'KORU', 'MU',
-            'SKHYNIX', 'SKHY', 'SNDK', 'SNXX', 'BABA', 'COIN', 'MSTR', 'ARM', 'INTC', 
-            'SMSN', 'EWY', 'AAOI', 'CRWV', 'ANTHROPIC', 'TQQQ', 'CSOPSK2LHKD'
-        }
 
         self.current_trade = None
-        self.coin_cooldowns = {}
-        self.load_brain()
-
         self.live_state = {
             "active": False, "symbol": None, "side": None, "contracts": 0,
-            "entry_price": 0.0, "entry_spread": 0.0, "start_time": 0.0,
-            "max_peak": 0.0
+            "entry_price": 0.0, "pivot_point": 0.0, "start_time": 0.0,
+            "max_peak": 0.0, "engine_source": ""
         }
 
+        # Safe Environment Variable Parsing
         self.api_key = (os.environ.get("API_KEY") or "").strip()
         self.secret_key = (os.environ.get("SECRET_KEY") or "").strip()
         self.passphrase = (os.environ.get("PASSPHRASE") or "").strip()
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing Bitget credentials! Configure API_KEY, SECRET_KEY, and PASSPHRASE in Render.", flush=True)
+            print("[FATAL] Missing credentials in Render!", flush=True)
             sys.exit(1)
 
         self.bitget = ccxt.bitget({
@@ -122,104 +96,60 @@ class PersistentTrendBot:
             "secret": self.secret_key,
             "password": self.passphrase,
             "enableRateLimit": True,
-            "options": {
-                "defaultType": "swap",
-                "defaultMarginMode": "cross"
-            }
+            "options": {"defaultType": "swap", "defaultMarginMode": "cross"}
         })
 
         self.enforce_one_way_mode()
+        self.load_memory()
 
+        # Launch Background Global Aggregator (Paginated 600 Coins)
         t_global = threading.Thread(target=self.global_volume_worker, daemon=True)
         t_global.start()
-
-    # --------------------------------------------------------------------------
-    # LEADERBOARD RANKING ENGINE
-    # --------------------------------------------------------------------------
-    def get_ranked_leaderboard(self):
-        """
-        Sorts all 10 behaviors from best to worst based on:
-        1. Win Rate %
-        2. Total Net PnL %
-        3. Total Executions
-        """
-        board = []
-        for name, data in self.pattern_stats.items():
-            total = data["wins"] + data["losses"]
-            win_rate = (data["wins"] / total * 100.0) if total > 0 else 0.0
-            board.append({
-                "model": name,
-                "win_rate_pct": round(win_rate, 1),
-                "wins": data["wins"],
-                "losses": data["losses"],
-                "scratches": data["scratches"],
-                "total_trades": total + data["scratches"],
-                "net_pnl_pct": round(data["net_pnl"], 2)
-            })
-
-        # Sort: Highest Win Rate first, then Highest Net PnL, then Total Trades
-        board.sort(key=lambda x: (x["win_rate_pct"], x["net_pnl_pct"], x["total_trades"]), reverse=True)
-
-        ranked = []
-        for idx, item in enumerate(board):
-            rank_label = f"#{idx+1} [BEST]" if idx == 0 else (f"#{idx+1} [WORST]" if idx == len(board)-1 else f"#{idx+1}")
-            ranked.append({
-                "rank": rank_label,
-                **item
-            })
-        return ranked
-
-    def print_leaderboard(self):
-        ranks = self.get_ranked_leaderboard()
-        print("\n======================= MODEL LEADERBOARD (BEST TO WORST) =======================", flush=True)
-        for r in ranks:
-            print(f"{r['rank']:<10} | {r['model']:<30} | WinRate: {r['win_rate_pct']:>5.1f}% | Wins: {r['wins']} Losses: {r['losses']} Scratches: {r['scratches']} | Net: {r['net_pnl_pct']:>+6.2f}%", flush=True)
-        print("==================================================================================\n", flush=True)
-
-    # --------------------------------------------------------------------------
-    # ATOMIC BRAIN PERSISTENCE
-    # --------------------------------------------------------------------------
-    def load_brain(self):
-        if os.path.exists(BRAIN_FILE):
-            try:
-                with open(BRAIN_FILE, "r") as f:
-                    content = f.read().strip()
-                    if content:
-                        data = json.loads(content)
-                        self.consecutive_paper_wins = data.get("consecutive_paper_wins", 0)
-                        self.all_time_wins = data.get("all_time_wins", 0)
-                        self.all_time_losses = data.get("all_time_losses", 0)
-                        saved_stats = data.get("pattern_stats", {})
-                        for k, v in saved_stats.items():
-                            if k in self.pattern_stats:
-                                self.pattern_stats[k] = v
-            except Exception as e:
-                print(f"[WARN] Brain recovery note: {e}", flush=True)
-
-    def save_brain(self):
-        tmp_file = f"{BRAIN_FILE}.tmp"
-        try:
-            with open(tmp_file, "w") as f:
-                json.dump({
-                    "consecutive_paper_wins": self.consecutive_paper_wins,
-                    "all_time_wins": self.all_time_wins,
-                    "all_time_losses": self.all_time_losses,
-                    "pattern_stats": self.pattern_stats
-                }, f, indent=2)
-            os.replace(tmp_file, BRAIN_FILE)
-        except Exception:
-            pass
-
-    def is_qualified_for_live(self):
-        return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
 
     def enforce_one_way_mode(self):
         try:
             self.bitget.set_position_mode(hedged=False, params={'productType': 'USDT-FUTURES'})
             print("[CONFIG] Verified Bitget One-Way Mode active.", flush=True)
-        except Exception as e:
-            print(f"[CONFIG] One-Way Mode check: {e} (Continuing cleanly)", flush=True)
+        except Exception:
+            pass
 
+    # --------------------------------------------------------------------------
+    # MEMORY PERSISTENCE
+    # --------------------------------------------------------------------------
+    def load_memory(self):
+        if os.path.exists(MEMORY_FILE):
+            try:
+                with open(MEMORY_FILE, "r") as f:
+                    data = json.load(f)
+                    self.all_time_wins = data.get("all_time_wins", 0)
+                    self.all_time_losses = data.get("all_time_losses", 0)
+                    self.eligible_scenarios = data.get("eligible_scenarios", {})
+                    self.audited_50d_timestamps = data.get("audited_50d_timestamps", {})
+                    self.coin_mistakes = data.get("coin_mistakes", {})
+                    self.quarantined_coins = set(data.get("quarantined_coins", []))
+                    print(f"[MEMORY] Loaded state: {self.all_time_wins}W - {self.all_time_losses}L | {len(self.eligible_scenarios)} 50d profiles", flush=True)
+            except Exception as e:
+                print(f"[WARN] Memory load note: {e}", flush=True)
+
+    def save_memory(self):
+        tmp_file = f"{MEMORY_FILE}.tmp"
+        try:
+            with open(tmp_file, "w") as f:
+                json.dump({
+                    "all_time_wins": self.all_time_wins,
+                    "all_time_losses": self.all_time_losses,
+                    "eligible_scenarios": self.eligible_scenarios,
+                    "audited_50d_timestamps": self.audited_50d_timestamps,
+                    "coin_mistakes": self.coin_mistakes,
+                    "quarantined_coins": list(self.quarantined_coins)
+                }, f, indent=2)
+            os.replace(tmp_file, MEMORY_FILE)
+        except Exception:
+            pass
+
+    # --------------------------------------------------------------------------
+    # GLOBAL AGGREGATOR ($1M+ Combined Volume)
+    # --------------------------------------------------------------------------
     def global_volume_worker(self):
         while True:
             new_whitelist = set()
@@ -241,485 +171,425 @@ class PersistentTrendBot:
 
                 if len(new_whitelist) >= 40:
                     self.global_volume_whitelist = new_whitelist
-                    self.last_global_fetch_time = time.time()
-                    print(f"🌍 [GLOBAL AGGREGATOR UPDATE] Cached {len(self.global_volume_whitelist)} coins with >= $1,000,000 24h volume across worldwide exchanges!", flush=True)
+                    print(f"🌍 [GLOBAL POOL] Cached {len(self.global_volume_whitelist)} liquid coins with >= $1M volume!", flush=True)
 
             except Exception as e:
-                print(f"[WARN] Aggregator worker notice: {e}", flush=True)
+                print(f"[WARN] Aggregator note: {e}", flush=True)
 
             time.sleep(600)
 
-    def calculate_fading_levels(self, elapsed_s, max_peak, entry_spread):
-        fee_spread_threshold = self.ROUNDTRIP_FEE_PCT + (entry_spread * 100.0)
-        progress = min(elapsed_s / self.FADE_HORIZON_SEC, 1.0)
-
-        faded_tp = self.INITIAL_TP_PCT - (progress * (self.INITIAL_TP_PCT - self.MIN_FADED_TP_PCT))
-        time_sl = self.INITIAL_SL_PCT + (progress * (abs(self.INITIAL_SL_PCT) - abs(self.TIGHTEST_SL_PCT)))
-
-        trail_sl = -99.0
-        if max_peak >= 0.80:
-            trail_sl = max(max_peak - 0.25, fee_spread_threshold + 0.15)
-        elif max_peak >= 0.45:
-            trail_sl = fee_spread_threshold + 0.05
-
-        effective_sl = max(time_sl, trail_sl)
-        return faded_tp, effective_sl, fee_spread_threshold
-
-    def record_trade_outcome(self, is_win, symbol, net_spot, pattern_name, is_scratch=False):
-        # Update pattern stats
-        if pattern_name in self.pattern_stats:
-            self.pattern_stats[pattern_name]["net_pnl"] += net_spot
-            if is_scratch:
-                self.pattern_stats[pattern_name]["scratches"] += 1
-            elif is_win:
-                self.pattern_stats[pattern_name]["wins"] += 1
-            else:
-                self.pattern_stats[pattern_name]["losses"] += 1
-
-        if is_scratch:
-            print(f"\n🛡️ [SCRATCH BAIL-OUT] {symbol} | Exited at {net_spot:+.2f}%. Fees covered, streak protected!", flush=True)
-            self.save_brain()
-            self.print_leaderboard()
-            return
-
-        if is_win:
-            self.all_time_wins += 1
-            self.consecutive_paper_wins += 1
-            self.coin_cooldowns[symbol] = time.time() + 600
-            print(f"\n🔥 [TREND WIN HARVESTED ({pattern_name})] {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} in a row! Spot: {net_spot:+.2f}%", flush=True)
-            if self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK:
-                print(f"🎉 [8/8 STREAK UNLOCKED] Live 90% allocation trading AUTHORIZED!\n", flush=True)
-        else:
-            self.all_time_losses += 1
-            self.consecutive_paper_wins = 0
-            self.coin_cooldowns[symbol] = time.time() + self.QUARANTINE_DURATION_SEC
-            print(f"\n💥 [STOPPED OUT ({pattern_name})] Resetting streak to 0/{self.REQUIRED_WIN_STREAK}.", flush=True)
-            print(f"🚫 [QUARANTINE] {symbol} locked out for 60 minutes.", flush=True)
-            
-        self.save_brain()
-        self.print_leaderboard()
-
-    def get_order_book_spread(self, symbol):
+    # --------------------------------------------------------------------------
+    # ENGINE 1: 50-DAY SINGLE-DAY 50%+ AUDITOR
+    # --------------------------------------------------------------------------
+    def audit_coin_50d_eligibility(self, symbol):
         try:
-            ob = self.bitget.fetch_order_book(symbol, limit=5)
-            bids = ob.get('bids', [])
-            asks = ob.get('asks', [])
+            candles = self.bitget.fetch_ohlcv(symbol, timeframe='1d', limit=55)
+            if not candles or len(candles) < 45:
+                return False
 
-            if not bids or not asks:
-                return None, None
+            daily_candles = candles[-50:]
+            pumps_50 = []
+            dumps_50 = []
 
-            best_bid = bids[0][0]
-            best_ask = asks[0][0]
-            mid = (best_bid + best_ask) / 2.0
-            spread_pct = (best_ask - best_bid) / mid
+            for i in range(7, len(daily_candles)):
+                c = daily_candles[i]
+                open_p, high_p, low_p, vol = c[1], c[2], c[3], c[5]
 
-            return mid, spread_pct
+                day_gain_pct = ((high_p - open_p) / open_p) * 100.0
+                day_dump_pct = ((open_p - low_p) / open_p) * 100.0
+
+                prior_vols = [x[5] for x in daily_candles[i-7:i]]
+                avg_prior_vol = sum(prior_vols) / len(prior_vols) if prior_vols else 1.0
+                vol_mult = vol / avg_prior_vol if avg_prior_vol > 0 else 1.0
+
+                if day_gain_pct >= self.MIN_SINGLE_DAY_MOVE_PCT:
+                    pumps_50.append(vol_mult)
+                if day_dump_pct >= self.MIN_SINGLE_DAY_MOVE_PCT:
+                    dumps_50.append(vol_mult)
+
+            total_events = len(pumps_50) + len(dumps_50)
+            self.audited_50d_timestamps[symbol] = time.time()
+
+            if total_events == 0:
+                return False
+
+            all_mults = pumps_50 + dumps_50
+            avg_vol_mult = sum(all_mults) / len(all_mults)
+
+            self.eligible_scenarios[symbol] = {
+                "pumps_count": len(pumps_50),
+                "dumps_count": len(dumps_50),
+                "best_vol_mult": round(min(max(avg_vol_mult, 1.8), 4.5), 2),
+                "can_long": len(pumps_50) > 0,
+                "can_short": len(dumps_50) > 0
+            }
+            print(f"🧬 [ENGINE 1 AUDIT] {symbol} has {total_events} events in 50d | Trigger Vol: {self.eligible_scenarios[symbol]['best_vol_mult']}x", flush=True)
+            return True
         except Exception:
-            return None, None
+            return False
+
+    def check_engine1_scenario(self, symbol, current_c, avg_vol_24, ema9, ema21):
+        """Engine 1: 50-Day Scenario Match with Winner Confirmation."""
+        scenario = self.eligible_scenarios.get(symbol)
+        if not scenario:
+            return None
+
+        cur_open = current_c[1]
+        cur_price = current_c[4]
+        cur_vol = current_c[5]
+        cur_vol_mult = cur_vol / avg_vol_24 if avg_vol_24 > 0 else 1.0
+
+        # Long: Longs actively winning
+        if scenario["can_long"] and cur_price > cur_open and cur_price > ema9 and ema9 > ema21:
+            gain_1h = ((cur_price - cur_open) / cur_open) * 100.0
+            if gain_1h >= 1.5 and cur_vol_mult >= scenario["best_vol_mult"]:
+                return {
+                    "side": "long", "engine": "50D_SCENARIO_ENGINE",
+                    "pivot": cur_open, "desc": f"50d Scenario Match (+{gain_1h:.1f}% on {cur_vol_mult:.1f}x vol)"
+                }
+
+        # Short: Shorts actively winning
+        if scenario["can_short"] and cur_price < cur_open and cur_price < ema9 and ema9 < ema21:
+            dump_1h = ((cur_open - cur_price) / cur_open) * 100.0
+            if dump_1h >= 1.5 and cur_vol_mult >= scenario["best_vol_mult"]:
+                return {
+                    "side": "short", "engine": "50D_SCENARIO_ENGINE",
+                    "pivot": cur_open, "desc": f"50d Scenario Match (-{dump_1h:.1f}% on {cur_vol_mult:.1f}x vol)"
+                }
+
+        return None
 
     # --------------------------------------------------------------------------
-    # MULTI-BEHAVIOR TREND INSPECTOR (10 MODELS)
+    # ENGINE 2: JAMES VS. DAVID FRONT-RUNNER DISPLACEMENT
     # --------------------------------------------------------------------------
-    def inspect_trend_behaviors(self, symbol):
+    def check_engine2_frontrunner(self, history, current_c, avg_vol_24):
+        """Engine 2: David has passed James with clear daylight and open runway."""
+        cur_price = current_c[4]
+        cur_vol = current_c[5]
+        vol_mult = cur_vol / avg_vol_24 if avg_vol_24 > 0 else 1.0
+
+        if vol_mult < 1.7:
+            return None
+
+        recent_candles = history[-60:-1]
+        james_ceiling = max([x[2] for x in recent_candles])
+        james_floor = min([x[3] for x in recent_candles])
+
+        # David Long: Passed James's ceiling
+        if cur_price > james_ceiling:
+            lead_pct = ((cur_price - james_ceiling) / james_ceiling) * 100.0
+            if self.MIN_LEAD_DISPLACEMENT_PCT <= lead_pct <= self.MAX_CHASE_LEAD_PCT:
+                # Check runway
+                all_highs = [x[2] for x in history]
+                overhead = [h for h in all_highs if h > cur_price * 1.03]
+                finish_line = min(overhead) if overhead else (cur_price * 1.25)
+                runway_pct = ((finish_line - cur_price) / cur_price) * 100.0
+
+                if runway_pct >= self.MIN_OPEN_RUNWAY_PCT:
+                    return {
+                        "side": "long", "engine": "FRONT_RUNNER_DAVID",
+                        "pivot": james_ceiling, "desc": f"David Leads by +{lead_pct:.1f}% | Runway: +{runway_pct:.1f}%"
+                    }
+
+        # David Short: Passed James's floor
+        if cur_price < james_floor:
+            lead_pct = ((james_floor - cur_price) / james_floor) * 100.0
+            if self.MIN_LEAD_DISPLACEMENT_PCT <= lead_pct <= self.MAX_CHASE_LEAD_PCT:
+                all_lows = [x[3] for x in history]
+                underhead = [l for l in all_lows if l < cur_price * 0.97]
+                finish_line = max(underhead) if underhead else (cur_price * 0.75)
+                runway_pct = ((cur_price - finish_line) / cur_price) * 100.0
+
+                if runway_pct >= self.MIN_OPEN_RUNWAY_PCT:
+                    return {
+                        "side": "short", "engine": "FRONT_RUNNER_DAVID",
+                        "pivot": james_floor, "desc": f"David Leads by -{lead_pct:.1f}% | Runway: +{runway_pct:.1f}%"
+                    }
+
+        return None
+
+    # --------------------------------------------------------------------------
+    # UNIFIED SCANNER: COMBINES BOTH ENGINES
+    # --------------------------------------------------------------------------
+    def scan_for_entry(self, symbol):
+        if symbol in self.quarantined_coins:
+            return None
+
         try:
-            candles = self.bitget.fetch_ohlcv(symbol, timeframe='1m', limit=20)
-            if not candles or len(candles) < 16:
+            candles_1h = self.bitget.fetch_ohlcv(symbol, timeframe='1h', limit=75)
+            if not candles_1h or len(candles_1h) < 65:
                 return None
 
-            c = candles[-16:-1]
-            opens = [x[1] for x in c]
-            highs = [x[2] for x in c]
-            lows = [x[3] for x in c]
-            closes = [x[4] for x in c]
-            vols = [x[5] for x in c]
+            history = candles_1h[:-1]
+            current_c = candles_1h[-1]
+            cur_price = current_c[4]
 
-            avg_vol = sum(vols[-12:]) / 12.0 if sum(vols[-12:]) > 0 else 1.0
+            avg_vol_24 = sum([x[5] for x in history[-24:]]) / 24.0
 
-            def calc_ema(series, period):
+            # Calculate EMAs
+            closes = [x[4] for x in history] + [cur_price]
+            def calc_ema(data, period):
                 k = 2 / (period + 1)
-                ema = [series[0]]
-                for price in series[1:]:
-                    ema.append((price * k) + (ema[-1] * (1 - k)))
-                return ema
+                res = [data[0]]
+                for p in data[1:]:
+                    res.append((p * k) + (res[-1] * (1 - k)))
+                return res
 
-            ema5 = calc_ema(closes, 5)
-            ema13 = calc_ema(closes, 13)
+            ema9 = calc_ema(closes, 9)[-1]
+            ema21 = calc_ema(closes, 21)[-1]
 
-            for side in ["long", "short"]:
-                # MODEL 1: Micro-Pullback Step-Ladder (RANK #1)
-                impulse_ok = (closes[-4] > opens[-4] and closes[-3] > opens[-3]) if side == "long" else (closes[-4] < opens[-4] and closes[-3] < opens[-3])
-                if impulse_ok:
-                    impulse_dist = abs(closes[-3] - opens[-4])
-                    if impulse_dist > 0:
-                        pause_retrace = (highs[-2] - lows[-2]) / impulse_dist
-                        if pause_retrace <= 0.38:
-                            breakout_now = (closes[-1] > highs[-2] and closes[-1] > closes[-3]) if side == "long" else (closes[-1] < lows[-2] and closes[-1] < closes[-3])
-                            if breakout_now:
-                                move = ((closes[-1] - opens[-4]) / opens[-4]) * 100.0 if side == "long" else ((opens[-4] - closes[-1]) / opens[-4]) * 100.0
-                                return {"side": side, "name": "STEP_LADDER_MICRO_PULLBACK", "move": move}
+            # Priority 1: Check Engine 1 (50-Day Scenario Match)
+            e1 = self.check_engine1_scenario(symbol, current_c, avg_vol_24, ema9, ema21)
+            if e1:
+                return e1
 
-                # MODEL 2: Compression Squeeze Breakout (RANK #2)
-                base_high = max(highs[-6:-1])
-                base_low = min(lows[-6:-1])
-                mid_p = (base_high + base_low) / 2.0
-                band_pct = ((base_high - base_low) / mid_p) * 100.0
-                if band_pct <= 0.45:
-                    burst_pct = ((closes[-1] - opens[-1]) / opens[-1]) * 100.0 if side == "long" else ((opens[-1] - closes[-1]) / opens[-1]) * 100.0
-                    if burst_pct >= 0.55 and vols[-1] >= (avg_vol * 2.2):
-                        return {"side": side, "name": "COMPRESSION_SQUEEZE_BREAKOUT", "move": burst_pct}
-
-                # MODEL 3: Volume-Expansion Escalator (RANK #3)
-                b1 = abs(closes[-3] - opens[-3])
-                b2 = abs(closes[-2] - opens[-2])
-                b3 = abs(closes[-1] - opens[-1])
-                v1, v2, v3 = vols[-3], vols[-2], vols[-1]
-                dir_ok = (closes[-3] > opens[-3] and closes[-2] > opens[-2] and closes[-1] > opens[-1]) if side == "long" else (closes[-3] < opens[-3] and closes[-2] < opens[-2] and closes[-1] < opens[-1])
-                if dir_ok and (b3 > b2 > b1) and (v3 > v2 > v1):
-                    move_3m = ((closes[-1] - opens[-3]) / opens[-3]) * 100.0 if side == "long" else ((opens[-3] - closes[-1]) / opens[-3]) * 100.0
-                    if move_3m >= 0.90:
-                        return {"side": side, "name": "VOLUME_EXPANSION_ESCALATOR", "move": move_3m}
-
-                # MODEL 4: Trap Liquidity Rejection (RANK #4)
-                candle_range = highs[-3] - lows[-3]
-                if candle_range > 0:
-                    rejection_wick = (highs[-3] - max(opens[-3], closes[-3])) if side == "short" else (min(opens[-3], closes[-3]) - lows[-3])
-                    wick_ratio = rejection_wick / candle_range
-                    if wick_ratio >= 0.55:
-                        engulf_follow = (closes[-1] > highs[-3] and closes[-2] > opens[-2]) if side == "long" else (closes[-1] < lows[-3] and closes[-2] < opens[-2])
-                        if engulf_follow:
-                            trap_move = ((closes[-1] - opens[-2]) / opens[-2]) * 100.0 if side == "long" else ((opens[-2] - closes[-1]) / opens[-2]) * 100.0
-                            return {"side": side, "name": "TRAP_LIQUIDITY_REJECTION", "move": trap_move}
-
-                # MODEL 5: 5-Candle Power Impulse (RANK #5)
-                c5_valid = True
-                for i in range(-5, 0):
-                    pct = ((closes[i] - opens[i]) / opens[i]) * 100.0 if side == "long" else ((opens[i] - closes[i]) / opens[i]) * 100.0
-                    if pct < 0.20:
-                        c5_valid = False
-                        break
-                if c5_valid:
-                    total_5m = ((closes[-1] - opens[-5]) / opens[-5]) * 100.0 if side == "long" else ((opens[-5] - closes[-1]) / opens[-5]) * 100.0
-                    if total_5m >= 1.30:
-                        return {"side": side, "name": "5_CANDLE_POWER_IMPULSE", "move": total_5m}
-
-                # MODEL 6: EMA 5/13 Momentum Runway (RANK #6)
-                ema_stacked = (ema5[-1] > ema13[-1] and ema5[-2] > ema13[-2] and ema5[-3] > ema13[-3]) if side == "long" else (ema5[-1] < ema13[-1] and ema5[-2] < ema13[-2] and ema5[-3] < ema13[-3])
-                closes_above_ema5 = all([closes[i] > ema5[i] for i in range(-4, 0)]) if side == "long" else all([closes[i] < ema5[i] for i in range(-4, 0)])
-                if ema_stacked and closes_above_ema5:
-                    runway_move = ((closes[-1] - opens[-4]) / opens[-4]) * 100.0 if side == "long" else ((opens[-4] - closes[-1]) / opens[-4]) * 100.0
-                    if runway_move >= 1.00:
-                        return {"side": side, "name": "EMA_5_13_MOMENTUM_RUNWAY", "move": runway_move}
-
-                # MODEL 7: 6-Candle Clean Staircase (RANK #7)
-                stair_ok = True
-                for i in range(-6, -1):
-                    if side == "long":
-                        if not (highs[i+1] > highs[i] and lows[i+1] >= lows[i] and closes[i+1] > opens[i+1]):
-                            stair_ok = False
-                            break
-                    else:
-                        if not (lows[i+1] < lows[i] and highs[i+1] <= highs[i] and closes[i+1] < opens[i+1]):
-                            stair_ok = False
-                            break
-                if stair_ok:
-                    stair_move = ((closes[-1] - opens[-6]) / opens[-6]) * 100.0 if side == "long" else ((opens[-6] - closes[-1]) / opens[-6]) * 100.0
-                    if stair_move >= 1.20:
-                        return {"side": side, "name": "6_CANDLE_CLEAN_STAIRCASE", "move": stair_move}
-
-                # MODEL 8: Volume Ignition Blast (RANK #8)
-                rvol = vols[-1] / avg_vol
-                blast_pct = ((closes[-1] - opens[-1]) / opens[-1]) * 100.0 if side == "long" else ((opens[-1] - closes[-1]) / opens[-1]) * 100.0
-                c_range = highs[-1] - lows[-1]
-                if c_range > 0 and rvol >= 3.5 and blast_pct >= 0.70:
-                    upper_wick = (highs[-1] - closes[-1]) if side == "long" else (closes[-1] - lows[-1])
-                    if (upper_wick / c_range) <= 0.15:
-                        return {"side": side, "name": "VOLUME_IGNITION_BLAST", "move": blast_pct}
-
-                # MODEL 9: Dynamic Baseline Stretch (RANK #9)
-                c_3_ok = True
-                for i in range(-3, 0):
-                    rng = highs[i] - lows[i]
-                    if rng <= 0:
-                        c_3_ok = False
-                        break
-                    body_close_pos = ((closes[i] - lows[i]) / rng) if side == "long" else ((highs[i] - closes[i]) / rng)
-                    if body_close_pos < 0.75:
-                        c_3_ok = False
-                        break
-                if c_3_ok:
-                    stretch_move = ((closes[-1] - opens[-3]) / opens[-3]) * 100.0 if side == "long" else ((opens[-3] - closes[-1]) / opens[-3]) * 100.0
-                    if stretch_move >= 1.10 and vols[-1] >= avg_vol * 1.5:
-                        return {"side": side, "name": "DYNAMIC_BASELINE_STRETCH", "move": stretch_move}
-
-                # MODEL 10: Original 8/8 or 9/10 Persistent Streak (RANK #10)
-                streak = 0
-                wins_10 = 0
-                for i in range(-10, 0):
-                    gain = ((closes[i] - opens[i]) / opens[i]) * 100.0 if side == "long" else ((opens[i] - closes[i]) / opens[i]) * 100.0
-                    if gain >= 0.30:
-                        wins_10 += 1
-                        streak += 1
-                    else:
-                        streak = 0
-                if streak >= 8 or wins_10 >= 9:
-                    return {"side": side, "name": "ORIGINAL_8_OR_9_OF_10_STREAK", "move": ((closes[-1] - opens[-10]) / opens[-10]) * 100.0}
+            # Priority 2: Check Engine 2 (Front-Runner James vs. David)
+            e2 = self.check_engine2_frontrunner(history, current_c, avg_vol_24)
+            if e2:
+                return e2
 
             return None
         except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # PAPER TRADE MONITOR
+    # UNIFIED EXIT: EXITS THE MOMENT MOMENTUM DIES
     # --------------------------------------------------------------------------
-    def update_active_trade(self):
-        if not self.current_trade:
+    def manage_momentum_and_exits(self):
+        trade = self.current_trade or (self.live_state if self.live_state["active"] else None)
+        if not trade:
             return
 
-        trade = self.current_trade
         sym = trade["symbol"]
         side = trade["side"]
-        entry = trade["entry_p"]
-        entry_spread = trade["entry_spread"]
-        pattern = trade["pattern"]
-        now = time.time()
-        elapsed_s = now - trade["start_t"]
+        entry = trade["entry_price"]
+        pivot = trade["pivot_point"]
+        elapsed_hours = (time.time() - trade["start_time"]) / 3600.0
 
-        mid, _ = self.get_order_book_spread(sym)
-        if not mid:
+        try:
+            ticker = self.bitget.fetch_ticker(sym)
+            cur_price = float(ticker.get('last') or 0.0)
+            if cur_price == 0:
+                return
+
+            candles_1h = self.bitget.fetch_ohlcv(sym, timeframe='1h', limit=15)
+            closes = [x[4] for x in candles_1h]
+            def calc_ema(data, period):
+                k = 2 / (period + 1)
+                res = [data[0]]
+                for p in data[1:]:
+                    res.append((p * k) + (res[-1] * (1 - k)))
+                return res
+
+            ema9 = calc_ema(closes, 9)[-1]
+            ema21 = calc_ema(closes, 21)[-1]
+            last_vol = candles_1h[-1][5]
+            avg_vol = sum([x[5] for x in candles_1h[-10:]]) / 10.0
+        except Exception:
             return
 
-        gain_spot = ((mid - entry) / entry) * 100.0 if side == "long" else ((entry - mid) / entry) * 100.0
-        trade["max_peak"] = max(trade.get("max_peak", 0.0), gain_spot)
+        gain_pct = ((cur_price - entry) / entry) * 100.0 if side == "long" else ((entry - cur_price) / entry) * 100.0
+        trade["max_peak"] = max(trade.get("max_peak", 0.0), gain_pct)
+        peak = trade["max_peak"]
 
-        faded_tp, faded_sl, fee_spread_threshold = self.calculate_fading_levels(elapsed_s, trade["max_peak"], entry_spread)
+        should_exit = False
+        is_win = False
+        exit_reason = ""
 
-        t_str = time.strftime("%H:%M:%S", time.localtime(now))
-        base_sym = sym.split('/')[0]
+        # --- MOMENTUM DEATH RULES (CLOSES AS SOON AS MOMENTUM DIES) ---
 
-        print(
-            f"[{t_str}] {base_sym:<6} ({side.upper()}) [{pattern}] | "
-            f"Spot:{gain_spot:+.2f}% (Peak:{trade['max_peak']:+.2f}%) | "
-            f"Fading_TP:{faded_tp:+.2f}% | Fading_SL:{faded_sl:+.2f}% | {int(elapsed_s)}s",
-            flush=True
-        )
+        # 1. Structural Inversion (Winning side lost control)
+        if side == "long" and (cur_price < ema9 or ema9 < ema21):
+            should_exit = True
+            is_win = gain_pct > 0.3
+            exit_reason = f"MOMENTUM DIED: Long EMA inverted (Closed at {gain_pct:+.2f}%)"
 
-        hit_take_profit = gain_spot >= faded_tp
-        hit_stop_loss = gain_spot <= faded_sl
+        elif side == "short" and (cur_price > ema9 or ema9 > ema21):
+            should_exit = True
+            is_win = gain_pct > 0.3
+            exit_reason = f"MOMENTUM DIED: Short EMA inverted (Closed at {gain_pct:+.2f}%)"
 
-        if hit_take_profit or hit_stop_loss:
+        # 2. Runner Retracement Lock-In
+        elif peak >= 6.0 and (peak - gain_pct) >= 2.8:
+            should_exit = True
+            is_win = True
+            exit_reason = f"MOMENTUM FADING: Peak was +{peak:.1f}%, secured at +{gain_pct:.1f}%"
+
+        # 3. Volume Collapse & Stagnation
+        elif elapsed_hours >= 3.0 and last_vol < (avg_vol * 0.35) and abs(gain_pct) < 1.5:
+            should_exit = True
+            is_win = gain_pct > 0.0
+            exit_reason = f"MOMENTUM DEAD: Volume dried up to a flatline after {elapsed_hours:.1f}h"
+
+        # 4. Big Target Harvested
+        elif gain_pct >= 20.0:
+            should_exit = True
+            is_win = True
+            exit_reason = f"MAJOR TARGET HARVESTED (+{gain_pct:.1f}%)"
+
+        # 5. Structural Pivot Invalidation
+        elif (side == "long" and cur_price < pivot * 0.98) or (side == "short" and cur_price > pivot * 1.02):
+            should_exit = True
+            is_win = False
+            exit_reason = f"PIVOT INVALIDATED: Price broke back past entry pivot (Loss: {gain_pct:.1f}%)"
+
+        t_str = time.strftime("%H:%M:%S", time.localtime(time.time()))
+        print(f"[{t_str}] {sym:<8} ({side.upper()}) | Spot: {gain_pct:>+6.1f}% | Peak: {peak:>+6.1f}% | Held: {elapsed_hours:.1f}h | Track: RUNNING", flush=True)
+
+        if should_exit:
             print(f"\n=======================================================", flush=True)
-            if hit_take_profit:
-                print(f"🟢 [FADING TARGET HARVESTED] {sym} ({side.upper()}) | Model: {pattern} | Gain: {gain_spot:+.2f}%", flush=True)
-                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=False)
-            else:
-                if gain_spot >= fee_spread_threshold:
-                    print(f"🛡️ [TRAILED / SCRATCH EXIT] {sym} ({side.upper()}) | Model: {pattern} | Spot: {gain_spot:+.2f}%", flush=True)
-                    self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=True)
-                else:
-                    print(f"🔴 [FADING STOP LOSS HIT] {sym} ({side.upper()}) | Model: {pattern} | Loss: {gain_spot:+.2f}%", flush=True)
-                    self.record_trade_outcome(is_win=False, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=False)
-
+            print(f"🛑 [TRADE CONCLUDED] {sym} | Reason: {exit_reason}", flush=True)
             print(f"=======================================================\n", flush=True)
+
+            if is_win:
+                self.all_time_wins += 1
+            else:
+                self.all_time_losses += 1
+                self.coin_mistakes[sym] = self.coin_mistakes.get(sym, 0) + 1
+                if self.coin_mistakes[sym] >= 2:
+                    self.quarantined_coins.add(sym)
+                    print(f"🚫 [QUARANTINE] {sym} quarantined due to 2 failed breakouts.", flush=True)
+
+            self.save_memory()
+
+            if self.live_state["active"]:
+                self.close_live_position(sym)
             self.current_trade = None
 
-    # --------------------------------------------------------------------------
-    # LIVE TRADE MONITOR
-    # --------------------------------------------------------------------------
-    def poll_live_trade(self):
-        if not self.live_state["active"]:
-            return
-
-        sym = self.live_state["symbol"]
-        side = self.live_state["side"]
-        entry = self.live_state["entry_price"]
-        entry_spread = self.live_state.get("entry_spread", 0.0008)
-        pattern = self.live_state.get("pattern", "UNKNOWN")
-        elapsed_s = time.time() - self.live_state["start_time"]
-
-        mid, _ = self.get_order_book_spread(sym)
-        if not mid:
-            return
-
-        gain_spot = ((mid - entry) / entry) * 100.0 if side == "long" else ((entry - mid) / entry) * 100.0
-        self.live_state["max_peak"] = max(self.live_state.get("max_peak", 0.0), gain_spot)
-
-        faded_tp, faded_sl, fee_spread_threshold = self.calculate_fading_levels(elapsed_s, self.live_state["max_peak"], entry_spread)
-
-        hit_take_profit = gain_spot >= faded_tp
-        hit_stop_loss = gain_spot <= faded_sl
-
-        if hit_take_profit or hit_stop_loss:
-            close_side = 'sell' if side == 'long' else 'buy'
-            contracts_to_close = self.live_state["contracts"]
-
-            try:
-                positions = self.bitget.fetch_positions([sym])
-                for p in positions:
-                    if p.get('symbol') == sym and float(p.get('contracts', 0) or 0) > 0:
-                        contracts_to_close = float(p['contracts'])
-                        break
-            except Exception:
-                pass
-
-            exit_params = {'reduceOnly': True, 'tradeSide': 'close'}
-
-            for attempt in range(3):
-                try:
-                    self.bitget.create_order(sym, 'market', close_side, contracts_to_close, params=exit_params)
+    def close_live_position(self, sym):
+        try:
+            positions = self.bitget.fetch_positions([sym])
+            for p in positions:
+                contracts = abs(float(p.get('contracts', 0) or 0))
+                if contracts > 0:
+                    close_side = 'sell' if self.live_state["side"] == 'long' else 'buy'
+                    self.bitget.create_order(sym, 'market', close_side, contracts, params={'reduceOnly': True, 'tradeSide': 'close'})
+                    print(f"[LIVE EXIT] Closed {contracts} contracts on {sym}", flush=True)
                     break
-                except Exception as e:
-                    print(f"[RETRY EXIT {attempt+1}] Order note: {e}. Retrying...", flush=True)
-                    try:
-                        self.bitget.create_order(sym, 'market', close_side, contracts_to_close, params={'reduceOnly': True})
-                        break
-                    except Exception:
-                        time.sleep(1)
-
-            print(f"\n=======================================================", flush=True)
-            if hit_take_profit:
-                self.consecutive_live_losses = 0
-                print(f"🟢 [LIVE FADING TARGET HIT: {gain_spot:+.2f}% SPOT] Model: {pattern}", flush=True)
-                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern)
-            elif gain_spot >= fee_spread_threshold:
-                print(f"🛡️ [LIVE TRAILED PROFIT/SCRATCH: {gain_spot:+.2f}% SPOT] Model: {pattern}", flush=True)
-                self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, pattern_name=pattern, is_scratch=True)
-            else:
-                self.consecutive_live_losses += 1
-                print(f"🔴 [LIVE FADING STOPPED: {gain_spot:+.2f}% SPOT] Model: {pattern}", flush=True)
-                if self.consecutive_live_losses >= self.max_live_losses:
-                    print(f"\n[DEMOTION ACTIVE] Resetting streak back to paper qualification.\n", flush=True)
-                    self.consecutive_paper_wins = 0
-                self.record_trade_outcome(is_win=False, symbol=sym, net_spot=gain_spot, pattern_name=pattern)
-
-            print(f"=======================================================\n", flush=True)
-            self.live_state["active"] = False
+        except Exception as e:
+            print(f"[EXIT ERROR] {e}", flush=True)
+        self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # MAIN LOOP
+    # 5. MAIN SCANNER PIPELINE
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX 1-Minute Multi-Behavior Benchmarking Engine online.", flush=True)
+        print("[SYSTEM] APEX Dual-Engine (50D Scenario + Front-Runner) online.", flush=True)
 
         try:
             self.bitget.load_markets()
             print(f"[SYSTEM] Loaded {len(self.bitget.markets)} swap pairs from Bitget.", flush=True)
         except Exception as e:
-            print(f"[WARN] Market load warning: {e}", flush=True)
+            print(f"[WARN] Market load notice: {e}", flush=True)
 
         cycle = 0
 
         while True:
             try:
-                self.update_active_trade()
-                self.poll_live_trade()
+                # 1. Manage Active Trade
+                self.manage_momentum_and_exits()
 
+                # 2. Check balance
                 balance = float(self.bitget.fetch_balance().get('USDT', {}).get('free', 0) or 0)
                 if balance < self.equity_floor:
                     time.sleep(20)
                     continue
 
-                try:
-                    tickers = self.bitget.fetch_tickers()
-                except Exception:
-                    time.sleep(3)
-                    continue
+                tickers = self.bitget.fetch_tickers()
 
                 candidates = []
                 for s, t in tickers.items():
                     if not s.endswith(":USDT"):
                         continue
                     base = s.split('/')[0].split(':')[0].upper()
-                    if base in self.EXCLUSION_LIST or len(base) > 7:
-                        continue
+                    has_1m = (base in self.global_volume_whitelist) or (float(t.get('quoteVolume', 0) or 0) >= 1_000_000.0)
 
-                    has_global_1m = (base in self.global_volume_whitelist) or (float(t.get('quoteVolume', 0) or 0) >= 1_000_000.0)
-
-                    if has_global_1m and time.time() >= self.coin_cooldowns.get(s, 0):
+                    if has_1m and (s not in self.quarantined_coins):
                         vol = float(t.get('quoteVolume', 0) or 0)
                         candidates.append((s, vol))
 
                 candidates.sort(key=lambda x: x[1], reverse=True)
 
+                # Periodic background 50d audit (2 coins per loop)
+                for sym, _ in candidates[:30]:
+                    last_audit = self.audited_50d_timestamps.get(sym, 0)
+                    if time.time() - last_audit > 43200:
+                        self.audit_coin_50d_eligibility(sym)
+                        self.save_memory()
+                        time.sleep(0.15)
+
+                # 3. Dual-Engine Scanning
                 if not self.current_trade and not self.live_state["active"]:
-                    for sym, vol in candidates[:25]:
-                        mid, spread_pct = self.get_order_book_spread(sym)
-                        if not mid or spread_pct > self.MAX_ALLOWED_SPREAD_PCT:
-                            continue
+                    for sym, _ in candidates[:40]:
+                        entry_signal = self.scan_for_entry(sym)
+                        if entry_signal:
+                            side = entry_signal["side"]
+                            engine = entry_signal["engine"]
+                            desc = entry_signal["desc"]
+                            pivot = entry_signal["pivot"]
 
-                        trend = self.inspect_trend_behaviors(sym)
-                        if trend:
-                            side = trend["side"]
-                            pattern_name = trend["name"]
-                            move_pct = trend["move"]
-                            print(f"\n🚀 [MODEL TRIGGERED: {pattern_name}] {sym} ({side.upper()}) | Run Move: {move_pct:+.2f}%", flush=True)
+                            print(f"\n🚀 [DUAL-ENGINE TRIGGER: {engine}] {sym} ({side.upper()})", flush=True)
+                            print(f"📊 Details: {desc}", flush=True)
 
-                            if self.is_qualified_for_live():
-                                margin_90 = balance * 0.90
-                                exchange_min_notional = 5.50
+                            mid = float(tickers[sym]['last'])
 
-                                needed_leverage = max(math.ceil(exchange_min_notional / margin_90), 1)
+                            margin_alloc = balance * 0.90
+                            exchange_min_notional = 5.50
+                            needed_leverage = max(math.ceil(exchange_min_notional / margin_alloc), 1)
 
+                            try:
+                                self.bitget.set_leverage(needed_leverage, sym, params={'marginCoin': 'USDT'})
+                            except Exception:
                                 try:
-                                    self.bitget.set_leverage(needed_leverage, sym, params={'marginCoin': 'USDT'})
+                                    self.bitget.set_leverage(needed_leverage, sym)
                                 except Exception:
-                                    try:
-                                        self.bitget.set_leverage(needed_leverage, sym)
-                                    except Exception:
-                                        pass
+                                    pass
 
-                                notional_size = margin_90 * needed_leverage
-                                raw_amount = notional_size / mid
-                                amount_str = self.bitget.amount_to_precision(sym, raw_amount)
-                                amount = float(amount_str)
+                            notional_size = margin_alloc * needed_leverage
+                            raw_amount = notional_size / mid
+                            amount = float(self.bitget.amount_to_precision(sym, raw_amount))
+                            order_side = 'buy' if side == 'long' else 'sell'
 
-                                order_side = 'buy' if side == 'long' else 'sell'
-                                open_params = {'tradeSide': 'open'}
-
-                                try:
-                                    self.bitget.create_order(sym, 'market', order_side, amount, params=open_params)
-                                except Exception:
-                                    self.bitget.create_order(sym, 'market', order_side, amount)
-
+                            try:
+                                self.bitget.create_order(sym, 'market', order_side, amount, params={'tradeSide': 'open'})
                                 self.live_state = {
                                     "active": True, "symbol": sym, "side": side,
                                     "contracts": amount, "entry_price": mid,
-                                    "entry_spread": spread_pct,
-                                    "pattern": pattern_name,
-                                    "start_time": time.time(),
-                                    "max_peak": 0.0
+                                    "pivot_point": pivot, "start_time": time.time(),
+                                    "max_peak": 0.0, "engine_source": engine
                                 }
-                                print(f"[LIVE ORDER EXECUTED] Margin: ${margin_90:.2f} | Leverage: {needed_leverage}x | Model: {pattern_name}", flush=True)
+                                print(f"[LIVE ORDER EXECUTED] Margin: ${margin_alloc:.2f} | Leverage: {needed_leverage}x | Side: {order_side.upper()}\n", flush=True)
                                 break
-                            else:
+                            except Exception as order_err:
+                                print(f"[ORDER NOTE] Executing as paper trade: {order_err}", flush=True)
                                 self.current_trade = {
-                                    "symbol": sym,
-                                    "side": side,
-                                    "pattern": pattern_name,
-                                    "entry_p": mid,
-                                    "entry_spread": spread_pct,
-                                    "start_t": time.time(),
-                                    "max_peak": 0.0
+                                    "symbol": sym, "side": side,
+                                    "entry_price": mid, "pivot_point": pivot,
+                                    "start_time": time.time(), "max_peak": 0.0,
+                                    "engine_source": engine
                                 }
                                 break
 
-                if cycle % 10 == 0:
-                    status_desc = "LIVE_AUTHORIZED" if self.is_qualified_for_live() else f"PAPER_QUALIFYING ({self.consecutive_paper_wins}/8)"
-                    active_name = self.current_trade["symbol"] if self.current_trade else ("LIVE_ACTIVE" if self.live_state["active"] else "SCANNING")
+                if cycle % 12 == 0:
+                    state_desc = self.current_trade["symbol"] if self.current_trade else ("LIVE_ACTIVE" if self.live_state["active"] else "SCANNING_DUAL")
                     print(
-                        f"[TREND PULSE] State: {active_name} | Global Pool: {len(self.global_volume_whitelist)} | "
-                        f"Vault: ${balance:.2f} | Streak: {self.consecutive_paper_wins}/8 | Status: {status_desc}",
+                        f"[PULSE] State: {state_desc} | Pool: {len(self.global_volume_whitelist)} | "
+                        f"50d Eligible: {len(self.eligible_scenarios)} | Record: {self.all_time_wins}W - {self.all_time_losses}L | Quarantined: {len(self.quarantined_coins)}",
                         flush=True
                     )
 
                 cycle += 1
-                time.sleep(3)
+                time.sleep(10)
 
             except Exception as e:
                 print(f"[LOOP EXCEPTION] {e}", flush=True)
                 traceback.print_exc()
-                time.sleep(4)
+                time.sleep(10)
 
+# ==============================================================================
+# ENTRY POINT
+# ==============================================================================
 if __name__ == "__main__":
-    bot = PersistentTrendBot()
+    bot = DualEngineBot()
     bot.run()
