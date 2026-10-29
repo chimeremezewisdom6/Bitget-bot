@@ -24,7 +24,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         
         if bot:
             status = {
-                "engine": "APEX 1-Minute Persistent Trend & Global $1M Radar",
+                "engine": "APEX 1-Minute Persistent Trend & Global 350+ Exchange Aggregator",
                 "global_1m_whitelist_count": len(bot.global_volume_whitelist),
                 "trend_rule": "8/8 or 9/10 minutes with >= +0.30% gain (Long) or <= -0.30% drop (Short)",
                 "active_trade": bot.current_trade["symbol"] if bot.current_trade else "SCANNING",
@@ -49,7 +49,7 @@ def start_server():
     print(f"[SYSTEM] Keep-Alive active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. PERSISTENT TREND & GLOBAL $1M RADAR ENGINE
+# 2. PERSISTENT TREND & GLOBAL 350+ EXCHANGE AGGREGATOR ENGINE
 # ==============================================================================
 class PersistentTrendBot:
     def __init__(self):
@@ -72,7 +72,7 @@ class PersistentTrendBot:
         self.ROUNDTRIP_FEE_PCT = 0.12          # 0.06% entry + 0.06% exit taker fee reserve
         self.QUARANTINE_DURATION_SEC = 3600
 
-        # Global Volume Whitelist ($1,000,000+ Combined 24h Volume Across All Exchanges)
+        # Global Volume Whitelist ($1,000,000+ Combined 24h Volume Across All Exchanges Worldwide)
         self.global_volume_whitelist = set()
         self.last_global_fetch_time = 0.0
 
@@ -113,7 +113,7 @@ class PersistentTrendBot:
             "options": {"defaultType": "swap"}
         })
 
-        # Start the Background Global Volume Radar Thread
+        # Launch the Background Global Aggregator Worker
         t_global = threading.Thread(target=self.global_volume_worker, daemon=True)
         t_global.start()
 
@@ -143,42 +143,54 @@ class PersistentTrendBot:
         return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
 
     # --------------------------------------------------------------------------
-    # 1. BACKGROUND GLOBAL $1M VOLUME RADAR (ZERO LAG ON MAIN LOOP)
+    # 1. BULLETPROOF GLOBAL AGGREGATOR WORKER (350+ EXCHANGES WORLDWIDE)
     # --------------------------------------------------------------------------
     def global_volume_worker(self):
         """
-        Background worker thread that runs every 12 minutes.
-        Fetches coins with >= $1,000,000 24h aggregate volume across all global exchanges.
-        Stores them in memory so lookup takes 0.0001 seconds!
+        Background worker that runs immediately on boot and refreshes every 10 minutes.
+        Queries open worldwide aggregators (CoinPaprika / CoinLore) tracking 350+ exchanges.
+        Populates self.global_volume_whitelist so lookups take 0.0001 seconds!
         """
         while True:
+            new_whitelist = set()
+            
+            # Primary Source: CoinPaprika 350+ Exchange Aggregator Feed
             try:
-                # Query CoinCap / CoinGecko public market aggregator endpoint for aggregate global volume
                 req = urllib.request.Request(
-                    "https://api.coincap.io/v2/assets?limit=500",
-                    headers={"User-Agent": "Mozilla/5.0"}
+                    "https://api.coinpaprika.com/v1/tickers",
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
                 )
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    data = json.loads(response.read().decode())
-                    assets = data.get("data", [])
-
-                    new_whitelist = set()
-                    for a in assets:
-                        sym = a.get("symbol", "").upper()
-                        vol_usd = float(a.get("volumeUsd24Hr", 0.0) or 0.0)
+                with urllib.request.urlopen(req, timeout=12) as response:
+                    tickers = json.loads(response.read().decode())
+                    for item in tickers:
+                        sym = item.get("symbol", "").upper()
+                        vol_usd = float(item.get("quotes", {}).get("USD", {}).get("volume_24h", 0.0) or 0.0)
                         if vol_usd >= 1_000_000.0:
                             new_whitelist.add(sym)
 
-                    if len(new_whitelist) >= 50:
-                        self.global_volume_whitelist = new_whitelist
-                        self.last_global_fetch_time = time.time()
-                        print(f"🌍 [GLOBAL RADAR UPDATE] Cached {len(self.global_volume_whitelist)} coins with >= $1,000,000 global volume across all exchanges.", flush=True)
+            except Exception:
+                # Secondary Backup Source: CoinLore Global 300+ Exchange Aggregator
+                try:
+                    req = urllib.request.Request(
+                        "https://api.coinlore.net/api/tickers/?start=0&limit=100",
+                        headers={"User-Agent": "Mozilla/5.0"}
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as response:
+                        res = json.loads(response.read().decode())
+                        for item in res.get("data", []):
+                            sym = item.get("symbol", "").upper()
+                            vol_usd = float(item.get("volume24", 0.0) or 0.0)
+                            if vol_usd >= 1_000_000.0:
+                                new_whitelist.add(sym)
+                except Exception:
+                    pass
 
-            except Exception as e:
-                # If public API is temporarily busy, ensure we maintain active crypto fallback
-                pass
+            if len(new_whitelist) >= 40:
+                self.global_volume_whitelist = new_whitelist
+                self.last_global_fetch_time = time.time()
+                print(f"🌍 [GLOBAL AGGREGATOR UPDATE] Cached {len(self.global_volume_whitelist)} coins with >= $1,000,000 24h volume across all exchanges worldwide!", flush=True)
 
-            time.sleep(720)  # Refresh every 12 minutes in the background
+            time.sleep(600)  # Refresh every 10 minutes
 
     def record_trade_outcome(self, is_win, symbol, net_spot, is_scratch=False):
         if is_scratch:
@@ -238,7 +250,7 @@ class PersistentTrendBot:
             if not candles or len(candles) < 11:
                 return None
 
-            completed_candles = candles[-11:-1]  # The last 10 fully closed 1m candles
+            completed_candles = candles[-11:-1]
 
             long_wins = 0
             short_wins = 0
@@ -310,20 +322,14 @@ class PersistentTrendBot:
         gain_spot = ((mid - entry) / entry) * 100.0 if side == "long" else ((entry - mid) / entry) * 100.0
         trade["max_peak"] = max(trade.get("max_peak", 0.0), gain_spot)
 
-        # Fee + Spread recovery floor for a clean zero-loss scratch
         fee_spread_threshold = self.ROUNDTRIP_FEE_PCT + (entry_spread * 100.0)
 
         # 45-50 SECOND FOLLOW-THROUGH TEST:
-        # If after 50s the trade hasn't expanded to at least +0.40%, momentum failed!
         has_failed_follow_through = (elapsed_s >= self.FOLLOW_THROUGH_SEC and trade["max_peak"] < 0.40)
 
-        # Hard stop if adverse drift hits -0.80%
         hit_hard_stop = gain_spot <= -0.80
-
-        # Profit target: Ride the trend to +1.50% or bank when faded from peak
         hit_take_profit = gain_spot >= 1.50 or (trade["max_peak"] >= 0.80 and (trade["max_peak"] - gain_spot) >= 0.25)
 
-        # Compact telemetry radar output
         t_str = time.strftime("%H:%M:%S", time.localtime(now))
         base_sym = sym.split('/')[0]
         status_tag = "TRENDING"
@@ -339,7 +345,6 @@ class PersistentTrendBot:
         )
 
         # BAIL-OUT EXECUTION:
-        # If follow-through failed, exit on the first micro-bounce covering fees + spread!
         if has_failed_follow_through:
             if gain_spot >= fee_spread_threshold:
                 self.record_trade_outcome(is_win=True, symbol=sym, net_spot=gain_spot, is_scratch=True)
@@ -427,11 +432,11 @@ class PersistentTrendBot:
             self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # 6. SCANNER LOOP (GLOBAL $1M WHITELIST + BITGET FUTURES VERIFICATION)
+    # 6. SCANNER LOOP (CROSS-MATCHES BITGET PAIRS WITH GLOBAL $1M AGGREGATOR)
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("[SYSTEM] APEX 1-Minute Persistent Trend & Global $1M Radar Bot online.", flush=True)
+        print("[SYSTEM] APEX 1-Minute Persistent Trend & Global 350+ Exchange Aggregator Bot online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -457,7 +462,6 @@ class PersistentTrendBot:
                     time.sleep(3)
                     continue
 
-                # Filter for clean Bitget crypto perps that meet Global $1,000,000+ volume
                 candidates = []
                 for s, t in tickers.items():
                     if not s.endswith(":USDT"):
@@ -466,7 +470,7 @@ class PersistentTrendBot:
                     if base in self.EXCLUSION_LIST or len(base) > 7:
                         continue
 
-                    # Instant In-Memory Global $1M Volume Check (Takes 0.0001 seconds!)
+                    # Instant In-Memory Lookup Against 350+ Exchange Global Aggregator
                     has_global_1m = (base in self.global_volume_whitelist) or (float(t.get('quoteVolume', 0) or 0) >= 1_000_000.0)
 
                     if has_global_1m and time.time() >= self.coin_cooldowns.get(s, 0):
@@ -475,7 +479,6 @@ class PersistentTrendBot:
 
                 candidates.sort(key=lambda x: x[1], reverse=True)
 
-                # Scan candidates if no trade is active
                 if not self.current_trade and not self.live_state["active"]:
                     for sym, vol in candidates[:25]:
                         # 1. Spread Gate: Reject wide spreads (> 0.12%)
