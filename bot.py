@@ -66,7 +66,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     <ul>{radar_html}</ul>
                     <div>Liquid Universe: <b>{len(bot.all_liquid_candidates)} Coins Monitored</b></div>
                 </div>
-                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • Dynamic Trap State Exits (Zero Static %)</div>
+                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • The Big Cheat (Dynamic Exits / Zero Flatlines)</div>
             </body>
             </html>"""
         else:
@@ -84,35 +84,40 @@ def start_server():
     print(f"[SYSTEM] 1-Click Dashboard live on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. THE BIG CHEAT ENGINE WITH DYNAMIC MATCH-STATE EXITS
+# 2. THE BIG CHEAT ENGINE WITH DEEP EXTENSION & PROVEN WINNER RULES
 # ==============================================================================
 class BigCheatEngine:
     def __init__(self):
-        self.equity_floor = 1.10
+        self.equity_floor = 1.05
         self.ROUNDTRIP_FEE_PCT = 0.12
 
         # THE CHEAT PARAMETERS
-        self.MIN_IMPULSE_TREND_PCT = 2.8   # Man City's aggressive push before the wall
-        self.WALL_COMPRESSION_PCT = 1.30   # Burnley's hidden limit wall
+        self.MIN_DAILY_ATR_PCT = 6.5       # Disqualifies flat synthetic tokens like EUV
+        self.MIN_DEEP_EXTENSION_PCT = 5.5  # Man City's aggressive run must be at least 5.5% deep
+        self.WALL_COMPRESSION_PCT = 1.35   # Burnley's hidden limit wall (< 1.35% range box)
         self.MIN_CHEAT_RVOL = 1.85         # Man City throwing heavy volume into the wall
+        self.MIN_WINNING_SEPARATION_PCT = 1.2  # Burnley must lead by >= 1.2% before entry
 
         self.all_time_wins = 0
         self.all_time_losses = 0
         self.active_trap_radar = {}        # {symbol: {"stage": "11-10", "side": ..., "wall": ...}}
+        self.volatility_cache = {}         # {symbol: {"is_boom": bool, "time": timestamp}}
         self.all_liquid_candidates = []
         self.global_volume_whitelist = set()
 
         self.last_summary_time = 0.0
-        self.last_balance = 1.39
+        self.last_balance = 1.33
         self.last_spot_gain = 0.0
         self.last_peak_gain = 0.0
         self.last_held_hours = 0.0
         self.current_trap_stage = "PATROL (HUNTING 11-8)"
-        self.last_10m_summary = "Scanning all liquid coins for 11-10 cheats..."
+        self.last_10m_summary = "Scanning all liquid coins for deep 11-10 cheats..."
 
+        # Universal Exclusion List (No Gold, Stocks, or Synthetic Commodities)
         self.EXCLUSION_LIST = {
             'PAXG', 'XAUT', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 
-            'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META'
+            'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META',
+            'EUV', 'CSOP', 'TQQQ'
         }
 
         self.current_trade = None
@@ -152,6 +157,7 @@ class BigCheatEngine:
             pass
 
     def recover_existing_position(self):
+        """Correctly identifies Long vs Short to prevent reverse closes."""
         try:
             positions = self.bitget.fetch_positions()
             for p in positions:
@@ -221,72 +227,111 @@ class BigCheatEngine:
             time.sleep(600)
 
     # --------------------------------------------------------------------------
-    # TRAP DETECTOR: 11-10 (RADAR) & 11-8 (ENTER)
+    # 1. BIG BOOM CAPACITY FILTER: REJECTS FLAT TOKENS LIKE EUV
+    # --------------------------------------------------------------------------
+    def check_big_boom_capacity(self, symbol):
+        now = time.time()
+        cached = self.volatility_cache.get(symbol)
+        if cached and (now - cached["time"] < 21600):  # 6-hour cache
+            return cached["is_boom"]
+
+        try:
+            candles_1d = self.bitget.fetch_ohlcv(symbol, timeframe='1d', limit=10)
+            if not candles_1d or len(candles_1d) < 7:
+                return False
+
+            ranges = [((c[2] - c[3]) / c[3]) * 100.0 for c in candles_1d[-7:]]
+            avg_daily_range = sum(ranges) / len(ranges)
+            is_boom = avg_daily_range >= self.MIN_DAILY_ATR_PCT
+
+            self.volatility_cache[symbol] = {"is_boom": is_boom, "time": now}
+            return is_boom
+        except Exception:
+            return False
+
+    # --------------------------------------------------------------------------
+    # 2. DEEP TRAP DETECTOR & "WINNING PERFECTLY" VERIFICATION
     # --------------------------------------------------------------------------
     def inspect_trap_mechanics(self, symbol):
+        # Rule 1: Must be a volatile crypto coin capable of a massive boom
+        if not self.check_big_boom_capacity(symbol):
+            return None
+
         try:
-            candles_15m = self.bitget.fetch_ohlcv(symbol, timeframe='15m', limit=20)
-            if not candles_15m or len(candles_15m) < 16:
+            candles_15m = self.bitget.fetch_ohlcv(symbol, timeframe='15m', limit=24)
+            if not candles_15m or len(candles_15m) < 18:
                 return None
 
             completed_15m = candles_15m[:-1]
             last_closed = completed_15m[-1]
 
+            # Volume comparison against 16-period baseline
             avg_vol_15m = sum([x[5] for x in completed_15m[-16:]]) / 16.0
             rvol = last_closed[5] / avg_vol_15m if avg_vol_15m > 0 else 1.0
 
+            # Rule 2: Prior trend MUST be a deep extension (At least 5.5% of real pain)
+            prior_open = completed_15m[-16][1]
+            cur_price = last_closed[4]
+            prior_move_pct = ((cur_price - prior_open) / prior_open) * 100.0
+
+            if abs(prior_move_pct) < self.MIN_DEEP_EXTENSION_PCT:
+                return None
+
+            # Wall detection: 3 completed 15m candles
             recent_3 = completed_15m[-3:]
             min_low = min([x[3] for x in recent_3])
             max_high = max([x[2] for x in recent_3])
             box_range = ((max_high - min_low) / min_low) * 100.0
 
-            prior_open = completed_15m[-16][1]
-            cur_price = last_closed[4]
-            prior_move_pct = ((cur_price - prior_open) / prior_open) * 100.0
-
-            # Is Man City pushing with volume into a hidden wall?
             is_hitting_wall = (rvol >= self.MIN_CHEAT_RVOL) and (box_range <= self.WALL_COMPRESSION_PCT)
 
             if is_hitting_wall:
-                # Scenario A: Sellers aggressive (prior drop <= -2.8%), hitting buyer wall
-                if prior_move_pct <= -self.MIN_IMPULSE_TREND_PCT:
+                candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=6)
+                if not candles_5m or len(candles_5m) < 4:
+                    return None
+
+                last_5m = candles_5m[-1]
+                prev_5m = candles_5m[-2]
+
+                # SCENARIO A: SELLERS TRAPPED AT FLOOR -> LONG TRIGGER
+                if prior_move_pct <= -self.MIN_DEEP_EXTENSION_PCT:
                     self.active_trap_radar[symbol] = {
                         "stage": "11-10",
                         "side": "long",
-                        "desc": f"Sellers trapped at floor (${min_low}) | RVOL: {rvol:.1f}x",
+                        "desc": f"Deep Dump (-{abs(prior_move_pct):.1f}%) trapped at floor (${min_low})",
                         "time": time.time()
                     }
 
-                    # CHECK 11-8: 5m candle confirms counter-turn (Burnley takes control)
-                    candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=4)
-                    if candles_5m and len(candles_5m) >= 2:
-                        last_5m = candles_5m[-1]
-                        if last_5m[4] > last_5m[1]:  # Solid green
-                            return {
-                                "side": "long",
-                                "wall_pivot": min_low,
-                                "desc": f"11-8 TRAP SPRUNG: Sellers down to 8 (Wall: ${min_low}, RVOL: {rvol:.1f}x)"
-                            }
+                    # Rule 3: Burnley Must Be WINNING PERFECTLY Before Entry
+                    # Must lead by >= 1.2% away from wall, with 2 consecutive green 5m candles
+                    separation = ((last_5m[4] - min_low) / min_low) * 100.0
+                    burnley_winning = (separation >= self.MIN_WINNING_SEPARATION_PCT) and (last_5m[4] > last_5m[1]) and (prev_5m[4] > prev_5m[1])
 
-                # Scenario B: Buyers aggressive (prior pump >= +2.8%), hitting seller wall
-                elif prior_move_pct >= self.MIN_IMPULSE_TREND_PCT:
+                    if burnley_winning:
+                        return {
+                            "side": "long",
+                            "wall_pivot": min_low,
+                            "desc": f"11-8 TRIGGER: Sellers crushed after -{abs(prior_move_pct):.1f}% dump | Burnley leading by +{separation:.2f}%!"
+                        }
+
+                # SCENARIO B: BUYERS TRAPPED AT CEILING -> SHORT TRIGGER
+                elif prior_move_pct >= self.MIN_DEEP_EXTENSION_PCT:
                     self.active_trap_radar[symbol] = {
                         "stage": "11-10",
                         "side": "short",
-                        "desc": f"Buyers trapped at ceiling (${max_high}) | RVOL: {rvol:.1f}x",
+                        "desc": f"Deep Pump (+{prior_move_pct:.1f}%) trapped at ceiling (${max_high})",
                         "time": time.time()
                     }
 
-                    # CHECK 11-8: 5m candle confirms counter-turn (Burnley takes control)
-                    candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=4)
-                    if candles_5m and len(candles_5m) >= 2:
-                        last_5m = candles_5m[-1]
-                        if last_5m[4] < last_5m[1]:  # Solid red
-                            return {
-                                "side": "short",
-                                "wall_pivot": max_high,
-                                "desc": f"11-8 TRAP SPRUNG: Buyers down to 8 (Wall: ${max_high}, RVOL: {rvol:.1f}x)"
-                            }
+                    separation = ((max_high - last_5m[4]) / max_high) * 100.0
+                    burnley_winning = (separation >= self.MIN_WINNING_SEPARATION_PCT) and (last_5m[4] < last_5m[1]) and (prev_5m[4] < prev_5m[1])
+
+                    if burnley_winning:
+                        return {
+                            "side": "short",
+                            "wall_pivot": max_high,
+                            "desc": f"11-8 TRIGGER: Buyers crushed after +{prior_move_pct:.1f}% pump | Burnley leading by -{separation:.2f}%!"
+                        }
             else:
                 if symbol in self.active_trap_radar and (time.time() - self.active_trap_radar[symbol]["time"] > 3600):
                     del self.active_trap_radar[symbol]
@@ -296,14 +341,9 @@ class BigCheatEngine:
             return None
 
     # --------------------------------------------------------------------------
-    # DYNAMIC MATCH-STATE EXIT ENGINE (NO STATIC %)
+    # 3. DYNAMIC MATCH-STATE EXIT ENGINE (NO STATIC %)
     # --------------------------------------------------------------------------
     def manage_trap_match_state(self):
-        """
-        Manages the active position dynamically:
-        1. Exit when match normalizes: Burnley 11 vs Man City 10 (Target Reached).
-        2. Cut immediately if Man City at 9 wins heavily (Trap Destroyed).
-        """
         trade = self.current_trade or (self.live_state if self.live_state["active"] else None)
         if not trade:
             self.current_trap_stage = "PATROL (HUNTING 11-8)"
@@ -322,14 +362,9 @@ class BigCheatEngine:
             if cur_price == 0:
                 return
 
-            # Fetch 1H candles to detect equilibrium (11 vs 10 normalization)
             candles_1h = self.bitget.fetch_ohlcv(sym, timeframe='1h', limit=24)
             closes_1h = [x[4] for x in candles_1h]
             ema21_1h = sum(closes_1h[-21:]) / 21.0
-
-            # Fetch 5m candles to detect tape momentum
-            candles_5m = self.bitget.fetch_ohlcv(sym, timeframe='5m', limit=5)
-            last_5m = candles_5m[-1] if candles_5m else None
         except Exception:
             return
 
@@ -344,11 +379,7 @@ class BigCheatEngine:
         is_win = False
         exit_reason = ""
 
-        # ----------------------------------------------------------------------
-        # SCENARIO A: THE TRAP NORMALIZES (BURNLEY 11 vs. MAN CITY 10)
-        # ----------------------------------------------------------------------
-        # The counter-thrust has expanded and reached the 1H equilibrium (EMA-21),
-        # OR the peak move begins rolling over as Man City regains the pitch:
+        # SCENARIO A: TRAP NORMALIZES (11 vs. 10 Normalization -> Cash Out)
         is_at_equilibrium = (side == "long" and cur_price >= ema21_1h) or (side == "short" and cur_price <= ema21_1h)
         is_rolling_over = (peak >= 3.0) and (peak - gain_pct >= 1.4)
 
@@ -356,21 +387,14 @@ class BigCheatEngine:
             self.current_trap_stage = "11 vs 10 (MATCH NORMALIZED -> ESCAPE)"
             should_exit = True
             is_win = True
-            exit_reason = f"TRAP NORMALIZED (11 vs 10): Move finished at {gain_pct:+.2f}% -> ESCAPE TO USDT"
+            exit_reason = f"TRAP NORMALIZED (11 vs 10): Edge realized at {gain_pct:+.2f}% -> ESCAPE TO USDT"
 
-        # ----------------------------------------------------------------------
         # SCENARIO B: MAN CITY WINS HEAVILY (TRAP DESTROYED -> CUT IMMEDIATELY)
-        # ----------------------------------------------------------------------
-        # Despite being handicapped at 9 or 8, Man City smashes the wall pivot anyway:
         man_city_won_heavily = False
-        if side == "long":
-            # If sellers break through the support wall by more than 0.8%
-            if cur_price < (wall * 0.992):
-                man_city_won_heavily = True
-        elif side == "short":
-            # If buyers break through the resistance ceiling by more than 0.8%
-            if cur_price > (wall * 1.008):
-                man_city_won_heavily = True
+        if side == "long" and cur_price < (wall * 0.992):
+            man_city_won_heavily = True
+        elif side == "short" and cur_price > (wall * 1.008):
+            man_city_won_heavily = True
 
         if man_city_won_heavily:
             self.current_trap_stage = "MAN CITY WON HEAVILY (TRAP COLLAPSED)"
@@ -378,9 +402,6 @@ class BigCheatEngine:
             is_win = False
             exit_reason = f"MAN CITY WON HEAVILY: Wall destroyed by aggressive side (Loss: {gain_pct:.1f}%)"
 
-        # ----------------------------------------------------------------------
-        # SCENARIO C: TRAP STALLS (NO ADVANCEMENT)
-        # ----------------------------------------------------------------------
         elif elapsed_hours >= 3.5 and gain_pct < 0.5:
             should_exit = True
             is_win = gain_pct > 0.0
@@ -399,13 +420,18 @@ class BigCheatEngine:
             self.current_trade = None
 
     def close_live_position(self, sym):
+        """Exits strictly via reduceOnly and only clears memory on confirmed execution."""
         try:
             positions = self.bitget.fetch_positions([sym])
             for p in positions:
                 contracts = abs(float(p.get('contracts', 0) or 0))
                 if contracts > 0:
                     close_side = 'sell' if self.live_state["side"] == 'long' else 'buy'
-                    self.bitget.create_order(sym, 'market', close_side, contracts, params={'reduceOnly': True, 'tradeSide': 'close'})
+                    try:
+                        self.bitget.create_order(sym, 'market', close_side, contracts, params={'reduceOnly': True})
+                    except Exception:
+                        self.bitget.create_order(sym, 'market', close_side, contracts, params={'reduceOnly': True, 'tradeSide': 'close'})
+
                     print(f"[LIVE ESCAPED] Closed {contracts} contracts on {sym} -> 100% USDT", flush=True)
                     self.live_state["active"] = False
                     break
@@ -413,11 +439,11 @@ class BigCheatEngine:
             print(f"[EXIT ERROR] Failed to close on exchange: {e}. Retaining state for retry.", flush=True)
 
     # --------------------------------------------------------------------------
-    # MAIN PATROL LOOP: CONTINUOUSLY WATCHES ALL $1M+ LIQUID COINS
+    # MAIN PATROL: CONTINUOUS PATROL OVER ALL $1M+ LIQUID PAIRS
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("\n[SYSTEM] The Big Cheat & Dynamic Match-State Engine Online.", flush=True)
+        print("\n[SYSTEM] The Big Cheat Engine Online (Flatlines Filtered & Deep Traps Active).", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -435,7 +461,6 @@ class BigCheatEngine:
 
                 tickers = self.bitget.fetch_tickers()
 
-                # Step 1: Patrol ALL coins with >= $1M Volume
                 candidates = []
                 for s, t in tickers.items():
                     if not s.endswith(":USDT"):
@@ -451,7 +476,6 @@ class BigCheatEngine:
                 candidates.sort(key=lambda x: x[1], reverse=True)
                 self.all_liquid_candidates = candidates
 
-                # Step 2: Patrol candidates in rotating chunks of 30 coins
                 if not self.current_trade and not self.live_state["active"]:
                     chunk_size = 30
                     start_idx = (cycle * chunk_size) % max(len(candidates), 1)
@@ -466,12 +490,12 @@ class BigCheatEngine:
                                 desc = signal["desc"]
                                 mid = float(tickers[sym]['last'])
 
-                                print(f"\n🚨 [MASSIVE CHEAT DETECTED: 11-8 SPRING] {sym} ({side.upper()}) at ${mid}", flush=True)
-                                print(f"📊 {desc} -> Entering alongside Burnley!\n", flush=True)
+                                print(f"\n🚨 [MASSIVE CHEAT CONFIRMED: 11-8] {sym} ({side.upper()}) at ${mid}", flush=True)
+                                print(f"📊 {desc}\n", flush=True)
 
                                 margin_alloc = balance * 0.90
                                 exchange_min = 5.50
-                                needed_lev = max(math.ceil(exchange_min / margin_alloc), 1)
+                                needed_lev = min(max(math.ceil(exchange_min / margin_alloc), 1), 20)
 
                                 try:
                                     self.bitget.set_leverage(needed_lev, sym, params={'marginCoin': 'USDT'})
@@ -486,7 +510,11 @@ class BigCheatEngine:
                                 order_side = 'buy' if side == 'long' else 'sell'
 
                                 try:
-                                    self.bitget.create_order(sym, 'market', order_side, amount, params={'tradeSide': 'open'})
+                                    try:
+                                        self.bitget.create_order(sym, 'market', order_side, amount)
+                                    except Exception:
+                                        self.bitget.create_order(sym, 'market', order_side, amount, params={'tradeSide': 'open'})
+
                                     self.live_state = {
                                         "active": True, "symbol": sym, "side": side,
                                         "contracts": amount, "entry_price": mid,
@@ -501,10 +529,10 @@ class BigCheatEngine:
                                         "entry_price": mid, "wall_pivot": wall,
                                         "start_time": time.time(), "max_peak": 0.0
                                     }
-                                    print(f"⚠️ [PAPER TRADE STARTED] {sym} (Live note: {err})\n", flush=True)
+                                    print(f"⚠️ [PAPER TRADE STARTED] {sym} (Live order note: {err})\n", flush=True)
                                     break
 
-                # CLEAN 10-MINUTE CONSOLE SUMMARY
+                # 10-MINUTE CLEAN SUMMARY (NO LOG SPAM)
                 now = time.time()
                 if now - self.last_summary_time >= 600:
                     self.last_summary_time = now
