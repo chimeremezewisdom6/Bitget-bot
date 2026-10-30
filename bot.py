@@ -12,7 +12,7 @@ import ccxt
 # 1. 1-CLICK WEB DASHBOARD (PORT 10000)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-MEMORY_FILE = "big_cheat_trap_memory.json"
+MEMORY_FILE = "fatigued_opponent_memory.json"
 bot = None
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -22,39 +22,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         
         if bot:
-            active_name = bot.current_trade["symbol"] if bot.current_trade else ("LIVE: " + str(bot.live_state["symbol"]) if bot.live_state["active"] else "SCANNING_ALL_COINS")
+            active_name = bot.current_trade["symbol"] if bot.current_trade else ("LIVE: " + str(bot.live_state["symbol"]) if bot.live_state["active"] else "SCANNING_FOR_FATIGUED_SIDES")
             active_side = bot.current_trade["side"].upper() if bot.current_trade else (bot.live_state["side"].upper() if bot.live_state["active"] else "NONE")
             gain_pct = bot.last_spot_gain
             peak_pct = bot.last_peak_gain
             held_str = f"{bot.last_held_hours:.1f} hrs" if (bot.current_trade or bot.live_state["active"]) else "0 hrs"
             
-            radar_html = "".join([f"<li><b>{sym}</b>: {data['desc']}</li>" for sym, data in list(bot.active_trap_radar.items())[:6]])
+            radar_html = "".join([f"<li><b>{sym}</b>: {data['desc']}</li>" for sym, data in list(bot.fatigue_radar.items())[:6]])
             if not radar_html:
-                radar_html = "<li>No minor traps currently building... scanning all liquid pairs.</li>"
+                radar_html = "<li>No opponents showing severe fatigue right now... scouting all liquid pairs.</li>"
 
             html = f"""<!DOCTYPE html>
             <html>
             <head>
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <meta http-equiv="refresh" content="15">
-                <title>The Big Cheat Trap Engine</title>
+                <title>Fatigued Opponent Engine</title>
                 <style>
                     body {{ font-family: -apple-system, sans-serif; background: #0b0f19; color: #f8fafc; padding: 20px; }}
                     .card {{ background: #151e32; border-radius: 12px; padding: 18px; margin-bottom: 15px; border: 1px solid #1e293b; }}
                     .stat {{ font-size: 26px; font-weight: bold; color: #38bdf8; margin: 4px 0; }}
                     .green {{ color: #4ade80; }}
                     .red {{ color: #f87171; }}
-                    .badge {{ background: #e11d48; padding: 3px 8px; border-radius: 6px; font-size: 13px; font-weight: bold; }}
+                    .badge {{ background: #0284c7; padding: 3px 8px; border-radius: 6px; font-size: 13px; font-weight: bold; }}
                     .title {{ font-size: 13px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }}
                     ul {{ padding-left: 20px; margin: 6px 0; font-size: 14px; color: #cbd5e1; }}
                 </style>
             </head>
             <body>
                 <div class="card">
-                    <div class="title">Active Trap Position (11 vs 8)</div>
+                    <div class="title">Active Match vs Fatigued Opponent</div>
                     <div class="stat">{active_name} ({active_side})</div>
                     <div>PnL: <b class="{'green' if gain_pct >= 0 else 'red'}">{gain_pct:+.2f}%</b> (Peak: {peak_pct:+.2f}%)</div>
-                    <div>Held Time: <b>{held_str}</b> | Match State: <span class="badge">{bot.current_trap_stage}</span></div>
+                    <div>Held Time: <b>{held_str}</b> | Match State: <span class="badge">{bot.current_trade_stage}</span></div>
                 </div>
                 <div class="card">
                     <div class="title">Account Vault</div>
@@ -62,11 +62,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     <div>Record: <b>{bot.all_time_wins} Wins / {bot.all_time_losses} Losses</b></div>
                 </div>
                 <div class="card">
-                    <div class="title">Trap Radar (11-10 Minor Cheats Brewing)</div>
+                    <div class="title">Fatigue Scouting Radar (Opponents Limping)</div>
                     <ul>{radar_html}</ul>
                     <div>Liquid Universe: <b>{len(bot.all_liquid_candidates)} Coins Monitored</b></div>
                 </div>
-                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • The Big Cheat (Dynamic Exits / Zero Flatlines)</div>
+                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • Fatigued Opponent Engine (Zero Chasing)</div>
             </body>
             </html>"""
         else:
@@ -84,24 +84,21 @@ def start_server():
     print(f"[SYSTEM] 1-Click Dashboard live on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. THE BIG CHEAT ENGINE WITH DEEP EXTENSION & PROVEN WINNER RULES
+# 2. THE FATIGUED OPPONENT TRADING ENGINE
 # ==============================================================================
-class BigCheatEngine:
+class FatiguedOpponentBot:
     def __init__(self):
         self.equity_floor = 1.05
         self.ROUNDTRIP_FEE_PCT = 0.12
 
-        # THE CHEAT PARAMETERS
-        self.MIN_DAILY_ATR_PCT = 6.5       # Disqualifies flat synthetic tokens like EUV
-        self.MIN_DEEP_EXTENSION_PCT = 5.5  # Man City's aggressive run must be at least 5.5% deep
-        self.WALL_COMPRESSION_PCT = 1.35   # Burnley's hidden limit wall (< 1.35% range box)
-        self.MIN_CHEAT_RVOL = 1.85         # Man City throwing heavy volume into the wall
-        self.MIN_WINNING_SEPARATION_PCT = 1.2  # Burnley must lead by >= 1.2% before entry
+        # FATIGUE DETECTION PARAMETERS
+        self.MIN_EXHAUSTION_RUN_PCT = 4.0      # Opponent ran for >= 4% and spent their stamina
+        self.MAX_COUNTER_PUNCH_POWER = 0.40    # Opponent's counter-attack produces < 0.40% move (too weak)
+        self.MIN_FRESH_SEPARATION_PCT = 1.10   # Our fresh side calmly leads by >= 1.10%
 
         self.all_time_wins = 0
         self.all_time_losses = 0
-        self.active_trap_radar = {}        # {symbol: {"stage": "11-10", "side": ..., "wall": ...}}
-        self.volatility_cache = {}         # {symbol: {"is_boom": bool, "time": timestamp}}
+        self.fatigue_radar = {}                # {symbol: {"opp_side": ..., "desc": ...}}
         self.all_liquid_candidates = []
         self.global_volume_whitelist = set()
 
@@ -110,10 +107,9 @@ class BigCheatEngine:
         self.last_spot_gain = 0.0
         self.last_peak_gain = 0.0
         self.last_held_hours = 0.0
-        self.current_trap_stage = "PATROL (HUNTING 11-8)"
-        self.last_10m_summary = "Scanning all liquid coins for deep 11-10 cheats..."
+        self.current_trade_stage = "PATROL (HUNTING FATIGUED OPPONENTS)"
+        self.last_10m_summary = "Scouting all liquid coins for crippled/fatigued sides..."
 
-        # Universal Exclusion List (No Gold, Stocks, or Synthetic Commodities)
         self.EXCLUSION_LIST = {
             'PAXG', 'XAUT', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 
             'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META',
@@ -157,7 +153,6 @@ class BigCheatEngine:
             pass
 
     def recover_existing_position(self):
-        """Correctly identifies Long vs Short to prevent reverse closes."""
         try:
             positions = self.bitget.fetch_positions()
             for p in positions:
@@ -227,132 +222,109 @@ class BigCheatEngine:
             time.sleep(600)
 
     # --------------------------------------------------------------------------
-    # 1. BIG BOOM CAPACITY FILTER: REJECTS FLAT TOKENS LIKE EUV
+    # FATIGUE INSPECTOR: IDENTIFIES CRIPPLED OPPONENTS & STEADY WINNERS
     # --------------------------------------------------------------------------
-    def check_big_boom_capacity(self, symbol):
-        now = time.time()
-        cached = self.volatility_cache.get(symbol)
-        if cached and (now - cached["time"] < 21600):  # 6-hour cache
-            return cached["is_boom"]
-
+    def inspect_fatigued_opponent(self, symbol):
+        """
+        1. Confirms the opposing side spent all their energy pushing (>= 4% run).
+        2. Tests for Fatigue: Their counter-attacks produce < 0.40% progress and volume drops.
+        3. Confirms our side is fresh/steady: Calm 5m candles leading by >= 1.10% with zero stress.
+        """
         try:
-            candles_1d = self.bitget.fetch_ohlcv(symbol, timeframe='1d', limit=10)
-            if not candles_1d or len(candles_1d) < 7:
-                return False
-
-            ranges = [((c[2] - c[3]) / c[3]) * 100.0 for c in candles_1d[-7:]]
-            avg_daily_range = sum(ranges) / len(ranges)
-            is_boom = avg_daily_range >= self.MIN_DAILY_ATR_PCT
-
-            self.volatility_cache[symbol] = {"is_boom": is_boom, "time": now}
-            return is_boom
-        except Exception:
-            return False
-
-    # --------------------------------------------------------------------------
-    # 2. DEEP TRAP DETECTOR & "WINNING PERFECTLY" VERIFICATION
-    # --------------------------------------------------------------------------
-    def inspect_trap_mechanics(self, symbol):
-        # Rule 1: Must be a volatile crypto coin capable of a massive boom
-        if not self.check_big_boom_capacity(symbol):
-            return None
-
-        try:
+            # Look at 15-minute candles to verify opponent's extended sprint
             candles_15m = self.bitget.fetch_ohlcv(symbol, timeframe='15m', limit=24)
             if not candles_15m or len(candles_15m) < 18:
                 return None
 
             completed_15m = candles_15m[:-1]
-            last_closed = completed_15m[-1]
+            last_closed_15m = completed_15m[-1]
 
-            # Volume comparison against 16-period baseline
-            avg_vol_15m = sum([x[5] for x in completed_15m[-16:]]) / 16.0
-            rvol = last_closed[5] / avg_vol_15m if avg_vol_15m > 0 else 1.0
-
-            # Rule 2: Prior trend MUST be a deep extension (At least 5.5% of real pain)
             prior_open = completed_15m[-16][1]
-            cur_price = last_closed[4]
+            cur_price = last_closed_15m[4]
             prior_move_pct = ((cur_price - prior_open) / prior_open) * 100.0
 
-            if abs(prior_move_pct) < self.MIN_DEEP_EXTENSION_PCT:
+            # Inspect 5-minute candles to check how weak the opponent's counter-punch is
+            candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=8)
+            if not candles_5m or len(candles_5m) < 6:
                 return None
 
-            # Wall detection: 3 completed 15m candles
-            recent_3 = completed_15m[-3:]
-            min_low = min([x[3] for x in recent_3])
-            max_high = max([x[2] for x in recent_3])
-            box_range = ((max_high - min_low) / min_low) * 100.0
+            completed_5m = candles_5m[:-1]
+            recent_3_5m = completed_5m[-3:]
+            last_5m = completed_5m[-1]
 
-            is_hitting_wall = (rvol >= self.MIN_CHEAT_RVOL) and (box_range <= self.WALL_COMPRESSION_PCT)
+            # ------------------------------------------------------------------
+            # SCENARIO A: SELLERS ARE SICK / CRIPPLED -> WE ENTER LONG
+            # ------------------------------------------------------------------
+            # 1. Sellers ran hard for hours (dumped >= 4.0%)
+            if prior_move_pct <= -self.MIN_EXHAUSTION_RUN_PCT:
+                floor_pivot = min([x[3] for x in completed_15m[-4:]])
 
-            if is_hitting_wall:
-                candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=6)
-                if not candles_5m or len(candles_5m) < 4:
-                    return None
+                # 2. Check sellers' stamina: Look at the red candles in the last 15 mins
+                seller_counter_punches = [abs(c[4] - c[1]) / c[1] * 100.0 for c in recent_3_5m if c[4] < c[1]]
+                max_seller_punch = max(seller_counter_punches) if seller_counter_punches else 0.0
 
-                last_5m = candles_5m[-1]
-                prev_5m = candles_5m[-2]
+                # If sellers can't even move the price by 0.40%, THEY ARE SICK/FATIGUED!
+                if max_seller_punch <= self.MAX_COUNTER_PUNCH_POWER:
+                    # 3. Check our fresh buyers: Price calmly breaks away from the floor
+                    separation = ((last_5m[4] - floor_pivot) / floor_pivot) * 100.0
 
-                # SCENARIO A: SELLERS TRAPPED AT FLOOR -> LONG TRIGGER
-                if prior_move_pct <= -self.MIN_DEEP_EXTENSION_PCT:
-                    self.active_trap_radar[symbol] = {
-                        "stage": "11-10",
-                        "side": "long",
-                        "desc": f"Deep Dump (-{abs(prior_move_pct):.1f}%) trapped at floor (${min_low})",
-                        "time": time.time()
-                    }
-
-                    # Rule 3: Burnley Must Be WINNING PERFECTLY Before Entry
-                    # Must lead by >= 1.2% away from wall, with 2 consecutive green 5m candles
-                    separation = ((last_5m[4] - min_low) / min_low) * 100.0
-                    burnley_winning = (separation >= self.MIN_WINNING_SEPARATION_PCT) and (last_5m[4] > last_5m[1]) and (prev_5m[4] > prev_5m[1])
-
-                    if burnley_winning:
+                    if separation >= self.MIN_FRESH_SEPARATION_PCT and last_5m[4] > last_5m[1]:
                         return {
                             "side": "long",
-                            "wall_pivot": min_low,
-                            "desc": f"11-8 TRIGGER: Sellers crushed after -{abs(prior_move_pct):.1f}% dump | Burnley leading by +{separation:.2f}%!"
+                            "wall_pivot": floor_pivot,
+                            "desc": f"SELLERS CRIPPLED: Dumped -{abs(prior_move_pct):.1f}%, now too weak to counter-punch (Max punch: {max_seller_punch:.2f}%). Fresh buyers leading by +{separation:.2f}%!"
+                        }
+                    else:
+                        self.fatigue_radar[symbol] = {
+                            "side": "long",
+                            "desc": f"Sellers fatigued (-{abs(prior_move_pct):.1f}%). Waiting for fresh buyers to separate."
                         }
 
-                # SCENARIO B: BUYERS TRAPPED AT CEILING -> SHORT TRIGGER
-                elif prior_move_pct >= self.MIN_DEEP_EXTENSION_PCT:
-                    self.active_trap_radar[symbol] = {
-                        "stage": "11-10",
-                        "side": "short",
-                        "desc": f"Deep Pump (+{prior_move_pct:.1f}%) trapped at ceiling (${max_high})",
-                        "time": time.time()
-                    }
+            # ------------------------------------------------------------------
+            # SCENARIO B: BUYERS ARE SICK / CRIPPLED -> WE ENTER SHORT
+            # ------------------------------------------------------------------
+            # 1. Buyers ran hard for hours (pumped >= 4.0%)
+            elif prior_move_pct >= self.MIN_EXHAUSTION_RUN_PCT:
+                ceiling_pivot = max([x[2] for x in completed_15m[-4:]])
 
-                    separation = ((max_high - last_5m[4]) / max_high) * 100.0
-                    burnley_winning = (separation >= self.MIN_WINNING_SEPARATION_PCT) and (last_5m[4] < last_5m[1]) and (prev_5m[4] < prev_5m[1])
+                # 2. Check buyers' stamina: Look at the green candles in the last 15 mins
+                buyer_counter_punches = [abs(c[4] - c[1]) / c[1] * 100.0 for c in recent_3_5m if c[4] > c[1]]
+                max_buyer_punch = max(buyer_counter_punches) if buyer_counter_punches else 0.0
 
-                    if burnley_winning:
+                # If buyers can't even push the price by 0.40%, THEY ARE SICK/FATIGUED!
+                if max_buyer_punch <= self.MAX_COUNTER_PUNCH_POWER:
+                    # 3. Check our fresh sellers: Price calmly drops away from the ceiling
+                    separation = ((ceiling_pivot - last_5m[4]) / ceiling_pivot) * 100.0
+
+                    if separation >= self.MIN_FRESH_SEPARATION_PCT and last_5m[4] < last_5m[1]:
                         return {
                             "side": "short",
-                            "wall_pivot": max_high,
-                            "desc": f"11-8 TRIGGER: Buyers crushed after +{prior_move_pct:.1f}% pump | Burnley leading by -{separation:.2f}%!"
+                            "wall_pivot": ceiling_pivot,
+                            "desc": f"BUYERS CRIPPLED: Pumped +{prior_move_pct:.1f}%, now too weak to counter-punch (Max punch: {max_buyer_punch:.2f}%). Fresh sellers leading by -{separation:.2f}%!"
                         }
-            else:
-                if symbol in self.active_trap_radar and (time.time() - self.active_trap_radar[symbol]["time"] > 3600):
-                    del self.active_trap_radar[symbol]
+                    else:
+                        self.fatigue_radar[symbol] = {
+                            "side": "short",
+                            "desc": f"Buyers fatigued (+{prior_move_pct:.1f}%). Waiting for fresh sellers to separate."
+                        }
 
             return None
         except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # 3. DYNAMIC MATCH-STATE EXIT ENGINE (NO STATIC %)
+    # POSITION MANAGEMENT: RIDE THE DEFENSELESS GOALS & ESCAPE SAFELY
     # --------------------------------------------------------------------------
-    def manage_trap_match_state(self):
+    def manage_fatigue_trade(self):
         trade = self.current_trade or (self.live_state if self.live_state["active"] else None)
         if not trade:
-            self.current_trap_stage = "PATROL (HUNTING 11-8)"
+            self.current_trade_stage = "PATROL (HUNTING FATIGUED OPPONENTS)"
             return
 
         sym = trade["symbol"]
         side = trade["side"]
         entry = trade["entry_price"]
-        wall = trade["wall_pivot"]
+        pivot = trade["wall_pivot"]
         elapsed_hours = (time.time() - trade["start_time"]) / 3600.0
         self.last_held_hours = elapsed_hours
 
@@ -362,9 +334,9 @@ class BigCheatEngine:
             if cur_price == 0:
                 return
 
-            candles_1h = self.bitget.fetch_ohlcv(sym, timeframe='1h', limit=24)
-            closes_1h = [x[4] for x in candles_1h]
-            ema21_1h = sum(closes_1h[-21:]) / 21.0
+            candles_5m = self.bitget.fetch_ohlcv(sym, timeframe='5m', limit=10)
+            closes_5m = [x[4] for x in candles_5m]
+            ema9_5m = sum(closes_5m[-9:]) / 9.0
         except Exception:
             return
 
@@ -379,33 +351,34 @@ class BigCheatEngine:
         is_win = False
         exit_reason = ""
 
-        # SCENARIO A: TRAP NORMALIZES (11 vs. 10 Normalization -> Cash Out)
-        is_at_equilibrium = (side == "long" and cur_price >= ema21_1h) or (side == "short" and cur_price <= ema21_1h)
-        is_rolling_over = (peak >= 3.0) and (peak - gain_pct >= 1.4)
-
-        if (is_at_equilibrium and gain_pct >= 1.5) or is_rolling_over:
-            self.current_trap_stage = "11 vs 10 (MATCH NORMALIZED -> ESCAPE)"
-            should_exit = True
-            is_win = True
-            exit_reason = f"TRAP NORMALIZED (11 vs 10): Edge realized at {gain_pct:+.2f}% -> ESCAPE TO USDT"
-
-        # SCENARIO B: MAN CITY WINS HEAVILY (TRAP DESTROYED -> CUT IMMEDIATELY)
-        man_city_won_heavily = False
-        if side == "long" and cur_price < (wall * 0.992):
-            man_city_won_heavily = True
-        elif side == "short" and cur_price > (wall * 1.008):
-            man_city_won_heavily = True
-
-        if man_city_won_heavily:
-            self.current_trap_stage = "MAN CITY WON HEAVILY (TRAP COLLAPSED)"
+        # --- RULE 1: INJURED SIDE WOKE UP (FALSE FATIGUE / CUT IMMEDIATELY) ---
+        # If the fatigued opponent suddenly finds strength and breaks back past the pivot by 0.7%, CUT!
+        if (side == "long" and cur_price < pivot * 0.993) or (side == "short" and cur_price > pivot * 1.007):
+            self.current_trade_stage = "OPPONENT NOT FATIGUED (CUT LOSS)"
             should_exit = True
             is_win = False
-            exit_reason = f"MAN CITY WON HEAVILY: Wall destroyed by aggressive side (Loss: {gain_pct:.1f}%)"
+            exit_reason = f"FALSE FATIGUE: Opponent broke the defense wall (Loss: {gain_pct:+.2f}%) -> CASH OUT"
 
-        elif elapsed_hours >= 3.5 and gain_pct < 0.5:
+        # --- RULE 2: EFFORTLESS EXPANSION HARVEST ---
+        # Because the opponent is fatigued, price glides smoothly. Once we capture solid profit:
+        elif peak >= 3.8 and (peak - gain_pct) >= 1.4:
+            self.current_trade_stage = "MATCH WON (TAKING PROFIT)"
+            should_exit = True
+            is_win = True
+            exit_reason = f"FATIGUE HARVESTED: Peaked at +{peak:.1f}%, secured at +{gain_pct:.1f}% -> 100% USDT"
+
+        # If 5-minute trend inverts after capturing a solid move (+2.0%+)
+        elif gain_pct >= 2.0 and ((side == "long" and cur_price < ema9_5m) or (side == "short" and cur_price > ema9_5m)):
+            self.current_trade_stage = "STALEMATE (CASHING OUT)"
+            should_exit = True
+            is_win = True
+            exit_reason = f"OPPONENT RECOVERING: 5m trend stalling at +{gain_pct:.2f}% -> ESCAPE TO USDT"
+
+        # If nothing happens after 2.5 hours (game ended in a draw)
+        elif elapsed_hours >= 2.5 and gain_pct < 0.3:
             should_exit = True
             is_win = gain_pct > 0.0
-            exit_reason = f"TRAP EXPIRED: Failed to produce expansion after {elapsed_hours:.1f}h"
+            exit_reason = f"DEAD GAME: No follow-through after {elapsed_hours:.1f}h"
 
         if should_exit:
             print(f"\n🛑 [EXIT EXECUTED] {sym} | Reason: {exit_reason} | Net: {gain_pct:+.2f}%\n", flush=True)
@@ -420,7 +393,6 @@ class BigCheatEngine:
             self.current_trade = None
 
     def close_live_position(self, sym):
-        """Exits strictly via reduceOnly and only clears memory on confirmed execution."""
         try:
             positions = self.bitget.fetch_positions([sym])
             for p in positions:
@@ -439,11 +411,11 @@ class BigCheatEngine:
             print(f"[EXIT ERROR] Failed to close on exchange: {e}. Retaining state for retry.", flush=True)
 
     # --------------------------------------------------------------------------
-    # MAIN PATROL: CONTINUOUS PATROL OVER ALL $1M+ LIQUID PAIRS
+    # PATROL LOOP ACROSS ALL $1M+ LIQUID COINS
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("\n[SYSTEM] The Big Cheat Engine Online (Flatlines Filtered & Deep Traps Active).", flush=True)
+        print("\n[SYSTEM] Fatigued Opponent Engine Online (Never Fight Fresh Teams).", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -454,7 +426,7 @@ class BigCheatEngine:
 
         while True:
             try:
-                self.manage_trap_match_state()
+                self.manage_fatigue_trade()
 
                 balance = float(self.bitget.fetch_balance().get('USDT', {}).get('free', 0) or 0)
                 self.last_balance = balance
@@ -477,20 +449,20 @@ class BigCheatEngine:
                 self.all_liquid_candidates = candidates
 
                 if not self.current_trade and not self.live_state["active"]:
-                    chunk_size = 30
+                    chunk_size = 35
                     start_idx = (cycle * chunk_size) % max(len(candidates), 1)
                     patrol_batch = candidates[start_idx:start_idx + chunk_size]
 
                     for sym, _ in patrol_batch:
                         if sym in tickers:
-                            signal = self.inspect_trap_mechanics(sym)
+                            signal = self.inspect_fatigued_opponent(sym)
                             if signal:
                                 side = signal["side"]
                                 wall = signal["wall_pivot"]
                                 desc = signal["desc"]
                                 mid = float(tickers[sym]['last'])
 
-                                print(f"\n🚨 [MASSIVE CHEAT CONFIRMED: 11-8] {sym} ({side.upper()}) at ${mid}", flush=True)
+                                print(f"\n🚨 [CRIPPLED OPPONENT DETECTED] {sym} ({side.upper()}) at ${mid}", flush=True)
                                 print(f"📊 {desc}\n", flush=True)
 
                                 margin_alloc = balance * 0.90
@@ -532,7 +504,7 @@ class BigCheatEngine:
                                     print(f"⚠️ [PAPER TRADE STARTED] {sym} (Live order note: {err})\n", flush=True)
                                     break
 
-                # 10-MINUTE CLEAN SUMMARY (NO LOG SPAM)
+                # 10-MINUTE CLEAN SUMMARY
                 now = time.time()
                 if now - self.last_summary_time >= 600:
                     self.last_summary_time = now
@@ -541,9 +513,9 @@ class BigCheatEngine:
                     if self.live_state["active"] or self.current_trade:
                         sym = self.live_state["symbol"] if self.live_state["active"] else self.current_trade["symbol"]
                         side = self.live_state["side"] if self.live_state["active"] else self.current_trade["side"]
-                        self.last_10m_summary = f"Holding {sym} ({side.upper()}) | PnL: {self.last_spot_gain:+.2f}% | State: {self.current_trap_stage}"
+                        self.last_10m_summary = f"Playing vs Fatigued {sym} ({side.upper()}) | PnL: {self.last_spot_gain:+.2f}% | State: {self.current_trade_stage}"
                     else:
-                        self.last_10m_summary = f"Patrolling {len(candidates)} liquid coins | Traps on Radar (11-10): {len(self.active_trap_radar)}"
+                        self.last_10m_summary = f"Scouting {len(candidates)} liquid coins | Opponents Limping: {len(self.fatigue_radar)}"
 
                     print(f"[{t_str}] [10-MIN SUMMARY] Vault: ${balance:.2f} | {self.last_10m_summary} | Record: {self.all_time_wins}W - {self.all_time_losses}L", flush=True)
 
@@ -554,5 +526,5 @@ class BigCheatEngine:
                 time.sleep(6)
 
 if __name__ == "__main__":
-    bot = BigCheatEngine()
+    bot = FatiguedOpponentBot()
     bot.run()
