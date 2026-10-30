@@ -12,7 +12,7 @@ import ccxt
 # 1. 1-CLICK WEB DASHBOARD (PORT 10000)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
-MEMORY_FILE = "fatigued_opponent_memory.json"
+MEMORY_FILE = "internal_strength_memory.json"
 bot = None
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -22,51 +22,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         
         if bot:
-            active_name = bot.current_trade["symbol"] if bot.current_trade else ("LIVE: " + str(bot.live_state["symbol"]) if bot.live_state["active"] else "SCANNING_FOR_FATIGUED_SIDES")
+            active_name = bot.current_trade["symbol"] if bot.current_trade else ("LIVE: " + str(bot.live_state["symbol"]) if bot.live_state["active"] else "SCANNING_MARKET")
             active_side = bot.current_trade["side"].upper() if bot.current_trade else (bot.live_state["side"].upper() if bot.live_state["active"] else "NONE")
             gain_pct = bot.last_spot_gain
             peak_pct = bot.last_peak_gain
             held_str = f"{bot.last_held_hours:.1f} hrs" if (bot.current_trade or bot.live_state["active"]) else "0 hrs"
-            
-            radar_html = "".join([f"<li><b>{sym}</b>: {data['desc']}</li>" for sym, data in list(bot.fatigue_radar.items())[:6]])
-            if not radar_html:
-                radar_html = "<li>No opponents showing severe fatigue right now... scouting all liquid pairs.</li>"
+            streak_str = " ".join([str(i) for i in range(1, bot.consecutive_paper_wins + 1)]) if bot.consecutive_paper_wins > 0 else "0"
+            mode_badge = "LIVE AUTHORIZED (6/6 STREAK WON!)" if bot.is_live_authorized() else f"PAPER QUALIFYING ({bot.consecutive_paper_wins}/6)"
 
             html = f"""<!DOCTYPE html>
             <html>
             <head>
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <meta http-equiv="refresh" content="15">
-                <title>Fatigued Opponent Engine</title>
+                <title>Internal Strength Imbalance Engine</title>
                 <style>
-                    body {{ font-family: -apple-system, sans-serif; background: #0b0f19; color: #f8fafc; padding: 20px; }}
-                    .card {{ background: #151e32; border-radius: 12px; padding: 18px; margin-bottom: 15px; border: 1px solid #1e293b; }}
-                    .stat {{ font-size: 26px; font-weight: bold; color: #38bdf8; margin: 4px 0; }}
+                    body {{ font-family: -apple-system, sans-serif; background: #080d1a; color: #f8fafc; padding: 20px; }}
+                    .card {{ background: #111a2e; border-radius: 12px; padding: 18px; margin-bottom: 15px; border: 1px solid #1e293b; }}
+                    .stat {{ font-size: 24px; font-weight: bold; color: #38bdf8; margin: 4px 0; }}
                     .green {{ color: #4ade80; }}
                     .red {{ color: #f87171; }}
-                    .badge {{ background: #0284c7; padding: 3px 8px; border-radius: 6px; font-size: 13px; font-weight: bold; }}
+                    .gold {{ color: #fbbf24; font-weight: bold; }}
+                    .badge {{ background: #2563eb; padding: 4px 10px; border-radius: 6px; font-size: 13px; font-weight: bold; }}
+                    .badge-live {{ background: #16a34a; padding: 4px 10px; border-radius: 6px; font-size: 13px; font-weight: bold; }}
                     .title {{ font-size: 13px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }}
-                    ul {{ padding-left: 20px; margin: 6px 0; font-size: 14px; color: #cbd5e1; }}
                 </style>
             </head>
             <body>
                 <div class="card">
-                    <div class="title">Active Match vs Fatigued Opponent</div>
+                    <div class="title">6-Win Qualification Controller</div>
+                    <div class="stat"><span class="{'badge-live' if bot.is_live_authorized() else 'badge'}">{mode_badge}</span></div>
+                    <div>Streak Sequence: <span class="gold">[{streak_str}] ({bot.consecutive_paper_wins}/6 in a row)</span></div>
+                    <div>All-Time Record: <b>{bot.all_time_wins} Wins / {bot.all_time_losses} Losses</b></div>
+                </div>
+                <div class="card">
+                    <div class="title">Active Trade (Widest Internal Imbalance)</div>
                     <div class="stat">{active_name} ({active_side})</div>
                     <div>PnL: <b class="{'green' if gain_pct >= 0 else 'red'}">{gain_pct:+.2f}%</b> (Peak: {peak_pct:+.2f}%)</div>
-                    <div>Held Time: <b>{held_str}</b> | Match State: <span class="badge">{bot.current_trade_stage}</span></div>
+                    <div>Held Time: <b>{held_str}</b> | State: <b>{bot.current_stage}</b></div>
                 </div>
                 <div class="card">
-                    <div class="title">Account Vault</div>
+                    <div class="title">Market Radar & Vault</div>
                     <div class="stat">${bot.last_balance:.2f} USDT</div>
-                    <div>Record: <b>{bot.all_time_wins} Wins / {bot.all_time_losses} Losses</b></div>
-                </div>
-                <div class="card">
-                    <div class="title">Fatigue Scouting Radar (Opponents Limping)</div>
-                    <ul>{radar_html}</ul>
                     <div>Liquid Universe: <b>{len(bot.all_liquid_candidates)} Coins Monitored</b></div>
+                    <div>Status: <i>{bot.last_10m_summary}</i></div>
                 </div>
-                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • Fatigued Opponent Engine (Zero Chasing)</div>
+                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • Internal Power Asymmetry Engine</div>
             </body>
             </html>"""
         else:
@@ -84,31 +85,36 @@ def start_server():
     print(f"[SYSTEM] 1-Click Dashboard live on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. THE FATIGUED OPPONENT TRADING ENGINE
+# 2. INTERNAL STRENGTH ASYMMETRY BOT
 # ==============================================================================
-class FatiguedOpponentBot:
+class InternalStrengthBot:
     def __init__(self):
         self.equity_floor = 1.05
         self.ROUNDTRIP_FEE_PCT = 0.12
 
-        # FATIGUE DETECTION PARAMETERS
-        self.MIN_EXHAUSTION_RUN_PCT = 4.0      # Opponent ran for >= 4% and spent their stamina
-        self.MAX_COUNTER_PUNCH_POWER = 0.40    # Opponent's counter-attack produces < 0.40% move (too weak)
-        self.MIN_FRESH_SEPARATION_PCT = 1.10   # Our fresh side calmly leads by >= 1.10%
-
+        # 6-WIN-IN-A-ROW QUALIFICATION
+        self.consecutive_paper_wins = 0
+        self.REQUIRED_WIN_STREAK = 6       # 1, 2, 3, 4, 5, 6 in a row!
         self.all_time_wins = 0
         self.all_time_losses = 0
-        self.fatigue_radar = {}                # {symbol: {"opp_side": ..., "desc": ...}}
+
+        # INTERNAL STRENGTH THRESHOLDS (ON THE SAME COIN)
+        self.MIN_IMBALANCE_RATIO = 2.4     # Winning side must be at least 2.4x stronger than losing side
+        self.MAX_SPREAD_PCT = 0.0012       # Rejects spreads > 0.12% (Anti-Trap)
+        self.MIN_DAILY_ATR_PCT = 5.5       # Rejects dead/synthetic tokens like EUV
+        self.MIN_RVOL = 1.65               # Volume must be real (Anti-Luck)
+
         self.all_liquid_candidates = []
         self.global_volume_whitelist = set()
+        self.volatility_cache = {}
 
         self.last_summary_time = 0.0
         self.last_balance = 1.33
         self.last_spot_gain = 0.0
         self.last_peak_gain = 0.0
         self.last_held_hours = 0.0
-        self.current_trade_stage = "PATROL (HUNTING FATIGUED OPPONENTS)"
-        self.last_10m_summary = "Scouting all liquid coins for crippled/fatigued sides..."
+        self.current_stage = "PATROL (HUNTING INTERNAL ASYMMETRY)"
+        self.last_10m_summary = "Scanning all liquid pairs for coins with widest Long vs Short power gap..."
 
         self.EXCLUSION_LIST = {
             'PAXG', 'XAUT', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 
@@ -119,7 +125,7 @@ class FatiguedOpponentBot:
         self.current_trade = None
         self.live_state = {
             "active": False, "symbol": None, "side": None, "contracts": 0,
-            "entry_price": 0.0, "wall_pivot": 0.0, "start_time": 0.0,
+            "entry_price": 0.0, "pivot_point": 0.0, "start_time": 0.0,
             "max_peak": 0.0
         }
 
@@ -146,6 +152,9 @@ class FatiguedOpponentBot:
         t_global = threading.Thread(target=self.global_volume_worker, daemon=True)
         t_global.start()
 
+    def is_live_authorized(self):
+        return self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK
+
     def enforce_one_way_mode(self):
         try:
             self.bitget.set_position_mode(hedged=False, params={'productType': 'USDT-FUTURES'})
@@ -166,7 +175,7 @@ class FatiguedOpponentBot:
                     self.live_state = {
                         "active": True, "symbol": sym, "side": side,
                         "contracts": contracts, "entry_price": entry_price,
-                        "wall_pivot": entry_price, "start_time": time.time(),
+                        "pivot_point": entry_price, "start_time": time.time(),
                         "max_peak": 0.0
                     }
                     print(f"\n🔄 [AUTO-RECOVERY] Resumed tracking live {side.upper()} on {sym} ({contracts} contracts)\n", flush=True)
@@ -179,8 +188,10 @@ class FatiguedOpponentBot:
             try:
                 with open(MEMORY_FILE, "r") as f:
                     data = json.load(f)
+                    self.consecutive_paper_wins = data.get("consecutive_paper_wins", 0)
                     self.all_time_wins = data.get("all_time_wins", 0)
                     self.all_time_losses = data.get("all_time_losses", 0)
+                    print(f"[MEMORY] Loaded: Streak {self.consecutive_paper_wins}/6 | {self.all_time_wins}W - {self.all_time_losses}L", flush=True)
             except Exception:
                 pass
 
@@ -189,6 +200,7 @@ class FatiguedOpponentBot:
         try:
             with open(tmp_file, "w") as f:
                 json.dump({
+                    "consecutive_paper_wins": self.consecutive_paper_wins,
                     "all_time_wins": self.all_time_wins,
                     "all_time_losses": self.all_time_losses
                 }, f, indent=2)
@@ -222,109 +234,225 @@ class FatiguedOpponentBot:
             time.sleep(600)
 
     # --------------------------------------------------------------------------
-    # FATIGUE INSPECTOR: IDENTIFIES CRIPPLED OPPONENTS & STEADY WINNERS
+    # 1. CALCULATE INTERNAL LONG VS SHORT STRENGTH ON THE SAME COIN
     # --------------------------------------------------------------------------
-    def inspect_fatigued_opponent(self, symbol):
+    def calculate_internal_coin_asymmetry(self, symbol):
         """
-        1. Confirms the opposing side spent all their energy pushing (>= 4% run).
-        2. Tests for Fatigue: Their counter-attacks produce < 0.40% progress and volume drops.
-        3. Confirms our side is fresh/steady: Calm 5m candles leading by >= 1.10% with zero stress.
+        Calculates Long Power vs Short Power on the SAME coin:
+        - Evaluates the last 12 5-minute candles (last 1 hour of combat).
+        - Measures buying volume & candle body vs selling volume & candle body.
+        - Returns: (dominant_side, ratio, bull_power, bear_power)
         """
         try:
-            # Look at 15-minute candles to verify opponent's extended sprint
-            candles_15m = self.bitget.fetch_ohlcv(symbol, timeframe='15m', limit=24)
-            if not candles_15m or len(candles_15m) < 18:
+            candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=14)
+            if not candles_5m or len(candles_5m) < 12:
                 return None
 
-            completed_15m = candles_15m[:-1]
-            last_closed_15m = completed_15m[-1]
+            completed = candles_5m[-12:]  # 1 hour of combat
+            bull_power = 0.0
+            bear_power = 0.0
 
-            prior_open = completed_15m[-16][1]
-            cur_price = last_closed_15m[4]
-            prior_move_pct = ((cur_price - prior_open) / prior_open) * 100.0
+            for c in completed:
+                o, h, l, cl, vol = c[1], c[2], c[3], c[4], c[5]
+                total_range = h - l
+                if total_range <= 0:
+                    continue
 
-            # Inspect 5-minute candles to check how weak the opponent's counter-punch is
-            candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=8)
-            if not candles_5m or len(candles_5m) < 6:
+                body = abs(cl - o)
+                body_ratio = body / total_range
+
+                # If candle is green, buyers won this round
+                if cl > o:
+                    bull_power += vol * (0.5 + 0.5 * body_ratio)
+                elif cl < o:
+                    bear_power += vol * (0.5 + 0.5 * body_ratio)
+
+            if bull_power <= 0 or bear_power <= 0:
                 return None
 
-            completed_5m = candles_5m[:-1]
-            recent_3_5m = completed_5m[-3:]
-            last_5m = completed_5m[-1]
+            if bull_power >= bear_power:
+                ratio = bull_power / bear_power
+                return ("long", ratio, bull_power, bear_power)
+            else:
+                ratio = bear_power / bull_power
+                return ("short", ratio, bull_power, bear_power)
 
-            # ------------------------------------------------------------------
-            # SCENARIO A: SELLERS ARE SICK / CRIPPLED -> WE ENTER LONG
-            # ------------------------------------------------------------------
-            # 1. Sellers ran hard for hours (dumped >= 4.0%)
-            if prior_move_pct <= -self.MIN_EXHAUSTION_RUN_PCT:
-                floor_pivot = min([x[3] for x in completed_15m[-4:]])
-
-                # 2. Check sellers' stamina: Look at the red candles in the last 15 mins
-                seller_counter_punches = [abs(c[4] - c[1]) / c[1] * 100.0 for c in recent_3_5m if c[4] < c[1]]
-                max_seller_punch = max(seller_counter_punches) if seller_counter_punches else 0.0
-
-                # If sellers can't even move the price by 0.40%, THEY ARE SICK/FATIGUED!
-                if max_seller_punch <= self.MAX_COUNTER_PUNCH_POWER:
-                    # 3. Check our fresh buyers: Price calmly breaks away from the floor
-                    separation = ((last_5m[4] - floor_pivot) / floor_pivot) * 100.0
-
-                    if separation >= self.MIN_FRESH_SEPARATION_PCT and last_5m[4] > last_5m[1]:
-                        return {
-                            "side": "long",
-                            "wall_pivot": floor_pivot,
-                            "desc": f"SELLERS CRIPPLED: Dumped -{abs(prior_move_pct):.1f}%, now too weak to counter-punch (Max punch: {max_seller_punch:.2f}%). Fresh buyers leading by +{separation:.2f}%!"
-                        }
-                    else:
-                        self.fatigue_radar[symbol] = {
-                            "side": "long",
-                            "desc": f"Sellers fatigued (-{abs(prior_move_pct):.1f}%). Waiting for fresh buyers to separate."
-                        }
-
-            # ------------------------------------------------------------------
-            # SCENARIO B: BUYERS ARE SICK / CRIPPLED -> WE ENTER SHORT
-            # ------------------------------------------------------------------
-            # 1. Buyers ran hard for hours (pumped >= 4.0%)
-            elif prior_move_pct >= self.MIN_EXHAUSTION_RUN_PCT:
-                ceiling_pivot = max([x[2] for x in completed_15m[-4:]])
-
-                # 2. Check buyers' stamina: Look at the green candles in the last 15 mins
-                buyer_counter_punches = [abs(c[4] - c[1]) / c[1] * 100.0 for c in recent_3_5m if c[4] > c[1]]
-                max_buyer_punch = max(buyer_counter_punches) if buyer_counter_punches else 0.0
-
-                # If buyers can't even push the price by 0.40%, THEY ARE SICK/FATIGUED!
-                if max_buyer_punch <= self.MAX_COUNTER_PUNCH_POWER:
-                    # 3. Check our fresh sellers: Price calmly drops away from the ceiling
-                    separation = ((ceiling_pivot - last_5m[4]) / ceiling_pivot) * 100.0
-
-                    if separation >= self.MIN_FRESH_SEPARATION_PCT and last_5m[4] < last_5m[1]:
-                        return {
-                            "side": "short",
-                            "wall_pivot": ceiling_pivot,
-                            "desc": f"BUYERS CRIPPLED: Pumped +{prior_move_pct:.1f}%, now too weak to counter-punch (Max punch: {max_buyer_punch:.2f}%). Fresh sellers leading by -{separation:.2f}%!"
-                        }
-                    else:
-                        self.fatigue_radar[symbol] = {
-                            "side": "short",
-                            "desc": f"Buyers fatigued (+{prior_move_pct:.1f}%). Waiting for fresh sellers to separate."
-                        }
-
-            return None
         except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # POSITION MANAGEMENT: RIDE THE DEFENSELESS GOALS & ESCAPE SAFELY
+    # 2. ANTI-LUCK & ANTI-TRAP VERIFICATION GAUNTLET
     # --------------------------------------------------------------------------
-    def manage_fatigue_trade(self):
+    def verify_asymmetry_authenticity(self, symbol, side, ratio):
+        """
+        Tests if the massive imbalance on this coin is genuine or a Trap / Luck:
+        1. Spread Gate: Must be <= 0.12% (proves deep book, not an illiquid trap).
+        2. Daily Volatility: ATR >= 5.5% (rejects flat dead coins like EUV).
+        3. Real Volume: Volume >= 1.65x normal 15m volume (not a fake vacuum).
+        4. Price Progress: If buyers are 3x stronger, price must have actually moved!
+           (If buyers pushed huge volume but price didn't move, IT IS AN ABSORPTION TRAP -> REJECT!).
+        """
+        # Test 1: Daily Volatility (No flat synthetic tokens)
+        now = time.time()
+        cached = self.volatility_cache.get(symbol)
+        if not cached or (now - cached["time"] > 21600):
+            try:
+                c_1d = self.bitget.fetch_ohlcv(symbol, timeframe='1d', limit=8)
+                if not c_1d or len(c_1d) < 5:
+                    return False, "Not enough daily history"
+                ranges = [((c[2] - c[3]) / c[3]) * 100.0 for c in c_1d[-5:]]
+                avg_atr = sum(ranges) / len(ranges)
+                is_boom = avg_atr >= self.MIN_DAILY_ATR_PCT
+                self.volatility_cache[symbol] = {"is_boom": is_boom, "time": now}
+            except Exception:
+                return False, "Daily ATR fetch error"
+        else:
+            is_boom = cached["is_boom"]
+
+        if not is_boom:
+            return False, "TRAP: Flat token with low volatility (like EUV)"
+
+        # Test 2: Order Book Spread (Anti-Vacuum Trap)
+        try:
+            ob = self.bitget.fetch_order_book(symbol, limit=5)
+            bids, asks = ob.get('bids', []), ob.get('asks', [])
+            if not bids or not asks:
+                return False, "TRAP: Empty order book"
+            best_bid = bids[0][0]
+            best_ask = asks[0][0]
+            mid = (best_bid + best_ask) / 2.0
+            spread = (best_ask - best_bid) / mid
+            if spread > self.MAX_SPREAD_PCT:
+                return False, f"TRAP: Spread too wide ({spread*100:.2f}%)"
+        except Exception:
+            return False, "Order book check failed"
+
+        # Test 3: Completed 15m Volume (Anti-Luck)
+        try:
+            c_15m = self.bitget.fetch_ohlcv(symbol, timeframe='15m', limit=20)
+            if not c_15m or len(c_15m) < 16:
+                return False, "Not enough 15m candles"
+            completed = c_15m[:-1]
+            last_15m = completed[-1]
+            avg_vol = sum([x[5] for x in completed[-15:]]) / 15.0
+            rvol = last_15m[5] / avg_vol if avg_vol > 0 else 1.0
+
+            if rvol < self.MIN_RVOL:
+                return False, f"TRAP: Low volume ({rvol:.1f}x) fake move"
+        except Exception:
+            return False, "Volume check failed"
+
+        # Test 4: Real Price Progress (Anti-Absorption Wall Trap)
+        try:
+            c_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=7)
+            if not c_5m or len(c_5m) < 6:
+                return False, "Not enough 5m candles"
+            c_start = c_5m[-6][1]
+            c_end = c_5m[-1][4]
+            move_pct = ((c_end - c_start) / c_start) * 100.0
+
+            if side == "long":
+                # If buyers are 2.5x stronger, price MUST be moving up (at least +0.8%)
+                if move_pct < 0.8:
+                    return False, "TRAP: Buyers have high volume but are blocked by a hidden wall!"
+            elif side == "short":
+                if move_pct > -0.8:
+                    return False, "TRAP: Sellers have high volume but are blocked by a hidden floor!"
+        except Exception:
+            return False, "Progress check failed"
+
+        return True, "GENUINE ASYMMETRY: Untrapped & real domination on this coin!"
+
+    # --------------------------------------------------------------------------
+    # 3. SCANNER: RANKS COINS BY INTERNAL ASYMMETRY & PICKS THE TRUE WINNER
+    # --------------------------------------------------------------------------
+    def scan_for_market_asymmetry_champion(self, candidates):
+        """
+        1. Calculates Long Strength vs Short Strength on every liquid coin.
+        2. Ranks coins by who has the LARGEST internal power gap.
+        3. Tests Candidate #1: If it's a Trap or Luck, SKIPS to Candidate #2,
+           then #3, until finding the true dominant winner.
+        """
+        ranked_pairs = []
+
+        # Check candidate pool for internal ratio
+        for sym, _ in candidates[:45]:
+            res = self.calculate_internal_coin_asymmetry(sym)
+            if res:
+                side, ratio, bull_p, bear_p = res
+                if ratio >= self.MIN_IMBALANCE_RATIO:
+                    ranked_pairs.append({
+                        "symbol": sym,
+                        "side": side,
+                        "ratio": ratio,
+                        "bull_p": bull_p,
+                        "bear_p": bear_p
+                    })
+
+        if not ranked_pairs:
+            return None
+
+        # Sort: Highest internal asymmetry on top!
+        ranked_pairs.sort(key=lambda x: x["ratio"], reverse=True)
+
+        # Sequentially test candidates: Discard luck/traps and pick the first genuine champion!
+        for cand in ranked_pairs[:6]:
+            sym = cand["symbol"]
+            side = cand["side"]
+            ratio = cand["ratio"]
+
+            is_valid, reason = self.verify_asymmetry_authenticity(sym, side, ratio)
+            if is_valid:
+                return {
+                    "symbol": sym,
+                    "side": side,
+                    "ratio": ratio,
+                    "desc": f"LARGEST INTERNAL ASYMMETRY: On {sym}, {side.upper()} strength is {ratio:.1f}x STRONGER than its opponent! (Widest gap in market)"
+                }
+            else:
+                # Log why candidate was skipped and move to the next!
+                # print(f"[SKIPPED CANDIDATE] {sym} ({side}) skipped: {reason}", flush=True)
+                pass
+
+        return None
+
+    # --------------------------------------------------------------------------
+    # 4. RECORD RESULTS (STRICT 1, 2, 3, 4, 5, 6 IN A ROW)
+    # --------------------------------------------------------------------------
+    def record_trade_result(self, is_win, symbol, net_spot):
+        if is_win:
+            self.all_time_wins += 1
+            self.consecutive_paper_wins += 1
+            streak_seq = ", ".join([str(i) for i in range(1, self.consecutive_paper_wins + 1)])
+            print(f"\n=======================================================", flush=True)
+            print(f"🏆 [WIN HARVESTED] {symbol} | Result: {net_spot:+.2f}%", flush=True)
+            print(f"🔥 STREAK PROGRESS: {self.consecutive_paper_wins}/{self.REQUIRED_WIN_STREAK} In a Row ({streak_seq})", flush=True)
+            if self.consecutive_paper_wins >= self.REQUIRED_WIN_STREAK:
+                print(f"🎉🎉 [6/6 STREAK UNLOCKED!] (1, 2, 3, 4, 5, 6 IN A ROW ACHIEVED) -> LIVE TRADING AUTHORIZED! 🎉🎉", flush=True)
+            print(f"=======================================================\n", flush=True)
+        else:
+            self.all_time_losses += 1
+            print(f"\n=======================================================", flush=True)
+            print(f"💥 [LOSS REGISTERED] {symbol} | Result: {net_spot:+.2f}%", flush=True)
+            print(f"⚠️ STREAK BROKEN: Resetting from {self.consecutive_paper_wins} back to 0/{self.REQUIRED_WIN_STREAK}.", flush=True)
+            print(f"=======================================================\n", flush=True)
+            self.consecutive_paper_wins = 0
+
+        self.save_memory()
+
+    # --------------------------------------------------------------------------
+    # 5. DYNAMIC RUNNER MANAGEMENT (LET THE DOMINANT SIDE RUN)
+    # --------------------------------------------------------------------------
+    def manage_active_trade(self):
         trade = self.current_trade or (self.live_state if self.live_state["active"] else None)
         if not trade:
-            self.current_trade_stage = "PATROL (HUNTING FATIGUED OPPONENTS)"
+            self.current_stage = "PATROL (HUNTING INTERNAL ASYMMETRY)"
             return
 
         sym = trade["symbol"]
         side = trade["side"]
         entry = trade["entry_price"]
-        pivot = trade["wall_pivot"]
+        pivot = trade["pivot_point"]
         elapsed_hours = (time.time() - trade["start_time"]) / 3600.0
         self.last_held_hours = elapsed_hours
 
@@ -351,42 +479,37 @@ class FatiguedOpponentBot:
         is_win = False
         exit_reason = ""
 
-        # --- RULE 1: INJURED SIDE WOKE UP (FALSE FATIGUE / CUT IMMEDIATELY) ---
-        # If the fatigued opponent suddenly finds strength and breaks back past the pivot by 0.7%, CUT!
-        if (side == "long" and cur_price < pivot * 0.993) or (side == "short" and cur_price > pivot * 1.007):
-            self.current_trade_stage = "OPPONENT NOT FATIGUED (CUT LOSS)"
+        # DYNAMIC EXIT PROTOCOLS
+        # 1. Big Expansion Harvest (Protect profits when dominant force exhausts)
+        if peak >= 3.8 and (peak - gain_pct) >= 1.3:
+            self.current_stage = "PROFIT_HARVEST"
+            should_exit = True
+            is_win = True
+            exit_reason = f"ASYMMETRY HARVEST: Peaked at +{peak:.1f}%, closed at +{gain_pct:.1f}% -> CASH OUT"
+
+        # 2. 5M Momentum Inversion (After capturing solid move >= +1.8%)
+        elif gain_pct >= 1.8 and ((side == "long" and cur_price < ema9_5m) or (side == "short" and cur_price > ema9_5m)):
+            self.current_stage = "TREND_INVERTED"
+            should_exit = True
+            is_win = True
+            exit_reason = f"MOMENTUM COMPLETE: 5m EMA inverting at +{gain_pct:.2f}% -> CASH OUT"
+
+        # 3. Pivot Invalidation (Dominant side lost control)
+        elif (side == "long" and cur_price < pivot * 0.990) or (side == "short" and cur_price > pivot * 1.010):
+            self.current_stage = "PIVOT_INVALIDATION"
             should_exit = True
             is_win = False
-            exit_reason = f"FALSE FATIGUE: Opponent broke the defense wall (Loss: {gain_pct:+.2f}%) -> CASH OUT"
+            exit_reason = f"DOMINANCE LOST: Price breached entry pivot (Loss: {gain_pct:+.2f}%) -> CASH OUT"
 
-        # --- RULE 2: EFFORTLESS EXPANSION HARVEST ---
-        # Because the opponent is fatigued, price glides smoothly. Once we capture solid profit:
-        elif peak >= 3.8 and (peak - gain_pct) >= 1.4:
-            self.current_trade_stage = "MATCH WON (TAKING PROFIT)"
-            should_exit = True
-            is_win = True
-            exit_reason = f"FATIGUE HARVESTED: Peaked at +{peak:.1f}%, secured at +{gain_pct:.1f}% -> 100% USDT"
-
-        # If 5-minute trend inverts after capturing a solid move (+2.0%+)
-        elif gain_pct >= 2.0 and ((side == "long" and cur_price < ema9_5m) or (side == "short" and cur_price > ema9_5m)):
-            self.current_trade_stage = "STALEMATE (CASHING OUT)"
-            should_exit = True
-            is_win = True
-            exit_reason = f"OPPONENT RECOVERING: 5m trend stalling at +{gain_pct:.2f}% -> ESCAPE TO USDT"
-
-        # If nothing happens after 2.5 hours (game ended in a draw)
+        # 4. Stagnant trade (No follow through after 2.5 hours)
         elif elapsed_hours >= 2.5 and gain_pct < 0.3:
             should_exit = True
             is_win = gain_pct > 0.0
-            exit_reason = f"DEAD GAME: No follow-through after {elapsed_hours:.1f}h"
+            exit_reason = f"TRADE STALLED: Dominant side stopped advancing after {elapsed_hours:.1f}h"
 
         if should_exit:
             print(f"\n🛑 [EXIT EXECUTED] {sym} | Reason: {exit_reason} | Net: {gain_pct:+.2f}%\n", flush=True)
-            if is_win:
-                self.all_time_wins += 1
-            else:
-                self.all_time_losses += 1
-            self.save_memory()
+            self.record_trade_result(is_win, sym, gain_pct)
 
             if self.live_state["active"]:
                 self.close_live_position(sym)
@@ -404,29 +527,27 @@ class FatiguedOpponentBot:
                     except Exception:
                         self.bitget.create_order(sym, 'market', close_side, contracts, params={'reduceOnly': True, 'tradeSide': 'close'})
 
-                    print(f"[LIVE ESCAPED] Closed {contracts} contracts on {sym} -> 100% USDT", flush=True)
+                    print(f"[LIVE CLOSED] Closed {contracts} contracts on {sym} -> 100% USDT", flush=True)
                     self.live_state["active"] = False
                     break
         except Exception as e:
             print(f"[EXIT ERROR] Failed to close on exchange: {e}. Retaining state for retry.", flush=True)
 
     # --------------------------------------------------------------------------
-    # PATROL LOOP ACROSS ALL $1M+ LIQUID COINS
+    # 6. MAIN ENGINE LOOP
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("\n[SYSTEM] Fatigued Opponent Engine Online (Never Fight Fresh Teams).", flush=True)
+        print("\n[SYSTEM] Internal Strength Imbalance Engine Online (Anti-Trap + 6-Win Qualifier Active).", flush=True)
 
         try:
             self.bitget.load_markets()
         except Exception:
             pass
 
-        cycle = 0
-
         while True:
             try:
-                self.manage_fatigue_trade()
+                self.manage_active_trade()
 
                 balance = float(self.bitget.fetch_balance().get('USDT', {}).get('free', 0) or 0)
                 self.last_balance = balance
@@ -448,83 +569,87 @@ class FatiguedOpponentBot:
                 candidates.sort(key=lambda x: x[1], reverse=True)
                 self.all_liquid_candidates = candidates
 
+                # Scan for coin with widest internal asymmetry
                 if not self.current_trade and not self.live_state["active"]:
-                    chunk_size = 35
-                    start_idx = (cycle * chunk_size) % max(len(candidates), 1)
-                    patrol_batch = candidates[start_idx:start_idx + chunk_size]
+                    champion = self.scan_for_market_asymmetry_champion(candidates)
+                    if champion:
+                        sym = champion["symbol"]
+                        side = champion["side"]
+                        desc = champion["desc"]
+                        mid = float(tickers[sym]['last'])
 
-                    for sym, _ in patrol_batch:
-                        if sym in tickers:
-                            signal = self.inspect_fatigued_opponent(sym)
-                            if signal:
-                                side = signal["side"]
-                                wall = signal["wall_pivot"]
-                                desc = signal["desc"]
-                                mid = float(tickers[sym]['last'])
+                        print(f"\n🚨 [INTERNAL CHAMPION IDENTIFIED: {side.upper()}] {sym} at ${mid}", flush=True)
+                        print(f"📊 {desc}\n", flush=True)
 
-                                print(f"\n🚨 [CRIPPLED OPPONENT DETECTED] {sym} ({side.upper()}) at ${mid}", flush=True)
-                                print(f"📊 {desc}\n", flush=True)
+                        # Execution Gate: PAPER QUALIFYING vs LIVE AUTHORIZED
+                        if self.is_live_authorized():
+                            margin_alloc = balance * 0.90
+                            exchange_min = 5.50
+                            needed_lev = min(max(math.ceil(exchange_min / margin_alloc), 1), 20)
 
-                                margin_alloc = balance * 0.90
-                                exchange_min = 5.50
-                                needed_lev = min(max(math.ceil(exchange_min / margin_alloc), 1), 20)
-
+                            try:
+                                self.bitget.set_leverage(needed_lev, sym, params={'marginCoin': 'USDT'})
+                            except Exception:
                                 try:
-                                    self.bitget.set_leverage(needed_lev, sym, params={'marginCoin': 'USDT'})
+                                    self.bitget.set_leverage(needed_lev, sym)
                                 except Exception:
-                                    try:
-                                        self.bitget.set_leverage(needed_lev, sym)
-                                    except Exception:
-                                        pass
+                                    pass
 
-                                notional = margin_alloc * needed_lev
-                                amount = float(self.bitget.amount_to_precision(sym, notional / mid))
-                                order_side = 'buy' if side == 'long' else 'sell'
+                            notional = margin_alloc * needed_lev
+                            amount = float(self.bitget.amount_to_precision(sym, notional / mid))
+                            order_side = 'buy' if side == 'long' else 'sell'
 
+                            try:
                                 try:
-                                    try:
-                                        self.bitget.create_order(sym, 'market', order_side, amount)
-                                    except Exception:
-                                        self.bitget.create_order(sym, 'market', order_side, amount, params={'tradeSide': 'open'})
+                                    self.bitget.create_order(sym, 'market', order_side, amount)
+                                except Exception:
+                                    self.bitget.create_order(sym, 'market', order_side, amount, params={'tradeSide': 'open'})
 
-                                    self.live_state = {
-                                        "active": True, "symbol": sym, "side": side,
-                                        "contracts": amount, "entry_price": mid,
-                                        "wall_pivot": wall, "start_time": time.time(),
-                                        "max_peak": 0.0
-                                    }
-                                    print(f"✅ [LIVE TRADE OPENED] {sym} | Margin: ${margin_alloc:.2f} | Leverage: {needed_lev}x\n", flush=True)
-                                    break
-                                except Exception as err:
-                                    self.current_trade = {
-                                        "symbol": sym, "side": side,
-                                        "entry_price": mid, "wall_pivot": wall,
-                                        "start_time": time.time(), "max_peak": 0.0
-                                    }
-                                    print(f"⚠️ [PAPER TRADE STARTED] {sym} (Live order note: {err})\n", flush=True)
-                                    break
+                                self.live_state = {
+                                    "active": True, "symbol": sym, "side": side,
+                                    "contracts": amount, "entry_price": mid,
+                                    "pivot_point": mid, "start_time": time.time(),
+                                    "max_peak": 0.0
+                                }
+                                print(f"✅ [LIVE TRADE OPENED] {sym} | Margin: ${margin_alloc:.2f} | Leverage: {needed_lev}x\n", flush=True)
+                            except Exception as err:
+                                print(f"⚠️ Live order failed: {err}. Falling back to paper trade.\n", flush=True)
+                                self.current_trade = {
+                                    "symbol": sym, "side": side,
+                                    "entry_price": mid, "pivot_point": mid,
+                                    "start_time": time.time(), "max_peak": 0.0
+                                }
+                        else:
+                            # Paper Qualifying Trade
+                            self.current_trade = {
+                                "symbol": sym, "side": side,
+                                "entry_price": mid, "pivot_point": mid,
+                                "start_time": time.time(), "max_peak": 0.0
+                            }
+                            print(f"📝 [PAPER QUALIFYING TRADE OPENED] {sym} ({side.upper()}) | Streak Goal: {self.consecutive_paper_wins}/6 -> {self.consecutive_paper_wins+1}/6\n", flush=True)
 
-                # 10-MINUTE CLEAN SUMMARY
+                # CLEAN 10-MINUTE SUMMARY
                 now = time.time()
                 if now - self.last_summary_time >= 600:
                     self.last_summary_time = now
                     t_str = time.strftime("%H:%M:%S", time.localtime(now))
-                    
+                    streak_status = "LIVE_AUTHORIZED" if self.is_live_authorized() else f"PAPER_STREAK ({self.consecutive_paper_wins}/6)"
+                    streak_seq = " ".join([str(i) for i in range(1, self.consecutive_paper_wins + 1)]) if self.consecutive_paper_wins > 0 else "0"
+
                     if self.live_state["active"] or self.current_trade:
                         sym = self.live_state["symbol"] if self.live_state["active"] else self.current_trade["symbol"]
                         side = self.live_state["side"] if self.live_state["active"] else self.current_trade["side"]
-                        self.last_10m_summary = f"Playing vs Fatigued {sym} ({side.upper()}) | PnL: {self.last_spot_gain:+.2f}% | State: {self.current_trade_stage}"
+                        self.last_10m_summary = f"Holding {sym} ({side.upper()}) | PnL: {self.last_spot_gain:+.2f}% | Streak: [{streak_seq}] ({self.consecutive_paper_wins}/6)"
                     else:
-                        self.last_10m_summary = f"Scouting {len(candidates)} liquid coins | Opponents Limping: {len(self.fatigue_radar)}"
+                        self.last_10m_summary = f"Patrolling {len(candidates)} pairs for widest internal imbalance | Streak: [{streak_seq}] ({self.consecutive_paper_wins}/6)"
 
                     print(f"[{t_str}] [10-MIN SUMMARY] Vault: ${balance:.2f} | {self.last_10m_summary} | Record: {self.all_time_wins}W - {self.all_time_losses}L", flush=True)
 
-                cycle += 1
-                time.sleep(6)
+                time.sleep(8)
 
-            except Exception:
-                time.sleep(6)
+            except Exception as e:
+                time.sleep(8)
 
 if __name__ == "__main__":
-    bot = FatiguedOpponentBot()
+    bot = InternalStrengthBot()
     bot.run()
