@@ -4,13 +4,12 @@ import time
 import json
 import math
 import threading
-import traceback
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import ccxt
 
 # ==============================================================================
-# 1. RENDER 1-CLICK WEB DASHBOARD (PORT 10000)
+# 1. 1-CLICK WEB DASHBOARD (PORT 10000)
 # ==============================================================================
 PORT = int(os.environ.get("PORT", 10000))
 MEMORY_FILE = "master_30d_eligible_memory.json"
@@ -23,7 +22,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         
         if bot:
-            active_name = bot.current_trade["symbol"] if bot.current_trade else ("LIVE_ACTIVE: " + str(bot.live_state["symbol"]) if bot.live_state["active"] else "SCANNING")
+            active_name = bot.current_trade["symbol"] if bot.current_trade else ("LIVE: " + str(bot.live_state["symbol"]) if bot.live_state["active"] else "SCANNING_IGNITIONS")
             active_side = bot.current_trade["side"].upper() if bot.current_trade else (bot.live_state["side"].upper() if bot.live_state["active"] else "NONE")
             gain_pct = bot.last_spot_gain
             peak_pct = bot.last_peak_gain
@@ -34,7 +33,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <head>
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <meta http-equiv="refresh" content="15">
-                <title>Bitget Bot Summary</title>
+                <title>Bitget Momentum Ignition Engine</title>
                 <style>
                     body {{ font-family: -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
                     .card {{ background: #1e293b; border-radius: 12px; padding: 18px; margin-bottom: 15px; border: 1px solid #334155; }}
@@ -46,7 +45,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </head>
             <body>
                 <div class="card">
-                    <div class="title">Active Position</div>
+                    <div class="title">Active Momentum Runner</div>
                     <div class="stat">{active_name} ({active_side})</div>
                     <div>PnL: <b class="{'green' if gain_pct >= 0 else 'red'}">{gain_pct:+.2f}%</b> (Peak: {peak_pct:+.2f}%)</div>
                     <div>Held Time: <b>{held_str}</b></div>
@@ -57,12 +56,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     <div>Record: <b>{bot.all_time_wins} Wins / {bot.all_time_losses} Losses</b></div>
                 </div>
                 <div class="card">
-                    <div class="title">30-Day Runner Scanner</div>
-                    <div>Verified 50%+ Movers: <b>{len(bot.eligible_30d_coins)} Coins</b></div>
-                    <div>Quarantined (Excluded): <b>{len(bot.ineligible_quarantine)} Coins</b></div>
+                    <div class="title">30-Day Certified Runners</div>
+                    <div>Verified 50%+ Coins: <b>{len(bot.eligible_30d_coins)} Coins</b></div>
                     <div>Status: <i>{bot.last_10m_summary}</i></div>
                 </div>
-                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • APEX 30D Dual Engine</div>
+                <div style="text-align: center; font-size: 11px; color: #64748b;">Auto-refreshes every 15s • Institutional Ignition Engine</div>
             </body>
             </html>"""
         else:
@@ -77,10 +75,10 @@ def start_server():
     server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    print(f"[SYSTEM] 1-Click Dashboard live on port {PORT}", flush=True)
+    print(f"[SYSTEM] Dashboard active on port {PORT}", flush=True)
 
 # ==============================================================================
-# 2. BOT ENGINE
+# 2. BOT ENGINE: ±4% INSTITUTIONAL IGNITION RUNNER
 # ==============================================================================
 class Strict30dGatedBot:
     def __init__(self):
@@ -89,9 +87,10 @@ class Strict30dGatedBot:
         self.LOOKBACK_DAYS = 30
         self.MIN_SINGLE_DAY_MOVE_PCT = 50.0
 
-        self.MIN_LEAD_DISPLACEMENT_PCT = 1.5
-        self.MAX_CHASE_LEAD_PCT = 4.5
-        self.MIN_OPEN_RUNWAY_PCT = 10.0
+        # INSTITUTIONAL IGNITION PARAMETERS (THE ±4% RULE)
+        self.MIN_DAILY_IGNITION_PCT = 4.0      # Must have moved at least 4% from today's Open
+        self.MAX_DAILY_ENTRY_CEILING_PCT = 9.5 # Do not chase if it already pumped > 9.5%
+        self.MIN_INSTITUTIONAL_RVOL = 2.8      # Must have 2.8x - 3.0x normal volume
 
         self.all_time_wins = 0
         self.all_time_losses = 0
@@ -101,18 +100,16 @@ class Strict30dGatedBot:
         self.coin_mistakes = {}
         self.global_volume_whitelist = set()
 
-        # Telemetry for Clean 10-Minute Summaries
         self.last_summary_time = 0.0
         self.last_balance = 1.78
         self.last_spot_gain = 0.0
         self.last_peak_gain = 0.0
         self.last_held_hours = 0.0
-        self.last_10m_summary = "Scanning 30-day verified runners..."
+        self.last_10m_summary = "Scanning for ±4% Institutional Ignitions..."
 
         self.EXCLUSION_LIST = {
             'PAXG', 'XAUT', 'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 
-            'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META',
-            'CL', 'BZ', 'XAU', 'XAG', 'SPX', 'NDX', 'DJI', 'KORU', 'MU'
+            'SOXS', 'SOXL', 'NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'META'
         }
 
         self.current_trade = None
@@ -127,7 +124,7 @@ class Strict30dGatedBot:
         self.passphrase = (os.environ.get("PASSPHRASE") or "").strip()
 
         if not all([self.api_key, self.secret_key, self.passphrase]):
-            print("[FATAL] Missing Bitget credentials!", flush=True)
+            print("[FATAL] Missing credentials!", flush=True)
             sys.exit(1)
 
         self.bitget = ccxt.bitget({
@@ -140,7 +137,7 @@ class Strict30dGatedBot:
 
         self.enforce_one_way_mode()
         self.load_memory()
-        self.recover_existing_position()  # AUTO-RECOVERS ANY OPEN TRADE AFTER RESTART
+        self.recover_existing_position()
 
         t_global = threading.Thread(target=self.global_volume_worker, daemon=True)
         t_global.start()
@@ -152,7 +149,6 @@ class Strict30dGatedBot:
             pass
 
     def recover_existing_position(self):
-        """Adopts any active position on Bitget if Render restarts."""
         try:
             positions = self.bitget.fetch_positions()
             for p in positions:
@@ -226,7 +222,7 @@ class Strict30dGatedBot:
             time.sleep(600)
 
     # --------------------------------------------------------------------------
-    # 30-DAY 50%+ AUDITOR (ELIGIBLE ONLY)
+    # 30-DAY PROVEN 50%+ RUNNER AUDITOR
     # --------------------------------------------------------------------------
     def audit_coin_30d_eligibility(self, symbol):
         try:
@@ -261,12 +257,8 @@ class Strict30dGatedBot:
                     del self.eligible_30d_coins[symbol]
                 return False
 
-            all_mults = pumps_50 + dumps_50
-            avg_vol_mult = sum(all_mults) / len(all_mults)
-
             self.eligible_30d_coins[symbol] = {
                 "total_events": total_events,
-                "required_vol_mult": round(min(max(avg_vol_mult, 1.8), 4.5), 2),
                 "can_long": len(pumps_50) > 0,
                 "can_short": len(dumps_50) > 0
             }
@@ -276,25 +268,79 @@ class Strict30dGatedBot:
         except Exception:
             return False
 
-    def inspect_eligible_coin(self, symbol):
+    # --------------------------------------------------------------------------
+    # ACTIVE DIRECTION & BULLDOZER BODY CHECK (5-MINUTE TIME TAPE)
+    # --------------------------------------------------------------------------
+    def verify_active_tape(self, symbol, side):
+        try:
+            candles_5m = self.bitget.fetch_ohlcv(symbol, timeframe='5m', limit=5)
+            if not candles_5m or len(candles_5m) < 3:
+                return False
+
+            last_c = candles_5m[-1]
+            prev_c = candles_5m[-2]
+
+            o, h, l, c = last_c[1], last_c[2], last_c[3], last_c[4]
+            total_range = h - l
+            if total_range <= 0:
+                return False
+
+            body_size = abs(c - o)
+            body_ratio = body_size / total_range
+
+            # Must have at least 65% solid candle body (No big rejection wicks!)
+            if body_ratio < 0.65:
+                return False
+
+            if side == "short":
+                return (c < o) and (c <= prev_c[4])
+            elif side == "long":
+                return (c > o) and (c >= prev_c[4])
+
+            return False
+        except Exception:
+            return False
+
+    # --------------------------------------------------------------------------
+    # THE INSTITUTIONAL IGNITION INSPECTOR (±4% FROM 00:00 UTC OPEN)
+    # --------------------------------------------------------------------------
+    def inspect_strong_ignition(self, symbol):
+        """
+        Confirms a coin has launched a TRUE Institutional Momentum Day:
+        1. Has gained >= +4% or dropped <= -4% from the Daily Open.
+        2. Has NOT already reached the finish line (> 9.5% is too late).
+        3. Relative Volume (RVOL) is >= 2.8x (Heavy money moving the asset).
+        4. Active 5m tape confirms continuous bulldozing in that exact direction.
+        """
         scenario = self.eligible_30d_coins.get(symbol)
         if not scenario:
             return None
 
         try:
-            candles_1h = self.bitget.fetch_ohlcv(symbol, timeframe='1h', limit=75)
-            if not candles_1h or len(candles_1h) < 65:
+            # 1. Fetch Daily (1D) candles to anchor 00:00 UTC Open
+            d_candles = self.bitget.fetch_ohlcv(symbol, timeframe='1d', limit=15)
+            if not d_candles or len(d_candles) < 12:
                 return None
 
-            history = candles_1h[:-1]
-            current_c = candles_1h[-1]
-            cur_open = current_c[1]
-            cur_price = current_c[4]
-            cur_vol = current_c[5]
-            avg_vol_24 = sum([x[5] for x in history[-24:]]) / 24.0
-            vol_mult = cur_vol / avg_vol_24 if avg_vol_24 > 0 else 1.0
+            today_c = d_candles[-1]
+            daily_open = today_c[1]
+            cur_price = today_c[4]
 
-            closes = [x[4] for x in history] + [cur_price]
+            # Calculate today's net gain from open
+            day_gain_pct = ((cur_price - daily_open) / daily_open) * 100.0
+
+            # 2. Check 1-Hour candles for volume acceleration
+            candles_1h = self.bitget.fetch_ohlcv(symbol, timeframe='1h', limit=48)
+            if not candles_1h or len(candles_1h) < 30:
+                return None
+
+            history_1h = candles_1h[:-1]
+            current_1h = candles_1h[-1]
+            avg_vol_24 = sum([x[5] for x in history_1h[-24:]]) / 24.0
+            rvol = current_1h[5] / avg_vol_24 if avg_vol_24 > 0 else 1.0
+
+            # Check 1H Moving Averages
+            closes = [x[4] for x in history_1h] + [cur_price]
             def calc_ema(data, period):
                 k = 2 / (period + 1)
                 res = [data[0]]
@@ -305,39 +351,47 @@ class Strict30dGatedBot:
             ema9 = calc_ema(closes, 9)[-1]
             ema21 = calc_ema(closes, 21)[-1]
 
-            # 1. 30d Ignition Match
-            if scenario["can_long"] and cur_price > cur_open and cur_price > ema9 and ema9 > ema21:
-                gain_1h = ((cur_price - cur_open) / cur_open) * 100.0
-                if gain_1h >= 1.5 and vol_mult >= scenario["required_vol_mult"]:
-                    return {"side": "long", "engine": "30D_IGNITION", "pivot": cur_open}
+            # ------------------------------------------------------------------
+            # LONG IGNITION: Daily +4.0% to +9.5% with 2.8x+ Volume
+            # ------------------------------------------------------------------
+            if scenario["can_long"]:
+                is_in_sweet_spot = self.MIN_DAILY_IGNITION_PCT <= day_gain_pct <= self.MAX_DAILY_ENTRY_CEILING_PCT
+                has_volume_thrust = rvol >= self.MIN_INSTITUTIONAL_RVOL
+                has_trend_structure = cur_price > ema9 and ema9 > ema21
 
-            if scenario["can_short"] and cur_price < cur_open and cur_price < ema9 and ema9 < ema21:
-                dump_1h = ((cur_open - cur_price) / cur_open) * 100.0
-                if dump_1h >= 1.5 and vol_mult >= scenario["required_vol_mult"]:
-                    return {"side": "short", "engine": "30D_IGNITION", "pivot": cur_open}
+                if is_in_sweet_spot and has_volume_thrust and has_trend_structure:
+                    if self.verify_active_tape(symbol, "long"):
+                        return {
+                            "side": "long",
+                            "day_gain": day_gain_pct,
+                            "rvol": round(rvol, 1),
+                            "pivot": daily_open
+                        }
 
-            # 2. James vs David Front-Runner
-            if vol_mult >= 1.7:
-                recent = history[-60:-1]
-                james_ceil = max([x[2] for x in recent])
-                james_floor = min([x[3] for x in recent])
+            # ------------------------------------------------------------------
+            # SHORT IGNITION: Daily -4.0% to -9.5% with 2.8x+ Volume
+            # ------------------------------------------------------------------
+            if scenario["can_short"]:
+                day_dump_pct = abs(day_gain_pct)
+                is_in_sweet_spot = (day_gain_pct <= -self.MIN_DAILY_IGNITION_PCT) and (day_dump_pct <= self.MAX_DAILY_ENTRY_CEILING_PCT)
+                has_volume_thrust = rvol >= self.MIN_INSTITUTIONAL_RVOL
+                has_trend_structure = cur_price < ema9 and ema9 < ema21
 
-                if cur_price > james_ceil and cur_price > ema9 and ema9 > ema21:
-                    lead = ((cur_price - james_ceil) / james_ceil) * 100.0
-                    if self.MIN_LEAD_DISPLACEMENT_PCT <= lead <= self.MAX_CHASE_LEAD_PCT:
-                        return {"side": "long", "engine": "FRONT_RUNNER_DAVID", "pivot": james_ceil}
-
-                if cur_price < james_floor and cur_price < ema9 and ema9 < ema21:
-                    lead = ((james_floor - cur_price) / james_floor) * 100.0
-                    if self.MIN_LEAD_DISPLACEMENT_PCT <= lead <= self.MAX_CHASE_LEAD_PCT:
-                        return {"side": "short", "engine": "FRONT_RUNNER_DAVID", "pivot": james_floor}
+                if is_in_sweet_spot and has_volume_thrust and has_trend_structure:
+                    if self.verify_active_tape(symbol, "short"):
+                        return {
+                            "side": "short",
+                            "day_gain": -day_dump_pct,
+                            "rvol": round(rvol, 1),
+                            "pivot": daily_open
+                        }
 
             return None
         except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # MOMENTUM DEATH EXITS (NO LOG SPAM)
+    # RIDE TO +20%/+30% & EXIT WHEN MOMENTUM FADES
     # --------------------------------------------------------------------------
     def manage_momentum_and_exits(self):
         trade = self.current_trade or (self.live_state if self.live_state["active"] else None)
@@ -368,6 +422,8 @@ class Strict30dGatedBot:
 
             ema9 = calc_ema(closes, 9)[-1]
             ema21 = calc_ema(closes, 21)[-1]
+            last_vol = candles_1h[-1][5]
+            avg_vol = sum([x[5] for x in candles_1h[-10:]]) / 10.0
         except Exception:
             return
 
@@ -382,27 +438,42 @@ class Strict30dGatedBot:
         is_win = False
         exit_reason = ""
 
-        # Momentum Death Triggers
-        if side == "long" and (cur_price < ema9 or ema9 < ema21):
+        # --- THE FADING MOMENTUM RULES (WAIT FOR IT TO FADE AT THE TOP) ---
+
+        # 1. Massive Expansion Reached (+25% to +30%+ Target)
+        if gain_pct >= 25.0:
             should_exit = True
-            is_win = gain_pct > 0.3
-            exit_reason = f"Momentum Died (EMA Inverted at {gain_pct:+.2f}%)"
+            is_win = True
+            exit_reason = f"TARGET HIT: Massive +{gain_pct:.1f}% Harvested!"
+
+        # 2. Peak Exhaustion Fade (If trade hit +12% or more and pulls back > 4.5%):
+        elif peak >= 12.0 and (peak - gain_pct) >= 4.5:
+            should_exit = True
+            is_win = True
+            exit_reason = f"RUNNER FADED: Peaked at +{peak:.1f}% -> Exited at +{gain_pct:.1f}%"
+
+        # 3. 1H Trend Inversion (The winning side lost control):
+        elif side == "long" and (cur_price < ema9 or ema9 < ema21):
+            should_exit = True
+            is_win = gain_pct > 0.5
+            exit_reason = f"MOMENTUM DIED: 1H Trend broke (Closed at {gain_pct:+.2f}%)"
+
         elif side == "short" and (cur_price > ema9 or ema9 > ema21):
             should_exit = True
-            is_win = gain_pct > 0.3
-            exit_reason = f"Momentum Died (EMA Inverted at {gain_pct:+.2f}%)"
-        elif peak >= 6.0 and (peak - gain_pct) >= 2.8:
+            is_win = gain_pct > 0.5
+            exit_reason = f"MOMENTUM DIED: 1H Trend broke (Closed at {gain_pct:+.2f}%)"
+
+        # 4. Volume Flatline: If held > 4 hours and volume drops below 30% of average:
+        elif elapsed_hours >= 4.0 and last_vol < (avg_vol * 0.30) and abs(gain_pct) < 2.0:
             should_exit = True
-            is_win = True
-            exit_reason = f"Profit Protected (Peak {peak:.1f}% -> Exited at {gain_pct:.1f}%)"
-        elif gain_pct >= 20.0:
-            should_exit = True
-            is_win = True
-            exit_reason = f"Target Hit (+{gain_pct:.1f}%)"
-        elif (side == "long" and cur_price < pivot * 0.98) or (side == "short" and cur_price > pivot * 1.02):
+            is_win = gain_pct > 0.0
+            exit_reason = f"STAGNATION: Volume dried up completely after {elapsed_hours:.1f}h"
+
+        # 5. Daily Open Failure (Price fell back below the 00:00 UTC Open):
+        elif (side == "long" and cur_price < pivot) or (side == "short" and cur_price > pivot):
             should_exit = True
             is_win = False
-            exit_reason = f"Pivot Invalidation (Loss: {gain_pct:.1f}%)"
+            exit_reason = f"IGNITION FAILED: Returned past Daily Open (Loss: {gain_pct:.1f}%)"
 
         if should_exit:
             print(f"\n🛑 [EXIT] {sym} | Reason: {exit_reason} | Net Spot: {gain_pct:+.2f}%\n", flush=True)
@@ -431,11 +502,11 @@ class Strict30dGatedBot:
         self.live_state["active"] = False
 
     # --------------------------------------------------------------------------
-    # 4. CLEAN 10-MINUTE SUMMARY LOGGING LOOP
+    # MAIN LOOP
     # --------------------------------------------------------------------------
     def run(self):
         start_server()
-        print("\n[SYSTEM] APEX Clean 10-Minute Summary Engine Online.", flush=True)
+        print("\n[SYSTEM] APEX ±4% Institutional Ignition Engine Online.", flush=True)
 
         try:
             self.bitget.load_markets()
@@ -473,18 +544,20 @@ class Strict30dGatedBot:
                         self.save_memory()
                         time.sleep(0.12)
 
-                # Scan only eligible coins
+                # Scan ONLY certified 30-day runners for the ±4% institutional ignition
                 if not self.current_trade and not self.live_state["active"]:
                     for sym in list(self.eligible_30d_coins.keys()):
                         if sym in tickers:
-                            entry_signal = self.inspect_eligible_coin(sym)
-                            if entry_signal:
-                                side = entry_signal["side"]
-                                engine = entry_signal["engine"]
-                                pivot = entry_signal["pivot"]
+                            signal = self.inspect_strong_ignition(sym)
+                            if signal:
+                                side = signal["side"]
+                                day_gain = signal["day_gain"]
+                                rvol = signal["rvol"]
+                                pivot = signal["pivot"]
                                 mid = float(tickers[sym]['last'])
 
-                                print(f"\n🚀 [ENTRY TRIGGERED: {engine}] {sym} ({side.upper()}) at ${mid}", flush=True)
+                                print(f"\n🚀 [STRONG IGNITION CONFIRMED] {sym} ({side.upper()})", flush=True)
+                                print(f"📊 Day Move: {day_gain:+.1f}% | Relative Volume: {rvol}x | Direction Verified!\n", flush=True)
 
                                 margin_alloc = balance * 0.90
                                 exchange_min = 5.50
@@ -508,7 +581,7 @@ class Strict30dGatedBot:
                                         "active": True, "symbol": sym, "side": side,
                                         "contracts": amount, "entry_price": mid,
                                         "pivot_point": pivot, "start_time": time.time(),
-                                        "max_peak": 0.0, "engine_source": engine
+                                        "max_peak": 0.0, "engine_source": "INSTITUTIONAL_IGNITION"
                                     }
                                     print(f"✅ [LIVE TRADE OPENED] {sym} | Margin: ${margin_alloc:.2f} | Leverage: {needed_lev}x\n", flush=True)
                                     break
@@ -521,7 +594,7 @@ class Strict30dGatedBot:
                                     print(f"⚠️ [PAPER TRADE STARTED] {sym} (Live note: {err})\n", flush=True)
                                     break
 
-                # CLEAN 10-MINUTE CONSOLE SUMMARY (ZERO SPAM)
+                # 10-MINUTE CLEAN SUMMARY
                 now = time.time()
                 if now - self.last_summary_time >= 600:
                     self.last_summary_time = now
@@ -532,13 +605,13 @@ class Strict30dGatedBot:
                         side = self.live_state["side"] if self.live_state["active"] else self.current_trade["side"]
                         self.last_10m_summary = f"Holding {sym} ({side.upper()}) | PnL: {self.last_spot_gain:+.2f}% | Held: {self.last_held_hours:.1f}h"
                     else:
-                        self.last_10m_summary = f"Scanning {len(self.eligible_30d_coins)} verified 30d runner coins"
+                        self.last_10m_summary = f"Scanning {len(self.eligible_30d_coins)} verified 30d runner coins for ±4% Ignitions"
 
                     print(f"[{t_str}] [10-MIN SUMMARY] Vault: ${balance:.2f} | {self.last_10m_summary} | Record: {self.all_time_wins}W - {self.all_time_losses}L", flush=True)
 
                 time.sleep(10)
 
-            except Exception as e:
+            except Exception:
                 time.sleep(10)
 
 if __name__ == "__main__":
