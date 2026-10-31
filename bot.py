@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Upgraded Institutional Bitget USDT-M Perpetual Trading Bot
-- Fast Multi-Threaded Concurrent Scanner (200+ pairs in ~3-4 seconds)
-- Method 1: First Set Blowout (Instant 4% Run & Top 10 40-0 Cleanliness Outlier)
-- Method 2: Second Set Continuation (Shallow 2-3 Candle Pause Breakout)
-- Execution: One-Way Mode, Dynamic Min Leverage ($5.50 Notional), reduceOnly
+Smart Quant Trading Bot - Bitget USDT-M Perpetual Swaps
+- Engine: 15m/30m Price vs. Open Interest Polarity Imbalance
+- Intelligence: Detects "Price Meets OI" vs "OI Traps" (Only enters genuine re-alignments)
+- Reporting: Clean 15-Minute Desk Briefing in Render Logs & Web Dashboard
+- Execution: One-Way Mode, Dynamic Leverage ($5.50 Min Notional), reduceOnly
 - Safety: Anti-Trap Spread Check, Anti-Stagnation (20m velocity cut), PARTI Loop Defense
 - Qualification: Strict 6-in-a-row Paper Win Gauntlet before Live Unlock
 - Infrastructure: Render Port 10000 HTTP Keep-Alive & Auto-Recovery
-- Fix: Expanded 50-Socket Connection Pool (Zero urllib3 warning spam)
 """
 
 import os
@@ -18,6 +17,7 @@ import json
 import math
 import logging
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -56,29 +56,23 @@ BLACKLIST = {
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 }
 
-# Scanning & Filter Parameters
+# Liquidity & Imbalance Thresholds
 MIN_24H_VOLUME_USDT = 1_000_000.0  # $1,000,000 minimum liquidity
-MIN_10M_MOVE_PCT = 2.0             # Minimum 2.0% move in 10 minutes
-MAX_10M_MOVE_PCT = 15.0            # Filter out illiquid needle spikes
-MAX_RETRACE_RATIO = 0.20           # Opponent cannot retrace > 20% of impulse
-MAX_OPPOSING_CANDLES = 2           # Opponent can win at most 2 out of 10 candles
-MAX_OPPOSING_VOL_RATIO = 0.18      # Opposing volume must be < 18% of 10m volume
-INSTANT_RUN_PCT = 4.0              # Smooth run >= 4%
-INSTANT_MAX_PULLBACK_PCT = 0.50    # Counter pullback strictly < 0.50%
+MIN_IMBALANCE_GAP_PCT = 3.0        # Minimum |Delta OI - Delta Price| gap
+MIN_POLARITY_PCT = 1.5             # Minimum individual displacement threshold
 MAX_SPREAD_PCT = 0.10              # Anti-trap order book spread <= 0.10%
 
-# Concurrency
-SCANNER_WORKERS = 16               # Parallel threads for 3-4s market sweep
-
-# Risk & Order Execution Parameters
+# Concurrency & Sizing
+SCANNER_WORKERS = 16               # Parallel threads for fast 3s sweeps
 BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
-BITGET_MIN_NOTIONAL = 5.50         # Bitget ~$5.50 min order value
-HARD_STOP_LOSS_PCT = 0.90          # 0.9% hard structural stop
+BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
+HARD_STOP_LOSS_PCT = 0.90          # 0.9% hard structural stop loss
 VELOCITY_TIMEOUT_SECONDS = 1200    # 20 minutes velocity clock
 VELOCITY_MIN_PROFIT_PCT = 1.20     # Must achieve >= +1.2% in 20m or cut trade
 RUNNER_TRAIL_ACTIVATION_PCT = 3.50 # Activate dynamic runner trailing at +3.5%
 RUNNER_GIVEBACK_PCT = 0.80         # Trail 0.8% behind local peak
 COOLDOWN_SECONDS = 900             # 15 minutes symbol cooldown
+BRIEFING_INTERVAL_SECONDS = 900    # 15 minutes intelligence debrief
 
 # ==============================================================================
 # 3. HTTP KEEP-ALIVE DASHBOARD (PORT 10000)
@@ -90,7 +84,7 @@ DASHBOARD_DATA = {
     "live_balance": 0.0,
     "active_trade": None,
     "last_scan_duration_sec": 0.0,
-    "top_candidates": [],
+    "last_briefing": {},
     "last_scan_time": "None"
 }
 
@@ -103,7 +97,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.wfile.write(response.encode("utf-8"))
 
     def log_message(self, format, *args):
-        return  # Suppress HTTP access log noise
+        return  # Suppress HTTP access noise
 
 def start_keep_alive_server(port: int):
     server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
@@ -127,7 +121,7 @@ class QuantBot:
             "enableRateLimit": True,
         })
 
-        # Upgrade HTTP adapter pool to 50 connections to eliminate pool-full warnings
+        # Upgrade HTTP adapter pool to 50 connections
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
         self.exchange.session.mount("https://", adapter)
         self.exchange.session.mount("http://", adapter)
@@ -136,6 +130,15 @@ class QuantBot:
         self.live_mode = False
         self.active_trade: Optional[Dict] = None
         self.cooldown_tracker: Dict[str, float] = {}
+
+        # Time-Series Buffers: {symbol: deque([{'time': t, 'price': p, 'oi': oi}, ...])}
+        self.history_buffer: Dict[str, deque] = {}
+        
+        # Intelligence / Learning Memory
+        self.traps_rejected_count = 0
+        self.ignitions_confirmed_count = 0
+        self.recent_learnings: List[str] = []
+        self.last_briefing_time = time.time()
 
         self.load_state()
         self.init_exchange_settings()
@@ -178,7 +181,7 @@ class QuantBot:
             self.exchange.set_position_mode(False, params={"productType": "USDT-FUTURES"})
             logger.info("Bitget Position Mode confirmed: ONE-WAY (Single Hold)")
         except Exception as e:
-            logger.info(f"Position mode notice: {e} (Account already configured or unified mode)")
+            logger.info(f"Position mode notice: {e}")
 
     def recover_live_position(self):
         """Auto-recovery if Render restarts while a live trade is open."""
@@ -211,10 +214,10 @@ class QuantBot:
                                    f"Size: {contracts} @ ${entry_price:.6f}")
                     break
         except Exception as e:
-            logger.error(f"Live position recovery check error: {e}")
+            logger.error(f"Live position recovery error: {e}")
 
     # --------------------------------------------------------------------------
-    # FAST MULTI-THREADED 10M CANDLE INSPECTOR
+    # PRICE & OPEN INTEREST TIME-SERIES TRACKER
     # --------------------------------------------------------------------------
     def is_symbol_valid(self, symbol: str) -> bool:
         base = symbol.split("/")[0].split(":")[0]
@@ -224,174 +227,57 @@ class QuantBot:
             return False
         return True
 
-    def fetch_symbol_candles(self, symbol: str) -> Optional[Tuple[str, List]]:
-        """Worker task to fetch 1m candles concurrently."""
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=12)
-            if ohlcv and len(ohlcv) >= 11:
-                return symbol, ohlcv[-11:]  # Last 10 completed + current forming
-        except Exception:
-            pass
-        return None
+    def update_time_series_buffer(self, tickers: Dict):
+        """Maintains a rolling 35-minute price and open interest history for each coin."""
+        now = time.time()
+        for sym, t in tickers.items():
+            if not sym.endswith(":USDT") or not self.is_symbol_valid(sym):
+                continue
 
-    def analyze_candles(self, symbol: str, ohlcv: List) -> Optional[Dict]:
-        """
-        Evaluates both:
-        - Method 1: First Set Blowout (40-0 Domination / Instant 4% Run)
-        - Method 2: Second Set Continuation (Shallow pause breakout)
-        """
-        candles = ohlcv[-11:-1]  # Exactly 10 completed 1m candles
-        start_open = candles[0][1]
-        end_close = candles[-1][4]
-        net_change_pct = ((end_close - start_open) / start_open) * 100.0
-        abs_change = abs(net_change_pct)
+            price = float(t.get("last", 0.0) or t.get("close", 0.0) or 0.0)
+            # Bitget holdingAmount = Open Interest contracts
+            oi = float(t.get("openInterest") or t.get("info", {}).get("holdingAmount") or 0.0)
 
-        if abs_change < MIN_10M_MOVE_PCT or abs_change > MAX_10M_MOVE_PCT:
+            if price <= 0 or oi <= 0:
+                continue
+
+            if sym not in self.history_buffer:
+                self.history_buffer[sym] = deque()
+
+            buf = self.history_buffer[sym]
+            buf.append({"time": now, "price": price, "oi": oi})
+
+            # Prune data points older than 35 minutes (2100 seconds)
+            while buf and (now - buf[0]["time"]) > 2100:
+                buf.popleft()
+
+    def calculate_deltas(self, symbol: str, target_seconds: int) -> Optional[Tuple[float, float]]:
+        """Calculates percentage change in Price and OI over target_seconds (e.g. 900s for 15m)."""
+        buf = self.history_buffer.get(symbol)
+        if not buf or len(buf) < 2:
             return None
 
-        direction = "buy" if net_change_pct > 0 else "sell"
-        total_vol = sum(c[5] for c in candles)
-        if total_vol <= 0:
+        current = buf[-1]
+        target_time = current["time"] - target_seconds
+
+        # Find historical snapshot closest to target_time
+        past = min(buf, key=lambda x: abs(x["time"] - target_time))
+        elapsed = current["time"] - past["time"]
+
+        # Ensure we have at least 60% of the target window populated
+        if elapsed < (target_seconds * 0.60):
             return None
 
-        # Track trajectory details
-        opposing_candles = 0
-        opposing_vol = 0.0
+        pr_change = ((current["price"] - past["price"]) / past["price"]) * 100.0
+        oi_change = ((current["oi"] - past["oi"]) / past["oi"]) * 100.0
 
-        if direction == "buy":
-            running_high = candles[0][2]
-            max_retrace_ratio = 0.0
-            max_pb_abs = 0.0
+        return pr_change, oi_change
 
-            for c in candles:
-                o, h, l, cl, vol = c[1], c[2], c[3], c[4], c[5]
-                if h > running_high:
-                    running_high = h
-
-                wave = running_high - start_open
-                if wave > 0:
-                    retrace = (running_high - l) / wave
-                    if retrace > max_retrace_ratio:
-                        max_retrace_ratio = retrace
-
-                pb = ((running_high - l) / running_high) * 100.0
-                if pb > max_pb_abs:
-                    max_pb_abs = pb
-
-                if cl < o:
-                    opposing_candles += 1
-                    opposing_vol += vol
-
-            opposing_vol_ratio = opposing_vol / total_vol
-
-            # METHOD 1A: Instant Runaway 4% Run
-            if abs_change >= INSTANT_RUN_PCT and max_pb_abs < INSTANT_MAX_PULLBACK_PCT:
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": 999.0,
-                    "method": "METHOD_1_INSTANT_RUN",
-                    "max_retrace": max_retrace_ratio
-                }
-
-            # METHOD 2: Second Set Continuation Setup
-            first_wave_high = max(c[2] for c in candles[:7])
-            pause_low = min(c[3] for c in candles[7:9])
-            pause_retrace = (first_wave_high - pause_low) / max((first_wave_high - start_open), 1e-9)
-            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
-
-            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close >= (first_wave_high * 0.998):
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": 900.0 + abs_change,
-                    "method": "METHOD_2_SECOND_SET_CONTINUATION",
-                    "max_retrace": pause_retrace
-                }
-
-            # METHOD 1B: Standard 40-0 Tennis Cleanliness
-            if max_retrace_ratio <= MAX_RETRACE_RATIO and opposing_candles <= MAX_OPPOSING_CANDLES and opposing_vol_ratio <= MAX_OPPOSING_VOL_RATIO:
-                score = abs_change * (1.0 - max_retrace_ratio)
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": score,
-                    "method": "METHOD_1_TENNIS_40_0",
-                    "max_retrace": max_retrace_ratio
-                }
-
-        else:  # direction == "sell"
-            running_low = candles[0][3]
-            max_retrace_ratio = 0.0
-            max_pb_abs = 0.0
-
-            for c in candles:
-                o, h, l, cl, vol = c[1], c[2], c[3], c[4], c[5]
-                if l < running_low:
-                    running_low = l
-
-                wave = start_open - running_low
-                if wave > 0:
-                    retrace = (h - running_low) / wave
-                    if retrace > max_retrace_ratio:
-                        max_retrace_ratio = retrace
-
-                pb = ((h - running_low) / running_low) * 100.0
-                if pb > max_pb_abs:
-                    max_pb_abs = pb
-
-                if cl > o:
-                    opposing_candles += 1
-                    opposing_vol += vol
-
-            opposing_vol_ratio = opposing_vol / total_vol
-
-            # METHOD 1A: Instant Runaway 4% Dump
-            if abs_change >= INSTANT_RUN_PCT and max_pb_abs < INSTANT_MAX_PULLBACK_PCT:
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": 999.0,
-                    "method": "METHOD_1_INSTANT_RUN",
-                    "max_retrace": max_retrace_ratio
-                }
-
-            # METHOD 2: Second Set Continuation (Short)
-            first_wave_low = min(c[3] for c in candles[:7])
-            pause_high = max(c[2] for c in candles[7:9])
-            pause_retrace = (pause_high - first_wave_low) / max((start_open - first_wave_low), 1e-9)
-            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
-
-            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close <= (first_wave_low * 1.002):
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": 900.0 + abs_change,
-                    "method": "METHOD_2_SECOND_SET_CONTINUATION",
-                    "max_retrace": pause_retrace
-                }
-
-            # METHOD 1B: Standard 40-0 Tennis Cleanliness
-            if max_retrace_ratio <= MAX_RETRACE_RATIO and opposing_candles <= MAX_OPPOSING_CANDLES and opposing_vol_ratio <= MAX_OPPOSING_VOL_RATIO:
-                score = abs_change * (1.0 - max_retrace_ratio)
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": score,
-                    "method": "METHOD_1_TENNIS_40_0",
-                    "max_retrace": max_retrace_ratio
-                }
-
-        return None
-
+    # --------------------------------------------------------------------------
+    # IMBALANCE SCANNER & THE "PRICE MEETS OI" IGNITION FILTER
+    # --------------------------------------------------------------------------
     def anti_trap_check(self, symbol: str) -> bool:
-        """Confirms spread <= 0.10% to prevent entering into illiquid iceberg walls."""
+        """Verifies tight spread to avoid iceberg walls."""
         try:
             ob = self.exchange.fetch_order_book(symbol, limit=5)
             bid = ob["bids"][0][0] if ob["bids"] else None
@@ -403,63 +289,154 @@ class QuantBot:
         except Exception:
             return False
 
+    def verify_price_ignition(self, symbol: str, expected_direction: str) -> bool:
+        """
+        Confirms Price is the active party moving to meet OI (Not an OI trap).
+        Inspects the last 3 completed 1m candles for immediate displacement.
+        """
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=4)
+            if not ohlcv or len(ohlcv) < 3:
+                return False
+
+            candles = ohlcv[-3:]
+            start_open = candles[0][1]
+            end_close = candles[-1][4]
+            move_pct = ((end_close - start_open) / start_open) * 100.0
+
+            if expected_direction == "buy":
+                # Price must show upward displacement to meet OI
+                if move_pct >= 0.40 and candles[-1][4] > candles[-1][1]:
+                    return True
+            else:
+                # Price must show downward displacement to meet OI
+                if move_pct <= -0.40 and candles[-1][4] < candles[-1][1]:
+                    return True
+
+            return False
+        except Exception:
+            return False
+
     def scan_for_opportunities(self) -> Optional[Dict]:
         scan_start = time.time()
         tickers = self.exchange.fetch_tickers()
+        self.update_time_series_buffer(tickers)
 
-        valid_symbols = []
+        candidates = []
         for sym, t in tickers.items():
-            if not sym.endswith(":USDT"):
-                continue
-            if not self.is_symbol_valid(sym):
+            if not sym.endswith(":USDT") or not self.is_symbol_valid(sym):
                 continue
             vol = float(t.get("quoteVolume", 0.0) or 0.0)
-            if vol >= MIN_24H_VOLUME_USDT:
-                valid_symbols.append(sym)
+            if vol < MIN_24H_VOLUME_USDT:
+                continue
 
-        # Parallel multi-threaded candle retrieval (16 concurrent threads with 50-pool adapter)
-        candles_by_symbol = {}
-        with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
-            future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
-            for future in as_completed(future_to_sym):
-                res = future.result()
-                if res:
-                    sym, ohlcv = res
-                    candles_by_symbol[sym] = ohlcv
+            # Check 15m window deltas
+            deltas_15m = self.calculate_deltas(sym, 900)
+            if not deltas_15m:
+                continue
 
-        # Evaluate all retrieved candle datasets
-        candidates = []
-        for sym, ohlcv in candles_by_symbol.items():
-            analysis = self.analyze_candles(sym, ohlcv)
-            if analysis:
-                candidates.append(analysis)
+            pr_15, oi_15 = deltas_15m
+            gap_15 = abs(oi_15 - pr_15)
+
+            # Polarity Split Detection:
+            # 1. Opposite Signs: One is negative (<= -1.5%) and other is positive (>= +1.5%)
+            # 2. Extreme Tension: OI surged >= 3.0% while price is asleep (<= 0.4%)
+            is_opposite_polarity = (pr_15 <= -MIN_POLARITY_PCT and oi_15 >= MIN_POLARITY_PCT) or \
+                                   (pr_15 >= MIN_POLARITY_PCT and oi_15 <= -MIN_POLARITY_PCT)
+            is_extreme_oi_lead = (oi_15 >= 3.0 and abs(pr_15) <= 0.50)
+
+            if (is_opposite_polarity or is_extreme_oi_lead) and gap_15 >= MIN_IMBALANCE_GAP_PCT:
+                # Target direction: Price snaps to meet the accumulated leverage
+                direction = "buy" if oi_15 > pr_15 else "sell"
+                candidates.append({
+                    "symbol": sym,
+                    "direction": direction,
+                    "pr_15": pr_15,
+                    "oi_15": oi_15,
+                    "gap": gap_15,
+                    "score": gap_15
+                })
 
         scan_duration = time.time() - scan_start
         DASHBOARD_DATA["last_scan_duration_sec"] = round(scan_duration, 2)
-        logger.info(f"Fast-scanned {len(valid_symbols)} pairs in {scan_duration:.2f}s | Qualified Candidates: {len(candidates)}")
 
         if not candidates:
             return None
 
-        # Rank Top 10 by Score (Instant runs & second set continuation score highest)
+        # Rank Top Candidate by largest polarity gap
         candidates.sort(key=lambda x: x["score"], reverse=True)
-        top_10 = candidates[:10]
+        champion = candidates[0]
 
-        DASHBOARD_DATA["top_candidates"] = [
-            f"{c['symbol']} [{c['method']}] {c['direction'].upper()} {c['net_change_pct']:.2f}% | Score: {c['score']:.1f}"
-            for c in top_10
-        ]
+        # Test #1: Anti-Trap Spread Check
+        if not self.anti_trap_check(champion["symbol"]):
+            self.traps_rejected_count += 1
+            return None
 
-        # Select Candidate #1 that passes Anti-Trap Spread Check
-        for cand in top_10:
-            if self.anti_trap_check(cand["symbol"]):
-                logger.info(f"SELECTING CHAMPION: {cand['symbol']} via {cand['method']} "
-                            f"({cand['direction'].upper()} {cand['net_change_pct']:.2f}%)")
-                return cand
-            else:
-                logger.warning(f"Skipping {cand['symbol']} (Failed order book spread check)")
+        # Test #2: The "Price Meets OI" Ignition Test
+        symbol = champion["symbol"]
+        direction = champion["direction"]
 
-        return None
+        if self.verify_price_ignition(symbol, direction):
+            self.ignitions_confirmed_count += 1
+            learning_note = f"{symbol}: Price ignited ({direction.upper()}) to balance with OI (OI:{champion['oi_15']:+.2f}%, Pr:{champion['pr_15']:+.2f}%) -> VALID SNAP-BACK"
+            self.recent_learnings.append(learning_note)
+            logger.info(f"CONFIRMED IMBALANCE IGNITION: {learning_note}")
+            return champion
+        else:
+            self.traps_rejected_count += 1
+            trap_note = f"{symbol}: OI surged ({champion['oi_15']:+.2f}%) but Price remained flat ({champion['pr_15']:+.2f}%) -> OI TRAP DISCARDED"
+            self.recent_learnings.append(trap_note)
+            return None
+
+    # --------------------------------------------------------------------------
+    # 15-MINUTE INTELLIGENCE BRIEFING
+    # --------------------------------------------------------------------------
+    def print_desk_briefing(self):
+        """Prints a high-IQ 15-minute desk summary and silences tick-by-tick spam."""
+        now = time.time()
+        if (now - self.last_briefing_time) < BRIEFING_INTERVAL_SECONDS:
+            return
+
+        self.last_briefing_time = now
+
+        # Identify market regime from liquid buffer
+        liquid_count = len(self.history_buffer)
+        top_imbalance_str = "None detected"
+        highest_gap = 0.0
+
+        for sym in list(self.history_buffer.keys())[:20]:
+            deltas = self.calculate_deltas(sym, 900)
+            if deltas:
+                p, o = deltas
+                gap = abs(o - p)
+                if gap > highest_gap:
+                    highest_gap = gap
+                    top_imbalance_str = f"{sym} | OI: {o:+.2f}% | Price: {p:+.2f}% (Gap: {gap:.1f}%)"
+
+        last_learning = self.recent_learnings[-1] if self.recent_learnings else "Market in balanced equilibrium. No unconfirmed traps."
+        # Keep learning log clean
+        if len(self.recent_learnings) > 10:
+            self.recent_learnings = self.recent_learnings[-10:]
+
+        briefing_text = (
+            f"\n{'='*25} [15-MIN DESK BRIEFING] {'='*25}\n"
+            f"• MARKET CHAMPION: {top_imbalance_str}\n"
+            f"• RECENT LEARNING: {last_learning}\n"
+            f"• TRAPS AVOIDED: {self.traps_rejected_count} (OI faded into flat price)\n"
+            f"• CONFIRMED IGNITIONS: {self.ignitions_confirmed_count}\n"
+            f"• GAUNTLET PROGRESS: {self.paper_wins}/6 Wins | Mode: {'LIVE' if self.live_mode else 'PAPER'}\n"
+            f"• TRACKING UNIVERSE: {liquid_count} liquid perpetual pairs active\n"
+            f"{'='*72}"
+        )
+        logger.info(briefing_text)
+
+        DASHBOARD_DATA["last_briefing"] = {
+            "top_imbalance": top_imbalance_str,
+            "last_learning": last_learning,
+            "traps_rejected": self.traps_rejected_count,
+            "ignitions_confirmed": self.ignitions_confirmed_count,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
 
     # --------------------------------------------------------------------------
     # SIZING & EXECUTION (MICRO-ACCOUNT ONE-WAY MODE)
@@ -485,7 +462,6 @@ class QuantBot:
     def execute_entry(self, candidate: Dict):
         symbol = candidate["symbol"]
         direction = candidate["direction"]
-        method = candidate["method"]
 
         ticker = self.exchange.fetch_ticker(symbol)
         current_price = ticker["ask"] if direction == "buy" else ticker["bid"]
@@ -500,11 +476,11 @@ class QuantBot:
                 "contracts": 10.0,
                 "entry_time": time.time(),
                 "is_live": False,
-                "method": method,
+                "method": "PRICE_OI_IMBALANCE_SNAP",
                 "leverage": 5
             }
             logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
-                        f"Type: {method} | Streak: {self.paper_wins}/6")
+                        f"Imbalance Gap: {candidate['gap']:.2f}% | Streak: {self.paper_wins}/6")
             return
 
         # Live Execution
@@ -532,10 +508,10 @@ class QuantBot:
                 "contracts": amount,
                 "entry_time": time.time(),
                 "is_live": True,
-                "method": method,
+                "method": "PRICE_OI_IMBALANCE_SNAP",
                 "leverage": leverage
             }
-            logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x | Method: {method}")
+            logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x")
 
         except Exception as e:
             logger.error(f"Live order failed: {e}")
@@ -684,7 +660,7 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Upgraded Quant Trading Engine active. Fast event loop running...")
+        logger.info("Smart Quant Trading Engine active. Learning loop initialized...")
 
         while True:
             try:
@@ -701,18 +677,21 @@ class QuantBot:
                 DASHBOARD_DATA["paper_wins"] = self.paper_wins
                 DASHBOARD_DATA["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
+                # Print periodic 15-minute desk briefing
+                self.print_desk_briefing()
+
                 # If managing an open trade, focus on monitoring
                 if self.active_trade:
                     self.monitor_active_trade()
                     time.sleep(2)
                     continue
 
-                # Run fast parallel market sweep
+                # Run fast polarity scan
                 opportunity = self.scan_for_opportunities()
                 if opportunity:
                     self.execute_entry(opportunity)
 
-                time.sleep(3)  # Fast 3-second cycle
+                time.sleep(10)  # Clean 10-second polling cadence
 
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
