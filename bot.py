@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Smart Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Engine: Strict Dual-Polarity Imbalance (One side <= -1.5%, Other side >= +1.5%)
-- Intelligence: Detects "Price Meets OI" vs "OI Traps" (Only enters genuine re-alignments)
+- Engine: Strict Dual-Polarity Imbalance (+/- 1.5% Minimum on BOTH sides)
+- Timing: Expansion Lock (Hands-off during blowout) -> Enters ONLY on Confirmed Pullback Hook
 - Reporting: Clean 15-Minute Desk Briefing in Render Logs & Web Dashboard
 - Execution: One-Way Mode, Dynamic Leverage ($5.50 Min Notional), reduceOnly
 - Safety: Anti-Trap Spread Check, Anti-Stagnation (20m velocity cut), PARTI Loop Defense
@@ -81,6 +81,10 @@ MIN_POLARITY_THRESHOLD = 1.50      # Strictly +/- 1.50%
 MIN_24H_VOLUME_USDT = 1_000_000.0  # $1,000,000 minimum liquidity
 MAX_SPREAD_PCT = 0.10              # Anti-trap order book spread <= 0.10%
 
+# Pullback Hook Timing Parameters
+MIN_PULLBACK_CONFIRM_PCT = 0.15    # Minimum 0.15% turn off extreme to confirm hook
+MAX_PULLBACK_CHASE_PCT = 0.85      # Don't chase if pullback already gave back > 0.85%
+
 # Risk & Order Execution Parameters
 BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
 BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
@@ -115,7 +119,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.wfile.write(response.encode("utf-8"))
 
     def log_message(self, format, *args):
-        return  # Suppress HTTP access noise
+        return
 
 def start_keep_alive_server(port: int):
     server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
@@ -139,7 +143,7 @@ class QuantBot:
             "enableRateLimit": True,
         })
 
-        # Upgrade HTTP adapter pool to 50 connections to eliminate warnings
+        # Upgrade HTTP adapter pool to 50 connections
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
         self.exchange.session.mount("https://", adapter)
         self.exchange.session.mount("http://", adapter)
@@ -154,6 +158,7 @@ class QuantBot:
         
         # Intelligence / Learning Memory
         self.traps_rejected_count = 0
+        self.expanding_waits_count = 0
         self.ignitions_confirmed_count = 0
         self.recent_learnings: List[str] = []
         self.last_briefing_time = time.time()
@@ -204,7 +209,6 @@ class QuantBot:
             logger.info(f"Position mode notice: {e}")
 
     def recover_live_position(self):
-        """Auto-recovery if Render restarts while a live trade is open."""
         if not API_KEY:
             return
 
@@ -286,9 +290,6 @@ class QuantBot:
 
         return pr_change, oi_change
 
-    # --------------------------------------------------------------------------
-    # STRICT DUAL-POLARITY SCANNER & IGNITION VERIFIER
-    # --------------------------------------------------------------------------
     def anti_trap_check(self, symbol: str) -> bool:
         try:
             ob = self.exchange.fetch_order_book(symbol, limit=5)
@@ -301,41 +302,73 @@ class QuantBot:
         except Exception:
             return False
 
-    def verify_price_ignition(self, symbol: str, setup_type: str) -> Optional[str]:
+    # --------------------------------------------------------------------------
+    # EXPANSION LOCK & PULLBACK HOOK INSPECTOR
+    # --------------------------------------------------------------------------
+    def inspect_pullback_hook(self, symbol: str, setup_type: str) -> Optional[Tuple[str, float]]:
         """
-        Inspects immediate 1m price candles.
-        Confirms Price is aggressively moving to balance with OI (Not an OI trap).
-        Returns 'buy', 'sell', or None.
+        1. Checks if the move is STILL actively expanding (making lower lows or higher highs).
+           -> If STILL EXPANDING, return None (Trigger Locked).
+        2. Detects the moment the 1m candle stops drilling and confirms a pullback hook.
+           -> Returns (direction, pivot_price).
         """
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=4)
-            if not ohlcv or len(ohlcv) < 3:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=7)
+            if not ohlcv or len(ohlcv) < 6:
                 return None
 
-            candles = ohlcv[-3:]
-            start_open = candles[0][1]
-            end_close = candles[-1][4]
-            move_pct = ((end_close - start_open) / start_open) * 100.0
+            candles = ohlcv[-6:]  # Inspect last 6 1m candles
+            current_candle = candles[-1]
+            prior_candles = candles[:-1]
 
-            # If Price was <= -1.5% and OI was >= +1.5% (Heavy short build-up)
+            # SETUP A: Price was dumping (<= -1.5%) while OI was surging (>= +1.5%)
             if setup_type == "SHORT_BUILDUP":
-                # If price accelerates further down to meet the short buildup -> enter SELL
-                if move_pct <= -0.35 and candles[-1][4] < candles[-1][1]:
-                    return "sell"
-                # If price violently reverses to liquidate the aggressive shorts -> enter BUY
-                elif move_pct >= +0.40 and candles[-1][4] > candles[-1][1]:
-                    return "buy"
+                running_low = min(c[3] for c in prior_candles)
+                
+                # Check if current candle is still actively drilling lower
+                if current_candle[3] < (running_low * 0.9990) or current_candle[4] < current_candle[1]:
+                    self.expanding_waits_count += 1
+                    logger.debug(f"{symbol}: Still actively dumping/expanding lower. Trigger locked.")
+                    return None  # Hands off! Wait for the wave to finish expanding.
 
-            # If Price was >= +1.5% and OI was <= -1.5% (Short squeeze expansion)
+                # Wave has stopped drilling. Measure pullback bounce off the floor:
+                absolute_floor = min(c[3] for c in candles)
+                current_price = current_candle[4]
+                bounce_pct = ((current_price - absolute_floor) / absolute_floor) * 100.0
+
+                # Must confirm the turn (bounce >= 0.15%), but not over-chased (< 0.85%)
+                if MIN_PULLBACK_CONFIRM_PCT <= bounce_pct <= MAX_PULLBACK_CHASE_PCT:
+                    # Confirmed Hook: Price turns upward to re-align with positive OI
+                    return "buy", absolute_floor
+
+            # SETUP B: Price was pumping (>= +1.5%) while OI was dumping (<= -1.5%)
             elif setup_type == "SHORT_SQUEEZE":
-                # Price must continue accelerating up -> enter BUY
-                if move_pct >= +0.35 and candles[-1][4] > candles[-1][1]:
-                    return "buy"
+                running_high = max(c[2] for c in prior_candles)
+
+                # Check if current candle is still actively rocketing higher
+                if current_candle[2] > (running_high * 1.0010) or current_candle[4] > current_candle[1]:
+                    self.expanding_waits_count += 1
+                    logger.debug(f"{symbol}: Still actively pumping/expanding higher. Trigger locked.")
+                    return None  # Hands off! Wait for the pump to exhaust.
+
+                # Wave has stopped rocketing. Measure pullback dip off the peak:
+                absolute_peak = max(c[2] for c in candles)
+                current_price = current_candle[4]
+                pullback_pct = ((absolute_peak - current_price) / absolute_peak) * 100.0
+
+                # Must confirm the turn (pullback >= 0.15%), but not over-chased (< 0.85%)
+                if MIN_PULLBACK_CONFIRM_PCT <= pullback_pct <= MAX_PULLBACK_CHASE_PCT:
+                    # Confirmed Hook: Price turns downward to re-align with negative OI
+                    return "sell", absolute_peak
 
             return None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Pullback hook inspect error on {symbol}: {e}")
             return None
 
+    # --------------------------------------------------------------------------
+    # STRICT DUAL-POLARITY SCANNER
+    # --------------------------------------------------------------------------
     def scan_for_opportunities(self) -> Optional[Dict]:
         scan_start = time.time()
         tickers = self.exchange.fetch_tickers()
@@ -355,10 +388,7 @@ class QuantBot:
 
             pr_15, oi_15 = deltas
 
-            # ==================================================================
-            # STRICT DUAL-POLARITY RULE:
-            # BOTH sides MUST cross +/- 1.5% in opposite directions!
-            # ==================================================================
+            # STRICT DUAL-POLARITY RULE (BOTH sides must cross +/- 1.5%)
             setup_a = (pr_15 <= -MIN_POLARITY_THRESHOLD and oi_15 >= MIN_POLARITY_THRESHOLD)
             setup_b = (pr_15 >= MIN_POLARITY_THRESHOLD and oi_15 <= -MIN_POLARITY_THRESHOLD)
 
@@ -386,30 +416,30 @@ class QuantBot:
         candidates.sort(key=lambda x: x["gap"], reverse=True)
         champion = candidates[0]
 
-        # Test #1: Anti-Trap Spread Check
+        # Filter 1: Anti-Trap Spread Check
         if not self.anti_trap_check(champion["symbol"]):
             self.traps_rejected_count += 1
             return None
 
-        # Test #2: The "Price Meets OI" Ignition Test
+        # Filter 2: The Expansion Lock & Pullback Hook Engine
         symbol = champion["symbol"]
         setup_type = champion["setup_type"]
-        confirmed_direction = self.verify_price_ignition(symbol, setup_type)
+        hook_result = self.inspect_pullback_hook(symbol, setup_type)
 
-        if confirmed_direction:
+        if hook_result:
+            direction, pivot_price = hook_result
             self.ignitions_confirmed_count += 1
-            champion["direction"] = confirmed_direction
+            champion["direction"] = direction
+            champion["pivot_price"] = pivot_price
+
             learning_note = (
-                f"{symbol}: Dual-Polarity Confirmed (OI: {champion['oi_15']:+.2f}% | "
-                f"Price: {champion['pr_15']:+.2f}%) -> Active Ignition {confirmed_direction.upper()}"
+                f"{symbol}: Expansion Crested! Confirmed Pullback Hook -> Entering {direction.upper()} "
+                f"(OI: {champion['oi_15']:+.2f}%, Price: {champion['pr_15']:+.2f}%) | Pivot: ${pivot_price:.6f}"
             )
             self.recent_learnings.append(learning_note)
-            logger.info(f"CONFIRMED DUAL-POLARITY TRADE: {learning_note}")
+            logger.info(f"CONFIRMED PULLBACK HOOK ENTRY: {learning_note}")
             return champion
         else:
-            self.traps_rejected_count += 1
-            trap_note = f"{symbol}: Dual-Polarity found (OI: {champion['oi_15']:+.2f}%, Pr: {champion['pr_15']:+.2f}%) but Price stayed dormant -> OI TRAP DISCARDED"
-            self.recent_learnings.append(trap_note)
             return None
 
     # --------------------------------------------------------------------------
@@ -422,7 +452,6 @@ class QuantBot:
 
         self.last_briefing_time = now
 
-        # Only search for champions that strictly qualify under the dual +/- 1.5% rule
         top_imbalance_str = "None (Market in equilibrium, no dual +/- 1.5% divergence)"
         highest_gap = 0.0
 
@@ -437,7 +466,7 @@ class QuantBot:
                         highest_gap = gap
                         top_imbalance_str = f"{sym} | OI: {o:+.2f}% | Price: {p:+.2f}% (Gap: {gap:.1f}%)"
 
-        last_learning = self.recent_learnings[-1] if self.recent_learnings else "Equilibrium maintained. Zero unconfirmed traps."
+        last_learning = self.recent_learnings[-1] if self.recent_learnings else "Equilibrium maintained. Zero traps."
         if len(self.recent_learnings) > 10:
             self.recent_learnings = self.recent_learnings[-10:]
 
@@ -445,8 +474,9 @@ class QuantBot:
             f"\n{'='*25} [15-MIN DESK BRIEFING] {'='*25}\n"
             f"• DUAL-POLARITY CHAMPION: {top_imbalance_str}\n"
             f"• RECENT LEARNING: {last_learning}\n"
-            f"• TRAPS AVOIDED: {self.traps_rejected_count} (OI faded into flat price)\n"
-            f"• CONFIRMED IGNITIONS: {self.ignitions_confirmed_count}\n"
+            f"• EXPANSION LOCKS (Waited for Pullback): {self.expanding_waits_count}\n"
+            f"• TRAPS AVOIDED: {self.traps_rejected_count} (Spread / Icebergs)\n"
+            f"• CONFIRMED HOOK ENTRIES: {self.ignitions_confirmed_count}\n"
             f"• GAUNTLET PROGRESS: {self.paper_wins}/6 Wins | Mode: {'LIVE' if self.live_mode else 'PAPER'}\n"
             f"• TRACKING UNIVERSE: {len(self.history_buffer)} liquid perpetual pairs active\n"
             f"{'='*72}"
@@ -456,6 +486,7 @@ class QuantBot:
         DASHBOARD_DATA["last_briefing"] = {
             "top_imbalance": top_imbalance_str,
             "last_learning": last_learning,
+            "expanding_waits": self.expanding_waits_count,
             "traps_rejected": self.traps_rejected_count,
             "ignitions_confirmed": self.ignitions_confirmed_count,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
@@ -469,7 +500,6 @@ class QuantBot:
         free_usdt = float(balance.get("USDT", {}).get("free", 0.0) or 0.0)
         usable_margin = max(free_usdt * BALANCE_UTILIZATION, 0.50)
 
-        # Dynamic Leverage = ceil(5.50 / usable_margin)
         calculated_lev = math.ceil(BITGET_MIN_NOTIONAL / usable_margin)
         leverage = max(2, min(calculated_lev, 20))
 
@@ -489,7 +519,6 @@ class QuantBot:
         current_price = ticker["ask"] if direction == "buy" else ticker["bid"]
 
         if not self.live_mode:
-            # Paper execution
             self.active_trade = {
                 "symbol": symbol,
                 "side": direction,
@@ -498,14 +527,13 @@ class QuantBot:
                 "contracts": 10.0,
                 "entry_time": time.time(),
                 "is_live": False,
-                "method": "DUAL_POLARITY_1.5_IMBALANCE",
+                "method": "PULLBACK_HOOK_SNAP",
                 "leverage": 5
             }
             logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
                         f"Gap: {candidate['gap']:.2f}% | Streak: {self.paper_wins}/6")
             return
 
-        # Live Execution
         try:
             leverage, amount = self.calculate_sizing(symbol, current_price)
             try:
@@ -530,7 +558,7 @@ class QuantBot:
                 "contracts": amount,
                 "entry_time": time.time(),
                 "is_live": True,
-                "method": "DUAL_POLARITY_1.5_IMBALANCE",
+                "method": "PULLBACK_HOOK_SNAP",
                 "leverage": leverage
             }
             logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x")
@@ -593,7 +621,6 @@ class QuantBot:
             else:
                 logger.info(f"[PAPER EXIT] Closed {symbol} @ ${exit_price:.6f} | PnL: {pnl_pct:.2f}% | Reason: {reason}")
 
-            # Qualification Counter (Strict 6-in-a-row)
             if not is_live:
                 if is_win:
                     self.paper_wins += 1
@@ -613,7 +640,6 @@ class QuantBot:
             logger.error(f"Critical error during exit: {e}")
 
         finally:
-            # Atomic state reset: permanently prevents PARTI phantom loop
             self.active_trade = None
             self.cooldown_tracker[symbol] = time.time() + COOLDOWN_SECONDS
             logger.info(f"{symbol} assigned to 15-minute cooldown.")
@@ -681,7 +707,7 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Strict Dual-Polarity Quant Engine active. Event loop running...")
+        logger.info("Pullback Hook Quant Engine active. Event loop running...")
 
         while True:
             try:
@@ -697,16 +723,13 @@ class QuantBot:
                 DASHBOARD_DATA["paper_wins"] = self.paper_wins
                 DASHBOARD_DATA["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-                # Print clean 15-minute intelligence debrief
                 self.print_desk_briefing()
 
-                # If managing an open trade, focus on monitoring
                 if self.active_trade:
                     self.monitor_active_trade()
                     time.sleep(2)
                     continue
 
-                # Run strict polarity scan
                 opportunity = self.scan_for_opportunities()
                 if opportunity:
                     self.execute_entry(opportunity)
