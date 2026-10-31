@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Smart Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Engine: 15m/30m Price vs. Open Interest Polarity Imbalance
+- Engine: Strict Dual-Polarity Imbalance (One side <= -1.5%, Other side >= +1.5%)
 - Intelligence: Detects "Price Meets OI" vs "OI Traps" (Only enters genuine re-alignments)
 - Reporting: Clean 15-Minute Desk Briefing in Render Logs & Web Dashboard
 - Execution: One-Way Mode, Dynamic Leverage ($5.50 Min Notional), reduceOnly
 - Safety: Anti-Trap Spread Check, Anti-Stagnation (20m velocity cut), PARTI Loop Defense
 - Qualification: Strict 6-in-a-row Paper Win Gauntlet before Live Unlock
-- Infrastructure: Render Port 10000 HTTP Keep-Alive & Auto-Recovery
+- Infrastructure: Universal Key Detection, Render Port 10000 HTTP Keep-Alive & Auto-Recovery
 """
 
 import os
@@ -18,7 +18,6 @@ import math
 import logging
 import threading
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -41,13 +40,34 @@ logging.getLogger("urllib3").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # ==============================================================================
-# 2. CONFIGURATION & PARAMETERS
+# 2. UNIVERSAL CREDENTIAL DETECTION & PARAMETERS
 # ==============================================================================
-API_KEY = os.getenv("BITGET_API_KEY", "")
-API_SECRET = os.getenv("BITGET_API_SECRET", "")
-API_PASSPHRASE = os.getenv("BITGET_API_PASSPHRASE", "")
-PORT = int(os.getenv("PORT", 10000))
+API_KEY = (
+    os.getenv("BITGET_API_KEY") or
+    os.getenv("API_KEY") or
+    os.getenv("BITGET_KEY") or
+    ""
+).strip()
 
+API_SECRET = (
+    os.getenv("BITGET_API_SECRET") or
+    os.getenv("BITGET_SECRET_KEY") or
+    os.getenv("API_SECRET") or
+    os.getenv("SECRET_KEY") or
+    os.getenv("BITGET_SECRET") or
+    ""
+).strip()
+
+API_PASSPHRASE = (
+    os.getenv("BITGET_API_PASSPHRASE") or
+    os.getenv("BITGET_PASSPHRASE") or
+    os.getenv("API_PASSPHRASE") or
+    os.getenv("PASSPHRASE") or
+    os.getenv("BITGET_PASSWORD") or
+    ""
+).strip()
+
+PORT = int(os.getenv("PORT", 10000))
 STATE_FILE = "qualification_state.json"
 
 # Strict Token Blacklist
@@ -56,14 +76,12 @@ BLACKLIST = {
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 }
 
-# Liquidity & Imbalance Thresholds
+# Strict Dual-Polarity Gate (BOTH sides must cross 1.5% in opposite directions)
+MIN_POLARITY_THRESHOLD = 1.50      # Strictly +/- 1.50%
 MIN_24H_VOLUME_USDT = 1_000_000.0  # $1,000,000 minimum liquidity
-MIN_IMBALANCE_GAP_PCT = 3.0        # Minimum |Delta OI - Delta Price| gap
-MIN_POLARITY_PCT = 1.5             # Minimum individual displacement threshold
 MAX_SPREAD_PCT = 0.10              # Anti-trap order book spread <= 0.10%
 
-# Concurrency & Sizing
-SCANNER_WORKERS = 16               # Parallel threads for fast 3s sweeps
+# Risk & Order Execution Parameters
 BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
 BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
 HARD_STOP_LOSS_PCT = 0.90          # 0.9% hard structural stop loss
@@ -121,7 +139,7 @@ class QuantBot:
             "enableRateLimit": True,
         })
 
-        # Upgrade HTTP adapter pool to 50 connections
+        # Upgrade HTTP adapter pool to 50 connections to eliminate warnings
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
         self.exchange.session.mount("https://", adapter)
         self.exchange.session.mount("http://", adapter)
@@ -173,8 +191,10 @@ class QuantBot:
     # EXCHANGE SETTINGS & AUTO-RECOVERY
     # --------------------------------------------------------------------------
     def init_exchange_settings(self):
+        logger.info(f"Credential Status -> Key Detected: {bool(API_KEY)} | Secret Detected: {bool(API_SECRET)} | Passphrase Detected: {bool(API_PASSPHRASE)}")
+        
         if not API_KEY or not API_SECRET or not API_PASSPHRASE:
-            logger.warning("Bitget API credentials missing. Bot running in PAPER SIMULATION mode.")
+            logger.warning("Bitget API credentials missing or incomplete. Bot running in PAPER SIMULATION mode.")
             return
 
         try:
@@ -217,7 +237,7 @@ class QuantBot:
             logger.error(f"Live position recovery error: {e}")
 
     # --------------------------------------------------------------------------
-    # PRICE & OPEN INTEREST TIME-SERIES TRACKER
+    # PRICE & OPEN INTEREST BUFFER
     # --------------------------------------------------------------------------
     def is_symbol_valid(self, symbol: str) -> bool:
         base = symbol.split("/")[0].split(":")[0]
@@ -228,14 +248,12 @@ class QuantBot:
         return True
 
     def update_time_series_buffer(self, tickers: Dict):
-        """Maintains a rolling 35-minute price and open interest history for each coin."""
         now = time.time()
         for sym, t in tickers.items():
             if not sym.endswith(":USDT") or not self.is_symbol_valid(sym):
                 continue
 
             price = float(t.get("last", 0.0) or t.get("close", 0.0) or 0.0)
-            # Bitget holdingAmount = Open Interest contracts
             oi = float(t.get("openInterest") or t.get("info", {}).get("holdingAmount") or 0.0)
 
             if price <= 0 or oi <= 0:
@@ -247,25 +265,20 @@ class QuantBot:
             buf = self.history_buffer[sym]
             buf.append({"time": now, "price": price, "oi": oi})
 
-            # Prune data points older than 35 minutes (2100 seconds)
             while buf and (now - buf[0]["time"]) > 2100:
                 buf.popleft()
 
     def calculate_deltas(self, symbol: str, target_seconds: int) -> Optional[Tuple[float, float]]:
-        """Calculates percentage change in Price and OI over target_seconds (e.g. 900s for 15m)."""
         buf = self.history_buffer.get(symbol)
         if not buf or len(buf) < 2:
             return None
 
         current = buf[-1]
         target_time = current["time"] - target_seconds
-
-        # Find historical snapshot closest to target_time
         past = min(buf, key=lambda x: abs(x["time"] - target_time))
         elapsed = current["time"] - past["time"]
 
-        # Ensure we have at least 60% of the target window populated
-        if elapsed < (target_seconds * 0.60):
+        if elapsed < (target_seconds * 0.50):
             return None
 
         pr_change = ((current["price"] - past["price"]) / past["price"]) * 100.0
@@ -274,10 +287,9 @@ class QuantBot:
         return pr_change, oi_change
 
     # --------------------------------------------------------------------------
-    # IMBALANCE SCANNER & THE "PRICE MEETS OI" IGNITION FILTER
+    # STRICT DUAL-POLARITY SCANNER & IGNITION VERIFIER
     # --------------------------------------------------------------------------
     def anti_trap_check(self, symbol: str) -> bool:
-        """Verifies tight spread to avoid iceberg walls."""
         try:
             ob = self.exchange.fetch_order_book(symbol, limit=5)
             bid = ob["bids"][0][0] if ob["bids"] else None
@@ -289,33 +301,40 @@ class QuantBot:
         except Exception:
             return False
 
-    def verify_price_ignition(self, symbol: str, expected_direction: str) -> bool:
+    def verify_price_ignition(self, symbol: str, setup_type: str) -> Optional[str]:
         """
-        Confirms Price is the active party moving to meet OI (Not an OI trap).
-        Inspects the last 3 completed 1m candles for immediate displacement.
+        Inspects immediate 1m price candles.
+        Confirms Price is aggressively moving to balance with OI (Not an OI trap).
+        Returns 'buy', 'sell', or None.
         """
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=4)
             if not ohlcv or len(ohlcv) < 3:
-                return False
+                return None
 
             candles = ohlcv[-3:]
             start_open = candles[0][1]
             end_close = candles[-1][4]
             move_pct = ((end_close - start_open) / start_open) * 100.0
 
-            if expected_direction == "buy":
-                # Price must show upward displacement to meet OI
-                if move_pct >= 0.40 and candles[-1][4] > candles[-1][1]:
-                    return True
-            else:
-                # Price must show downward displacement to meet OI
-                if move_pct <= -0.40 and candles[-1][4] < candles[-1][1]:
-                    return True
+            # If Price was <= -1.5% and OI was >= +1.5% (Heavy short build-up)
+            if setup_type == "SHORT_BUILDUP":
+                # If price accelerates further down to meet the short buildup -> enter SELL
+                if move_pct <= -0.35 and candles[-1][4] < candles[-1][1]:
+                    return "sell"
+                # If price violently reverses to liquidate the aggressive shorts -> enter BUY
+                elif move_pct >= +0.40 and candles[-1][4] > candles[-1][1]:
+                    return "buy"
 
-            return False
+            # If Price was >= +1.5% and OI was <= -1.5% (Short squeeze expansion)
+            elif setup_type == "SHORT_SQUEEZE":
+                # Price must continue accelerating up -> enter BUY
+                if move_pct >= +0.35 and candles[-1][4] > candles[-1][1]:
+                    return "buy"
+
+            return None
         except Exception:
-            return False
+            return None
 
     def scan_for_opportunities(self) -> Optional[Dict]:
         scan_start = time.time()
@@ -330,32 +349,32 @@ class QuantBot:
             if vol < MIN_24H_VOLUME_USDT:
                 continue
 
-            # Check 15m window deltas
-            deltas_15m = self.calculate_deltas(sym, 900)
-            if not deltas_15m:
+            deltas = self.calculate_deltas(sym, 900)
+            if not deltas:
                 continue
 
-            pr_15, oi_15 = deltas_15m
-            gap_15 = abs(oi_15 - pr_15)
+            pr_15, oi_15 = deltas
 
-            # Polarity Split Detection:
-            # 1. Opposite Signs: One is negative (<= -1.5%) and other is positive (>= +1.5%)
-            # 2. Extreme Tension: OI surged >= 3.0% while price is asleep (<= 0.4%)
-            is_opposite_polarity = (pr_15 <= -MIN_POLARITY_PCT and oi_15 >= MIN_POLARITY_PCT) or \
-                                   (pr_15 >= MIN_POLARITY_PCT and oi_15 <= -MIN_POLARITY_PCT)
-            is_extreme_oi_lead = (oi_15 >= 3.0 and abs(pr_15) <= 0.50)
+            # ==================================================================
+            # STRICT DUAL-POLARITY RULE:
+            # BOTH sides MUST cross +/- 1.5% in opposite directions!
+            # ==================================================================
+            setup_a = (pr_15 <= -MIN_POLARITY_THRESHOLD and oi_15 >= MIN_POLARITY_THRESHOLD)
+            setup_b = (pr_15 >= MIN_POLARITY_THRESHOLD and oi_15 <= -MIN_POLARITY_THRESHOLD)
 
-            if (is_opposite_polarity or is_extreme_oi_lead) and gap_15 >= MIN_IMBALANCE_GAP_PCT:
-                # Target direction: Price snaps to meet the accumulated leverage
-                direction = "buy" if oi_15 > pr_15 else "sell"
-                candidates.append({
-                    "symbol": sym,
-                    "direction": direction,
-                    "pr_15": pr_15,
-                    "oi_15": oi_15,
-                    "gap": gap_15,
-                    "score": gap_15
-                })
+            if not (setup_a or setup_b):
+                continue
+
+            setup_type = "SHORT_BUILDUP" if setup_a else "SHORT_SQUEEZE"
+            gap = abs(oi_15 - pr_15)
+
+            candidates.append({
+                "symbol": sym,
+                "setup_type": setup_type,
+                "pr_15": pr_15,
+                "oi_15": oi_15,
+                "gap": gap
+            })
 
         scan_duration = time.time() - scan_start
         DASHBOARD_DATA["last_scan_duration_sec"] = round(scan_duration, 2)
@@ -363,8 +382,8 @@ class QuantBot:
         if not candidates:
             return None
 
-        # Rank Top Candidate by largest polarity gap
-        candidates.sort(key=lambda x: x["score"], reverse=True)
+        # Rank by largest polarity gap
+        candidates.sort(key=lambda x: x["gap"], reverse=True)
         champion = candidates[0]
 
         # Test #1: Anti-Trap Spread Check
@@ -374,17 +393,22 @@ class QuantBot:
 
         # Test #2: The "Price Meets OI" Ignition Test
         symbol = champion["symbol"]
-        direction = champion["direction"]
+        setup_type = champion["setup_type"]
+        confirmed_direction = self.verify_price_ignition(symbol, setup_type)
 
-        if self.verify_price_ignition(symbol, direction):
+        if confirmed_direction:
             self.ignitions_confirmed_count += 1
-            learning_note = f"{symbol}: Price ignited ({direction.upper()}) to balance with OI (OI:{champion['oi_15']:+.2f}%, Pr:{champion['pr_15']:+.2f}%) -> VALID SNAP-BACK"
+            champion["direction"] = confirmed_direction
+            learning_note = (
+                f"{symbol}: Dual-Polarity Confirmed (OI: {champion['oi_15']:+.2f}% | "
+                f"Price: {champion['pr_15']:+.2f}%) -> Active Ignition {confirmed_direction.upper()}"
+            )
             self.recent_learnings.append(learning_note)
-            logger.info(f"CONFIRMED IMBALANCE IGNITION: {learning_note}")
+            logger.info(f"CONFIRMED DUAL-POLARITY TRADE: {learning_note}")
             return champion
         else:
             self.traps_rejected_count += 1
-            trap_note = f"{symbol}: OI surged ({champion['oi_15']:+.2f}%) but Price remained flat ({champion['pr_15']:+.2f}%) -> OI TRAP DISCARDED"
+            trap_note = f"{symbol}: Dual-Polarity found (OI: {champion['oi_15']:+.2f}%, Pr: {champion['pr_15']:+.2f}%) but Price stayed dormant -> OI TRAP DISCARDED"
             self.recent_learnings.append(trap_note)
             return None
 
@@ -392,40 +416,39 @@ class QuantBot:
     # 15-MINUTE INTELLIGENCE BRIEFING
     # --------------------------------------------------------------------------
     def print_desk_briefing(self):
-        """Prints a high-IQ 15-minute desk summary and silences tick-by-tick spam."""
         now = time.time()
         if (now - self.last_briefing_time) < BRIEFING_INTERVAL_SECONDS:
             return
 
         self.last_briefing_time = now
 
-        # Identify market regime from liquid buffer
-        liquid_count = len(self.history_buffer)
-        top_imbalance_str = "None detected"
+        # Only search for champions that strictly qualify under the dual +/- 1.5% rule
+        top_imbalance_str = "None (Market in equilibrium, no dual +/- 1.5% divergence)"
         highest_gap = 0.0
 
-        for sym in list(self.history_buffer.keys())[:20]:
+        for sym in list(self.history_buffer.keys()):
             deltas = self.calculate_deltas(sym, 900)
             if deltas:
                 p, o = deltas
-                gap = abs(o - p)
-                if gap > highest_gap:
-                    highest_gap = gap
-                    top_imbalance_str = f"{sym} | OI: {o:+.2f}% | Price: {p:+.2f}% (Gap: {gap:.1f}%)"
+                if (p <= -MIN_POLARITY_THRESHOLD and o >= MIN_POLARITY_THRESHOLD) or \
+                   (p >= MIN_POLARITY_THRESHOLD and o <= -MIN_POLARITY_THRESHOLD):
+                    gap = abs(o - p)
+                    if gap > highest_gap:
+                        highest_gap = gap
+                        top_imbalance_str = f"{sym} | OI: {o:+.2f}% | Price: {p:+.2f}% (Gap: {gap:.1f}%)"
 
-        last_learning = self.recent_learnings[-1] if self.recent_learnings else "Market in balanced equilibrium. No unconfirmed traps."
-        # Keep learning log clean
+        last_learning = self.recent_learnings[-1] if self.recent_learnings else "Equilibrium maintained. Zero unconfirmed traps."
         if len(self.recent_learnings) > 10:
             self.recent_learnings = self.recent_learnings[-10:]
 
         briefing_text = (
             f"\n{'='*25} [15-MIN DESK BRIEFING] {'='*25}\n"
-            f"• MARKET CHAMPION: {top_imbalance_str}\n"
+            f"• DUAL-POLARITY CHAMPION: {top_imbalance_str}\n"
             f"• RECENT LEARNING: {last_learning}\n"
             f"• TRAPS AVOIDED: {self.traps_rejected_count} (OI faded into flat price)\n"
             f"• CONFIRMED IGNITIONS: {self.ignitions_confirmed_count}\n"
             f"• GAUNTLET PROGRESS: {self.paper_wins}/6 Wins | Mode: {'LIVE' if self.live_mode else 'PAPER'}\n"
-            f"• TRACKING UNIVERSE: {liquid_count} liquid perpetual pairs active\n"
+            f"• TRACKING UNIVERSE: {len(self.history_buffer)} liquid perpetual pairs active\n"
             f"{'='*72}"
         )
         logger.info(briefing_text)
@@ -442,7 +465,6 @@ class QuantBot:
     # SIZING & EXECUTION (MICRO-ACCOUNT ONE-WAY MODE)
     # --------------------------------------------------------------------------
     def calculate_sizing(self, symbol: str, current_price: float) -> Tuple[int, float]:
-        """Calculates exact minimum leverage to clear $5.50 minimum notional."""
         balance = self.exchange.fetch_balance()
         free_usdt = float(balance.get("USDT", {}).get("free", 0.0) or 0.0)
         usable_margin = max(free_usdt * BALANCE_UTILIZATION, 0.50)
@@ -476,11 +498,11 @@ class QuantBot:
                 "contracts": 10.0,
                 "entry_time": time.time(),
                 "is_live": False,
-                "method": "PRICE_OI_IMBALANCE_SNAP",
+                "method": "DUAL_POLARITY_1.5_IMBALANCE",
                 "leverage": 5
             }
             logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
-                        f"Imbalance Gap: {candidate['gap']:.2f}% | Streak: {self.paper_wins}/6")
+                        f"Gap: {candidate['gap']:.2f}% | Streak: {self.paper_wins}/6")
             return
 
         # Live Execution
@@ -508,7 +530,7 @@ class QuantBot:
                 "contracts": amount,
                 "entry_time": time.time(),
                 "is_live": True,
-                "method": "PRICE_OI_IMBALANCE_SNAP",
+                "method": "DUAL_POLARITY_1.5_IMBALANCE",
                 "leverage": leverage
             }
             logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x")
@@ -543,7 +565,6 @@ class QuantBot:
 
             is_win = pnl_pct > 0
 
-            # Execute Live Order with exact contract balance
             if is_live:
                 try:
                     positions = self.exchange.fetch_positions([symbol], params={"productType": "USDT-FUTURES"})
@@ -660,11 +681,10 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Smart Quant Trading Engine active. Learning loop initialized...")
+        logger.info("Strict Dual-Polarity Quant Engine active. Event loop running...")
 
         while True:
             try:
-                # Refresh balance for dashboard
                 if API_KEY:
                     try:
                         bal = self.exchange.fetch_balance()
@@ -677,7 +697,7 @@ class QuantBot:
                 DASHBOARD_DATA["paper_wins"] = self.paper_wins
                 DASHBOARD_DATA["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-                # Print periodic 15-minute desk briefing
+                # Print clean 15-minute intelligence debrief
                 self.print_desk_briefing()
 
                 # If managing an open trade, focus on monitoring
@@ -686,12 +706,12 @@ class QuantBot:
                     time.sleep(2)
                     continue
 
-                # Run fast polarity scan
+                # Run strict polarity scan
                 opportunity = self.scan_for_opportunities()
                 if opportunity:
                     self.execute_entry(opportunity)
 
-                time.sleep(10)  # Clean 10-second polling cadence
+                time.sleep(10)
 
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
