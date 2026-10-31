@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Institutional Bitget USDT-M Perpetual Trading Bot
-- Engine: 10-Minute "40-0 Tennis Domination" via 1-minute Candlestick Inspection
-- Execution: One-Way Mode, Dynamic Leverage (clearing $5.50 min notional), reduceOnly exits
-- Safety: Anti-Trap Spread Check, Anti-Stagnation (20m velocity cut), PARTI phantom-loop defense
-- Qualification: Strict 6-in-a-row paper win gauntlet before live unlock
+Upgraded Institutional Bitget USDT-M Perpetual Trading Bot
+- Fast Multi-Threaded Concurrent Scanner (200+ pairs in ~3-4 seconds)
+- Method 1: First Set Blowout (Instant 4% Run & Top 10 40-0 Cleanliness Outlier)
+- Method 2: Second Set Continuation (Shallow 2-3 Candle Pause Breakout)
+- Execution: One-Way Mode, Dynamic Min Leverage ($5.50 Notional), reduceOnly
+- Safety: Anti-Trap Spread Check, Anti-Stagnation (20m velocity cut), PARTI Loop Defense
+- Qualification: Strict 6-in-a-row Paper Win Gauntlet before Live Unlock
 - Infrastructure: Render Port 10000 HTTP Keep-Alive & Auto-Recovery
 """
 
@@ -15,6 +17,7 @@ import json
 import math
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -31,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger("QuantDesk")
 
 # ==============================================================================
-# 2. CONFIGURATION & ENVIRONMENT
+# 2. CONFIGURATION & PARAMETERS
 # ==============================================================================
 API_KEY = os.getenv("BITGET_API_KEY", "")
 API_SECRET = os.getenv("BITGET_API_SECRET", "")
@@ -42,33 +45,36 @@ STATE_FILE = "qualification_state.json"
 
 # Strict Token Blacklist
 BLACKLIST = {
-    "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP", 
+    "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP",
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 }
 
-# Strategy Parameters
+# Scanning & Filter Parameters
 MIN_24H_VOLUME_USDT = 1_000_000.0  # $1,000,000 minimum liquidity
 MIN_10M_MOVE_PCT = 2.0             # Minimum 2.0% move in 10 minutes
-MAX_10M_MOVE_PCT = 15.0            # Cap at 15.0% to avoid dead illiquid wicks
-MAX_RETRACE_RATIO = 0.20           # 20% max counter-retracement (Opponent points)
+MAX_10M_MOVE_PCT = 15.0            # Filter out illiquid needle spikes
+MAX_RETRACE_RATIO = 0.20           # Opponent cannot retrace > 20% of impulse
 MAX_OPPOSING_CANDLES = 2           # Opponent can win at most 2 out of 10 candles
-MAX_OPPOSING_VOL_RATIO = 0.15      # Opposing volume must be < 15% of 10m total
+MAX_OPPOSING_VOL_RATIO = 0.18      # Opposing volume must be < 18% of 10m volume
 INSTANT_RUN_PCT = 4.0              # Smooth run >= 4%
 INSTANT_MAX_PULLBACK_PCT = 0.50    # Counter pullback strictly < 0.50%
 MAX_SPREAD_PCT = 0.10              # Anti-trap order book spread <= 0.10%
 
+# Concurrency
+SCANNER_WORKERS = 16               # Parallel threads for 3-4s market sweep
+
 # Risk & Order Execution Parameters
 BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
-BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
-HARD_STOP_LOSS_PCT = 0.90          # 0.9% hard structural stop loss
+BITGET_MIN_NOTIONAL = 5.50         # Bitget ~$5.50 min order value
+HARD_STOP_LOSS_PCT = 0.90          # 0.9% hard structural stop
 VELOCITY_TIMEOUT_SECONDS = 1200    # 20 minutes velocity clock
-VELOCITY_MIN_PROFIT_PCT = 1.20     # Must be >= +1.2% in 20m or cut trade
+VELOCITY_MIN_PROFIT_PCT = 1.20     # Must achieve >= +1.2% in 20m or cut trade
 RUNNER_TRAIL_ACTIVATION_PCT = 3.50 # Activate dynamic runner trailing at +3.5%
 RUNNER_GIVEBACK_PCT = 0.80         # Trail 0.8% behind local peak
 COOLDOWN_SECONDS = 900             # 15 minutes symbol cooldown
 
 # ==============================================================================
-# 3. HTTP KEEP-ALIVE SERVER (FOR RENDER PORT 10000)
+# 3. HTTP KEEP-ALIVE DASHBOARD (PORT 10000)
 # ==============================================================================
 DASHBOARD_DATA = {
     "status": "Initializing",
@@ -76,6 +82,7 @@ DASHBOARD_DATA = {
     "paper_wins": 0,
     "live_balance": 0.0,
     "active_trade": None,
+    "last_scan_duration_sec": 0.0,
     "top_candidates": [],
     "last_scan_time": "None"
 }
@@ -89,7 +96,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.wfile.write(response.encode("utf-8"))
 
     def log_message(self, format, *args):
-        return  # Suppress server request noise in logs
+        return  # Suppress HTTP access log noise
 
 def start_keep_alive_server(port: int):
     server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
@@ -98,7 +105,7 @@ def start_keep_alive_server(port: int):
     logger.info(f"Keep-Alive HTTP server running on port {port}")
 
 # ==============================================================================
-# 4. BOT ENGINE CLASS
+# 4. QUANT TRADING BOT ENGINE
 # ==============================================================================
 class QuantBot:
     def __init__(self):
@@ -116,7 +123,7 @@ class QuantBot:
         self.live_mode = False
         self.active_trade: Optional[Dict] = None
         self.cooldown_tracker: Dict[str, float] = {}
-        
+
         self.load_state()
         self.init_exchange_settings()
         self.recover_live_position()
@@ -133,7 +140,7 @@ class QuantBot:
                     self.live_mode = data.get("live_mode", False)
                     logger.info(f"Loaded persistent state: {self.paper_wins}/6 Paper Wins. LiveMode: {self.live_mode}")
             except Exception as e:
-                logger.error(f"Failed to load state file: {e}")
+                logger.error(f"Failed to load state: {e}")
 
     def save_state(self):
         try:
@@ -144,25 +151,24 @@ class QuantBot:
                     "timestamp": time.time()
                 }, f)
         except Exception as e:
-            logger.error(f"Failed to save state file: {e}")
+            logger.error(f"Failed to save state: {e}")
 
     # --------------------------------------------------------------------------
-    # EXCHANGE INITIALIZATION & RECOVERY
+    # EXCHANGE SETTINGS & AUTO-RECOVERY
     # --------------------------------------------------------------------------
     def init_exchange_settings(self):
         if not API_KEY or not API_SECRET or not API_PASSPHRASE:
-            logger.warning("Bitget API credentials missing. Bot running exclusively in PAPER simulation.")
+            logger.warning("Bitget API credentials missing. Bot running in PAPER SIMULATION mode.")
             return
 
         try:
-            # Set One-Way Mode (Hedged=False / Single-Hold)
             self.exchange.set_position_mode(False, params={"productType": "USDT-FUTURES"})
-            logger.info("Bitget Position Mode confirmed: ONE-WAY MODE (Single Hold)")
+            logger.info("Bitget Position Mode confirmed: ONE-WAY (Single Hold)")
         except Exception as e:
             logger.info(f"Position mode notice: {e} (Account already configured or unified mode)")
 
     def recover_live_position(self):
-        """Cleanly re-hydrate open positions if Render dyno restarts during active trade."""
+        """Auto-recovery if Render restarts while a live trade is open."""
         if not API_KEY:
             return
 
@@ -172,7 +178,6 @@ class QuantBot:
                 contracts = float(p.get("contracts", 0.0) or 0.0)
                 if contracts > 0:
                     symbol = p["symbol"]
-                    # Cleanly resolve side: 'long' -> 'buy', 'short' -> 'sell'
                     side_raw = str(p.get("side", "")).lower()
                     side = "buy" if side_raw in ["long", "buy"] else "sell"
                     entry_price = float(p.get("entryPrice", 0.0) or 0.0)
@@ -185,17 +190,18 @@ class QuantBot:
                         "contracts": contracts,
                         "entry_time": time.time(),
                         "is_live": True,
+                        "method": "RECOVERED_LIVE",
                         "leverage": int(p.get("leverage", 5))
                     }
                     self.live_mode = True
-                    logger.warning(f"CRITICAL RECOVERY: Recovered active LIVE position {side.upper()} on {symbol} | "
-                                   f"Size: {contracts} contracts @ ${entry_price}")
+                    logger.warning(f"RESTART RECOVERY: Open position detected on {symbol} {side.upper()} | "
+                                   f"Size: {contracts} @ ${entry_price:.6f}")
                     break
         except Exception as e:
-            logger.error(f"Position recovery check failed: {e}")
+            logger.error(f"Live position recovery check error: {e}")
 
     # --------------------------------------------------------------------------
-    # UNIVERSE SCANNING & 10M CLEANLINESS INSPECTOR
+    # FAST MULTI-THREADED 10M CANDLE INSPECTOR
     # --------------------------------------------------------------------------
     def is_symbol_valid(self, symbol: str) -> bool:
         base = symbol.split("/")[0].split(":")[0]
@@ -205,121 +211,176 @@ class QuantBot:
             return False
         return True
 
-    def evaluate_10m_cleanliness(self, symbol: str) -> Optional[Dict]:
-        """
-        Fetches 10 completed 1-minute candles and performs the 40-0 Domination test.
-        """
+    def fetch_symbol_candles(self, symbol: str) -> Optional[Tuple[str, List]]:
+        """Worker task to fetch 1m candles concurrently."""
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=11)
-            if not ohlcv or len(ohlcv) < 11:
-                return None
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=12)
+            if ohlcv and len(ohlcv) >= 11:
+                return symbol, ohlcv[-11:]  # Last 10 completed + current forming
+        except Exception:
+            pass
+        return None
 
-            candles = ohlcv[-11:-1] # 10 completed 1m candles
-            start_open = candles[0][1]
-            end_close = candles[-1][4]
-            net_change_pct = ((end_close - start_open) / start_open) * 100.0
+    def analyze_candles(self, symbol: str, ohlcv: List) -> Optional[Dict]:
+        """
+        Evaluates both:
+        - Method 1: First Set Blowout (40-0 Domination / Instant 4% Run)
+        - Method 2: Second Set Continuation (Shallow pause breakout)
+        """
+        candles = ohlcv[-11:-1]  # Exactly 10 completed 1m candles
+        start_open = candles[0][1]
+        end_close = candles[-1][4]
+        net_change_pct = ((end_close - start_open) / start_open) * 100.0
+        abs_change = abs(net_change_pct)
 
-            abs_change = abs(net_change_pct)
-            if abs_change < MIN_10M_MOVE_PCT or abs_change > MAX_10M_MOVE_PCT:
-                return None
+        if abs_change < MIN_10M_MOVE_PCT or abs_change > MAX_10M_MOVE_PCT:
+            return None
 
-            direction = "buy" if net_change_pct > 0 else "sell"
-            total_volume = sum(c[5] for c in candles)
-            if total_volume <= 0:
-                return None
+        direction = "buy" if net_change_pct > 0 else "sell"
+        total_vol = sum(c[5] for c in candles)
+        if total_vol <= 0:
+            return None
 
-            # Track cleanliness mechanics
-            opposing_candles = 0
-            opposing_volume = 0.0
+        # Track trajectory details
+        opposing_candles = 0
+        opposing_vol = 0.0
 
-            if direction == "buy":
-                running_high = candles[0][2]
-                max_counter_pullback_abs = 0.0
-                max_retrace_ratio = 0.0
+        if direction == "buy":
+            running_high = candles[0][2]
+            max_retrace_ratio = 0.0
+            max_pb_abs = 0.0
 
-                for c in candles:
-                    o, h, l, cl, vol = c[1], c[2], c[3], c[4], c[5]
-                    if h > running_high:
-                        running_high = h
-                    
-                    # Measure pullback from current running high
-                    wave_expansion = running_high - start_open
-                    if wave_expansion > 0:
-                        pullback = running_high - l
-                        retrace_ratio = pullback / wave_expansion
-                        if retrace_ratio > max_retrace_ratio:
-                            max_retrace_ratio = retrace_ratio
-                    
-                    # Absolute pullback from peak
-                    pb_abs = ((running_high - l) / running_high) * 100.0
-                    if pb_abs > max_counter_pullback_abs:
-                        max_counter_pullback_abs = pb_abs
+            for c in candles:
+                o, h, l, cl, vol = c[1], c[2], c[3], c[4], c[5]
+                if h > running_high:
+                    running_high = h
 
-                    if cl < o: # Opposing candle (Red)
-                        opposing_candles += 1
-                        opposing_volume += vol
+                wave = running_high - start_open
+                if wave > 0:
+                    retrace = (running_high - l) / wave
+                    if retrace > max_retrace_ratio:
+                        max_retrace_ratio = retrace
 
-            else: # direction == "sell"
-                running_low = candles[0][3]
-                max_counter_pullback_abs = 0.0
-                max_retrace_ratio = 0.0
+                pb = ((running_high - l) / running_high) * 100.0
+                if pb > max_pb_abs:
+                    max_pb_abs = pb
 
-                for c in candles:
-                    o, h, l, cl, vol = c[1], c[2], c[3], c[4], c[5]
-                    if l < running_low:
-                        running_low = l
-                    
-                    # Measure bounce from current running low
-                    wave_expansion = start_open - running_low
-                    if wave_expansion > 0:
-                        bounce = h - running_low
-                        retrace_ratio = bounce / wave_expansion
-                        if retrace_ratio > max_retrace_ratio:
-                            max_retrace_ratio = retrace_ratio
+                if cl < o:
+                    opposing_candles += 1
+                    opposing_vol += vol
 
-                    # Absolute bounce from dip
-                    pb_abs = ((h - running_low) / running_low) * 100.0
-                    if pb_abs > max_counter_pullback_abs:
-                        max_counter_pullback_abs = pb_abs
+            opposing_vol_ratio = opposing_vol / total_vol
 
-                    if cl > o: # Opposing candle (Green)
-                        opposing_candles += 1
-                        opposing_volume += vol
-
-            opposing_vol_ratio = opposing_volume / total_volume
-
-            # Rule A: Smooth 4% Run instant trigger
-            if abs_change >= INSTANT_RUN_PCT and max_counter_pullback_abs < INSTANT_MAX_PULLBACK_PCT:
+            # METHOD 1A: Instant Runaway 4% Run
+            if abs_change >= INSTANT_RUN_PCT and max_pb_abs < INSTANT_MAX_PULLBACK_PCT:
                 return {
                     "symbol": symbol,
                     "direction": direction,
                     "net_change_pct": net_change_pct,
-                    "score": 999.0, # Immediate trigger priority
-                    "instant": True
+                    "score": 999.0,
+                    "method": "METHOD_1_INSTANT_RUN",
+                    "max_retrace": max_retrace_ratio
                 }
 
-            # Rule B: Tennis 40-0 Cleanliness Test
-            if max_retrace_ratio > MAX_RETRACE_RATIO:
-                return None # Dirty deuce match (>20% counter-retracement)
-            if opposing_candles > MAX_OPPOSING_CANDLES:
-                return None # Opponent scored more than 2 games
-            if opposing_vol_ratio > MAX_OPPOSING_VOL_RATIO:
-                return None # Opponent put up substantial resistance (>15% volume)
+            # METHOD 2: Second Set Continuation Setup
+            # Checks if first 7 candles made a clean impulse, candles 7-9 paused shallowly (<20% dip on low vol),
+            # and candle 9-10 breaks out of the pause high
+            first_wave_high = max(c[2] for c in candles[:7])
+            pause_low = min(c[3] for c in candles[7:9])
+            pause_retrace = (first_wave_high - pause_low) / max((first_wave_high - start_open), 1e-9)
+            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
 
-            cleanliness_score = abs_change * (1.0 - max_retrace_ratio)
-            return {
-                "symbol": symbol,
-                "direction": direction,
-                "net_change_pct": net_change_pct,
-                "score": cleanliness_score,
-                "instant": False
-            }
+            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close >= (first_wave_high * 0.998):
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": 900.0 + abs_change,
+                    "method": "METHOD_2_SECOND_SET_CONTINUATION",
+                    "max_retrace": pause_retrace
+                }
 
-        except Exception as e:
-            return None
+            # METHOD 1B: Standard 40-0 Tennis Cleanliness
+            if max_retrace_ratio <= MAX_RETRACE_RATIO and opposing_candles <= MAX_OPPOSING_CANDLES and opposing_vol_ratio <= MAX_OPPOSING_VOL_RATIO:
+                score = abs_change * (1.0 - max_retrace_ratio)
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": score,
+                    "method": "METHOD_1_TENNIS_40_0",
+                    "max_retrace": max_retrace_ratio
+                }
+
+        else:  # direction == "sell"
+            running_low = candles[0][3]
+            max_retrace_ratio = 0.0
+            max_pb_abs = 0.0
+
+            for c in candles:
+                o, h, l, cl, vol = c[1], c[2], c[3], c[4], c[5]
+                if l < running_low:
+                    running_low = l
+
+                wave = start_open - running_low
+                if wave > 0:
+                    retrace = (h - running_low) / wave
+                    if retrace > max_retrace_ratio:
+                        max_retrace_ratio = retrace
+
+                pb = ((h - running_low) / running_low) * 100.0
+                if pb > max_pb_abs:
+                    max_pb_abs = pb
+
+                if cl > o:
+                    opposing_candles += 1
+                    opposing_vol += vol
+
+            opposing_vol_ratio = opposing_vol / total_vol
+
+            # METHOD 1A: Instant Runaway 4% Dump
+            if abs_change >= INSTANT_RUN_PCT and max_pb_abs < INSTANT_MAX_PULLBACK_PCT:
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": 999.0,
+                    "method": "METHOD_1_INSTANT_RUN",
+                    "max_retrace": max_retrace_ratio
+                }
+
+            # METHOD 2: Second Set Continuation (Short)
+            first_wave_low = min(c[3] for c in candles[:7])
+            pause_high = max(c[2] for c in candles[7:9])
+            pause_retrace = (pause_high - first_wave_low) / max((start_open - first_wave_low), 1e-9)
+            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
+
+            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close <= (first_wave_low * 1.002):
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": 900.0 + abs_change,
+                    "method": "METHOD_2_SECOND_SET_CONTINUATION",
+                    "max_retrace": pause_retrace
+                }
+
+            # METHOD 1B: Standard 40-0 Tennis Cleanliness
+            if max_retrace_ratio <= MAX_RETRACE_RATIO and opposing_candles <= MAX_OPPOSING_CANDLES and opposing_vol_ratio <= MAX_OPPOSING_VOL_RATIO:
+                score = abs_change * (1.0 - max_retrace_ratio)
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": score,
+                    "method": "METHOD_1_TENNIS_40_0",
+                    "max_retrace": max_retrace_ratio
+                }
+
+        return None
 
     def anti_trap_check(self, symbol: str) -> bool:
-        """Verifies tight spread to avoid iceberg walls and illiquid traps."""
+        """Confirms spread <= 0.10% to prevent entering into illiquid iceberg walls."""
         try:
             ob = self.exchange.fetch_order_book(symbol, limit=5)
             bid = ob["bids"][0][0] if ob["bids"] else None
@@ -332,72 +393,79 @@ class QuantBot:
             return False
 
     def scan_for_opportunities(self) -> Optional[Dict]:
+        scan_start = time.time()
         tickers = self.exchange.fetch_tickers()
-        valid_candidates = []
 
-        for symbol, t in tickers.items():
-            if not symbol.endswith(":USDT"):
+        valid_symbols = []
+        for sym, t in tickers.items():
+            if not sym.endswith(":USDT"):
                 continue
-            if not self.is_symbol_valid(symbol):
+            if not self.is_symbol_valid(sym):
                 continue
-            
-            quote_vol = float(t.get("quoteVolume", 0.0) or 0.0)
-            if quote_vol < MIN_24H_VOLUME_USDT:
-                continue
+            vol = float(t.get("quoteVolume", 0.0) or 0.0)
+            if vol >= MIN_24H_VOLUME_USDT:
+                valid_symbols.append(sym)
 
-            valid_candidates.append(symbol)
+        # Parallel multi-threaded candle retrieval (16 concurrent threads)
+        candles_by_symbol = {}
+        with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
+            future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
+            for future in as_completed(future_to_sym):
+                res = future.result()
+                if res:
+                    sym, ohlcv = res
+                    candles_by_symbol[sym] = ohlcv
 
-        logger.info(f"Scanning {len(valid_candidates)} liquid pairs for 10m clean momentum...")
-
-        results = []
-        for symbol in valid_candidates:
-            analysis = self.evaluate_10m_cleanliness(symbol)
+        # Evaluate all retrieved candle datasets
+        candidates = []
+        for sym, ohlcv in candles_by_symbol.items():
+            analysis = self.analyze_candles(sym, ohlcv)
             if analysis:
-                if analysis["instant"]:
-                    if self.anti_trap_check(symbol):
-                        logger.info(f"INSTANT 4% TRIGGER: {symbol} clean runaway move!")
-                        return analysis
-                results.append(analysis)
-            time.sleep(0.04) # Protect API rate limits
+                candidates.append(analysis)
 
-        if not results:
+        scan_duration = time.time() - scan_start
+        DASHBOARD_DATA["last_scan_duration_sec"] = round(scan_duration, 2)
+        logger.info(f"Fast-scanned {len(valid_symbols)} pairs in {scan_duration:.2f}s | Qualified Candidates: {len(candidates)}")
+
+        if not candidates:
             return None
 
-        # Sort by cleanliness score (40-0 domination)
-        results.sort(key=lambda x: x["score"], reverse=True)
-        top_10 = results[:10]
-        
-        # Update dashboard
+        # Rank Top 10 by Score (Instant runs & second set continuation score highest)
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_10 = candidates[:10]
+
         DASHBOARD_DATA["top_candidates"] = [
-            f"{c['symbol']} | {c['direction'].upper()} {c['net_change_pct']:.2f}% | Score: {c['score']:.2f}" 
+            f"{c['symbol']} [{c['method']}] {c['direction'].upper()} {c['net_change_pct']:.2f}% | Score: {c['score']:.1f}"
             for c in top_10
         ]
 
-        # Select Candidate #1 that passes Anti-Trap
-        for candidate in top_10:
-            if self.anti_trap_check(candidate["symbol"]):
-                return candidate
+        # Select Candidate #1 that passes Anti-Trap Spread Check
+        for cand in top_10:
+            if self.anti_trap_check(cand["symbol"]):
+                logger.info(f"SELECTING CHAMPION: {cand['symbol']} via {cand['method']} "
+                            f"({cand['direction'].upper()} {cand['net_change_pct']:.2f}%)")
+                return cand
             else:
-                logger.warning(f"Candidate {candidate['symbol']} failed anti-trap spread check. Testing next...")
+                logger.warning(f"Skipping {cand['symbol']} (Failed order book spread check)")
 
         return None
 
     # --------------------------------------------------------------------------
-    # EXECUTION ENGINE (MICRO-CAPITAL & ONE-WAY PRECISION)
+    # SIZING & EXECUTION (MICRO-ACCOUNT ONE-WAY MODE)
     # --------------------------------------------------------------------------
     def calculate_sizing(self, symbol: str, current_price: float) -> Tuple[int, float]:
-        """Dynamically computes minimum leverage needed to clear $5.50 min notional."""
+        """Calculates exact minimum leverage to clear $5.50 minimum notional."""
         balance = self.exchange.fetch_balance()
         free_usdt = float(balance.get("USDT", {}).get("free", 0.0) or 0.0)
         usable_margin = max(free_usdt * BALANCE_UTILIZATION, 0.50)
 
         # Dynamic Leverage = ceil(5.50 / usable_margin)
         calculated_lev = math.ceil(BITGET_MIN_NOTIONAL / usable_margin)
-        leverage = max(2, min(calculated_lev, 20)) # Clamp between 2x and 20x
+        leverage = max(2, min(calculated_lev, 20))
 
         target_notional = usable_margin * leverage
         if target_notional < BITGET_MIN_NOTIONAL:
-            target_notional = BITGET_MIN_NOTIONAL + 0.20 # Ensure threshold clearance
+            target_notional = BITGET_MIN_NOTIONAL + 0.20
 
         raw_amount = target_notional / current_price
         formatted_amount = float(self.exchange.amount_to_precision(symbol, raw_amount))
@@ -405,7 +473,9 @@ class QuantBot:
 
     def execute_entry(self, candidate: Dict):
         symbol = candidate["symbol"]
-        direction = candidate["direction"] # 'buy' or 'sell'
+        direction = candidate["direction"]
+        method = candidate["method"]
+
         ticker = self.exchange.fetch_ticker(symbol)
         current_price = ticker["ask"] if direction == "buy" else ticker["bid"]
 
@@ -419,9 +489,11 @@ class QuantBot:
                 "contracts": 10.0,
                 "entry_time": time.time(),
                 "is_live": False,
+                "method": method,
                 "leverage": 5
             }
-            logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | Paper Streak: {self.paper_wins}/6")
+            logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
+                        f"Type: {method} | Streak: {self.paper_wins}/6")
             return
 
         # Live Execution
@@ -430,7 +502,7 @@ class QuantBot:
             try:
                 self.exchange.set_leverage(leverage, symbol, params={"productType": "USDT-FUTURES", "marginCoin": "USDT"})
             except Exception as e:
-                logger.info(f"Leverage set notice: {e}")
+                logger.info(f"Leverage notice: {e}")
 
             order = self.exchange.create_order(
                 symbol=symbol,
@@ -439,7 +511,7 @@ class QuantBot:
                 amount=amount,
                 params={"productType": "USDT-FUTURES"}
             )
-            
+
             fill_price = float(order.get("average", 0.0) or current_price)
             self.active_trade = {
                 "symbol": symbol,
@@ -449,18 +521,19 @@ class QuantBot:
                 "contracts": amount,
                 "entry_time": time.time(),
                 "is_live": True,
+                "method": method,
                 "leverage": leverage
             }
-            logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x")
+            logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x | Method: {method}")
 
         except Exception as e:
-            logger.error(f"Live entry order failed: {e}")
+            logger.error(f"Live order failed: {e}")
             self.active_trade = None
 
     def execute_exit(self, reason: str):
         """
         Permanent fix for PARTI phantom loop:
-        Uses live exchange contract query + reduceOnly + atomic finally state cleanup.
+        Uses live REST contract queries, reduceOnly, and atomic finally state cleanup.
         """
         if not self.active_trade:
             return
@@ -483,10 +556,9 @@ class QuantBot:
 
             is_win = pnl_pct > 0
 
-            # Execute Live Order
+            # Execute Live Order with exact contract balance
             if is_live:
                 try:
-                    # Query live exchange contract balance to avoid dust or flip errors
                     positions = self.exchange.fetch_positions([symbol], params={"productType": "USDT-FUTURES"})
                     live_contracts = 0.0
                     for p in positions:
@@ -495,7 +567,7 @@ class QuantBot:
                             break
 
                     close_amount = live_contracts if live_contracts > 0 else trade["contracts"]
-                    
+
                     self.exchange.create_order(
                         symbol=symbol,
                         type="market",
@@ -510,37 +582,36 @@ class QuantBot:
                     logger.info(f"[LIVE EXIT] Closed {symbol} via reduceOnly @ ${exit_price:.6f} | PnL: {pnl_pct:.2f}% | Reason: {reason}")
                 except Exception as e:
                     logger.error(f"Live exit submission exception: {e}")
-
             else:
                 logger.info(f"[PAPER EXIT] Closed {symbol} @ ${exit_price:.6f} | PnL: {pnl_pct:.2f}% | Reason: {reason}")
 
-            # Qualification Logic (Strict 6 in a Row)
+            # Qualification Counter (Strict 6-in-a-row)
             if not is_live:
                 if is_win:
                     self.paper_wins += 1
-                    logger.info(f"PAPER QUALIFIER WIN: Streak is now {self.paper_wins}/6")
+                    logger.info(f"PAPER QUALIFIER WIN: Consecutive streak is now {self.paper_wins}/6")
                     if self.paper_wins >= 6:
                         self.live_mode = True
-                        logger.warning("=========================================================")
-                        logger.warning("GAUNTLET COMPLETED (6/6 WINS). LIVE TRADING UNLOCKED!")
-                        logger.warning("=========================================================")
+                        logger.warning("*********************************************************")
+                        logger.warning("6 CONSECUTIVE WINS ACHIEVED! LIVE TRADING UNLOCKED!")
+                        logger.warning("*********************************************************")
                 else:
-                    logger.warning(f"PAPER QUALIFIER LOSS ({pnl_pct:.2f}%). Counter reset to 0/6.")
+                    logger.warning(f"PAPER LOSS ({pnl_pct:.2f}%). Counter reset back to 0/6.")
                     self.paper_wins = 0
 
                 self.save_state()
 
         except Exception as e:
-            logger.error(f"Critical error during exit execution: {e}")
+            logger.error(f"Critical error during exit: {e}")
 
         finally:
-            # Atomic state reset: permanently prevents PARTI phantom exit loops
+            # Atomic state reset: permanently prevents PARTI phantom loop
             self.active_trade = None
             self.cooldown_tracker[symbol] = time.time() + COOLDOWN_SECONDS
-            logger.info(f"Symbol {symbol} entered 15-minute cooldown.")
+            logger.info(f"{symbol} assigned to 15-minute cooldown.")
 
     # --------------------------------------------------------------------------
-    # TRADE MONITOR & ANTI-STAGNATION HARVESTER
+    # POSITION MONITOR & ANTI-STAGNATION
     # --------------------------------------------------------------------------
     def monitor_active_trade(self):
         if not self.active_trade:
@@ -556,7 +627,6 @@ class QuantBot:
             ticker = self.exchange.fetch_ticker(symbol)
             current_price = ticker["last"]
 
-            # Calculate current PnL & Peak Price
             if side == "buy":
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
                 if current_price > trade["peak_price"]:
@@ -570,7 +640,6 @@ class QuantBot:
 
             duration_secs = time.time() - entry_time
 
-            # Update dashboard status
             DASHBOARD_DATA["active_trade"] = {
                 "symbol": symbol,
                 "side": side.upper(),
@@ -585,7 +654,7 @@ class QuantBot:
                 self.execute_exit(f"Hard Stop-Loss Breached (-{HARD_STOP_LOSS_PCT}%)")
                 return
 
-            # 2. Velocity Invalidation (Anti-Stagnation Clock: 20 mins)
+            # 2. Anti-Stagnation Velocity Cut (20 Minutes Clock)
             if duration_secs >= VELOCITY_TIMEOUT_SECONDS:
                 if pnl_pct < VELOCITY_MIN_PROFIT_PCT:
                     self.execute_exit(f"Velocity Cut (Stagnant < +{VELOCITY_MIN_PROFIT_PCT}% after 20m)")
@@ -604,39 +673,39 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Quant Trading Desk engine active. Starting event loop...")
-        
+        logger.info("Upgraded Quant Trading Engine active. Fast event loop running...")
+
         while True:
             try:
-                # Update Dashboard live balance
+                # Refresh balance for dashboard
                 if API_KEY:
                     try:
                         bal = self.exchange.fetch_balance()
                         DASHBOARD_DATA["live_balance"] = round(float(bal.get("USDT", {}).get("free", 0.0) or 0.0), 2)
                     except Exception:
                         pass
-                
+
                 DASHBOARD_DATA["status"] = "Active"
                 DASHBOARD_DATA["mode"] = "LIVE" if self.live_mode else f"PAPER ({self.paper_wins}/6)"
                 DASHBOARD_DATA["paper_wins"] = self.paper_wins
                 DASHBOARD_DATA["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-                # If trade is open, manage it exclusively
+                # If managing an open trade, focus on monitoring
                 if self.active_trade:
                     self.monitor_active_trade()
-                    time.sleep(3)
+                    time.sleep(2)
                     continue
 
-                # Otherwise, scan universe for fresh 40-0 blowouts
+                # Run fast parallel market sweep
                 opportunity = self.scan_for_opportunities()
                 if opportunity:
                     self.execute_entry(opportunity)
 
-                time.sleep(10) # Scanner interval
+                time.sleep(3)  # Fast 3-second cycle
 
             except Exception as e:
-                logger.error(f"Unhandled loop error: {e}")
-                time.sleep(10)
+                logger.error(f"Main loop error: {e}")
+                time.sleep(5)
 
 # ==============================================================================
 # 5. ENTRY POINT
