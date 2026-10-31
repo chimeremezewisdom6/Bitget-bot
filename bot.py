@@ -8,6 +8,7 @@ Upgraded Institutional Bitget USDT-M Perpetual Trading Bot
 - Safety: Anti-Trap Spread Check, Anti-Stagnation (20m velocity cut), PARTI Loop Defense
 - Qualification: Strict 6-in-a-row Paper Win Gauntlet before Live Unlock
 - Infrastructure: Render Port 10000 HTTP Keep-Alive & Auto-Recovery
+- Fix: Expanded 50-Socket Connection Pool (Zero urllib3 warning spam)
 """
 
 import os
@@ -22,9 +23,11 @@ from typing import Dict, List, Optional, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import ccxt
+import requests
+from requests.adapters import HTTPAdapter
 
 # ==============================================================================
-# 1. LOGGING SETUP
+# 1. LOGGING SETUP & SPAM SUPPRESSION
 # ==============================================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +35,10 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("QuantDesk")
+
+# Mute noisy connection pool warnings from urllib3
+logging.getLogger("urllib3").setLevel(logging.ERROR)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # ==============================================================================
 # 2. CONFIGURATION & PARAMETERS
@@ -119,6 +126,12 @@ class QuantBot:
             },
             "enableRateLimit": True,
         })
+
+        # Upgrade HTTP adapter pool to 50 connections to eliminate pool-full warnings
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        self.exchange.session.mount("https://", adapter)
+        self.exchange.session.mount("http://", adapter)
+
         self.paper_wins = 0
         self.live_mode = False
         self.active_trade: Optional[Dict] = None
@@ -283,8 +296,6 @@ class QuantBot:
                 }
 
             # METHOD 2: Second Set Continuation Setup
-            # Checks if first 7 candles made a clean impulse, candles 7-9 paused shallowly (<20% dip on low vol),
-            # and candle 9-10 breaks out of the pause high
             first_wave_high = max(c[2] for c in candles[:7])
             pause_low = min(c[3] for c in candles[7:9])
             pause_retrace = (first_wave_high - pause_low) / max((first_wave_high - start_open), 1e-9)
@@ -406,7 +417,7 @@ class QuantBot:
             if vol >= MIN_24H_VOLUME_USDT:
                 valid_symbols.append(sym)
 
-        # Parallel multi-threaded candle retrieval (16 concurrent threads)
+        # Parallel multi-threaded candle retrieval (16 concurrent threads with 50-pool adapter)
         candles_by_symbol = {}
         with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
             future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
