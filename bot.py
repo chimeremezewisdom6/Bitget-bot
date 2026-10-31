@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Smart Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Engine: Strict Dual-Polarity Imbalance (+/- 1.5% Minimum on BOTH sides)
-- Timing: Expansion Lock (Hands-off during blowout) -> Enters ONLY on Confirmed Pullback Hook
-- Reporting: Clean 15-Minute Desk Briefing in Render Logs & Web Dashboard
-- Execution: One-Way Mode, Dynamic Leverage ($5.50 Min Notional), reduceOnly
-- Safety: Anti-Trap Spread Check, Anti-Stagnation (20m velocity cut), PARTI Loop Defense
-- Qualification: Strict 6-in-a-row Paper Win Gauntlet before Live Unlock
-- Infrastructure: Universal Key Detection, Render Port 10000 HTTP Keep-Alive & Auto-Recovery
+Unified Institutional Quant Trading Bot - Bitget USDT-M Perpetual Swaps
+- Engine 1: Strict 4:1 Dominance Move (Impulse >= 2.0%, Reversal <= Impulse / 4.0)
+- Engine 2: Second Set Continuation (Shallow 2-3 Candle Pause Breakout)
+- Engine 3: 8,000m Exhaustion & Hook (Dual-Polarity +/- 1.5% Imbalance & Pullback Hook)
+- Paper Mode: Unconstrained Behavioral Laboratory (Natural Peak Harvesting & Invalidation)
+- Live Mode: Strict Institutional Execution (Dynamic Leverage, One-Way, reduceOnly)
+- Telemetry: 15-Minute Desk Intelligence Briefing & Port 10000 Keep-Alive Server
 """
 
 import os
@@ -18,6 +17,7 @@ import math
 import logging
 import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QuantDesk")
 
-# Mute noisy connection pool warnings from urllib3
+# Mute noisy urllib3 connection pool warnings
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
@@ -76,32 +76,47 @@ BLACKLIST = {
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 }
 
-# Strict Dual-Polarity Gate (BOTH sides must cross 1.5% in opposite directions)
-MIN_POLARITY_THRESHOLD = 1.50      # Strictly +/- 1.50%
+# Scanning & Filter Thresholds
 MIN_24H_VOLUME_USDT = 1_000_000.0  # $1,000,000 minimum liquidity
 MAX_SPREAD_PCT = 0.10              # Anti-trap order book spread <= 0.10%
+SCANNER_WORKERS = 16               # Parallel threads for ~3-4s market sweep
 
-# Pullback Hook Timing Parameters
+# Engine 1 Parameters (Strict 4:1 Dominance Ratio)
+DOMINANCE_RATIO = 4.0              # 4:1 move-to-retracement ratio (max 25% giveback)
+MIN_10M_MOVE_PCT = 2.0             # Minimum 2.0% move in 10 minutes
+MAX_10M_MOVE_PCT = 15.0            # Cap at 15.0% to avoid illiquid needles
+
+# Engine 3 Parameters (8,000m Exhaustion & Hook)
+MIN_POLARITY_THRESHOLD = 1.50      # Strictly +/- 1.50% on both Price & OI
 MIN_PULLBACK_CONFIRM_PCT = 0.15    # Minimum 0.15% turn off extreme to confirm hook
-MAX_PULLBACK_CHASE_PCT = 0.85      # Don't chase if pullback already gave back > 0.85%
+MAX_PULLBACK_CHASE_PCT = 0.85      # Don't chase if hook gave back > 0.85%
 
-# Risk & Order Execution Parameters
+# Account & Risk Parameters
 BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
 BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
-HARD_STOP_LOSS_PCT = 0.90          # 0.9% hard structural stop loss
-VELOCITY_TIMEOUT_SECONDS = 1200    # 20 minutes velocity clock
-VELOCITY_MIN_PROFIT_PCT = 1.20     # Must achieve >= +1.2% in 20m or cut trade
-RUNNER_TRAIL_ACTIVATION_PCT = 3.50 # Activate dynamic runner trailing at +3.5%
-RUNNER_GIVEBACK_PCT = 0.80         # Trail 0.8% behind local peak
-COOLDOWN_SECONDS = 900             # 15 minutes symbol cooldown
+COOLDOWN_SECONDS = 900             # 15 minutes symbol cooldown post-exit
 BRIEFING_INTERVAL_SECONDS = 900    # 15 minutes intelligence debrief
+
+# LIVE Risk Limits (Strict)
+LIVE_HARD_STOP_LOSS_PCT = 0.90     # 0.9% hard stop loss in live mode
+LIVE_VELOCITY_TIMEOUT_SECS = 1200  # 20m velocity clock in live mode
+LIVE_VELOCITY_MIN_PROFIT = 1.20    # Must achieve >= +1.2% in 20m or cut
+
+# PAPER Learning Parameters (Unconstrained Behavioral Laboratory)
+PAPER_STRUCTURAL_INVALIDATION = 2.50  # Let paper breathe up to -2.5% to observe MAE
+PAPER_STAGNATION_TIMEOUT = 1500       # 25 minutes to observe dead volume fading
+PAPER_STAGNATION_MIN_PROFIT = 0.60    # Require at least +0.6% after 25m
+
+# Dynamic Runner Trailing
+RUNNER_TRAIL_ACTIVATION_PCT = 3.50 # Activate dynamic trailing at +3.5%
+RUNNER_GIVEBACK_PCT = 0.80         # Trail 0.8% behind local peak
 
 # ==============================================================================
 # 3. HTTP KEEP-ALIVE DASHBOARD (PORT 10000)
 # ==============================================================================
 DASHBOARD_DATA = {
     "status": "Initializing",
-    "mode": "PAPER",
+    "mode": "PAPER_LABORATORY",
     "paper_wins": 0,
     "live_balance": 0.0,
     "active_trade": None,
@@ -143,7 +158,7 @@ class QuantBot:
             "enableRateLimit": True,
         })
 
-        # Upgrade HTTP adapter pool to 50 connections
+        # Upgrade HTTP adapter to 50 connections to eliminate warnings
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
         self.exchange.session.mount("https://", adapter)
         self.exchange.session.mount("http://", adapter)
@@ -155,11 +170,12 @@ class QuantBot:
 
         # Time-Series Buffers: {symbol: deque([{'time': t, 'price': p, 'oi': oi}, ...])}
         self.history_buffer: Dict[str, deque] = {}
-        
-        # Intelligence / Learning Memory
+
+        # Telemetry & Learning Memory
         self.traps_rejected_count = 0
         self.expanding_waits_count = 0
         self.ignitions_confirmed_count = 0
+        self.completed_trade_dossiers: List[Dict] = []
         self.recent_learnings: List[str] = []
         self.last_briefing_time = time.time()
 
@@ -196,10 +212,10 @@ class QuantBot:
     # EXCHANGE SETTINGS & AUTO-RECOVERY
     # --------------------------------------------------------------------------
     def init_exchange_settings(self):
-        logger.info(f"Credential Status -> Key Detected: {bool(API_KEY)} | Secret Detected: {bool(API_SECRET)} | Passphrase Detected: {bool(API_PASSPHRASE)}")
-        
+        logger.info(f"Credential Status -> Key: {bool(API_KEY)} | Secret: {bool(API_SECRET)} | Passphrase: {bool(API_PASSPHRASE)}")
+
         if not API_KEY or not API_SECRET or not API_PASSPHRASE:
-            logger.warning("Bitget API credentials missing or incomplete. Bot running in PAPER SIMULATION mode.")
+            logger.warning("Bitget API credentials missing or incomplete. Bot running in PAPER LABORATORY mode.")
             return
 
         try:
@@ -227,10 +243,11 @@ class QuantBot:
                         "side": side,
                         "entry_price": entry_price,
                         "peak_price": entry_price,
+                        "trough_price": entry_price,
                         "contracts": contracts,
                         "entry_time": time.time(),
                         "is_live": True,
-                        "method": "RECOVERED_LIVE",
+                        "engine": "RECOVERED_LIVE",
                         "leverage": int(p.get("leverage", 5))
                     }
                     self.live_mode = True
@@ -241,7 +258,7 @@ class QuantBot:
             logger.error(f"Live position recovery error: {e}")
 
     # --------------------------------------------------------------------------
-    # PRICE & OPEN INTEREST BUFFER
+    # DATA BUFFERS & SCREENING
     # --------------------------------------------------------------------------
     def is_symbol_valid(self, symbol: str) -> bool:
         base = symbol.split("/")[0].split(":")[0]
@@ -287,7 +304,6 @@ class QuantBot:
 
         pr_change = ((current["price"] - past["price"]) / past["price"]) * 100.0
         oi_change = ((current["oi"] - past["oi"]) / past["oi"]) * 100.0
-
         return pr_change, oi_change
 
     def anti_trap_check(self, symbol: str) -> bool:
@@ -302,109 +318,247 @@ class QuantBot:
         except Exception:
             return False
 
+    def fetch_symbol_candles(self, symbol: str) -> Optional[Tuple[str, List]]:
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=12)
+            if ohlcv and len(ohlcv) >= 11:
+                return symbol, ohlcv[-11:]
+        except Exception:
+            pass
+        return None
+
     # --------------------------------------------------------------------------
-    # EXPANSION LOCK & PULLBACK HOOK INSPECTOR
+    # ACTION ENGINES (ENGINE 1: 4:1 RATIO, ENGINE 2: CONTINUATION, ENGINE 3: HOOK)
     # --------------------------------------------------------------------------
-    def inspect_pullback_hook(self, symbol: str, setup_type: str) -> Optional[Tuple[str, float]]:
+    def evaluate_engines_1_and_2(self, symbol: str, ohlcv: List) -> Optional[Dict]:
         """
-        1. Checks if the move is STILL actively expanding (making lower lows or higher highs).
-           -> If STILL EXPANDING, return None (Trigger Locked).
-        2. Detects the moment the 1m candle stops drilling and confirms a pullback hook.
-           -> Returns (direction, pivot_price).
+        Evaluates:
+        - Engine 1: Strict 4:1 Dominance Ratio (Impulse >= 2.0%, Reversal <= Impulse / 4.0)
+        - Engine 2: Second Set Continuation (Shallow pause breakout)
         """
+        candles = ohlcv[-11:-1]  # 10 completed 1m candles
+        start_open = candles[0][1]
+        end_close = candles[-1][4]
+        net_change_pct = ((end_close - start_open) / start_open) * 100.0
+        abs_change = abs(net_change_pct)
+
+        if abs_change < MIN_10M_MOVE_PCT or abs_change > MAX_10M_MOVE_PCT:
+            return None
+
+        direction = "buy" if net_change_pct > 0 else "sell"
+        total_vol = sum(c[5] for c in candles)
+        if total_vol <= 0:
+            return None
+
+        # ======================================================================
+        # ENGINE 1: STRICT 4:1 DOMINANCE RATIO CALCULATION
+        # ======================================================================
+        # For every 4% gain, counter-pullback cannot exceed 1.0% (max 25% giveback)
+        max_allowed_reversal = abs_change / DOMINANCE_RATIO
+
+        if direction == "buy":
+            running_high = candles[0][2]
+            max_pullback_abs = 0.0
+
+            for c in candles:
+                h, l = c[2], c[3]
+                if h > running_high:
+                    running_high = h
+
+                pb = ((running_high - l) / running_high) * 100.0
+                if pb > max_pullback_abs:
+                    max_pullback_abs = pb
+
+            # Check 4:1 Dominance Rule (e.g. gain 2%, pullback <= 0.5%; gain 4%, pullback <= 1.0%)
+            if max_pullback_abs <= max_allowed_reversal:
+                dominance_score = 950.0 + (abs_change * 10.0) - (max_pullback_abs * 5.0)
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": dominance_score,
+                    "engine": "ENGINE_1_DOMINANCE_4_TO_1",
+                    "pivot_price": candles[0][3],
+                    "counter_reversal": max_pullback_abs,
+                    "max_allowed": max_allowed_reversal
+                }
+
+            # ENGINE 2: Second Set Continuation Setup (Long)
+            first_wave_high = max(c[2] for c in candles[:7])
+            pause_low = min(c[3] for c in candles[7:9])
+            pause_retrace = (first_wave_high - pause_low) / max((first_wave_high - start_open), 1e-9)
+            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
+
+            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close >= (first_wave_high * 0.998):
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": 900.0 + abs_change,
+                    "engine": "ENGINE_2_SECOND_SET_CONTINUATION",
+                    "pivot_price": pause_low,
+                    "counter_reversal": pause_retrace * 100.0,
+                    "max_allowed": 20.0
+                }
+
+        else:  # direction == "sell"
+            running_low = candles[0][3]
+            max_bounce_abs = 0.0
+
+            for c in candles:
+                h, l = c[2], c[3]
+                if l < running_low:
+                    running_low = l
+
+                bounce = ((h - running_low) / running_low) * 100.0
+                if bounce > max_bounce_abs:
+                    max_bounce_abs = bounce
+
+            # Check 4:1 Dominance Rule for Short (e.g. drop 2%, bounce <= 0.5%; drop 4%, bounce <= 1.0%)
+            if max_bounce_abs <= max_allowed_reversal:
+                dominance_score = 950.0 + (abs_change * 10.0) - (max_bounce_abs * 5.0)
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": dominance_score,
+                    "engine": "ENGINE_1_DOMINANCE_4_TO_1",
+                    "pivot_price": candles[0][2],
+                    "counter_reversal": max_bounce_abs,
+                    "max_allowed": max_allowed_reversal
+                }
+
+            # ENGINE 2: Second Set Continuation Setup (Short)
+            first_wave_low = min(c[3] for c in candles[:7])
+            pause_high = max(c[2] for c in candles[7:9])
+            pause_retrace = (pause_high - first_wave_low) / max((start_open - first_wave_low), 1e-9)
+            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
+
+            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close <= (first_wave_low * 1.002):
+                return {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "net_change_pct": net_change_pct,
+                    "score": 900.0 + abs_change,
+                    "engine": "ENGINE_2_SECOND_SET_CONTINUATION",
+                    "pivot_price": pause_high,
+                    "counter_reversal": pause_retrace * 100.0,
+                    "max_allowed": 20.0
+                }
+
+        return None
+
+    def evaluate_engine_3(self, symbol: str, deltas: Tuple[float, float]) -> Optional[Dict]:
+        """
+        Engine 3: 8,000m Exhaustion vs Fresh Backup Hook
+        Checks for Dual-Polarity +/- 1.5% Imbalance & confirmed Pullback Hook
+        """
+        pr_15, oi_15 = deltas
+        setup_a = (pr_15 <= -MIN_POLARITY_THRESHOLD and oi_15 >= MIN_POLARITY_THRESHOLD)
+        setup_b = (pr_15 >= MIN_POLARITY_THRESHOLD and oi_15 <= -MIN_POLARITY_THRESHOLD)
+
+        if not (setup_a or setup_b):
+            return None
+
+        setup_type = "SHORT_BUILDUP" if setup_a else "SHORT_SQUEEZE"
+        gap = abs(oi_15 - pr_15)
+
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=7)
             if not ohlcv or len(ohlcv) < 6:
                 return None
 
-            candles = ohlcv[-6:]  # Inspect last 6 1m candles
+            candles = ohlcv[-6:]
             current_candle = candles[-1]
             prior_candles = candles[:-1]
 
-            # SETUP A: Price was dumping (<= -1.5%) while OI was surging (>= +1.5%)
             if setup_type == "SHORT_BUILDUP":
                 running_low = min(c[3] for c in prior_candles)
-                
-                # Check if current candle is still actively drilling lower
+                # Expansion lock: Still drilling down?
                 if current_candle[3] < (running_low * 0.9990) or current_candle[4] < current_candle[1]:
                     self.expanding_waits_count += 1
-                    logger.debug(f"{symbol}: Still actively dumping/expanding lower. Trigger locked.")
-                    return None  # Hands off! Wait for the wave to finish expanding.
+                    return None
 
-                # Wave has stopped drilling. Measure pullback bounce off the floor:
                 absolute_floor = min(c[3] for c in candles)
-                current_price = current_candle[4]
-                bounce_pct = ((current_price - absolute_floor) / absolute_floor) * 100.0
+                bounce_pct = ((current_candle[4] - absolute_floor) / absolute_floor) * 100.0
 
-                # Must confirm the turn (bounce >= 0.15%), but not over-chased (< 0.85%)
                 if MIN_PULLBACK_CONFIRM_PCT <= bounce_pct <= MAX_PULLBACK_CHASE_PCT:
-                    # Confirmed Hook: Price turns upward to re-align with positive OI
-                    return "buy", absolute_floor
+                    return {
+                        "symbol": symbol,
+                        "direction": "buy",
+                        "net_change_pct": pr_15,
+                        "score": 880.0 + gap,
+                        "engine": "ENGINE_3_EXHAUSTION_HOOK",
+                        "pivot_price": absolute_floor,
+                        "gap": gap
+                    }
 
-            # SETUP B: Price was pumping (>= +1.5%) while OI was dumping (<= -1.5%)
             elif setup_type == "SHORT_SQUEEZE":
                 running_high = max(c[2] for c in prior_candles)
-
-                # Check if current candle is still actively rocketing higher
+                # Expansion lock: Still rocketing up?
                 if current_candle[2] > (running_high * 1.0010) or current_candle[4] > current_candle[1]:
                     self.expanding_waits_count += 1
-                    logger.debug(f"{symbol}: Still actively pumping/expanding higher. Trigger locked.")
-                    return None  # Hands off! Wait for the pump to exhaust.
+                    return None
 
-                # Wave has stopped rocketing. Measure pullback dip off the peak:
                 absolute_peak = max(c[2] for c in candles)
-                current_price = current_candle[4]
-                pullback_pct = ((absolute_peak - current_price) / absolute_peak) * 100.0
+                pullback_pct = ((absolute_peak - current_candle[4]) / absolute_peak) * 100.0
 
-                # Must confirm the turn (pullback >= 0.15%), but not over-chased (< 0.85%)
                 if MIN_PULLBACK_CONFIRM_PCT <= pullback_pct <= MAX_PULLBACK_CHASE_PCT:
-                    # Confirmed Hook: Price turns downward to re-align with negative OI
-                    return "sell", absolute_peak
+                    return {
+                        "symbol": symbol,
+                        "direction": "sell",
+                        "net_change_pct": pr_15,
+                        "score": 880.0 + gap,
+                        "engine": "ENGINE_3_EXHAUSTION_HOOK",
+                        "pivot_price": absolute_peak,
+                        "gap": gap
+                    }
 
             return None
-        except Exception as e:
-            logger.debug(f"Pullback hook inspect error on {symbol}: {e}")
+        except Exception:
             return None
 
     # --------------------------------------------------------------------------
-    # STRICT DUAL-POLARITY SCANNER
+    # UNIFIED SCANNER
     # --------------------------------------------------------------------------
     def scan_for_opportunities(self) -> Optional[Dict]:
         scan_start = time.time()
         tickers = self.exchange.fetch_tickers()
         self.update_time_series_buffer(tickers)
 
-        candidates = []
+        valid_symbols = []
         for sym, t in tickers.items():
             if not sym.endswith(":USDT") or not self.is_symbol_valid(sym):
                 continue
             vol = float(t.get("quoteVolume", 0.0) or 0.0)
-            if vol < MIN_24H_VOLUME_USDT:
-                continue
+            if vol >= MIN_24H_VOLUME_USDT:
+                valid_symbols.append(sym)
 
+        # Concurrently fetch 1m candles for Engines 1 & 2
+        candles_by_symbol = {}
+        with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
+            future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
+            for future in as_completed(future_to_sym):
+                res = future.result()
+                if res:
+                    sym, ohlcv = res
+                    candles_by_symbol[sym] = ohlcv
+
+        candidates = []
+
+        # Evaluate Engines 1 & 2
+        for sym, ohlcv in candles_by_symbol.items():
+            analysis = self.evaluate_engines_1_and_2(sym, ohlcv)
+            if analysis:
+                candidates.append(analysis)
+
+        # Evaluate Engine 3 (8,000m Exhaustion Hook)
+        for sym in valid_symbols:
             deltas = self.calculate_deltas(sym, 900)
-            if not deltas:
-                continue
-
-            pr_15, oi_15 = deltas
-
-            # STRICT DUAL-POLARITY RULE (BOTH sides must cross +/- 1.5%)
-            setup_a = (pr_15 <= -MIN_POLARITY_THRESHOLD and oi_15 >= MIN_POLARITY_THRESHOLD)
-            setup_b = (pr_15 >= MIN_POLARITY_THRESHOLD and oi_15 <= -MIN_POLARITY_THRESHOLD)
-
-            if not (setup_a or setup_b):
-                continue
-
-            setup_type = "SHORT_BUILDUP" if setup_a else "SHORT_SQUEEZE"
-            gap = abs(oi_15 - pr_15)
-
-            candidates.append({
-                "symbol": sym,
-                "setup_type": setup_type,
-                "pr_15": pr_15,
-                "oi_15": oi_15,
-                "gap": gap
-            })
+            if deltas:
+                analysis3 = self.evaluate_engine_3(sym, deltas)
+                if analysis3:
+                    candidates.append(analysis3)
 
         scan_duration = time.time() - scan_start
         DASHBOARD_DATA["last_scan_duration_sec"] = round(scan_duration, 2)
@@ -412,88 +566,24 @@ class QuantBot:
         if not candidates:
             return None
 
-        # Rank by largest polarity gap
-        candidates.sort(key=lambda x: x["gap"], reverse=True)
-        champion = candidates[0]
+        # Rank all candidates by conviction score
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_candidates = candidates[:10]
 
-        # Filter 1: Anti-Trap Spread Check
-        if not self.anti_trap_check(champion["symbol"]):
-            self.traps_rejected_count += 1
-            return None
+        # Select Candidate #1 that passes Anti-Trap Spread Check
+        for cand in top_candidates:
+            if self.anti_trap_check(cand["symbol"]):
+                self.ignitions_confirmed_count += 1
+                logger.info(f"UNIFIED CHAMPION: {cand['symbol']} via {cand['engine']} "
+                            f"({cand['direction'].upper()} {cand['net_change_pct']:.2f}%) | Score: {cand['score']:.1f}")
+                return cand
+            else:
+                self.traps_rejected_count += 1
 
-        # Filter 2: The Expansion Lock & Pullback Hook Engine
-        symbol = champion["symbol"]
-        setup_type = champion["setup_type"]
-        hook_result = self.inspect_pullback_hook(symbol, setup_type)
-
-        if hook_result:
-            direction, pivot_price = hook_result
-            self.ignitions_confirmed_count += 1
-            champion["direction"] = direction
-            champion["pivot_price"] = pivot_price
-
-            learning_note = (
-                f"{symbol}: Expansion Crested! Confirmed Pullback Hook -> Entering {direction.upper()} "
-                f"(OI: {champion['oi_15']:+.2f}%, Price: {champion['pr_15']:+.2f}%) | Pivot: ${pivot_price:.6f}"
-            )
-            self.recent_learnings.append(learning_note)
-            logger.info(f"CONFIRMED PULLBACK HOOK ENTRY: {learning_note}")
-            return champion
-        else:
-            return None
+        return None
 
     # --------------------------------------------------------------------------
-    # 15-MINUTE INTELLIGENCE BRIEFING
-    # --------------------------------------------------------------------------
-    def print_desk_briefing(self):
-        now = time.time()
-        if (now - self.last_briefing_time) < BRIEFING_INTERVAL_SECONDS:
-            return
-
-        self.last_briefing_time = now
-
-        top_imbalance_str = "None (Market in equilibrium, no dual +/- 1.5% divergence)"
-        highest_gap = 0.0
-
-        for sym in list(self.history_buffer.keys()):
-            deltas = self.calculate_deltas(sym, 900)
-            if deltas:
-                p, o = deltas
-                if (p <= -MIN_POLARITY_THRESHOLD and o >= MIN_POLARITY_THRESHOLD) or \
-                   (p >= MIN_POLARITY_THRESHOLD and o <= -MIN_POLARITY_THRESHOLD):
-                    gap = abs(o - p)
-                    if gap > highest_gap:
-                        highest_gap = gap
-                        top_imbalance_str = f"{sym} | OI: {o:+.2f}% | Price: {p:+.2f}% (Gap: {gap:.1f}%)"
-
-        last_learning = self.recent_learnings[-1] if self.recent_learnings else "Equilibrium maintained. Zero traps."
-        if len(self.recent_learnings) > 10:
-            self.recent_learnings = self.recent_learnings[-10:]
-
-        briefing_text = (
-            f"\n{'='*25} [15-MIN DESK BRIEFING] {'='*25}\n"
-            f"• DUAL-POLARITY CHAMPION: {top_imbalance_str}\n"
-            f"• RECENT LEARNING: {last_learning}\n"
-            f"• EXPANSION LOCKS (Waited for Pullback): {self.expanding_waits_count}\n"
-            f"• TRAPS AVOIDED: {self.traps_rejected_count} (Spread / Icebergs)\n"
-            f"• CONFIRMED HOOK ENTRIES: {self.ignitions_confirmed_count}\n"
-            f"• GAUNTLET PROGRESS: {self.paper_wins}/6 Wins | Mode: {'LIVE' if self.live_mode else 'PAPER'}\n"
-            f"• TRACKING UNIVERSE: {len(self.history_buffer)} liquid perpetual pairs active\n"
-            f"{'='*72}"
-        )
-        logger.info(briefing_text)
-
-        DASHBOARD_DATA["last_briefing"] = {
-            "top_imbalance": top_imbalance_str,
-            "last_learning": last_learning,
-            "expanding_waits": self.expanding_waits_count,
-            "traps_rejected": self.traps_rejected_count,
-            "ignitions_confirmed": self.ignitions_confirmed_count,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-    # --------------------------------------------------------------------------
-    # SIZING & EXECUTION (MICRO-ACCOUNT ONE-WAY MODE)
+    # SIZING & EXECUTION
     # --------------------------------------------------------------------------
     def calculate_sizing(self, symbol: str, current_price: float) -> Tuple[int, float]:
         balance = self.exchange.fetch_balance()
@@ -514,6 +604,8 @@ class QuantBot:
     def execute_entry(self, candidate: Dict):
         symbol = candidate["symbol"]
         direction = candidate["direction"]
+        engine = candidate["engine"]
+        pivot_price = candidate.get("pivot_price", 0.0)
 
         ticker = self.exchange.fetch_ticker(symbol)
         current_price = ticker["ask"] if direction == "buy" else ticker["bid"]
@@ -524,16 +616,19 @@ class QuantBot:
                 "side": direction,
                 "entry_price": current_price,
                 "peak_price": current_price,
+                "trough_price": current_price,
                 "contracts": 10.0,
                 "entry_time": time.time(),
                 "is_live": False,
-                "method": "PULLBACK_HOOK_SNAP",
+                "engine": engine,
+                "pivot_price": pivot_price,
                 "leverage": 5
             }
-            logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
-                        f"Gap: {candidate['gap']:.2f}% | Streak: {self.paper_wins}/6")
+            logger.info(f"[PAPER LAB ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
+                        f"Engine: {engine} | Gauntlet: {self.paper_wins}/6")
             return
 
+        # Live Execution
         try:
             leverage, amount = self.calculate_sizing(symbol, current_price)
             try:
@@ -555,19 +650,21 @@ class QuantBot:
                 "side": direction,
                 "entry_price": fill_price,
                 "peak_price": fill_price,
+                "trough_price": fill_price,
                 "contracts": amount,
                 "entry_time": time.time(),
                 "is_live": True,
-                "method": "PULLBACK_HOOK_SNAP",
+                "engine": engine,
+                "pivot_price": pivot_price,
                 "leverage": leverage
             }
-            logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x")
+            logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x | Engine: {engine}")
 
         except Exception as e:
             logger.error(f"Live order failed: {e}")
             self.active_trade = None
 
-    def execute_exit(self, reason: str):
+    def execute_exit(self, reason: str, is_win: bool):
         """
         Permanent fix for PARTI phantom loop:
         Uses live REST contract queries, reduceOnly, and atomic finally state cleanup.
@@ -580,6 +677,7 @@ class QuantBot:
         side = trade["side"]
         exit_side = "sell" if side == "buy" else "buy"
         is_live = trade.get("is_live", False)
+        engine = trade.get("engine", "UNKNOWN")
 
         try:
             ticker = self.exchange.fetch_ticker(symbol)
@@ -588,11 +686,31 @@ class QuantBot:
 
             if side == "buy":
                 pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
+                peak_mfe = ((trade["peak_price"] - entry_price) / entry_price) * 100.0
+                worst_mae = ((trade["trough_price"] - entry_price) / entry_price) * 100.0
             else:
                 pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
+                peak_mfe = ((entry_price - trade["peak_price"]) / entry_price) * 100.0
+                worst_mae = ((entry_price - trade["trough_price"]) / entry_price) * 100.0
 
-            is_win = pnl_pct > 0
+            duration_min = round((time.time() - trade["entry_time"]) / 60, 1)
 
+            # Record Empirical Trade Dossier for Desk Telemetry
+            dossier = {
+                "symbol": symbol,
+                "engine": engine,
+                "pnl_pct": round(pnl_pct, 2),
+                "peak_mfe": round(peak_mfe, 2),
+                "worst_mae": round(worst_mae, 2),
+                "duration_min": duration_min,
+                "reason": reason,
+                "timestamp": time.strftime("%H:%M:%S")
+            }
+            self.completed_trade_dossiers.append(dossier)
+            if len(self.completed_trade_dossiers) > 10:
+                self.completed_trade_dossiers = self.completed_trade_dossiers[-10:]
+
+            # Execute Live Order with exact contract balance
             if is_live:
                 try:
                     positions = self.exchange.fetch_positions([symbol], params={"productType": "USDT-FUTURES"})
@@ -617,21 +735,22 @@ class QuantBot:
                     )
                     logger.info(f"[LIVE EXIT] Closed {symbol} via reduceOnly @ ${exit_price:.6f} | PnL: {pnl_pct:.2f}% | Reason: {reason}")
                 except Exception as e:
-                    logger.error(f"Live exit submission exception: {e}")
+                    logger.error(f"Live exit submission error: {e}")
             else:
-                logger.info(f"[PAPER EXIT] Closed {symbol} @ ${exit_price:.6f} | PnL: {pnl_pct:.2f}% | Reason: {reason}")
+                logger.info(f"[PAPER LAB EXIT] Closed {symbol} @ ${exit_price:.6f} | PnL: {pnl_pct:.2f}% (Peak: +{peak_mfe:.2f}%, Worst: {worst_mae:.2f}%) | Reason: {reason}")
 
+            # Gauntlet Progression (6-in-a-row qualification)
             if not is_live:
                 if is_win:
                     self.paper_wins += 1
-                    logger.info(f"PAPER QUALIFIER WIN: Consecutive streak is now {self.paper_wins}/6")
+                    logger.info(f"GAUNTLET PROGRESS: Streak is now {self.paper_wins}/6 Wins!")
                     if self.paper_wins >= 6:
                         self.live_mode = True
                         logger.warning("*********************************************************")
-                        logger.warning("6 CONSECUTIVE WINS ACHIEVED! LIVE TRADING UNLOCKED!")
+                        logger.warning("6/6 CONSECUTIVE WINS ACHIEVED! LIVE TRADING UNLOCKED!")
                         logger.warning("*********************************************************")
                 else:
-                    logger.warning(f"PAPER LOSS ({pnl_pct:.2f}%). Counter reset back to 0/6.")
+                    logger.warning(f"GAUNTLET RESET: Loss ({pnl_pct:.2f}%). Counter reset to 0/6.")
                     self.paper_wins = 0
 
                 self.save_state()
@@ -645,7 +764,7 @@ class QuantBot:
             logger.info(f"{symbol} assigned to 15-minute cooldown.")
 
     # --------------------------------------------------------------------------
-    # POSITION MONITOR & ANTI-STAGNATION
+    # POSITION MONITOR: BEHAVIORAL LABORATORY VS LIVE STRICT
     # --------------------------------------------------------------------------
     def monitor_active_trade(self):
         if not self.active_trade:
@@ -656,20 +775,26 @@ class QuantBot:
         side = trade["side"]
         entry_price = trade["entry_price"]
         entry_time = trade["entry_time"]
+        is_live = trade.get("is_live", False)
 
         try:
             ticker = self.exchange.fetch_ticker(symbol)
             current_price = ticker["last"]
 
+            # Update Peak and Trough metrics (MFE and MAE)
             if side == "buy":
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
                 if current_price > trade["peak_price"]:
                     trade["peak_price"] = current_price
+                if current_price < trade["trough_price"]:
+                    trade["trough_price"] = current_price
                 drawdown_from_peak = ((trade["peak_price"] - current_price) / trade["peak_price"]) * 100.0
             else:
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
                 if current_price < trade["peak_price"]:
                     trade["peak_price"] = current_price
+                if current_price > trade["trough_price"]:
+                    trade["trough_price"] = current_price
                 drawdown_from_peak = ((current_price - trade["peak_price"]) / trade["peak_price"]) * 100.0
 
             duration_secs = time.time() - entry_time
@@ -680,34 +805,114 @@ class QuantBot:
                 "entry": entry_price,
                 "current": current_price,
                 "pnl_pct": round(pnl_pct, 2),
-                "duration_min": round(duration_secs / 60, 1)
+                "duration_min": round(duration_secs / 60, 1),
+                "engine": trade.get("engine", "")
             }
 
-            # 1. Hard Structural Stop Loss (0.9% Pivot Breached)
-            if pnl_pct <= -HARD_STOP_LOSS_PCT:
-                self.execute_exit(f"Hard Stop-Loss Breached (-{HARD_STOP_LOSS_PCT}%)")
-                return
-
-            # 2. Anti-Stagnation Velocity Cut (20 Minutes Clock)
-            if duration_secs >= VELOCITY_TIMEOUT_SECONDS:
-                if pnl_pct < VELOCITY_MIN_PROFIT_PCT:
-                    self.execute_exit(f"Velocity Cut (Stagnant < +{VELOCITY_MIN_PROFIT_PCT}% after 20m)")
+            # ==================================================================
+            # LIVE TRADING MONITORING (Strict Institutional Discipline)
+            # ==================================================================
+            if is_live:
+                # 1. Hard Structural Stop Loss (0.9% Pivot Breached)
+                if pnl_pct <= -LIVE_HARD_STOP_LOSS_PCT:
+                    self.execute_exit(f"Hard Stop-Loss (-{LIVE_HARD_STOP_LOSS_PCT}%)", is_win=False)
                     return
 
-            # 3. Dynamic Runner Trailing (+3.5% up to +35%)
-            if pnl_pct >= RUNNER_TRAIL_ACTIVATION_PCT:
-                if drawdown_from_peak >= RUNNER_GIVEBACK_PCT:
-                    self.execute_exit(f"Dynamic Runner Harvested (+{pnl_pct:.2f}% locked)")
+                # 2. Velocity Cut (20-Minute Anti-Stagnation)
+                if duration_secs >= LIVE_VELOCITY_TIMEOUT_SECS and pnl_pct < LIVE_VELOCITY_MIN_PROFIT:
+                    self.execute_exit(f"Velocity Cut (<+{LIVE_VELOCITY_MIN_PROFIT}% at 20m)", is_win=(pnl_pct > 0))
+                    return
+
+                # 3. Dynamic Runner Trailing (+3.5% up to +35%)
+                if pnl_pct >= RUNNER_TRAIL_ACTIVATION_PCT and drawdown_from_peak >= RUNNER_GIVEBACK_PCT:
+                    self.execute_exit(f"Dynamic Runner Harvest (+{pnl_pct:.2f}%)", is_win=True)
+                    return
+
+            # ==================================================================
+            # PAPER LABORATORY MONITORING (Unconstrained Behavioral Learning)
+            # ==================================================================
+            else:
+                # 1. Natural Peak Harvesting: Runner expansion rolls over after cresting
+                if pnl_pct >= RUNNER_TRAIL_ACTIVATION_PCT:
+                    giveback_threshold = RUNNER_GIVEBACK_PCT if pnl_pct < 7.0 else 1.20
+                    if drawdown_from_peak >= giveback_threshold:
+                        self.execute_exit(f"Natural Peak Harvested (+{pnl_pct:.2f}% locked)", is_win=True)
+                        return
+
+                # 2. Natural Invalidation: Structural floor completely fails (-2.5%)
+                if pnl_pct <= -PAPER_STRUCTURAL_INVALIDATION:
+                    self.execute_exit(f"Structural Collapse (-{PAPER_STRUCTURAL_INVALIDATION}%)", is_win=False)
+                    return
+
+                # 3. Behavioral Stagnation: 25 minutes elapsed with dead volume (<+0.6%)
+                if duration_secs >= PAPER_STAGNATION_TIMEOUT:
+                    is_win = pnl_pct > 0
+                    self.execute_exit(f"Behavioral Stagnation (Volume died after 25m, PnL: {pnl_pct:.2f}%)", is_win=is_win)
                     return
 
         except Exception as e:
             logger.error(f"Error monitoring active trade on {symbol}: {e}")
 
     # --------------------------------------------------------------------------
+    # 15-MINUTE INTELLIGENCE BRIEFING & TELEMETRY
+    # --------------------------------------------------------------------------
+    def print_desk_briefing(self):
+        now = time.time()
+        if (now - self.last_briefing_time) < BRIEFING_INTERVAL_SECONDS:
+            return
+
+        self.last_briefing_time = now
+
+        top_imbalance_str = "None (Market in equilibrium)"
+        highest_gap = 0.0
+
+        for sym in list(self.history_buffer.keys()):
+            deltas = self.calculate_deltas(sym, 900)
+            if deltas:
+                p, o = deltas
+                if (p <= -MIN_POLARITY_THRESHOLD and o >= MIN_POLARITY_THRESHOLD) or \
+                   (p >= MIN_POLARITY_THRESHOLD and o <= -MIN_POLARITY_THRESHOLD):
+                    gap = abs(o - p)
+                    if gap > highest_gap:
+                        highest_gap = gap
+                        top_imbalance_str = f"{sym} | OI: {o:+.2f}% | Price: {p:+.2f}% (Gap: {gap:.1f}%)"
+
+        last_dossier_str = "No trades completed in last window."
+        if self.completed_trade_dossiers:
+            d = self.completed_trade_dossiers[-1]
+            last_dossier_str = (
+                f"{d['symbol']} [{d['engine']}] -> PnL: {d['pnl_pct']:+.2f}% | "
+                f"Peak MFE: +{d['peak_mfe']:.2f}% | Worst MAE: {d['worst_mae']:.2f}% | "
+                f"Duration: {d['duration_min']}m ({d['reason']})"
+            )
+
+        briefing_text = (
+            f"\n{'='*25} [15-MIN UNIFIED DESK BRIEFING] {'='*25}\n"
+            f"• DUAL-POLARITY CHAMPION: {top_imbalance_str}\n"
+            f"• RECENT TRADE TELEMETRY: {last_dossier_str}\n"
+            f"• EXPANSION LOCKS (Waited for Hook): {self.expanding_waits_count}\n"
+            f"• TRAPS AVOIDED: {self.traps_rejected_count} (Spread / Icebergs)\n"
+            f"• CONFIRMED IGNITIONS: {self.ignitions_confirmed_count}\n"
+            f"• GAUNTLET PROGRESS: {self.paper_wins}/6 Wins | Mode: {'LIVE' if self.live_mode else 'PAPER_LABORATORY'}\n"
+            f"• TRACKING UNIVERSE: {len(self.history_buffer)} liquid perpetual pairs active\n"
+            f"{'='*75}"
+        )
+        logger.info(briefing_text)
+
+        DASHBOARD_DATA["last_briefing"] = {
+            "top_imbalance": top_imbalance_str,
+            "last_trade_telemetry": last_dossier_str,
+            "expanding_waits": self.expanding_waits_count,
+            "traps_rejected": self.traps_rejected_count,
+            "ignitions_confirmed": self.ignitions_confirmed_count,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+    # --------------------------------------------------------------------------
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Pullback Hook Quant Engine active. Event loop running...")
+        logger.info("Unified 4:1 Dominance Quant Engine active. Event loop running...")
 
         while True:
             try:
@@ -719,7 +924,7 @@ class QuantBot:
                         pass
 
                 DASHBOARD_DATA["status"] = "Active"
-                DASHBOARD_DATA["mode"] = "LIVE" if self.live_mode else f"PAPER ({self.paper_wins}/6)"
+                DASHBOARD_DATA["mode"] = "LIVE" if self.live_mode else f"PAPER_LABORATORY ({self.paper_wins}/6)"
                 DASHBOARD_DATA["paper_wins"] = self.paper_wins
                 DASHBOARD_DATA["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -734,7 +939,7 @@ class QuantBot:
                 if opportunity:
                     self.execute_entry(opportunity)
 
-                time.sleep(10)
+                time.sleep(5)
 
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
