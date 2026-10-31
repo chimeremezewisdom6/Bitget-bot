@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Unified Institutional Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Engine 1: Strict 4:1 Dominance Move (Impulse >= 2.0%, Reversal <= Impulse / 4.0)
-- Engine 2: Second Set Continuation (Shallow 2-3 Candle Pause Breakout)
-- Engine 3: 8,000m Exhaustion & Hook (Dual-Polarity +/- 1.5% Imbalance & Pullback Hook)
+- Engine 1: Strict 4:1 Dominance Ratio (Impulse >= 2.0%, Reversal <= Impulse / 4.0)
+- Engine 2: Top 10 Luckiest (Heaviest Siege Trapped at 0-0 -> Enters on Dam Break)
+- Engine 3: Dual-Polarity +/- 1.5% Imbalance (Price vs. OI Tension & Pullback Hook)
+- Engine 4: 8,000m Exhausted Runner (Capital Depletion vs. Fresh Backup)
 - Paper Mode: Unconstrained Behavioral Laboratory (Natural Peak Harvesting & Invalidation)
 - Live Mode: Strict Institutional Execution (Dynamic Leverage, One-Way, reduceOnly)
 - Telemetry: 15-Minute Desk Intelligence Briefing & Port 10000 Keep-Alive Server
@@ -86,7 +87,12 @@ DOMINANCE_RATIO = 4.0              # 4:1 move-to-retracement ratio (max 25% give
 MIN_10M_MOVE_PCT = 2.0             # Minimum 2.0% move in 10 minutes
 MAX_10M_MOVE_PCT = 15.0            # Cap at 15.0% to avoid illiquid needles
 
-# Engine 3 Parameters (8,000m Exhaustion & Hook)
+# Engine 2 Parameters (Top 10 Luckiest / Dam Break)
+MAX_LUCKY_BOX_PCT = 0.50           # Defending side trapped in < 0.50% range
+MIN_SIEGE_VOL_RATIO = 0.70         # At least 70% one-sided volume hammering the wall
+MIN_DAM_BREAK_PCT = 0.18           # Minimum breakout beyond defended box to confirm luck is dead
+
+# Engine 3 Parameters (Dual-Polarity Imbalance)
 MIN_POLARITY_THRESHOLD = 1.50      # Strictly +/- 1.50% on both Price & OI
 MIN_PULLBACK_CONFIRM_PCT = 0.15    # Minimum 0.15% turn off extreme to confirm hook
 MAX_PULLBACK_CHASE_PCT = 0.85      # Don't chase if hook gave back > 0.85%
@@ -328,15 +334,10 @@ class QuantBot:
         return None
 
     # --------------------------------------------------------------------------
-    # ACTION ENGINES (ENGINE 1: 4:1 RATIO, ENGINE 2: CONTINUATION, ENGINE 3: HOOK)
+    # ENGINE 1: STRICT 4:1 DOMINANCE RATIO
     # --------------------------------------------------------------------------
-    def evaluate_engines_1_and_2(self, symbol: str, ohlcv: List) -> Optional[Dict]:
-        """
-        Evaluates:
-        - Engine 1: Strict 4:1 Dominance Ratio (Impulse >= 2.0%, Reversal <= Impulse / 4.0)
-        - Engine 2: Second Set Continuation (Shallow pause breakout)
-        """
-        candles = ohlcv[-11:-1]  # 10 completed 1m candles
+    def evaluate_engine_1(self, symbol: str, ohlcv: List) -> Optional[Dict]:
+        candles = ohlcv[-11:-1]
         start_open = candles[0][1]
         end_close = candles[-1][4]
         net_change_pct = ((end_close - start_open) / start_open) * 100.0
@@ -346,14 +347,6 @@ class QuantBot:
             return None
 
         direction = "buy" if net_change_pct > 0 else "sell"
-        total_vol = sum(c[5] for c in candles)
-        if total_vol <= 0:
-            return None
-
-        # ======================================================================
-        # ENGINE 1: STRICT 4:1 DOMINANCE RATIO CALCULATION
-        # ======================================================================
-        # For every 4% gain, counter-pullback cannot exceed 1.0% (max 25% giveback)
         max_allowed_reversal = abs_change / DOMINANCE_RATIO
 
         if direction == "buy":
@@ -364,41 +357,19 @@ class QuantBot:
                 h, l = c[2], c[3]
                 if h > running_high:
                     running_high = h
-
                 pb = ((running_high - l) / running_high) * 100.0
                 if pb > max_pullback_abs:
                     max_pullback_abs = pb
 
-            # Check 4:1 Dominance Rule (e.g. gain 2%, pullback <= 0.5%; gain 4%, pullback <= 1.0%)
             if max_pullback_abs <= max_allowed_reversal:
-                dominance_score = 950.0 + (abs_change * 10.0) - (max_pullback_abs * 5.0)
+                score = 950.0 + (abs_change * 10.0) - (max_pullback_abs * 5.0)
                 return {
                     "symbol": symbol,
                     "direction": direction,
                     "net_change_pct": net_change_pct,
-                    "score": dominance_score,
+                    "score": score,
                     "engine": "ENGINE_1_DOMINANCE_4_TO_1",
-                    "pivot_price": candles[0][3],
-                    "counter_reversal": max_pullback_abs,
-                    "max_allowed": max_allowed_reversal
-                }
-
-            # ENGINE 2: Second Set Continuation Setup (Long)
-            first_wave_high = max(c[2] for c in candles[:7])
-            pause_low = min(c[3] for c in candles[7:9])
-            pause_retrace = (first_wave_high - pause_low) / max((first_wave_high - start_open), 1e-9)
-            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
-
-            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close >= (first_wave_high * 0.998):
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": 900.0 + abs_change,
-                    "engine": "ENGINE_2_SECOND_SET_CONTINUATION",
-                    "pivot_price": pause_low,
-                    "counter_reversal": pause_retrace * 100.0,
-                    "max_allowed": 20.0
+                    "pivot_price": candles[0][3]
                 }
 
         else:  # direction == "sell"
@@ -409,50 +380,85 @@ class QuantBot:
                 h, l = c[2], c[3]
                 if l < running_low:
                     running_low = l
-
                 bounce = ((h - running_low) / running_low) * 100.0
                 if bounce > max_bounce_abs:
                     max_bounce_abs = bounce
 
-            # Check 4:1 Dominance Rule for Short (e.g. drop 2%, bounce <= 0.5%; drop 4%, bounce <= 1.0%)
             if max_bounce_abs <= max_allowed_reversal:
-                dominance_score = 950.0 + (abs_change * 10.0) - (max_bounce_abs * 5.0)
+                score = 950.0 + (abs_change * 10.0) - (max_bounce_abs * 5.0)
                 return {
                     "symbol": symbol,
                     "direction": direction,
                     "net_change_pct": net_change_pct,
-                    "score": dominance_score,
+                    "score": score,
                     "engine": "ENGINE_1_DOMINANCE_4_TO_1",
-                    "pivot_price": candles[0][2],
-                    "counter_reversal": max_bounce_abs,
-                    "max_allowed": max_allowed_reversal
-                }
-
-            # ENGINE 2: Second Set Continuation Setup (Short)
-            first_wave_low = min(c[3] for c in candles[:7])
-            pause_high = max(c[2] for c in candles[7:9])
-            pause_retrace = (pause_high - first_wave_low) / max((start_open - first_wave_low), 1e-9)
-            pause_vol = sum(c[5] for c in candles[7:9]) / max(total_vol, 1e-9)
-
-            if pause_retrace < 0.20 and pause_vol < 0.22 and end_close <= (first_wave_low * 1.002):
-                return {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "net_change_pct": net_change_pct,
-                    "score": 900.0 + abs_change,
-                    "engine": "ENGINE_2_SECOND_SET_CONTINUATION",
-                    "pivot_price": pause_high,
-                    "counter_reversal": pause_retrace * 100.0,
-                    "max_allowed": 20.0
+                    "pivot_price": candles[0][2]
                 }
 
         return None
 
+    # --------------------------------------------------------------------------
+    # ENGINE 2: TOP 10 LUCKIEST (DAM BREAK ENTRY)
+    # --------------------------------------------------------------------------
+    def evaluate_engine_2(self, symbol: str, ohlcv: List) -> Optional[Dict]:
+        """
+        Detects heavy siege trapped in a tight box (< 0.50% range).
+        Enters when the luck dies (the defended wall shatters on latest 1m candle).
+        """
+        candles = ohlcv[-11:-1]
+        box_high = max(c[2] for c in candles[:-1])
+        box_low = min(c[3] for c in candles[:-1])
+        box_range_pct = ((box_high - box_low) / box_low) * 100.0
+
+        if box_range_pct > MAX_LUCKY_BOX_PCT:
+            return None  # Move is too loose, not a tight luck siege
+
+        total_vol = sum(c[5] for c in candles[:-1])
+        if total_vol <= 0:
+            return None
+
+        sell_vol = sum(c[5] for c in candles[:-1] if c[4] < c[1])
+        buy_vol = sum(c[5] for c in candles[:-1] if c[4] > c[1])
+
+        current_candle = candles[-1]
+        current_close = current_candle[4]
+
+        # Case A: Short Siege (Buyers surviving on luck at the floor)
+        if (sell_vol / total_vol) >= MIN_SIEGE_VOL_RATIO:
+            breakout_pct = ((box_low - current_close) / box_low) * 100.0
+            # Confirm the luck died: current 1m candle punches below the defended floor
+            if breakout_pct >= MIN_DAM_BREAK_PCT and current_close < box_low:
+                luck_score = 920.0 + (sell_vol / total_vol) * 50.0
+                return {
+                    "symbol": symbol,
+                    "direction": "sell",
+                    "net_change_pct": -breakout_pct,
+                    "score": luck_score,
+                    "engine": "ENGINE_2_LUCKIEST_DAM_BREAK",
+                    "pivot_price": box_high
+                }
+
+        # Case B: Long Siege (Sellers surviving on luck at the ceiling)
+        elif (buy_vol / total_vol) >= MIN_SIEGE_VOL_RATIO:
+            breakout_pct = ((current_close - box_high) / box_high) * 100.0
+            # Confirm the luck died: current 1m candle punches above the defended ceiling
+            if breakout_pct >= MIN_DAM_BREAK_PCT and current_close > box_high:
+                luck_score = 920.0 + (buy_vol / total_vol) * 50.0
+                return {
+                    "symbol": symbol,
+                    "direction": "buy",
+                    "net_change_pct": breakout_pct,
+                    "score": luck_score,
+                    "engine": "ENGINE_2_LUCKIEST_DAM_BREAK",
+                    "pivot_price": box_low
+                }
+
+        return None
+
+    # --------------------------------------------------------------------------
+    # ENGINE 3: DUAL-POLARITY +/- 1.5% IMBALANCE (PRICE VS. OI HOOK)
+    # --------------------------------------------------------------------------
     def evaluate_engine_3(self, symbol: str, deltas: Tuple[float, float]) -> Optional[Dict]:
-        """
-        Engine 3: 8,000m Exhaustion vs Fresh Backup Hook
-        Checks for Dual-Polarity +/- 1.5% Imbalance & confirmed Pullback Hook
-        """
         pr_15, oi_15 = deltas
         setup_a = (pr_15 <= -MIN_POLARITY_THRESHOLD and oi_15 >= MIN_POLARITY_THRESHOLD)
         setup_b = (pr_15 >= MIN_POLARITY_THRESHOLD and oi_15 <= -MIN_POLARITY_THRESHOLD)
@@ -474,7 +480,6 @@ class QuantBot:
 
             if setup_type == "SHORT_BUILDUP":
                 running_low = min(c[3] for c in prior_candles)
-                # Expansion lock: Still drilling down?
                 if current_candle[3] < (running_low * 0.9990) or current_candle[4] < current_candle[1]:
                     self.expanding_waits_count += 1
                     return None
@@ -488,14 +493,12 @@ class QuantBot:
                         "direction": "buy",
                         "net_change_pct": pr_15,
                         "score": 880.0 + gap,
-                        "engine": "ENGINE_3_EXHAUSTION_HOOK",
-                        "pivot_price": absolute_floor,
-                        "gap": gap
+                        "engine": "ENGINE_3_DUAL_POLARITY_HOOK",
+                        "pivot_price": absolute_floor
                     }
 
             elif setup_type == "SHORT_SQUEEZE":
                 running_high = max(c[2] for c in prior_candles)
-                # Expansion lock: Still rocketing up?
                 if current_candle[2] > (running_high * 1.0010) or current_candle[4] > current_candle[1]:
                     self.expanding_waits_count += 1
                     return None
@@ -509,14 +512,71 @@ class QuantBot:
                         "direction": "sell",
                         "net_change_pct": pr_15,
                         "score": 880.0 + gap,
-                        "engine": "ENGINE_3_EXHAUSTION_HOOK",
-                        "pivot_price": absolute_peak,
-                        "gap": gap
+                        "engine": "ENGINE_3_DUAL_POLARITY_HOOK",
+                        "pivot_price": absolute_peak
                     }
 
             return None
         except Exception:
             return None
+
+    # --------------------------------------------------------------------------
+    # ENGINE 4: THE 8,000m EXHAUSTED RUNNER (PURE CAPITAL DEPLETION)
+    # --------------------------------------------------------------------------
+    def evaluate_engine_4(self, symbol: str, ohlcv: List) -> Optional[Dict]:
+        """
+        Standalone: Heavy volume pushed across candles 0-7, but price progress stalled completely.
+        Fresh opposing runner arrives on candle 9-10 with velocity, slicing through empty book.
+        """
+        candles = ohlcv[-11:-1]
+        
+        # Phase 1: Measure effort of the first 7 candles
+        first_leg_vol = sum(c[5] for c in candles[:7])
+        first_leg_high = max(c[2] for c in candles[:7])
+        first_leg_low = min(c[3] for c in candles[:7])
+        first_leg_displacement = ((first_leg_high - first_leg_low) / first_leg_low) * 100.0
+
+        if first_leg_displacement < 1.50 or first_leg_vol <= 0:
+            return None
+
+        # Phase 2: Check exhaustion stall at 8,000m mark (candles 7-9)
+        stall_vol = sum(c[5] for c in candles[7:9])
+        stall_high = max(c[2] for c in candles[7:9])
+        stall_low = min(c[3] for c in candles[7:9])
+        stall_range_pct = ((stall_high - stall_low) / stall_low) * 100.0
+
+        # Tired legs: Heavy volume spent relative to tiny price advancement
+        is_tired_runner = (stall_vol / first_leg_vol >= 0.28) and (stall_range_pct < 0.40)
+        if not is_tired_runner:
+            return None
+
+        # Phase 3: Fresh runner arrives on latest completed candle (candle -1)
+        latest_candle = candles[-1]
+        body_pct = ((abs(latest_candle[4] - latest_candle[1])) / latest_candle[1]) * 100.0
+
+        # Fresh Seller blows past exhausted buyer
+        if latest_candle[4] < latest_candle[1] and latest_candle[4] < stall_low and body_pct >= 0.30:
+            return {
+                "symbol": symbol,
+                "direction": "sell",
+                "net_change_pct": -body_pct,
+                "score": 870.0 + (body_pct * 15.0),
+                "engine": "ENGINE_4_EXHAUSTED_8000M_RUNNER",
+                "pivot_price": stall_high
+            }
+
+        # Fresh Buyer blows past exhausted seller
+        elif latest_candle[4] > latest_candle[1] and latest_candle[4] > stall_high and body_pct >= 0.30:
+            return {
+                "symbol": symbol,
+                "direction": "buy",
+                "net_change_pct": body_pct,
+                "score": 870.0 + (body_pct * 15.0),
+                "engine": "ENGINE_4_EXHAUSTED_8000M_RUNNER",
+                "pivot_price": stall_low
+            }
+
+        return None
 
     # --------------------------------------------------------------------------
     # UNIFIED SCANNER
@@ -534,7 +594,7 @@ class QuantBot:
             if vol >= MIN_24H_VOLUME_USDT:
                 valid_symbols.append(sym)
 
-        # Concurrently fetch 1m candles for Engines 1 & 2
+        # Parallel candle retrieval
         candles_by_symbol = {}
         with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
             future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
@@ -546,19 +606,27 @@ class QuantBot:
 
         candidates = []
 
-        # Evaluate Engines 1 & 2
+        # Evaluate Engines 1, 2, and 4
         for sym, ohlcv in candles_by_symbol.items():
-            analysis = self.evaluate_engines_1_and_2(sym, ohlcv)
-            if analysis:
-                candidates.append(analysis)
+            res1 = self.evaluate_engine_1(sym, ohlcv)
+            if res1:
+                candidates.append(res1)
 
-        # Evaluate Engine 3 (8,000m Exhaustion Hook)
+            res2 = self.evaluate_engine_2(sym, ohlcv)
+            if res2:
+                candidates.append(res2)
+
+            res4 = self.evaluate_engine_4(sym, ohlcv)
+            if res4:
+                candidates.append(res4)
+
+        # Evaluate Engine 3 (Dual-Polarity)
         for sym in valid_symbols:
             deltas = self.calculate_deltas(sym, 900)
             if deltas:
-                analysis3 = self.evaluate_engine_3(sym, deltas)
-                if analysis3:
-                    candidates.append(analysis3)
+                res3 = self.evaluate_engine_3(sym, deltas)
+                if res3:
+                    candidates.append(res3)
 
         scan_duration = time.time() - scan_start
         DASHBOARD_DATA["last_scan_duration_sec"] = round(scan_duration, 2)
@@ -695,7 +763,7 @@ class QuantBot:
 
             duration_min = round((time.time() - trade["entry_time"]) / 60, 1)
 
-            # Record Empirical Trade Dossier for Desk Telemetry
+            # Record Empirical Trade Dossier for Telemetry
             dossier = {
                 "symbol": symbol,
                 "engine": engine,
@@ -813,17 +881,14 @@ class QuantBot:
             # LIVE TRADING MONITORING (Strict Institutional Discipline)
             # ==================================================================
             if is_live:
-                # 1. Hard Structural Stop Loss (0.9% Pivot Breached)
                 if pnl_pct <= -LIVE_HARD_STOP_LOSS_PCT:
                     self.execute_exit(f"Hard Stop-Loss (-{LIVE_HARD_STOP_LOSS_PCT}%)", is_win=False)
                     return
 
-                # 2. Velocity Cut (20-Minute Anti-Stagnation)
                 if duration_secs >= LIVE_VELOCITY_TIMEOUT_SECS and pnl_pct < LIVE_VELOCITY_MIN_PROFIT:
                     self.execute_exit(f"Velocity Cut (<+{LIVE_VELOCITY_MIN_PROFIT}% at 20m)", is_win=(pnl_pct > 0))
                     return
 
-                # 3. Dynamic Runner Trailing (+3.5% up to +35%)
                 if pnl_pct >= RUNNER_TRAIL_ACTIVATION_PCT and drawdown_from_peak >= RUNNER_GIVEBACK_PCT:
                     self.execute_exit(f"Dynamic Runner Harvest (+{pnl_pct:.2f}%)", is_win=True)
                     return
@@ -832,19 +897,16 @@ class QuantBot:
             # PAPER LABORATORY MONITORING (Unconstrained Behavioral Learning)
             # ==================================================================
             else:
-                # 1. Natural Peak Harvesting: Runner expansion rolls over after cresting
                 if pnl_pct >= RUNNER_TRAIL_ACTIVATION_PCT:
                     giveback_threshold = RUNNER_GIVEBACK_PCT if pnl_pct < 7.0 else 1.20
                     if drawdown_from_peak >= giveback_threshold:
                         self.execute_exit(f"Natural Peak Harvested (+{pnl_pct:.2f}% locked)", is_win=True)
                         return
 
-                # 2. Natural Invalidation: Structural floor completely fails (-2.5%)
                 if pnl_pct <= -PAPER_STRUCTURAL_INVALIDATION:
                     self.execute_exit(f"Structural Collapse (-{PAPER_STRUCTURAL_INVALIDATION}%)", is_win=False)
                     return
 
-                # 3. Behavioral Stagnation: 25 minutes elapsed with dead volume (<+0.6%)
                 if duration_secs >= PAPER_STAGNATION_TIMEOUT:
                     is_win = pnl_pct > 0
                     self.execute_exit(f"Behavioral Stagnation (Volume died after 25m, PnL: {pnl_pct:.2f}%)", is_win=is_win)
@@ -912,7 +974,7 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Unified 4:1 Dominance Quant Engine active. Event loop running...")
+        logger.info("Unified 4-Engine Quant Trading Suite active. Event loop running...")
 
         while True:
             try:
