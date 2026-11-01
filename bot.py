@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Unified Institutional Quant Trading Bot - Bitget USDT-M Perpetual Swaps
+- Worldwide Feed: Direct Zero-Cost CoinGlass Bridge (coinglass_feed.py)
 - Engine 1: Strict 4:1 Dominance Ratio (Impulse >= 2.0%, Reversal <= Impulse / 4.0)
 - Engine 2: Top 10 Luckiest (Heaviest Siege Trapped at 0-0 -> Enters on Dam Break)
 - Engine 3: Dual-Polarity +/- 1.5% Imbalance (Price vs. OI Tension & Pullback Hook)
@@ -26,6 +27,12 @@ import ccxt
 import requests
 from requests.adapters import HTTPAdapter
 
+# Import zero-cost CoinGlass feed
+try:
+    from coinglass_feed import get_coinglass_data
+except ImportError:
+    get_coinglass_data = lambda: []
+
 # ==============================================================================
 # 1. LOGGING SETUP & SPAM SUPPRESSION
 # ==============================================================================
@@ -36,7 +43,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QuantDesk")
 
-# Mute noisy urllib3 connection pool warnings
+# Mute noisy connection pool warnings
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
@@ -80,7 +87,7 @@ BLACKLIST = {
 # Scanning & Filter Thresholds
 MIN_24H_VOLUME_USDT = 1_000_000.0  # $1,000,000 minimum liquidity
 MAX_SPREAD_PCT = 0.10              # Anti-trap order book spread <= 0.10%
-SCANNER_WORKERS = 16               # Parallel threads for ~3-4s market sweep
+SCANNER_WORKERS = 16               # Parallel threads for ~3-4s sweeps
 
 # Engine 1 Parameters (Strict 4:1 Dominance Ratio)
 DOMINANCE_RATIO = 4.0              # 4:1 move-to-retracement ratio (max 25% giveback)
@@ -164,7 +171,7 @@ class QuantBot:
             "enableRateLimit": True,
         })
 
-        # Upgrade HTTP adapter to 50 connections to eliminate warnings
+        # Upgrade HTTP adapter to 50 connections
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
         self.exchange.session.mount("https://", adapter)
         self.exchange.session.mount("http://", adapter)
@@ -189,9 +196,6 @@ class QuantBot:
         self.init_exchange_settings()
         self.recover_live_position()
 
-    # --------------------------------------------------------------------------
-    # STATE MANAGEMENT & PERSISTENCE
-    # --------------------------------------------------------------------------
     def load_state(self):
         if os.path.exists(STATE_FILE):
             try:
@@ -214,9 +218,6 @@ class QuantBot:
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
 
-    # --------------------------------------------------------------------------
-    # EXCHANGE SETTINGS & AUTO-RECOVERY
-    # --------------------------------------------------------------------------
     def init_exchange_settings(self):
         logger.info(f"Credential Status -> Key: {bool(API_KEY)} | Secret: {bool(API_SECRET)} | Passphrase: {bool(API_PASSPHRASE)}")
 
@@ -263,9 +264,6 @@ class QuantBot:
         except Exception as e:
             logger.error(f"Live position recovery error: {e}")
 
-    # --------------------------------------------------------------------------
-    # DATA BUFFERS & SCREENING
-    # --------------------------------------------------------------------------
     def is_symbol_valid(self, symbol: str) -> bool:
         base = symbol.split("/")[0].split(":")[0]
         if base in BLACKLIST:
@@ -334,9 +332,10 @@ class QuantBot:
         return None
 
     # --------------------------------------------------------------------------
-    # ENGINE 1: STRICT 4:1 DOMINANCE RATIO
+    # THE 4 ACTION ENGINES
     # --------------------------------------------------------------------------
     def evaluate_engine_1(self, symbol: str, ohlcv: List) -> Optional[Dict]:
+        """Engine 1: Strict 4:1 Dominance Ratio."""
         candles = ohlcv[-11:-1]
         start_open = candles[0][1]
         end_close = candles[-1][4]
@@ -352,7 +351,6 @@ class QuantBot:
         if direction == "buy":
             running_high = candles[0][2]
             max_pullback_abs = 0.0
-
             for c in candles:
                 h, l = c[2], c[3]
                 if h > running_high:
@@ -371,11 +369,9 @@ class QuantBot:
                     "engine": "ENGINE_1_DOMINANCE_4_TO_1",
                     "pivot_price": candles[0][3]
                 }
-
-        else:  # direction == "sell"
+        else:
             running_low = candles[0][3]
             max_bounce_abs = 0.0
-
             for c in candles:
                 h, l = c[2], c[3]
                 if l < running_low:
@@ -394,24 +390,17 @@ class QuantBot:
                     "engine": "ENGINE_1_DOMINANCE_4_TO_1",
                     "pivot_price": candles[0][2]
                 }
-
         return None
 
-    # --------------------------------------------------------------------------
-    # ENGINE 2: TOP 10 LUCKIEST (DAM BREAK ENTRY)
-    # --------------------------------------------------------------------------
     def evaluate_engine_2(self, symbol: str, ohlcv: List) -> Optional[Dict]:
-        """
-        Detects heavy siege trapped in a tight box (< 0.50% range).
-        Enters when the luck dies (the defended wall shatters on latest 1m candle).
-        """
+        """Engine 2: Top 10 Luckiest (Dam Break)."""
         candles = ohlcv[-11:-1]
         box_high = max(c[2] for c in candles[:-1])
         box_low = min(c[3] for c in candles[:-1])
         box_range_pct = ((box_high - box_low) / box_low) * 100.0
 
         if box_range_pct > MAX_LUCKY_BOX_PCT:
-            return None  # Move is too loose, not a tight luck siege
+            return None
 
         total_vol = sum(c[5] for c in candles[:-1])
         if total_vol <= 0:
@@ -419,46 +408,34 @@ class QuantBot:
 
         sell_vol = sum(c[5] for c in candles[:-1] if c[4] < c[1])
         buy_vol = sum(c[5] for c in candles[:-1] if c[4] > c[1])
+        current_close = candles[-1][4]
 
-        current_candle = candles[-1]
-        current_close = current_candle[4]
-
-        # Case A: Short Siege (Buyers surviving on luck at the floor)
         if (sell_vol / total_vol) >= MIN_SIEGE_VOL_RATIO:
             breakout_pct = ((box_low - current_close) / box_low) * 100.0
-            # Confirm the luck died: current 1m candle punches below the defended floor
             if breakout_pct >= MIN_DAM_BREAK_PCT and current_close < box_low:
-                luck_score = 920.0 + (sell_vol / total_vol) * 50.0
                 return {
                     "symbol": symbol,
                     "direction": "sell",
                     "net_change_pct": -breakout_pct,
-                    "score": luck_score,
+                    "score": 920.0 + (sell_vol / total_vol) * 50.0,
                     "engine": "ENGINE_2_LUCKIEST_DAM_BREAK",
                     "pivot_price": box_high
                 }
-
-        # Case B: Long Siege (Sellers surviving on luck at the ceiling)
         elif (buy_vol / total_vol) >= MIN_SIEGE_VOL_RATIO:
             breakout_pct = ((current_close - box_high) / box_high) * 100.0
-            # Confirm the luck died: current 1m candle punches above the defended ceiling
             if breakout_pct >= MIN_DAM_BREAK_PCT and current_close > box_high:
-                luck_score = 920.0 + (buy_vol / total_vol) * 50.0
                 return {
                     "symbol": symbol,
                     "direction": "buy",
                     "net_change_pct": breakout_pct,
-                    "score": luck_score,
+                    "score": 920.0 + (buy_vol / total_vol) * 50.0,
                     "engine": "ENGINE_2_LUCKIEST_DAM_BREAK",
                     "pivot_price": box_low
                 }
-
         return None
 
-    # --------------------------------------------------------------------------
-    # ENGINE 3: DUAL-POLARITY +/- 1.5% IMBALANCE (PRICE VS. OI HOOK)
-    # --------------------------------------------------------------------------
     def evaluate_engine_3(self, symbol: str, deltas: Tuple[float, float]) -> Optional[Dict]:
+        """Engine 3: Dual-Polarity +/- 1.5% Imbalance."""
         pr_15, oi_15 = deltas
         setup_a = (pr_15 <= -MIN_POLARITY_THRESHOLD and oi_15 >= MIN_POLARITY_THRESHOLD)
         setup_b = (pr_15 >= MIN_POLARITY_THRESHOLD and oi_15 <= -MIN_POLARITY_THRESHOLD)
@@ -496,7 +473,6 @@ class QuantBot:
                         "engine": "ENGINE_3_DUAL_POLARITY_HOOK",
                         "pivot_price": absolute_floor
                     }
-
             elif setup_type == "SHORT_SQUEEZE":
                 running_high = max(c[2] for c in prior_candles)
                 if current_candle[2] > (running_high * 1.0010) or current_candle[4] > current_candle[1]:
@@ -515,22 +491,13 @@ class QuantBot:
                         "engine": "ENGINE_3_DUAL_POLARITY_HOOK",
                         "pivot_price": absolute_peak
                     }
-
             return None
         except Exception:
             return None
 
-    # --------------------------------------------------------------------------
-    # ENGINE 4: THE 8,000m EXHAUSTED RUNNER (PURE CAPITAL DEPLETION)
-    # --------------------------------------------------------------------------
     def evaluate_engine_4(self, symbol: str, ohlcv: List) -> Optional[Dict]:
-        """
-        Standalone: Heavy volume pushed across candles 0-7, but price progress stalled completely.
-        Fresh opposing runner arrives on candle 9-10 with velocity, slicing through empty book.
-        """
+        """Engine 4: 8,000m Exhausted Runner (Pure Capital Depletion)."""
         candles = ohlcv[-11:-1]
-        
-        # Phase 1: Measure effort of the first 7 candles
         first_leg_vol = sum(c[5] for c in candles[:7])
         first_leg_high = max(c[2] for c in candles[:7])
         first_leg_low = min(c[3] for c in candles[:7])
@@ -539,22 +506,18 @@ class QuantBot:
         if first_leg_displacement < 1.50 or first_leg_vol <= 0:
             return None
 
-        # Phase 2: Check exhaustion stall at 8,000m mark (candles 7-9)
         stall_vol = sum(c[5] for c in candles[7:9])
         stall_high = max(c[2] for c in candles[7:9])
         stall_low = min(c[3] for c in candles[7:9])
         stall_range_pct = ((stall_high - stall_low) / stall_low) * 100.0
 
-        # Tired legs: Heavy volume spent relative to tiny price advancement
         is_tired_runner = (stall_vol / first_leg_vol >= 0.28) and (stall_range_pct < 0.40)
         if not is_tired_runner:
             return None
 
-        # Phase 3: Fresh runner arrives on latest completed candle (candle -1)
         latest_candle = candles[-1]
         body_pct = ((abs(latest_candle[4] - latest_candle[1])) / latest_candle[1]) * 100.0
 
-        # Fresh Seller blows past exhausted buyer
         if latest_candle[4] < latest_candle[1] and latest_candle[4] < stall_low and body_pct >= 0.30:
             return {
                 "symbol": symbol,
@@ -564,8 +527,6 @@ class QuantBot:
                 "engine": "ENGINE_4_EXHAUSTED_8000M_RUNNER",
                 "pivot_price": stall_high
             }
-
-        # Fresh Buyer blows past exhausted seller
         elif latest_candle[4] > latest_candle[1] and latest_candle[4] > stall_high and body_pct >= 0.30:
             return {
                 "symbol": symbol,
@@ -575,23 +536,34 @@ class QuantBot:
                 "engine": "ENGINE_4_EXHAUSTED_8000M_RUNNER",
                 "pivot_price": stall_low
             }
-
         return None
 
     # --------------------------------------------------------------------------
-    # UNIFIED SCANNER
+    # UNIFIED SCANNER (WORLDWIDE + LOCAL PAIRS)
     # --------------------------------------------------------------------------
     def scan_for_opportunities(self) -> Optional[Dict]:
         scan_start = time.time()
         tickers = self.exchange.fetch_tickers()
         self.update_time_series_buffer(tickers)
 
+        # 1. Check Worldwide CoinGlass Feed for Priority Champions
+        cg_table = get_coinglass_data()
+        worldwide_priority_bases = set()
+        if cg_table:
+            # Sort by 15m Price * 15m OI acceleration
+            cg_sorted = sorted(cg_table, key=lambda x: abs(x.get("price_15m", 0.0) * x.get("oi_15m", 0.0)), reverse=True)
+            for row in cg_sorted[:5]:
+                worldwide_priority_bases.add(row["symbol"])
+
         valid_symbols = []
         for sym, t in tickers.items():
             if not sym.endswith(":USDT") or not self.is_symbol_valid(sym):
                 continue
+            base = sym.split("/")[0].split(":")[0]
             vol = float(t.get("quoteVolume", 0.0) or 0.0)
-            if vol >= MIN_24H_VOLUME_USDT:
+
+            # Accept if liquid OR if flagged as Worldwide Champion on CoinGlass!
+            if vol >= MIN_24H_VOLUME_USDT or base in worldwide_priority_bases:
                 valid_symbols.append(sym)
 
         # Parallel candle retrieval
@@ -620,7 +592,7 @@ class QuantBot:
             if res4:
                 candidates.append(res4)
 
-        # Evaluate Engine 3 (Dual-Polarity)
+        # Evaluate Engine 3
         for sym in valid_symbols:
             deltas = self.calculate_deltas(sym, 900)
             if deltas:
@@ -634,7 +606,12 @@ class QuantBot:
         if not candidates:
             return None
 
-        # Rank all candidates by conviction score
+        # Give worldwide priority candidates a 50-point boost
+        for c in candidates:
+            base = c["symbol"].split("/")[0].split(":")[0]
+            if base in worldwide_priority_bases:
+                c["score"] += 50.0
+
         candidates.sort(key=lambda x: x["score"], reverse=True)
         top_candidates = candidates[:10]
 
@@ -877,9 +854,7 @@ class QuantBot:
                 "engine": trade.get("engine", "")
             }
 
-            # ==================================================================
             # LIVE TRADING MONITORING (Strict Institutional Discipline)
-            # ==================================================================
             if is_live:
                 if pnl_pct <= -LIVE_HARD_STOP_LOSS_PCT:
                     self.execute_exit(f"Hard Stop-Loss (-{LIVE_HARD_STOP_LOSS_PCT}%)", is_win=False)
@@ -893,9 +868,7 @@ class QuantBot:
                     self.execute_exit(f"Dynamic Runner Harvest (+{pnl_pct:.2f}%)", is_win=True)
                     return
 
-            # ==================================================================
             # PAPER LABORATORY MONITORING (Unconstrained Behavioral Learning)
-            # ==================================================================
             else:
                 if pnl_pct >= RUNNER_TRAIL_ACTIVATION_PCT:
                     giveback_threshold = RUNNER_GIVEBACK_PCT if pnl_pct < 7.0 else 1.20
@@ -974,7 +947,7 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Unified 4-Engine Quant Trading Suite active. Event loop running...")
+        logger.info("Unified 4-Engine Quant Suite with CoinGlass Bridge active. Event loop running...")
 
         while True:
             try:
