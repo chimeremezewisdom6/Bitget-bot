@@ -1,824 +1,601 @@
 #!/usr/bin/env python3
 """
-Harmonic-Polarity Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Longs: ALL THREE MUST BE PLUS (+) [Price + | OI + | Flow +]
-- Shorts: ALL THREE MUST BE MINUS (-) [Price - | OI - | Flow -]
-- Reject Traps: Never short when price dumps but OI is positive (+)
-- Exit 1: Grid 0.5% Peak Reverse (Instantly sells if price pulls back 0.50% from peak)
-- Exit 2: 90s Dead-on-Arrival Kill Switch (Aborts if no +0.30% thrust in 90 seconds)
-- Qualification: Strict 6-in-a-row Paper Gauntlet (1 -> 6) before Live Execution
-- Infrastructure: Render Port 10000 HTTP Keep-Alive & 15-Minute Telemetry
+===============================================================================
+BOT.PY: QUANTITATIVE DESK ENGINE (BITGET USDT-M PERPETUALS)
+STRATEGY: GLOBAL INDEX CATCH-UP TRAP & MOMENTUM IGNITION
+DEPLOYMENT: RENDER (PORT 10000 HTTP DASHBOARD) VIA GITHUB
+===============================================================================
 """
 
 import os
 import sys
 import time
-import json
 import math
+import json
 import logging
 import threading
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+from collections import deque, defaultdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
-import ccxt
 import requests
 from requests.adapters import HTTPAdapter
+import ccxt
 
-# Import zero-cost CoinGlass feed
-try:
-    from coinglass_feed import get_coinglass_data
-except ImportError:
-    get_coinglass_data = lambda: []
-
-# ==============================================================================
-# 1. LOGGING SETUP & SPAM SUPPRESSION
-# ==============================================================================
+# -----------------------------------------------------------------------------
+# SECTION 1: LOGGING CONFIGURATION
+# -----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("QuantDesk")
+logger = logging.getLogger("DeskPartnerBot")
 
-# Mute noisy urllib3 connection pool warnings
-logging.getLogger("urllib3").setLevel(logging.ERROR)
-logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+# -----------------------------------------------------------------------------
+# SECTION 2: SYSTEM CONSTANTS & STRATEGY PARAMETERS
+# -----------------------------------------------------------------------------
+# Blacklist: Illiquid, de-pegged, or historically errant symbols
+BLACKLIST = [
+    "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP", 
+    "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
+]
 
-# ==============================================================================
-# 2. UNIVERSAL CREDENTIAL DETECTION & PARAMETERS
-# ==============================================================================
-API_KEY = (
-    os.getenv("BITGET_API_KEY") or
-    os.getenv("API_KEY") or
-    os.getenv("BITGET_KEY") or
-    ""
-).strip()
+# Market Filters
+MIN_24H_VOLUME_USDT = 1_000_000.0  # $1M Global/Local Liquidity Filter
+HISTORY_BUFFER_SECONDS = 300       # 5 minutes of rolling 1s tick memory
 
-API_SECRET = (
-    os.getenv("BITGET_API_SECRET") or
-    os.getenv("BITGET_SECRET_KEY") or
-    os.getenv("API_SECRET") or
-    os.getenv("SECRET_KEY") or
-    os.getenv("BITGET_SECRET") or
-    ""
-).strip()
+# Global Index Catch-Up Trap Parameters
+MIN_SPREAD_GAP_PCT = 0.80          # Bitget must be at least 0.80% cheaper than Global Index
+MIN_GLOBAL_INDEX_3M_PCT = 1.00     # Global Index must have pushed >= +1.0% in last 3 mins
+MIN_BITGET_OI_DELTA_PCT = 0.50     # Bitget OI must have grown >= +0.50% in last 3 mins
 
-API_PASSPHRASE = (
-    os.getenv("BITGET_API_PASSPHRASE") or
-    os.getenv("BITGET_PASSPHRASE") or
-    os.getenv("API_PASSPHRASE") or
-    os.getenv("PASSPHRASE") or
-    os.getenv("BITGET_PASSWORD") or
-    ""
-).strip()
+# Dynamic Exit Rules
+GAP_CLOSE_THRESHOLD_PCT = 0.10     # Exit when Bitget is within 0.10% of Global Index
+PEAK_REVERSE_PULLBACK_PCT = 0.50   # 0.5% Peak Reverse Trailing Wall
+DOA_TIMEOUT_SECONDS = 90           # 90-Second Dead-on-Arrival Kill Switch
+DOA_FORWARD_THRESHOLD_PCT = 0.30   # Must gain at least +0.30% in 90s or abort
+LIVE_HARD_STOP_PCT = 0.90          # Structural Emergency Hard Stop in Live Mode
 
-PORT = int(os.getenv("PORT", 10000))
+# Gauntlet & Execution Parameters
+QUALIFICATION_TARGET_WINS = 6      # Must achieve 6 consecutive paper wins to unlock Live
+COOLDOWN_SECONDS = 600             # 10-Minute Cooldown per pair post-exit
+ALLOCATION_PCT = 0.90              # Allocate 90% of usable balance
+MIN_NOTIONAL_USDT = 5.50           # Bitget minimum order size constraint
+MAX_LEVERAGE_CLAMP = 20
+MIN_LEVERAGE_CLAMP = 2
+
+PORT = int(os.environ.get("PORT", 10000))
 STATE_FILE = "qualification_state.json"
 
-# Strict Token Blacklist
-BLACKLIST = {
-    "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP",
-    "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
-}
+# -----------------------------------------------------------------------------
+# SECTION 3: CREDENTIAL READER (ROBUST STRIP IMPLEMENTATION)
+# -----------------------------------------------------------------------------
+def get_env_var(keys, default=""):
+    for k in keys:
+        val = os.environ.get(k)
+        if val:
+            return val.strip()
+    return default
 
-# Liquidity & Anti-Trap Parameters
-GLOBAL_MIN_24H_VOL = 1_000_000.0   # $1,000,000 global volume on CoinGlass
-BITGET_FALLBACK_MIN_VOL = 1_000_000.0
-MAX_SPREAD_PCT = 0.10              # Order book spread <= 0.10%
-SCANNER_WORKERS = 16               # Parallel threads for fast sweeps
+API_KEY = get_env_var(["BITGET_API_KEY", "API_KEY"])
+SECRET_KEY = get_env_var(["BITGET_SECRET_KEY", "SECRET_KEY"])
+PASSPHRASE = get_env_var(["BITGET_PASSPHRASE", "PASSPHRASE"])
 
-# ==============================================================================
-# HARMONIC POLARITY TRIPLE IGNITION PARAMETERS
-# ==============================================================================
-MIN_3M_IGNITION_MOVE = 1.40        # Minimum 1.40% rapid push in the last 3 minutes
-MAX_3M_IGNITION_MOVE = 8.00        # Explicitly defined: Cap at 8.00%
-PEAK_PROXIMITY_CEILING = 0.25      # Must close within 0.25% of extreme (NOT falling back!)
-MIN_3M_OI_DELTA_PCT = 0.50         # Absolute minimum 0.50% OI change in 3 minutes
-MIN_FLOW_DOMINANCE_RATIO = 0.70    # At least 70% of 3m volume must match the trade direction
+# -----------------------------------------------------------------------------
+# SECTION 4: QUALIFICATION STATE MANAGER (GAUNTLET 1 -> 6)
+# -----------------------------------------------------------------------------
+class StateManager:
+    def __init__(self, filename=STATE_FILE):
+        self.filename = filename
+        self.lock = threading.Lock()
+        self.state = self.load()
 
-# ==============================================================================
-# THE CRITICAL GRID & LIGHTNING-FAST ABORT RULES
-# ==============================================================================
-GRID_PEAK_REVERSE_PCT = 0.50       # Sells immediately if price reverses 0.50% from ANY peak!
-DOA_TIMEOUT_SECS = 90              # 90-Second Dead-on-Arrival Kill Switch
-DOA_MIN_THRUST_PCT = 0.30          # Must achieve at least +0.30% forward thrust within 90s or ABORT!
-
-# Account Sizing & Execution
-BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
-BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
-NORMAL_COOLDOWN_SECS = 600         # 10 minutes symbol cooldown
-BRIEFING_INTERVAL_SECONDS = 900    # 15 minutes intelligence debrief
-
-# LIVE Risk Limits (Strict only after earning 6/6 paper qualification)
-LIVE_HARD_STOP_LOSS_PCT = 0.90     # 0.9% hard stop loss in live mode
-LIVE_VELOCITY_TIMEOUT_SECS = 1200  # 20m velocity clock in live mode
-LIVE_VELOCITY_MIN_PROFIT = 1.20    # Must achieve >= +1.2% in 20m or cut
-
-# ==============================================================================
-# 3. HTTP KEEP-ALIVE DASHBOARD (PORT 10000)
-# ==============================================================================
-DASHBOARD_DATA = {
-    "status": "Initializing",
-    "mode": "PAPER_QUALIFYING",
-    "paper_wins": 0,
-    "live_balance": 0.0,
-    "active_trade": None,
-    "last_scan_duration_sec": 0.0,
-    "last_briefing": {},
-    "last_scan_time": "None"
-}
-
-class KeepAliveHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        response = json.dumps(DASHBOARD_DATA, indent=2)
-        self.wfile.write(response.encode("utf-8"))
-
-    def log_message(self, format, *args):
-        return
-
-def start_keep_alive_server(port: int):
-    server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logger.info(f"Keep-Alive HTTP server running on port {port}")
-
-# ==============================================================================
-# 4. QUANT TRADING BOT ENGINE
-# ==============================================================================
-class QuantBot:
-    def __init__(self):
-        self.exchange = ccxt.bitget({
-            "apiKey": API_KEY,
-            "secret": API_SECRET,
-            "password": API_PASSPHRASE,
-            "options": {
-                "defaultType": "swap",
-                "createMarketBuyOrderRequiresPrice": False
-            },
-            "enableRateLimit": True,
-        })
-
-        # Upgrade HTTP adapter to 50 connections
-        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
-        self.exchange.session.mount("https://", adapter)
-        self.exchange.session.mount("http://", adapter)
-
-        self.paper_wins = 0
-        self.live_mode = False
-        self.active_trade: Optional[Dict] = None
-        self.cooldown_tracker: Dict[str, float] = {}
-
-        # Time-Series Buffers: {symbol: deque([{'time': t, 'price': p, 'oi': oi}, ...])}
-        self.history_buffer: Dict[str, deque] = {}
-
-        # Telemetry & Learning Memory
-        self.completed_trade_dossiers: List[Dict] = []
-        self.last_briefing_time = time.time()
-        self.global_liquid_symbols: set = set()
-
-        self.load_state()
-        self.init_exchange_settings()
-        self.recover_live_position()
-
-    def load_state(self):
-        if os.path.exists(STATE_FILE):
+    def load(self):
+        if os.path.exists(self.filename):
             try:
-                with open(STATE_FILE, "r") as f:
-                    data = json.load(f)
-                    self.paper_wins = data.get("paper_wins", 0)
-                    self.live_mode = data.get("live_mode", False)
-                    logger.info(f"Loaded persistent state: {self.paper_wins}/6 Paper Wins. LiveMode: {self.live_mode}")
+                with open(self.filename, "r") as f:
+                    return json.load(f)
             except Exception as e:
-                logger.error(f"Failed to load state: {e}")
-
-    def save_state(self):
-        try:
-            with open(STATE_FILE, "w") as f:
-                json.dump({
-                    "paper_wins": self.paper_wins,
-                    "live_mode": self.live_mode,
-                    "timestamp": time.time()
-                }, f)
-        except Exception as e:
-            logger.error(f"Failed to save state: {e}")
-
-    def init_exchange_settings(self):
-        logger.info(f"Credential Status -> Key: {bool(API_KEY)} | Secret: {bool(API_SECRET)} | Passphrase: {bool(API_PASSPHRASE)}")
-
-        if not API_KEY or not API_SECRET or not API_PASSPHRASE:
-            logger.warning("Bitget API credentials missing or incomplete. Bot running in PAPER mode.")
-            return
-
-        try:
-            self.exchange.set_position_mode(False, params={"productType": "USDT-FUTURES"})
-            logger.info("Bitget Position Mode confirmed: ONE-WAY (Single Hold)")
-        except Exception as e:
-            logger.info(f"Position mode notice: {e}")
-
-    def recover_live_position(self):
-        if not API_KEY:
-            return
-
-        try:
-            positions = self.exchange.fetch_positions(params={"productType": "USDT-FUTURES"})
-            for p in positions:
-                contracts = float(p.get("contracts", 0.0) or 0.0)
-                if contracts > 0:
-                    symbol = p["symbol"]
-                    side_raw = str(p.get("side", "")).lower()
-                    side = "buy" if side_raw in ["long", "buy"] else "sell"
-                    entry_price = float(p.get("entryPrice", 0.0) or 0.0)
-
-                    self.active_trade = {
-                        "symbol": symbol,
-                        "side": side,
-                        "entry_price": entry_price,
-                        "peak_price": entry_price,
-                        "trough_price": entry_price,
-                        "contracts": contracts,
-                        "entry_time": time.time(),
-                        "is_live": True,
-                        "engine": "RECOVERED_LIVE",
-                        "leverage": int(p.get("leverage", 5))
-                    }
-                    self.live_mode = True
-                    logger.warning(f"RESTART RECOVERY: Open live position detected on {symbol} {side.upper()} | "
-                                   f"Size: {contracts} @ ${entry_price:.6f}")
-                    break
-        except Exception as e:
-            logger.error(f"Live position recovery error: {e}")
-
-    def is_symbol_valid(self, symbol: str) -> bool:
-        base = symbol.split("/")[0].split(":")[0]
-        if base in BLACKLIST:
-            return False
-        if time.time() < self.cooldown_tracker.get(symbol, 0):
-            return False
-        return True
-
-    def update_time_series_buffer(self, tickers: Dict):
-        now = time.time()
-        for sym, t in tickers.items():
-            if not sym.endswith(":USDT") or not self.is_symbol_valid(sym):
-                continue
-
-            price = float(t.get("last", 0.0) or t.get("close", 0.0) or 0.0)
-            oi = float(t.get("openInterest") or t.get("info", {}).get("holdingAmount") or 0.0)
-
-            if price <= 0:
-                continue
-
-            if sym not in self.history_buffer:
-                self.history_buffer[sym] = deque()
-
-            buf = self.history_buffer[sym]
-            buf.append({"time": now, "price": price, "oi": oi})
-
-            while buf and (now - buf[0]["time"]) > 2100:
-                buf.popleft()
-
-    def get_3m_oi_delta(self, symbol: str) -> float:
-        """Calculates Open Interest percentage delta over the last 3 minutes."""
-        buf = self.history_buffer.get(symbol)
-        if not buf or len(buf) < 2:
-            return 0.0
-
-        current_oi = buf[-1]["oi"]
-        target_time = buf[-1]["time"] - 180
-        past = min(buf, key=lambda x: abs(x["time"] - target_time))
-
-        if past["oi"] > 0:
-            return ((current_oi - past["oi"]) / past["oi"]) * 100.0
-        return 0.0
-
-    def anti_trap_check(self, symbol: str) -> bool:
-        try:
-            ob = self.exchange.fetch_order_book(symbol, limit=5)
-            bid = ob["bids"][0][0] if ob["bids"] else None
-            ask = ob["asks"][0][0] if ob["asks"] else None
-            if not bid or not ask:
-                return False
-            spread_pct = ((ask - bid) / ask) * 100.0
-            return spread_pct <= MAX_SPREAD_PCT
-        except Exception:
-            return False
-
-    def fetch_symbol_candles(self, symbol: str) -> Optional[Tuple[str, List]]:
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=7)
-            if ohlcv and len(ohlcv) >= 6:
-                return symbol, ohlcv[-6:]
-        except Exception:
-            pass
-        return None
-
-    # --------------------------------------------------------------------------
-    # HARMONIC POLARITY TRIPLE IGNITION ENGINE
-    # --------------------------------------------------------------------------
-    def evaluate_triple_ignition(self, symbol: str, ohlcv: List) -> Optional[Dict]:
-        """
-        Enforces Harmonic Triple Polarity:
-        - LONG: ALL THREE MUST BE PLUS (+) [Price + | OI + | Flow +]
-        - SHORT: ALL THREE MUST BE MINUS (-) [Price - | OI - | Flow -]
-        - NEVER short when price is dumping but OI is positive (+)
-        """
-        candles = ohlcv[-6:-1]
-        three_min_candles = candles[-3:]
-
-        c1, c2, c3 = three_min_candles[0], three_min_candles[1], three_min_candles[2]
-        three_min_open = c1[1]
-        three_min_close = c3[4]
-        three_min_move_pct = ((three_min_close - three_min_open) / three_min_open) * 100.0
-        abs_move = abs(three_min_move_pct)
-
-        if abs_move < MIN_3M_IGNITION_MOVE or abs_move > MAX_3M_IGNITION_MOVE:
-            return None
-
-        five_min_high = max(c[2] for c in candles)
-        five_min_low = min(c[3] for c in candles)
-
-        # 3-Minute Volume Flow Breakdown
-        buy_vol = sum(c[5] for c in three_min_candles if c[4] >= c[1])
-        sell_vol = sum(c[5] for c in three_min_candles if c[4] < c[1])
-        total_vol = buy_vol + sell_vol
-        if total_vol <= 0:
-            return None
-
-        oi_3m_delta = self.get_3m_oi_delta(symbol)
-
-        # ======================================================================
-        # CASE 1: LONG IGNITION (ALL THREE MUST BE PLUS +)
-        # 1. Price is PLUS (+) (>= +1.40%)
-        # 2. OI is PLUS (+) (>= +0.50% fresh leverage inflow)
-        # 3. Flow is PLUS (+) (Buyers dominate >= 70% of 3m volume)
-        # ======================================================================
-        if three_min_move_pct > 0:
-            # Check Condition 2: OI MUST be PLUS (+)
-            if oi_3m_delta < MIN_3M_OI_DELTA_PCT:
-                return None  # Missing fresh leverage expansion
-
-            # Check Condition 3: Flow MUST be PLUS (+)
-            buyer_ratio = buy_vol / total_vol
-            if buyer_ratio < MIN_FLOW_DOMINANCE_RATIO:
-                return None  # Flow not strongly green
-
-            # Price Proximity: Closing at the high
-            distance_from_high = ((five_min_high - three_min_close) / five_min_high) * 100.0
-            if distance_from_high > PEAK_PROXIMITY_CEILING:
-                return None  # Stale, falling back
-
-            # Consecutive green advancement
-            if c3[4] < c2[4] or c2[4] < c1[4]:
-                return None
-
-            ignition_score = 1000.0 + (abs_move * 25.0) + (buyer_ratio * 30.0) + (oi_3m_delta * 10.0)
-            return {
-                "symbol": symbol,
-                "direction": "buy",
-                "net_change_pct": three_min_move_pct,
-                "oi_3m_pct": oi_3m_delta,
-                "score": ignition_score,
-                "engine": "HARMONIC_PLUS_TRIPLE_IGNITION",
-                "thrust_origin": c1[3]
-            }
-
-        # ======================================================================
-        # CASE 2: SHORT IGNITION (ALL THREE MUST BE MINUS -)
-        # 1. Price is MINUS (-) (<= -1.40%)
-        # 2. OI is MINUS (-) (<= -0.50% liquidation flush, NOT expanding!)
-        # 3. Flow is MINUS (-) (Sellers dominate >= 70% of 3m volume)
-        # ======================================================================
-        else:
-            # Check Condition 2: OI MUST be MINUS (-)
-            # CRITICAL: If OI is positive or flat, REJECT! (Trapped short squeeze avoidance)
-            if oi_3m_delta > -MIN_3M_OI_DELTA_PCT:
-                return None
-
-            # Check Condition 3: Flow MUST be MINUS (-)
-            seller_ratio = sell_vol / total_vol
-            if seller_ratio < MIN_FLOW_DOMINANCE_RATIO:
-                return None  # Flow not strongly red
-
-            # Price Proximity: Closing at the low
-            distance_from_low = ((three_min_close - five_min_low) / five_min_low) * 100.0
-            if distance_from_low > PEAK_PROXIMITY_CEILING:
-                return None  # Stale, bouncing
-
-            # Consecutive red advancement
-            if c3[4] > c2[4] or c2[4] > c1[4]:
-                return None
-
-            ignition_score = 1000.0 + (abs_move * 25.0) + (seller_ratio * 30.0) + (abs(oi_3m_delta) * 10.0)
-            return {
-                "symbol": symbol,
-                "direction": "sell",
-                "net_change_pct": three_min_move_pct,
-                "oi_3m_pct": oi_3m_delta,
-                "score": ignition_score,
-                "engine": "HARMONIC_MINUS_TRIPLE_IGNITION",
-                "thrust_origin": c1[2]
-            }
-
-    # --------------------------------------------------------------------------
-    # UNIFIED SCANNER
-    # --------------------------------------------------------------------------
-    def scan_for_opportunities(self) -> Optional[Dict]:
-        scan_start = time.time()
-        tickers = self.exchange.fetch_tickers()
-        self.update_time_series_buffer(tickers)
-
-        cg_data = get_coinglass_data()
-        self.global_liquid_symbols = set()
-        if cg_data:
-            for row in cg_data:
-                sym = row.get("symbol", "")
-                if sym:
-                    self.global_liquid_symbols.add(sym)
-
-        valid_symbols = []
-        for sym, t in tickers.items():
-            if not sym.endswith(":USDT") or not self.is_symbol_valid(sym):
-                continue
-            base = sym.split("/")[0].split(":")[0]
-            vol = float(t.get("quoteVolume", 0.0) or 0.0)
-
-            if vol >= BITGET_FALLBACK_MIN_VOL or base in self.global_liquid_symbols:
-                valid_symbols.append(sym)
-
-        candles_by_symbol = {}
-        with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
-            future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
-            for future in as_completed(future_to_sym):
-                res = future.result()
-                if res:
-                    sym, ohlcv = res
-                    candles_by_symbol[sym] = ohlcv
-
-        candidates = []
-        for sym, ohlcv in candles_by_symbol.items():
-            analysis = self.evaluate_triple_ignition(sym, ohlcv)
-            if analysis:
-                candidates.append(analysis)
-
-        scan_duration = time.time() - scan_start
-        DASHBOARD_DATA["last_scan_duration_sec"] = round(scan_duration, 2)
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda x: x["score"], reverse=True)
-        top_candidates = candidates[:10]
-
-        for cand in top_candidates:
-            if self.anti_trap_check(cand["symbol"]):
-                logger.info(f"HARMONIC CHAMPION: {cand['symbol']} via {cand['engine']} "
-                            f"({cand['direction'].upper()} {cand['net_change_pct']:+.2f}% | OI Delta: {cand['oi_3m_pct']:+.2f}%) | Score: {cand['score']:.1f}")
-                return cand
-
-        return None
-
-    # --------------------------------------------------------------------------
-    # SIZING & EXECUTION
-    # --------------------------------------------------------------------------
-    def calculate_sizing(self, symbol: str, current_price: float) -> Tuple[int, float]:
-        balance = self.exchange.fetch_balance()
-        free_usdt = float(balance.get("USDT", {}).get("free", 0.0) or 0.0)
-        usable_margin = max(free_usdt * BALANCE_UTILIZATION, 0.50)
-
-        calculated_lev = math.ceil(BITGET_MIN_NOTIONAL / usable_margin)
-        leverage = max(2, min(calculated_lev, 20))
-
-        target_notional = usable_margin * leverage
-        if target_notional < BITGET_MIN_NOTIONAL:
-            target_notional = BITGET_MIN_NOTIONAL + 0.20
-
-        raw_amount = target_notional / current_price
-        formatted_amount = float(self.exchange.amount_to_precision(symbol, raw_amount))
-        return leverage, formatted_amount
-
-    def execute_entry(self, candidate: Dict):
-        symbol = candidate["symbol"]
-        direction = candidate["direction"]
-        engine = candidate["engine"]
-        thrust_origin = candidate.get("thrust_origin", 0.0)
-
-        ticker = self.exchange.fetch_ticker(symbol)
-        current_price = ticker["ask"] if direction == "buy" else ticker["bid"]
-
-        if not self.live_mode:
-            self.active_trade = {
-                "symbol": symbol,
-                "side": direction,
-                "entry_price": current_price,
-                "peak_price": current_price,
-                "trough_price": current_price,
-                "contracts": 10.0,
-                "entry_time": time.time(),
-                "is_live": False,
-                "engine": engine,
-                "thrust_origin": thrust_origin,
-                "leverage": 5
-            }
-            logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
-                        f"3m Thrust: {candidate['net_change_pct']:+.2f}% (OI: {candidate['oi_3m_pct']:+.2f}%) | Gauntlet: {self.paper_wins}/6")
-            return
-
-        # Live Execution
-        try:
-            leverage, amount = self.calculate_sizing(symbol, current_price)
-            try:
-                self.exchange.set_leverage(leverage, symbol, params={"productType": "USDT-FUTURES", "marginCoin": "USDT"})
-            except Exception as e:
-                logger.info(f"Leverage notice: {e}")
-
-            order = self.exchange.create_order(
-                symbol=symbol,
-                type="market",
-                side=direction,
-                amount=amount,
-                params={"productType": "USDT-FUTURES"}
-            )
-
-            fill_price = float(order.get("average", 0.0) or current_price)
-            self.active_trade = {
-                "symbol": symbol,
-                "side": direction,
-                "entry_price": fill_price,
-                "peak_price": fill_price,
-                "trough_price": fill_price,
-                "contracts": amount,
-                "entry_time": time.time(),
-                "is_live": True,
-                "engine": engine,
-                "thrust_origin": thrust_origin,
-                "leverage": leverage
-            }
-            logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x")
-
-        except Exception as e:
-            logger.error(f"Live order failed: {e}")
-            self.active_trade = None
-
-    def execute_exit(self, reason: str, is_win: bool):
-        """
-        Permanent fix for PARTI phantom loop & Grid-Wall Exit.
-        """
-        if not self.active_trade:
-            return
-
-        trade = self.active_trade
-        symbol = trade["symbol"]
-        side = trade["side"]
-        exit_side = "sell" if side == "buy" else "buy"
-        is_live = trade.get("is_live", False)
-        engine = trade.get("engine", "UNKNOWN")
-
-        try:
-            ticker = self.exchange.fetch_ticker(symbol)
-            exit_price = ticker["bid"] if exit_side == "sell" else ticker["ask"]
-            entry_price = trade["entry_price"]
-
-            if side == "buy":
-                pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
-                peak_mfe = ((trade["peak_price"] - entry_price) / entry_price) * 100.0
-                worst_mae = ((trade["trough_price"] - entry_price) / entry_price) * 100.0
-            else:
-                pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
-                peak_mfe = ((entry_price - trade["peak_price"]) / entry_price) * 100.0
-                worst_mae = ((entry_price - trade["trough_price"]) / entry_price) * 100.0
-
-            duration_min = round((time.time() - trade["entry_time"]) / 60, 1)
-
-            dossier = {
-                "symbol": symbol,
-                "engine": engine,
-                "pnl_pct": round(pnl_pct, 2),
-                "peak_mfe": round(peak_mfe, 2),
-                "worst_mae": round(worst_mae, 2),
-                "duration_min": duration_min,
-                "reason": reason,
-                "timestamp": time.strftime("%H:%M:%S")
-            }
-            self.completed_trade_dossiers.append(dossier)
-            if len(self.completed_trade_dossiers) > 10:
-                self.completed_trade_dossiers = self.completed_trade_dossiers[-10:]
-
-            if is_live:
-                try:
-                    positions = self.exchange.fetch_positions([symbol], params={"productType": "USDT-FUTURES"})
-                    live_contracts = 0.0
-                    for p in positions:
-                        if p["symbol"] == symbol:
-                            live_contracts = float(p.get("contracts", 0.0) or 0.0)
-                            break
-
-                    close_amount = live_contracts if live_contracts > 0 else trade["contracts"]
-
-                    self.exchange.create_order(
-                        symbol=symbol,
-                        type="market",
-                        side=exit_side,
-                        amount=close_amount,
-                        params={
-                            "reduceOnly": True,
-                            "tradeSide": "close",
-                            "productType": "USDT-FUTURES"
-                        }
-                    )
-                    logger.info(f"[LIVE EXIT] Closed {symbol} via reduceOnly @ ${exit_price:.6f} | PnL: {pnl_pct:+.2f}% | Reason: {reason}")
-                except Exception as e:
-                    logger.error(f"Live exit submission error: {e}")
-            else:
-                logger.info(f"[PAPER EXIT] Closed {symbol} @ ${exit_price:.6f} | PnL: {pnl_pct:+.2f}% (Peak: +{peak_mfe:.2f}%) | Reason: {reason}")
-
-            # Gauntlet Progression (6 consecutive wins in a row)
-            if not is_live:
-                if is_win:
-                    self.paper_wins += 1
-                    logger.info(f"GAUNTLET PROGRESS: Streak is now {self.paper_wins}/6 Wins!")
-                    if self.paper_wins >= 6:
-                        self.live_mode = True
-                        logger.warning("*********************************************************")
-                        logger.warning("6/6 CONSECUTIVE WINS ACHIEVED! LIVE TRADING UNLOCKED!")
-                        logger.warning("*********************************************************")
-                else:
-                    logger.warning(f"GAUNTLET RESET: Loss ({pnl_pct:.2f}%). Counter reset to 0/6.")
-                    self.paper_wins = 0
-
-                self.save_state()
-
-        except Exception as e:
-            logger.error(f"Critical error during exit: {e}")
-
-        finally:
-            self.active_trade = None
-            self.cooldown_tracker[symbol] = time.time() + NORMAL_COOLDOWN_SECS
-            logger.info(f"{symbol} assigned to normal cooldown.")
-
-    # --------------------------------------------------------------------------
-    # POSITION MONITOR: GRID 0.5% PEAK WALL & 90s DOA KILL SWITCH
-    # --------------------------------------------------------------------------
-    def monitor_active_trade(self):
-        if not self.active_trade:
-            return
-
-        trade = self.active_trade
-        symbol = trade["symbol"]
-        side = trade["side"]
-        entry_price = trade["entry_price"]
-        entry_time = trade["entry_time"]
-        is_live = trade.get("is_live", False)
-
-        try:
-            ticker = self.exchange.fetch_ticker(symbol)
-            current_price = ticker["last"]
-
-            if side == "buy":
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
-                if current_price > trade["peak_price"]:
-                    trade["peak_price"] = current_price
-                if current_price < trade["trough_price"]:
-                    trade["trough_price"] = current_price
-
-                peak_pnl = ((trade["peak_price"] - entry_price) / entry_price) * 100.0
-                drawdown_from_peak = ((trade["peak_price"] - current_price) / trade["peak_price"]) * 100.0
-
-            else:
-                pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
-                if current_price < trade["peak_price"]:
-                    trade["peak_price"] = current_price
-                if current_price > trade["trough_price"]:
-                    trade["trough_price"] = current_price
-
-                peak_pnl = ((entry_price - trade["peak_price"]) / entry_price) * 100.0
-                drawdown_from_peak = ((current_price - trade["peak_price"]) / trade["peak_price"]) * 100.0
-
-            duration_secs = time.time() - entry_time
-
-            DASHBOARD_DATA["active_trade"] = {
-                "symbol": symbol,
-                "side": side.upper(),
-                "entry": entry_price,
-                "current": current_price,
-                "pnl_pct": round(pnl_pct, 2),
-                "peak_pnl": round(peak_pnl, 2),
-                "drawdown_from_peak": round(drawdown_from_peak, 2),
-                "duration_sec": round(duration_secs, 1)
-            }
-
-            # ==================================================================
-            # RULE 1: THE GRID 0.5% PEAK REVERSE (The Electrified Floor)
-            # If price pulls back 0.50% from ANY peak reached, SELL IMMEDIATELY!
-            # ==================================================================
-            if drawdown_from_peak >= GRID_PEAK_REVERSE_PCT:
-                is_win = pnl_pct > 0
-                reason = f"Grid 0.5% Peak Reverse (Peaked at +{peak_pnl:.2f}%, Reversal: {drawdown_from_peak:.2f}%)"
-                self.execute_exit(reason, is_win=is_win)
-                return
-
-            # ==================================================================
-            # RULE 2: 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
-            # If 90s pass and nothing pushed the price up (peak < +0.30%), ABORT!
-            # ==================================================================
-            if duration_secs >= DOA_TIMEOUT_SECS and peak_pnl < DOA_MIN_THRUST_PCT:
-                is_win = pnl_pct > 0
-                reason = f"90s Dead-on-Arrival Kill Switch (Peak was only +{peak_pnl:.2f}%)"
-                self.execute_exit(reason, is_win=is_win)
-                return
-
-            # ==================================================================
-            # RULE 3: LIVE HARD STOP LOSS (Once in live mode)
-            # ==================================================================
-            if is_live and pnl_pct <= -LIVE_HARD_STOP_LOSS_PCT:
-                self.execute_exit(f"Hard Stop-Loss (-{LIVE_HARD_STOP_LOSS_PCT}%)", is_win=False)
-                return
-
-        except Exception as e:
-            logger.error(f"Error monitoring active trade on {symbol}: {e}")
-
-    # --------------------------------------------------------------------------
-    # 15-MINUTE INTELLIGENCE BRIEFING & TELEMETRY
-    # --------------------------------------------------------------------------
-    def print_desk_briefing(self):
-        now = time.time()
-        if (now - self.last_briefing_time) < BRIEFING_INTERVAL_SECONDS:
-            return
-
-        self.last_briefing_time = now
-
-        last_dossier_str = "No trades completed in last window."
-        if self.completed_trade_dossiers:
-            d = self.completed_trade_dossiers[-1]
-            last_dossier_str = (
-                f"{d['symbol']} [{d['engine']}] -> PnL: {d['pnl_pct']:+.2f}% | "
-                f"Peak: +{d['peak_mfe']:.2f}% | Worst: {d['worst_mae']:.2f}% | "
-                f"Duration: {d['duration_min']}m ({d['reason']})"
-            )
-
-        briefing_text = (
-            f"\n{'='*25} [15-MIN UNIFIED DESK BRIEFING] {'='*25}\n"
-            f"• RECENT TRADE TELEMETRY: {last_dossier_str}\n"
-            f"• GAUNTLET PROGRESS: {self.paper_wins}/6 Wins | Mode: {'LIVE' if self.live_mode else 'PAPER_QUALIFYING'}\n"
-            f"• TRACKING UNIVERSE: {len(self.history_buffer)} liquid perpetual pairs active\n"
-            f"• COINGLASS LIQUID POOL: {len(self.global_liquid_symbols)} global pairs verified\n"
-            f"{'='*75}"
-        )
-        logger.info(briefing_text)
-
-        DASHBOARD_DATA["last_briefing"] = {
-            "last_trade_telemetry": last_dossier_str,
-            "paper_wins": self.paper_wins,
-            "active_pairs": len(self.history_buffer),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                logger.error(f"Error loading state: {e}. Reinitializing.")
+        return {
+            "mode": "PAPER",
+            "consecutive_wins": 0,
+            "target_wins": QUALIFICATION_TARGET_WINS,
+            "total_trades": 0,
+            "total_wins": 0,
+            "total_losses": 0,
+            "history": []
         }
 
-    # --------------------------------------------------------------------------
-    # MAIN EVENT LOOP
-    # --------------------------------------------------------------------------
+    def save(self):
+        with self.lock:
+            try:
+                with open(self.filename, "w") as f:
+                    json.dump(self.state, f, indent=2)
+            except Exception as e:
+                logger.error(f"Error saving state: {e}")
+
+    def record_trade(self, symbol, gain_pct, exit_reason, is_paper):
+        with self.lock:
+            self.state["total_trades"] += 1
+            is_win = gain_pct > 0.0
+
+            if is_win:
+                self.state["total_wins"] += 1
+                if self.state["mode"] == "PAPER":
+                    self.state["consecutive_wins"] += 1
+                    logger.info(f"🏆 PAPER WIN! Streak: {self.state['consecutive_wins']}/{QUALIFICATION_TARGET_WINS}")
+                    if self.state["consecutive_wins"] >= QUALIFICATION_TARGET_WINS:
+                        self.state["mode"] = "LIVE"
+                        logger.info("🚀 GAUNTLET COMPLETED! AUTHORIZING LIVE TRADING ENGINE!")
+            else:
+                self.state["total_losses"] += 1
+                if self.state["mode"] == "PAPER":
+                    logger.warning(f"❌ PAPER LOSS. Streak reset to 0/{QUALIFICATION_TARGET_WINS}")
+                    self.state["consecutive_wins"] = 0
+
+            trade_log = {
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "symbol": symbol,
+                "gain_pct": round(gain_pct, 3),
+                "exit_reason": exit_reason,
+                "mode": "PAPER" if is_paper else "LIVE",
+                "result": "WIN" if is_win else "LOSS"
+            }
+            self.state["history"].append(trade_log)
+            if len(self.state["history"]) > 50:
+                self.state["history"].pop(0)
+
+        self.save()
+
+# -----------------------------------------------------------------------------
+# SECTION 5: LIVE HTTP KEEP-ALIVE SERVER (PORT 10000 DASHBOARD)
+# -----------------------------------------------------------------------------
+dashboard_data = {
+    "status": "INITIALIZING",
+    "mode": "PAPER",
+    "streak": 0,
+    "universe_size": 0,
+    "active_trade": None,
+    "recent_trades": [],
+    "last_update": ""
+}
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+
+        at = dashboard_data.get("active_trade")
+        active_html = "<p style='color: #888;'>No active positions. Scanning order flow...</p>"
+        if at:
+            active_html = f"""
+            <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid #3b82f6;">
+                <h3 style="margin: 0 0 10px 0; color: #60a5fa;">ACTIVE TRADE: {at['symbol']} ({at['side'].upper()})</h3>
+                <p><b>Mode:</b> {at['mode']} | <b>Entry Price:</b> {at['entry_price']} | <b>Target Index:</b> {at['index_price']}</p>
+                <p><b>Current Price:</b> {at['current_price']} | <b>Current Gap:</b> {at['current_gap_pct']:.2f}%</p>
+                <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
+                <p><b>DOA Timer:</b> {at['elapsed_seconds']}s / {DOA_TIMEOUT_SECONDS}s</p>
+            </div>
+            """
+
+        history_rows = ""
+        for t in reversed(dashboard_data.get("recent_trades", [])[-10:]):
+            color = "#4ade80" if t["result"] == "WIN" else "#f87171"
+            history_rows += f"""
+            <tr>
+                <td style="padding: 6px;">{t['timestamp']}</td>
+                <td style="padding: 6px;">{t['symbol']}</td>
+                <td style="padding: 6px; color: {color}; font-weight: bold;">{t['gain_pct']:+.2f}%</td>
+                <td style="padding: 6px;">{t['exit_reason']}</td>
+                <td style="padding: 6px;">{t['mode']}</td>
+            </tr>
+            """
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Desk Radar & Execution Engine</title>
+            <meta http-equiv="refresh" content="3">
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
+                .card {{ background: #1e293b; border-radius: 8px; padding: 15px; margin-bottom: 20px; }}
+                .badge {{ padding: 4px 10px; border-radius: 4px; font-weight: bold; }}
+                .badge-live {{ background: #ef4444; color: white; }}
+                .badge-paper {{ background: #eab308; color: black; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+                th {{ text-align: left; background: #334155; padding: 8px; font-size: 13px; }}
+            </style>
+        </head>
+        <body>
+            <h2>🛰️ Quantitative Desk Intelligence Dashboard</h2>
+            <div class="card">
+                <b>Status:</b> {dashboard_data['status']} | 
+                <b>Engine Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
+                <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Consecutive Wins | 
+                <b>Universe:</b> {dashboard_data['universe_size']} Pairs
+            </div>
+
+            <div class="card">
+                <h3>Live Position Telemetry</h3>
+                {active_html}
+            </div>
+
+            <div class="card">
+                <h3>Recent Execution Log</h3>
+                <table>
+                    <thead>
+                        <tr><th>Time</th><th>Symbol</th><th>PnL %</th><th>Exit Reason</th><th>Type</th></tr>
+                    </thead>
+                    <tbody>
+                        {history_rows}
+                    </tbody>
+                </table>
+            </div>
+            <p style="font-size: 12px; color: #64748b;">Telemetry updated: {dashboard_data['last_update']}</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode("utf-8"))
+
+def start_http_server():
+    server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
+    logger.info(f"🌐 HTTP Keep-Alive Server active on port {PORT}")
+    server.serve_forever()
+
+# -----------------------------------------------------------------------------
+# SECTION 6: DESK TRADING BOT CORE ENGINE
+# -----------------------------------------------------------------------------
+class BitgetDeskPartnerEngine:
+    def __init__(self):
+        self.state_mgr = StateManager()
+        self.exchange = None
+        self.http_session = None
+        self.price_buffer = defaultdict(lambda: deque(maxlen=360))  # Rolling ~5m tick memory
+        self.cooldowns = {}
+        self.active_trade = None
+        self.lock = threading.Lock()
+
+        self._setup_connection_pool()
+        self._setup_exchange()
+
+    def _setup_connection_pool(self):
+        """Mounts a 50-socket HTTP pool to permanently eliminate urllib3 warnings."""
+        self.http_session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=3)
+        self.http_session.mount("https://", adapter)
+        self.http_session.mount("http://", adapter)
+
+    def _setup_exchange(self):
+        """Initializes the Bitget CCXT client with one-way mode."""
+        self.exchange = ccxt.bitget({
+            "apiKey": API_KEY,
+            "secret": SECRET_KEY,
+            "password": PASSPHRASE,
+            "enableRateLimit": True,
+            "options": {"defaultType": "swap"}
+        })
+        self.exchange.session = self.http_session
+
+        if API_KEY and SECRET_KEY and PASSPHRASE:
+            try:
+                # Enforce One-Way Position Mode
+                self.exchange.set_position_mode(hedged=False)
+                logger.info("🔒 Bitget account verified: One-Way Mode Active.")
+            except Exception as e:
+                logger.warning(f"Note on position mode: {e}")
+        else:
+            logger.info("ℹ️ Running in Paper Mode without full private keys.")
+
+    def fetch_universal_tickers(self):
+        """Pulls all 800+ USDT-M pairs in ONE single REST call (0 lag)."""
+        url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
+        try:
+            resp = self.http_session.get(url, timeout=4)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == "00000":
+                    return data.get("data", [])
+        except Exception as e:
+            logger.error(f"Ticker ingestion error: {e}")
+        return []
+
+    def update_buffers(self, tickers):
+        """Stores local lastPrice, global indexPrice, and OI into memory."""
+        now = time.time()
+        active_count = 0
+
+        for t in tickers:
+            symbol = t.get("symbol", "")
+            # Filter Blacklist
+            if any(b in symbol for b in BLACKLIST):
+                continue
+
+            try:
+                vol_24h = float(t.get("usdtVolume", 0.0) or t.get("baseVolume", 0.0))
+                if vol_24h < MIN_24H_VOLUME_USDT:
+                    continue
+
+                last_price = float(t.get("lastPr", 0.0))
+                index_price = float(t.get("indexPrice", 0.0))
+                oi = float(t.get("openInterest", 0.0) or 0.0)
+
+                if last_price <= 0 or index_price <= 0:
+                    continue
+
+                self.price_buffer[symbol].append({
+                    "time": now,
+                    "last_price": last_price,
+                    "index_price": index_price,
+                    "oi": oi
+                })
+                active_count += 1
+            except (ValueError, TypeError):
+                continue
+
+        dashboard_data["universe_size"] = active_count
+
+    def scan_for_catchup_trap(self):
+        """Scans in-memory buffer for the Global Catch-Up Trap footprint."""
+        if self.active_trade is not None:
+            return None  # Max 1 focused trade at a time
+
+        now = time.time()
+
+        for symbol, buf in list(self.price_buffer.items()):
+            if symbol in self.cooldowns and (now - self.cooldowns[symbol]) < COOLDOWN_SECONDS:
+                continue
+
+            if len(buf) < 60:  # Need at least ~1-2 minutes of history
+                continue
+
+            latest = buf[-1]
+            last_price = latest["last_price"]
+            index_price = latest["index_price"]
+
+            # 1. THE SPREAD GAP (Bitget is cheaper than Global Index)
+            spread_gap_pct = ((index_price - last_price) / last_price) * 100.0
+            if spread_gap_pct < MIN_SPREAD_GAP_PCT:
+                continue
+
+            # 2. GLOBAL INDEX 3-MINUTE MOMENTUM
+            cutoff_3m = now - 180
+            ticks_3m = [b for b in buf if b["time"] >= cutoff_3m]
+            if len(ticks_3m) < 10:
+                continue
+
+            oldest_index = ticks_3m[0]["index_price"]
+            index_3m_gain_pct = ((index_price - oldest_index) / oldest_index) * 100.0
+            if index_3m_gain_pct < MIN_GLOBAL_INDEX_3M_PCT:
+                continue
+
+            # 3. BITGET OPEN INTEREST DELTA
+            oldest_oi = ticks_3m[0]["oi"]
+            latest_oi = latest["oi"]
+            oi_delta_pct = 0.0
+            if oldest_oi > 0:
+                oi_delta_pct = ((latest_oi - oldest_oi) / oldest_oi) * 100.0
+
+            # Guard: OI must be expanding or at least positive in latest minute
+            if oi_delta_pct < MIN_BITGET_OI_DELTA_PCT and latest_oi < ticks_3m[-5]["oi"]:
+                continue
+
+            # TRAP CONDITIONS MET!
+            logger.info(f"🎯 TRAP TRIGGERED: {symbol} | Gap: +{spread_gap_pct:.2f}% | Global 3m: +{index_3m_gain_pct:.2f}% | Bitget OI: +{oi_delta_pct:.2f}%")
+            return {
+                "symbol": symbol,
+                "entry_price": last_price,
+                "index_price": index_price,
+                "gap_pct": spread_gap_pct
+            }
+
+        return None
+
+    def calculate_live_position_size(self, current_price):
+        """Micro-Account Math: 90% balance, dynamic leverage clamped [2x, 20x] to clear $5.50 min."""
+        try:
+            balance_info = self.exchange.fetch_balance()
+            free_usdt = float(balance_info["free"].get("USDT", 0.0))
+            usable_margin = free_usdt * ALLOCATION_PCT
+
+            if usable_margin < 0.50:
+                logger.warning(f"Usable margin too low: ${usable_margin:.2f}")
+                return 0, 0
+
+            # Dynamic Leverage calculation to clear $5.50 notional
+            calculated_lev = math.ceil(MIN_NOTIONAL_USDT / usable_margin)
+            leverage = max(MIN_LEVERAGE_CLAMP, min(calculated_lev, MAX_LEVERAGE_CLAMP))
+            notional = usable_margin * leverage
+
+            if notional < MIN_NOTIONAL_USDT:
+                notional = MIN_NOTIONAL_USDT
+
+            contract_size = notional / current_price
+            return contract_size, leverage
+        except Exception as e:
+            logger.error(f"Sizing error: {e}")
+            return 0, 0
+
+    def enter_trade(self, signal):
+        """Executes trade entry in Paper or Live mode."""
+        symbol = signal["symbol"]
+        price = signal["entry_price"]
+        is_paper = (self.state_mgr.state["mode"] == "PAPER")
+
+        trade_info = {
+            "symbol": symbol,
+            "side": "buy",
+            "entry_price": price,
+            "index_price": signal["index_price"],
+            "entry_time": time.time(),
+            "peak_price": price,
+            "highest_gain_pct": 0.0,
+            "is_paper": is_paper,
+            "mode": "PAPER" if is_paper else "LIVE",
+            "size": 0
+        }
+
+        if is_paper:
+            logger.info(f"📝 [PAPER ENTRY] Bought {symbol} @ {price} | Target Index: {signal['index_price']}")
+            self.active_trade = trade_info
+        else:
+            try:
+                size, lev = self.calculate_live_position_size(price)
+                if size <= 0:
+                    return
+                # Set Leverage
+                ccxt_symbol = f"{symbol[:len(symbol)-4]}/USDT:USDT"
+                self.exchange.set_leverage(lev, ccxt_symbol)
+                # Fire Market Order
+                order = self.exchange.create_market_buy_order(ccxt_symbol, size)
+                trade_info["size"] = size
+                self.active_trade = trade_info
+                logger.info(f"⚡ [LIVE ENTRY] Long {symbol} | Size: {size} | Lev: {lev}x | OrderID: {order.get('id')}")
+            except Exception as e:
+                logger.error(f"Live entry execution failed: {e}")
+                self.active_trade = None
+
+    def manage_active_trade(self):
+        """Monitors active trade tick-by-tick for Gap-Closed, 0.5% Peak Reverse, or 90s DOA."""
+        if not self.active_trade:
+            return
+
+        trade = self.active_trade
+        symbol = trade["symbol"]
+        buf = self.price_buffer.get(symbol)
+        if not buf:
+            return
+
+        latest = buf[-1]
+        current_price = latest["last_price"]
+        current_index = latest["index_price"]
+        elapsed = time.time() - trade["entry_time"]
+
+        # Calculate PnL and Peak Tracking
+        gain_pct = ((current_price - trade["entry_price"]) / trade["entry_price"]) * 100.0
+        if gain_pct > trade["highest_gain_pct"]:
+            trade["highest_gain_pct"] = gain_pct
+            trade["peak_price"] = current_price
+
+        # Update Live Telemetry
+        current_gap = ((current_index - current_price) / current_price) * 100.0
+        dashboard_data["active_trade"] = {
+            "symbol": symbol,
+            "side": trade["side"],
+            "mode": trade["mode"],
+            "entry_price": trade["entry_price"],
+            "index_price": current_index,
+            "current_price": current_price,
+            "current_gap_pct": current_gap,
+            "pnl_pct": gain_pct,
+            "peak_gain_pct": trade["highest_gain_pct"],
+            "elapsed_seconds": int(elapsed)
+        }
+
+        exit_reason = None
+
+        # RULE 1: THE GAP-CLOSED GRID TAKE-PROFIT (Bitget equalizes with Global Index)
+        if current_price >= current_index * (1.0 - (GAP_CLOSE_THRESHOLD_PCT / 100.0)):
+            exit_reason = "GAP_CLOSED_PROFIT"
+
+        # RULE 2: 0.5% PEAK REVERSE (Momentum Overshoot Wall)
+        elif (trade["highest_gain_pct"] - gain_pct) >= PEAK_REVERSE_PULLBACK_PCT:
+            exit_reason = "0.5%_PEAK_REVERSE"
+
+        # RULE 3: 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
+        elif elapsed >= DOA_TIMEOUT_SECONDS and trade["highest_gain_pct"] < DOA_FORWARD_THRESHOLD_PCT:
+            exit_reason = "90S_DOA_KILL_SWITCH"
+
+        # RULE 4: STRUCTURAL EMERGENCY HARD STOP (Live Mode)
+        elif not trade["is_paper"] and gain_pct <= -LIVE_HARD_STOP_PCT:
+            exit_reason = "HARD_STOP_LOSS"
+
+        # EXECUTE EXIT IF TRIGGERED
+        if exit_reason:
+            self._execute_exit(trade, current_price, gain_pct, exit_reason)
+
+    def _execute_exit(self, trade, exit_price, gain_pct, reason):
+        """Exits position cleanly and guarantees atomic active_trade = None cleanup."""
+        symbol = trade["symbol"]
+        is_paper = trade["is_paper"]
+
+        try:
+            if not is_paper:
+                ccxt_symbol = f"{symbol[:len(symbol)-4]}/USDT:USDT"
+                # Query exact open size to prevent dust
+                pos = self.exchange.fetch_position(ccxt_symbol)
+                exact_size = abs(float(pos.get("contracts", 0.0) or trade["size"]))
+                if exact_size > 0:
+                    self.exchange.create_market_sell_order(
+                        ccxt_symbol, 
+                        exact_size, 
+                        params={"reduceOnly": True}
+                    )
+                logger.info(f"⚡ [LIVE EXIT] Closed {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
+            else:
+                logger.info(f"📝 [PAPER EXIT] Closed {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
+
+            # Record in Gauntlet Tracker
+            self.state_mgr.record_trade(symbol, gain_pct, reason, is_paper)
+            self.cooldowns[symbol] = time.time()
+
+        except Exception as e:
+            logger.error(f"Error during exit execution: {e}")
+        finally:
+            # ATOMIC CLEANUP: Eliminates PARTI phantom exit loops permanently
+            self.active_trade = None
+            dashboard_data["active_trade"] = None
+
     def run(self):
-        logger.info("Harmonic-Polarity Grid-Trailing Quant Engine active. Event loop running...")
+        """Main desk loop running every 1.5 seconds."""
+        logger.info("🚀 Desk Radar Engine Active. Tracking Global Catch-Up Signals...")
+        last_briefing = 0
 
         while True:
             try:
-                if API_KEY:
-                    try:
-                        bal = self.exchange.fetch_balance()
-                        DASHBOARD_DATA["live_balance"] = round(float(bal.get("USDT", {}).get("free", 0.0) or 0.0), 2)
-                    except Exception:
-                        pass
+                tickers = self.fetch_universal_tickers()
+                if tickers:
+                    self.update_buffers(tickers)
 
-                DASHBOARD_DATA["status"] = "Active"
-                DASHBOARD_DATA["mode"] = "LIVE" if self.live_mode else f"PAPER_QUALIFYING ({self.paper_wins}/6)"
-                DASHBOARD_DATA["paper_wins"] = self.paper_wins
-                DASHBOARD_DATA["last_scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-                self.print_desk_briefing()
-
-                # Check the 0.5% grid wall every second during active trade
                 if self.active_trade:
-                    self.monitor_active_trade()
-                    time.sleep(1)
-                    continue
+                    self.manage_active_trade()
+                else:
+                    signal = self.scan_for_catchup_trap()
+                    if signal:
+                        self.enter_trade(signal)
 
-                opportunity = self.scan_for_opportunities()
-                if opportunity:
-                    self.execute_entry(opportunity)
+                # Dashboard Sync
+                dashboard_data["status"] = "RUNNING"
+                dashboard_data["mode"] = self.state_mgr.state["mode"]
+                dashboard_data["streak"] = self.state_mgr.state["consecutive_wins"]
+                dashboard_data["recent_trades"] = self.state_mgr.state["history"]
+                dashboard_data["last_update"] = datetime.utcnow().strftime("%H:%M:%S UTC")
 
-                time.sleep(3)
+                # 15-Minute Desk Intelligence Briefing to Console
+                if time.time() - last_briefing >= 900:
+                    last_briefing = time.time()
+                    logger.info(
+                        f"📊 [15M DESK BRIEFING] Mode: {dashboard_data['mode']} | "
+                        f"Gauntlet: {dashboard_data['streak']}/{QUALIFICATION_TARGET_WINS} Wins | "
+                        f"Tracking: {dashboard_data['universe_size']} pairs"
+                    )
+
+                time.sleep(1.5)
 
             except Exception as e:
-                logger.error(f"Main loop error: {e}")
-                time.sleep(4)
+                logger.error(f"Engine Loop Exception: {e}")
+                time.sleep(3)
 
-# ==============================================================================
-# 5. ENTRY POINT
-# ==============================================================================
+# -----------------------------------------------------------------------------
+# SECTION 7: BOOTSTRAP ENTRY POINT
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    start_keep_alive_server(PORT)
-    bot = QuantBot()
-    bot.run()
+    # Start Keep-Alive HTTP Server in Daemon Thread
+    t = threading.Thread(target=start_http_server, daemon=True)
+    t.start()
+
+    # Start Trading Engine
+    engine = BitgetDeskPartnerEngine()
+    engine.run()
