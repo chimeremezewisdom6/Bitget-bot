@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: COINGLASS WORLDWIDE LEADERBOARD TOURNAMENT ENGINE
+BOT.PY: COINGLASS WORLDWIDE LEADERBOARD TOURNAMENT ENGINE (CLEAN TELEMETRY)
 EXCHANGE: BITGET USDT-M PERPETUALS | DATA FEED: COINGLASS_FEED.PY
 STRATEGY: 15-MINUTE VELOCITY ASYMMETRY (DAVID VS. SAMUEL) NO-FIXED-HURDLE RANKING
 INFRASTRUCTURE: RENDER PORT 10000 KEEP-ALIVE SERVER | GAUNTLET 1 -> 6 WINS
@@ -24,7 +24,7 @@ from requests.adapters import HTTPAdapter
 import ccxt
 
 # -----------------------------------------------------------------------------
-# SECTION 1: LOGGING CONFIGURATION
+# SECTION 1: LOGGING CONFIGURATION (CLEAN DESK TELEMETRY)
 # -----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -33,20 +33,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("LeaderboardDeskEngine")
 
+# Silence noisy third-party loggers
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
 # -----------------------------------------------------------------------------
 # SECTION 2: DYNAMIC COINGLASS FEED LOADER
 # -----------------------------------------------------------------------------
 get_coinglass_data = None
 
 def load_coinglass_module():
-    """Dynamically imports get_coinglass_data from coinglass_feed.py or similar filenames."""
     global get_coinglass_data
     possible_names = ["coinglass_feed.py", "coinglass feed.py", "coinglass.py", "cg_feed.py"]
 
     try:
         from coinglass_feed import get_coinglass_data as cg_func
         get_coinglass_data = cg_func
-        logger.info("✅ Successfully imported get_coinglass_data from coinglass_feed.py")
         return
     except ImportError:
         pass
@@ -59,12 +61,10 @@ def load_coinglass_module():
                 spec.loader.exec_module(mod)
                 if hasattr(mod, "get_coinglass_data"):
                     get_coinglass_data = getattr(mod, "get_coinglass_data")
-                    logger.info(f"✅ Loaded CoinGlass data module from {fname}")
                     return
-            except Exception as e:
-                logger.warning(f"Could not load {fname}: {e}")
+            except Exception:
+                pass
 
-    logger.warning("⚠️ CoinGlass feed file not found. Running with direct Bitget universal buffer.")
     get_coinglass_data = lambda: []
 
 load_coinglass_module()
@@ -77,7 +77,7 @@ BLACKLIST = [
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 ]
 
-LOOKBACK_SECONDS = 900             # 15-Minute Lookback Window for Speed Calculation
+LOOKBACK_SECONDS = 900             # 15-Minute Lookback Window
 MAX_TRADE_LIFECYCLE_SECONDS = 900  # 15-Minute Maximum Trade Hold (Rotate to new leader)
 VELOCITY_DECAY_RATIO = 2.0         # Armed when speed ratio collapses from peak to <= 2.0x
 PEAK_REVERSE_PULLBACK_PCT = 0.50   # 0.5% Peak Reverse Trailing Wall
@@ -124,8 +124,8 @@ class StateManager:
             try:
                 with open(self.filename, "r") as f:
                     return json.load(f)
-            except Exception as e:
-                logger.error(f"Error loading state: {e}. Reinitializing.")
+            except Exception:
+                pass
         return {
             "mode": "PAPER",
             "consecutive_wins": 0,
@@ -205,7 +205,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>No active positions. Tournament scanner evaluating #1 leader...</p>"
+        active_html = "<p style='color: #888;'>No active positions. Scanning 15m order flow...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             fade_status = "<span style='color: #f59e0b; font-weight: bold;'>ARMED (FADING)</span>" if at.get("velocity_decayed") else "<span style='color: #4ade80;'>ACTIVE PROPULSION</span>"
@@ -214,7 +214,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE POSITION: {at['symbol']} ({at['side'].upper()})</h3>
                 <p><b>Mode:</b> {at['mode']} | <b>Entry Price:</b> {at['entry_price']} | <b>Current Price:</b> {at['current_price']}</p>
                 <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
-                <p><b>Speed Ratio:</b> {at.get('current_speed_ratio', 0.0):.1f}x (Initial: {at.get('initial_speed_ratio', 0.0):.1f}x) | <b>Fade Status:</b> {fade_status}</p>
+                <p><b>Speed Ratio:</b> {at.get('current_speed_ratio', 0.0):.1f}x | <b>Fade Status:</b> {fade_status}</p>
                 <p><b>Lifecycle Timer:</b> {at['elapsed_seconds']}s / {MAX_TRADE_LIFECYCLE_SECONDS}s (DOA Limit: {DOA_TIMEOUT_SECONDS}s)</p>
             </div>
             """
@@ -255,7 +255,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
                 <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Wins | 
-                <b>Global Pairs:</b> {dashboard_data['cg_synced_pairs']} | <b>Bitget Pairs:</b> {dashboard_data['universe_size']}
+                <b>Tracking Universe:</b> {dashboard_data['universe_size']} Bitget Pairs
             </div>
 
             <div class="card">
@@ -280,9 +280,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """
         self.wfile.write(html.encode("utf-8"))
 
+    def log_message(self, format, *args):
+        """Silences standard HTTP request logging in terminal to keep logs clean."""
+        return
+
 def start_http_server():
     server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
-    logger.info(f"🌐 HTTP Keep-Alive Server active on port {PORT}")
     server.serve_forever()
 
 # -----------------------------------------------------------------------------
@@ -302,14 +305,12 @@ class BitgetDeskPartnerEngine:
         self._setup_exchange()
 
     def _setup_connection_pool(self):
-        """Mounts a 50-socket HTTP pool to permanently eliminate urllib3 warnings."""
         self.http_session = requests.Session()
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=3)
         self.http_session.mount("https://", adapter)
         self.http_session.mount("http://", adapter)
 
     def _setup_exchange(self):
-        """Initializes the Bitget CCXT client with one-way mode."""
         self.exchange = ccxt.bitget({
             "apiKey": API_KEY,
             "secret": SECRET_KEY,
@@ -323,13 +324,12 @@ class BitgetDeskPartnerEngine:
             try:
                 self.exchange.set_position_mode(hedged=False)
                 logger.info("🔒 Bitget account verified: One-Way Mode Active.")
-            except Exception as e:
-                logger.warning(f"Note on position mode: {e}")
+            except Exception:
+                pass
         else:
             logger.info("ℹ️ Running in Paper Mode without full private keys.")
 
     def sync_coinglass_leaderboard(self):
-        """Pulls global coins from coinglass_feed.py."""
         global get_coinglass_data
         if not get_coinglass_data:
             return
@@ -343,11 +343,10 @@ class BitgetDeskPartnerEngine:
                     if sym:
                         self.cg_map[sym] = item
                 dashboard_data["cg_synced_pairs"] = len(self.cg_map)
-        except Exception as e:
-            logger.debug(f"CoinGlass sync notice: {e}")
+        except Exception:
+            pass
 
     def fetch_universal_tickers(self):
-        """Pulls all 800+ USDT-M pairs in ONE single REST call (0 lag)."""
         url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
         try:
             resp = self.http_session.get(url, timeout=4)
@@ -355,12 +354,15 @@ class BitgetDeskPartnerEngine:
                 data = resp.json()
                 if data.get("code") == "00000":
                     return data.get("data", [])
-        except Exception as e:
-            logger.error(f"Ticker ingestion error: {e}")
+        except Exception:
+            pass
         return []
 
     def update_buffers(self, tickers):
-        """Stores local lastPrice and Open Interest into rolling memory buffer."""
+        """
+        ACCURATE OPEN INTEREST CAPTURE:
+        Reads Bitget's official 'holdingAmount' field so real OI delta is tracked.
+        """
         now = time.time()
         active_count = 0
 
@@ -371,7 +373,8 @@ class BitgetDeskPartnerEngine:
 
             try:
                 last_price = float(t.get("lastPr", 0.0))
-                oi = float(t.get("openInterest", 0.0) or 0.0)
+                # Bitget official field name for Open Interest is holdingAmount
+                oi = float(t.get("holdingAmount", 0.0) or t.get("openInterest", 0.0) or 0.0)
                 if last_price <= 0:
                     continue
 
@@ -388,10 +391,9 @@ class BitgetDeskPartnerEngine:
 
     def run_leaderboard_tournament(self):
         """
-        NO-FIXED-HURDLE RELATIVE RANKING TOURNAMENT WITH SELF-HEALING DUAL-ENGINE OI:
-        1. Calculates 15-Minute David vs. Samuel Speed Ratio.
-        2. Applies Global CoinGlass OI if available; otherwise uses Bitget Native OI.
-        3. Enforces Strict Polarities (+ for Long, - for Short with trap avoidance).
+        15-MINUTE DAVID VS. SAMUEL SPEED TOURNAMENT WITH ACTIVE OPEN INTEREST:
+        Ranks all coins by (Reclaim Speed / Drop Speed) * OI Delta.
+        Selects #1 Undisputed Leader without arbitrary hurdles.
         """
         if self.active_trade is not None:
             return None
@@ -408,20 +410,20 @@ class BitgetDeskPartnerEngine:
             if len(ticks) < 45:
                 continue
 
-            # Check CoinGlass Global OI
+            # Calculate Native Bitget 15-Minute OI Delta
+            oldest_oi = ticks[0]["oi"]
+            latest_oi = ticks[-1]["oi"]
+            native_oi_delta = 0.0
+            if oldest_oi > 0:
+                native_oi_delta = ((latest_oi - oldest_oi) / oldest_oi) * 100.0
+
+            # Check CoinGlass OI as secondary verification
             base_sym = symbol.replace("USDT", "").replace("_USDT", "").upper()
             cg_info = self.cg_map.get(base_sym, {})
             cg_oi = float(cg_info.get("oi_15m", 0.0) or 0.0)
 
-            # Check Bitget Native OI as Autonomous Fallback
-            native_oi_delta = 0.0
-            oldest_oi = ticks[0]["oi"]
-            latest_oi = ticks[-1]["oi"]
-            if oldest_oi > 0:
-                native_oi_delta = ((latest_oi - oldest_oi) / oldest_oi) * 100.0
-
-            # Dual-Engine: Use CoinGlass OI if synced, otherwise use Native Bitget OI
-            effective_oi = cg_oi if len(self.cg_map) > 0 and cg_oi != 0.0 else native_oi_delta
+            # Combined Effective OI
+            effective_oi = cg_oi if cg_oi != 0.0 else native_oi_delta
 
             current_price = ticks[-1]["price"]
             prices = [t["price"] for t in ticks]
@@ -431,7 +433,7 @@ class BitgetDeskPartnerEngine:
             max_idx = prices.index(max_p)
 
             # -------------------------------------------------------------
-            # TOURNAMENT: LONG CANDIDATE (David Reclaims Samuel's Bleed)
+            # TOURNAMENT: LONG CANDIDATE
             # -------------------------------------------------------------
             if max_idx < min_idx and min_idx < (len(ticks) - 1):
                 t_peak = ticks[max_idx]["time"]
@@ -444,16 +446,16 @@ class BitgetDeskPartnerEngine:
                 drop_pct = ((max_p - min_p) / max_p) * 100.0
                 rebound_pct = ((current_price - min_p) / min_p) * 100.0
 
-                if drop_pct > 0.25 and rebound_pct > 0.25:
+                if drop_pct > 0.20 and rebound_pct > 0.20:
                     v_down = drop_pct / (drop_duration / 60.0)
                     v_up = rebound_pct / (rebound_duration / 60.0)
 
                     if v_down > 0:
                         speed_ratio = v_up / v_down
 
-                        # STRICT LONG POLARITY: OI must be POSITIVE (+)
-                        if effective_oi > 0.0:
-                            score = speed_ratio * (1.0 + (effective_oi / 10.0))
+                        # STRICT LONG POLARITY: OI must be non-negative
+                        if effective_oi >= 0.0:
+                            score = speed_ratio * (1.0 + max(0.0, effective_oi / 10.0))
                             candidates.append({
                                 "symbol": symbol,
                                 "side": "buy",
@@ -465,7 +467,7 @@ class BitgetDeskPartnerEngine:
                             })
 
             # -------------------------------------------------------------
-            # TOURNAMENT: SHORT CANDIDATE (David Smashes Samuel's Crawl)
+            # TOURNAMENT: SHORT CANDIDATE
             # -------------------------------------------------------------
             if min_idx < max_idx and max_idx < (len(ticks) - 1):
                 t_trough = ticks[min_idx]["time"]
@@ -478,7 +480,7 @@ class BitgetDeskPartnerEngine:
                 climb_pct = ((max_p - min_p) / min_p) * 100.0
                 flush_pct = ((max_p - current_price) / max_p) * 100.0
 
-                if climb_pct > 0.25 and flush_pct > 0.25:
+                if climb_pct > 0.20 and flush_pct > 0.20:
                     v_up = climb_pct / (climb_duration / 60.0)
                     v_down = flush_pct / (flush_duration / 60.0)
 
@@ -486,7 +488,7 @@ class BitgetDeskPartnerEngine:
                         speed_ratio = v_down / v_up
 
                         # STRICT SHORT POLARITY & TRAP BLOCK:
-                        # OI must be strictly NEGATIVE (-). If OI is positive, block short!
+                        # OI must be strictly NEGATIVE (-). If positive, short is blocked!
                         if effective_oi < 0.0:
                             score = speed_ratio * (1.0 + (abs(effective_oi) / 10.0))
                             candidates.append({
@@ -499,29 +501,26 @@ class BitgetDeskPartnerEngine:
                                 "oi_delta": effective_oi
                             })
 
-        # SELECT UNDISPUTED #1 LEADER
         if candidates:
             candidates.sort(key=lambda x: x["score"], reverse=True)
             top = candidates[0]
 
             if top["speed_ratio"] >= 2.0:
                 logger.info(
-                    f"🏆 #1 TOURNAMENT LEADER: {top['symbol']} ({top['side'].upper()}) | "
-                    f"Score: {top['score']:.2f} | Speed Ratio: {top['speed_ratio']:.1f}x | OI Delta: {top['oi_delta']:+.2f}%"
+                    f"🎯 #1 TOURNAMENT LEADER FOUND: {top['symbol']} ({top['side'].upper()}) | "
+                    f"Speed Ratio: {top['speed_ratio']:.1f}x | OI Delta: {top['oi_delta']:+.2f}%"
                 )
                 return top
 
         return None
 
     def calculate_live_position_size(self, current_price):
-        """Micro-Account Math: 90% balance, dynamic leverage clamped [2x, 20x] to clear $5.50 min."""
         try:
             balance_info = self.exchange.fetch_balance()
             free_usdt = float(balance_info["free"].get("USDT", 0.0))
             usable_margin = free_usdt * ALLOCATION_PCT
 
             if usable_margin < 0.50:
-                logger.warning(f"Usable margin too low: ${usable_margin:.2f}")
                 return 0, 0
 
             calculated_lev = math.ceil(MIN_NOTIONAL_USDT / usable_margin)
@@ -529,12 +528,10 @@ class BitgetDeskPartnerEngine:
             notional = max(MIN_NOTIONAL_USDT, usable_margin * leverage)
             contract_size = notional / current_price
             return contract_size, leverage
-        except Exception as e:
-            logger.error(f"Sizing error: {e}")
+        except Exception:
             return 0, 0
 
     def enter_trade(self, signal):
-        """Executes trade entry in Paper or Live mode."""
         symbol = signal["symbol"]
         side = signal["side"]
         price = signal["entry_price"]
@@ -576,19 +573,12 @@ class BitgetDeskPartnerEngine:
 
                 trade_info["size"] = size
                 self.active_trade = trade_info
-                logger.info(f"⚡ [LIVE ENTRY] #1 Leader {side.upper()} {symbol} | Size: {size} | Lev: {lev}x | OrderID: {order.get('id')}")
+                logger.info(f"⚡ [LIVE ENTRY] #1 Leader {side.upper()} {symbol} | Size: {size} | Lev: {lev}x")
             except Exception as e:
                 logger.error(f"Live entry execution failed: {e}")
                 self.active_trade = None
 
     def manage_active_trade(self):
-        """
-        Monitors active position tick-by-tick.
-        - Calculates Real-Time Speed Decay (Fade).
-        - Executes 0.5% Peak Reverse once faded.
-        - Rotates position at 15-minute mark.
-        - Executes 90s DOA if forward progress < +0.30%.
-        """
         if not self.active_trade:
             return
 
@@ -618,7 +608,6 @@ class BitgetDeskPartnerEngine:
                 trade["highest_gain_pct"] = gain_pct
             pullback_from_peak = trade["highest_gain_pct"] - gain_pct
 
-        # Real-Time Velocity Decay (Fade) Tracking
         current_speed = max(0.0, gain_pct) / (elapsed / 60.0)
         baseline = trade["baseline_speed"]
         if baseline > 0:
@@ -627,13 +616,11 @@ class BitgetDeskPartnerEngine:
             if current_ratio > trade["peak_speed_ratio"]:
                 trade["peak_speed_ratio"] = current_ratio
 
-            # FADE CONFIRMED: Speed decayed from peak to <= 2.0x
             if trade["peak_speed_ratio"] >= 3.0 and current_ratio <= VELOCITY_DECAY_RATIO and gain_pct >= 0.40:
                 if not trade["velocity_decayed"]:
                     trade["velocity_decayed"] = True
-                    logger.info(f"⚠️ MOMENTUM FADE on {symbol}: Speed decayed to {current_ratio:.1f}x. 0.5% Peak Wall ARMED!")
+                    logger.info(f"⚠️ MOMENTUM FADE on {symbol}: Velocity decayed. 0.5% Wall ARMED!")
 
-        # Update Telemetry for Port 10000 Dashboard
         dashboard_data["active_trade"] = {
             "symbol": symbol,
             "side": side,
@@ -650,22 +637,12 @@ class BitgetDeskPartnerEngine:
 
         exit_reason = None
 
-        # -------------------------------------------------------------
-        # EXIT RULES
-        # -------------------------------------------------------------
-        # RULE 1: 0.5% PEAK REVERSE (Triggered on pullback from highest peak)
         if pullback_from_peak >= PEAK_REVERSE_PULLBACK_PCT:
             exit_reason = "0.5%_PEAK_REVERSE (FADE_EXIT)"
-
-        # RULE 2: 15-MINUTE ROTATION CYCLE (Cycle ended, rotate to fresh leader)
         elif elapsed >= MAX_TRADE_LIFECYCLE_SECONDS:
-            exit_reason = "15M_ROTATION_CYCLE_EXHAUSTION"
-
-        # RULE 3: 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
+            exit_reason = "15M_ROTATION_EXHAUSTION"
         elif elapsed >= DOA_TIMEOUT_SECONDS and trade["highest_gain_pct"] < DOA_FORWARD_THRESHOLD_PCT:
             exit_reason = "90S_DOA_KILL_SWITCH"
-
-        # RULE 4: STRUCTURAL EMERGENCY HARD STOP (Live Mode Only)
         elif not trade["is_paper"] and gain_pct <= -LIVE_HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
 
@@ -673,7 +650,6 @@ class BitgetDeskPartnerEngine:
             self._execute_exit(trade, current_price, gain_pct, exit_reason)
 
     def _execute_exit(self, trade, exit_price, gain_pct, reason):
-        """Exits position cleanly and guarantees atomic active_trade = None cleanup."""
         symbol = trade["symbol"]
         side = trade["side"]
         is_paper = trade["is_paper"]
@@ -703,15 +679,40 @@ class BitgetDeskPartnerEngine:
             self.active_trade = None
             dashboard_data["active_trade"] = None
 
+    def print_15m_briefing(self):
+        """Clean, professional 15-minute desk intelligence box (No messy lines)."""
+        mode = self.state_mgr.state["mode"]
+        streak = self.state_mgr.state["consecutive_wins"]
+        total = self.state_mgr.state["total_trades"]
+        wins = self.state_mgr.state["total_wins"]
+        losses = self.state_mgr.state["total_losses"]
+        win_rate = (wins / total * 100.0) if total > 0 else 0.0
+
+        pos_str = "None (Scanning Order Flow)"
+        if self.active_trade:
+            pos_str = f"{self.active_trade['symbol']} ({self.active_trade['side'].upper()}) PnL: {dashboard_data['active_trade']['pnl_pct']:+.2f}%"
+
+        logger.info(
+            f"\n"
+            f"╔════════════════════════════════════════════════════════════════════╗\n"
+            f"║                📊 15-MINUTE DESK INTELLIGENCE BRIEFING             ║\n"
+            f"╠════════════════════════════════════════════════════════════════════╣\n"
+            f"║ Engine Status  : RUNNING ACTIVE                                    ║\n"
+            f"║ Trading Mode   : {mode:<49} ║\n"
+            f"║ Gauntlet Streak: [{streak}/{QUALIFICATION_TARGET_WINS} Consecutive Wins]                           ║\n"
+            f"║ Performance    : {wins}W / {losses}L ({win_rate:.1f}% Win Rate) Total Trades: {total:<12} ║\n"
+            f"║ Active Pairs   : {dashboard_data['universe_size']} Bitget Pairs Monitored                           ║\n"
+            f"║ Current Trade  : {pos_str:<49} ║\n"
+            f"╚════════════════════════════════════════════════════════════════════╝"
+        )
+
     def run(self):
-        """Main desk loop running every 1.5 seconds."""
-        logger.info("🚀 CoinGlass Tournament Engine Active. Tracking #1 Global Leaders...")
-        last_briefing = 0
+        logger.info("🚀 Leaderboard Tournament Engine Online. Clean Telemetry Active...")
+        last_briefing = time.time()
         last_cg_sync = 0
 
         while True:
             try:
-                # Sync CoinGlass ranking every 20 seconds
                 if time.time() - last_cg_sync >= 20:
                     last_cg_sync = time.time()
                     self.sync_coinglass_leaderboard()
@@ -733,14 +734,10 @@ class BitgetDeskPartnerEngine:
                 dashboard_data["recent_trades"] = self.state_mgr.state["history"]
                 dashboard_data["last_update"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
+                # Clean 15-Minute Desk Intelligence Briefing
                 if time.time() - last_briefing >= 900:
                     last_briefing = time.time()
-                    logger.info(
-                        f"📊 [15M BRIEFING] Mode: {dashboard_data['mode']} | "
-                        f"Gauntlet: {dashboard_data['streak']}/{QUALIFICATION_TARGET_WINS} Wins | "
-                        f"Universe: {dashboard_data['universe_size']} pairs | "
-                        f"CoinGlass Synced: {dashboard_data['cg_synced_pairs']} pairs"
-                    )
+                    self.print_15m_briefing()
 
                 time.sleep(1.5)
 
