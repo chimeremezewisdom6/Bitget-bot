@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Fresh-Momentum Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Engine: 3-Minute Fresh Ignition (Rejects the 15-minute illusion trap)
-- Scanner: CoinGlass Worldwide Global Liquidity (>= $1M 24h Volume across all exchanges)
-- Exit: Dynamic "Wiggle & Fade" Harvest (No blind stops; banks profit the instant momentum stalls)
+Grid-Trailing Quant Trading Bot - Bitget USDT-M Perpetual Swaps
+- Engine: 3-Minute Fresh Ignition (Enters live thrust pushing in right now)
+- Exit 1: Grid 0.5% Peak Reverse (Immediately sells the second price drops 0.5% from highest peak)
+- Exit 2: 90-Second Dead-on-Arrival Kill Switch (Aborts immediately if no thrust within 90s)
+- Scanner: 860+ Active Liquid Universe (CoinGlass Worldwide + Bitget)
 - Qualification: Strict 6-in-a-row Paper Gauntlet (1 -> 6) before Live Execution
-- Infrastructure: Render Port 10000 HTTP Keep-Alive & 15-Minute Desk Telemetry
+- Infrastructure: Render Port 10000 HTTP Keep-Alive & 15-Minute Telemetry
 """
 
 import os
@@ -40,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QuantDesk")
 
-# Mute noisy connection pool warnings
+# Mute noisy urllib3 connection pool warnings
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
@@ -85,23 +86,24 @@ BLACKLIST = {
 GLOBAL_MIN_24H_VOL = 1_000_000.0   # $1,000,000 global volume on CoinGlass
 BITGET_FALLBACK_MIN_VOL = 1_000_000.0
 MAX_SPREAD_PCT = 0.10              # Order book spread <= 0.10%
-SCANNER_WORKERS = 16               # Parallel threads for fast 3s sweeps
+SCANNER_WORKERS = 16               # Parallel threads for fast sweeps
 
 # Fresh 3-Minute Ignition Parameters
-MIN_3M_IGNITION_MOVE = 1.50        # Minimum 1.5% rapid push in the last 3 minutes
-MAX_3M_IGNITION_MOVE = 8.00        # Cap to avoid buying already exhausted spikes
+MIN_3M_IGNITION_MOVE = 1.40        # Minimum 1.4% rapid push in the last 3 minutes
+MAX_3M_IGNITION_MOVE = 8.00        # Cap to avoid already exhausted moves
 PEAK_PROXIMITY_CEILING = 0.25      # Current price must be within 0.25% of extreme (NOT falling back!)
 
-# Dynamic Wiggle & Fade Parameters (No Blind Micro-Stops)
-PROFIT_BANK_THRESHOLD_PCT = 1.40   # Look to bank profit once trade is up >= 1.40%
-WIGGLE_GIVEBACK_PCT = 0.50         # If profit pulls back 0.50% from peak while stalling -> Bank it!
-MOMENTUM_COLLAPSE_PCT = 2.00       # Trade structure considered dead if reversing past 2.0%
+# ==============================================================================
+# THE CRITICAL GRID & LIGHTNING-FAST ABORT RULES
+# ==============================================================================
+GRID_PEAK_REVERSE_PCT = 0.50       # Sells immediately if price reverses 0.50% from ANY peak!
+DOA_TIMEOUT_SECS = 90              # 90-Second Dead-on-Arrival Kill Switch
+DOA_MIN_THRUST_PCT = 0.30          # Must achieve at least +0.30% forward thrust within 90s or ABORT!
 
 # Account Sizing & Execution
 BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
 BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
-NORMAL_COOLDOWN_SECS = 900         # 15 minutes normal cooldown
-STAGNANT_COOLDOWN_SECS = 3600      # 1 hour cooldown if coin stalled
+NORMAL_COOLDOWN_SECS = 600         # 10 minutes symbol cooldown
 BRIEFING_INTERVAL_SECONDS = 900    # 15 minutes intelligence debrief
 
 # LIVE Risk Limits (Strict only after earning 6/6 paper qualification)
@@ -297,18 +299,11 @@ class QuantBot:
         return None
 
     # --------------------------------------------------------------------------
-    # THE 3-MINUTE FRESH IGNITION ENGINE (NO STALE 15M TRAPS)
+    # THE 3-MINUTE FRESH IGNITION ENGINE
     # --------------------------------------------------------------------------
     def evaluate_fresh_ignition(self, symbol: str, ohlcv: List) -> Optional[Dict]:
-        """
-        Inspects the 5-minute window and the last 3 completed 1m candles.
-        Guarantees that momentum is ACTIVELY STARTING and PUSHING RIGHT NOW:
-        - Price is actively expanding to new extremes (NOT falling back from an old peak)
-        - Volume is expanding candle-over-candle (Growing fire)
-        - Defending side has zero counter-wicks / zero fight
-        """
-        candles = ohlcv[-6:-1]  # 5 completed 1m candles
-        three_min_candles = candles[-3:]  # The last 3 completed minutes
+        candles = ohlcv[-6:-1]
+        three_min_candles = candles[-3:]
 
         c1, c2, c3 = three_min_candles[0], three_min_candles[1], three_min_candles[2]
         three_min_open = c1[1]
@@ -316,30 +311,23 @@ class QuantBot:
         three_min_move_pct = ((three_min_close - three_min_open) / three_min_open) * 100.0
         abs_move = abs(three_min_move_pct)
 
-        # Must have significant displacement in the last 3 minutes
         if abs_move < MIN_3M_IGNITION_MOVE or abs_move > MAX_3M_IGNITION_MOVE:
             return None
 
-        # Check 5-minute extreme high and low
         five_min_high = max(c[2] for c in candles)
         five_min_low = min(c[3] for c in candles)
 
-        # ----------------------------------------------------------------------
-        # FRESH BUY IGNITION (Pump starting right now)
-        # ----------------------------------------------------------------------
+        # Fresh Buy Ignition (Pumping right now)
         if three_min_move_pct > 0:
-            # 1. Proximity check: Current price must be right at the high of the 5m move!
             distance_from_high = ((five_min_high - three_min_close) / five_min_high) * 100.0
             if distance_from_high > PEAK_PROXIMITY_CEILING:
-                return None  # Stale move: It already peaked and is falling back!
+                return None  # Stale move: already falling back!
 
-            # 2. Continuous green progression: No heavy red wicks in the last 3 minutes
             if c3[4] < c2[4] or c2[4] < c1[4]:
                 return None
 
-            # 3. Volume combustion: Volume is expanding or significantly strong
             vol1, vol2, vol3 = c1[5], c2[5], c3[5]
-            if vol3 < (vol2 * 0.80) or (vol2 + vol3) <= 0:
+            if vol3 < (vol2 * 0.75) or (vol2 + vol3) <= 0:
                 return None
 
             ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 10.0)
@@ -352,22 +340,17 @@ class QuantBot:
                 "thrust_origin": c1[3]
             }
 
-        # ----------------------------------------------------------------------
-        # FRESH SELL IGNITION (Dump starting right now)
-        # ----------------------------------------------------------------------
+        # Fresh Sell Ignition (Dumping right now)
         else:
-            # 1. Proximity check: Current price must be right at the absolute low!
             distance_from_low = ((three_min_close - five_min_low) / five_min_low) * 100.0
             if distance_from_low > PEAK_PROXIMITY_CEILING:
-                return None  # Stale move: It already hit the floor and is bouncing!
+                return None  # Stale move: already bouncing!
 
-            # 2. Continuous red progression
             if c3[4] > c2[4] or c2[4] > c1[4]:
                 return None
 
-            # 3. Volume combustion
             vol1, vol2, vol3 = c1[5], c2[5], c3[5]
-            if vol3 < (vol2 * 0.80) or (vol2 + vol3) <= 0:
+            if vol3 < (vol2 * 0.75) or (vol2 + vol3) <= 0:
                 return None
 
             ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 10.0)
@@ -388,7 +371,6 @@ class QuantBot:
         tickers = self.exchange.fetch_tickers()
         self.update_time_series_buffer(tickers)
 
-        # 1. Update CoinGlass Global Liquidity Pool (>= $1M Volume across all exchanges)
         cg_data = get_coinglass_data()
         self.global_liquid_symbols = set()
         if cg_data:
@@ -404,11 +386,9 @@ class QuantBot:
             base = sym.split("/")[0].split(":")[0]
             vol = float(t.get("quoteVolume", 0.0) or 0.0)
 
-            # Accept if Bitget vol >= $1M OR if verified in CoinGlass Global Worldwide Pool!
             if vol >= BITGET_FALLBACK_MIN_VOL or base in self.global_liquid_symbols:
                 valid_symbols.append(sym)
 
-        # Parallel 1m candle retrieval
         candles_by_symbol = {}
         with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
             future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
@@ -430,14 +410,12 @@ class QuantBot:
         if not candidates:
             return None
 
-        # Sort candidates by conviction score
         candidates.sort(key=lambda x: x["score"], reverse=True)
         top_candidates = candidates[:10]
 
-        # Select Candidate #1 that passes Anti-Trap Spread Check
         for cand in top_candidates:
             if self.anti_trap_check(cand["symbol"]):
-                logger.info(f"FRESH IGNITION CHAMPION: {cand['symbol']} "
+                logger.info(f"IGNITION CHAMPION: {cand['symbol']} "
                             f"({cand['direction'].upper()} {cand['net_change_pct']:+.2f}% in 3m) | Score: {cand['score']:.1f}")
                 return cand
 
@@ -486,7 +464,7 @@ class QuantBot:
                 "leverage": 5
             }
             logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
-                        f"Fresh 3m Move: {candidate['net_change_pct']:+.2f}% | Gauntlet: {self.paper_wins}/6")
+                        f"3m Move: {candidate['net_change_pct']:+.2f}% | Gauntlet: {self.paper_wins}/6")
             return
 
         # Live Execution
@@ -527,7 +505,7 @@ class QuantBot:
 
     def execute_exit(self, reason: str, is_win: bool):
         """
-        Permanent fix for PARTI phantom loop & Wiggle-Fade Harvest.
+        Permanent fix for PARTI phantom loop & Grid-Wall Exit.
         """
         if not self.active_trade:
             return
@@ -618,14 +596,11 @@ class QuantBot:
 
         finally:
             self.active_trade = None
-            if "Stall" in reason or "Dead" in reason:
-                self.cooldown_tracker[symbol] = time.time() + STAGNANT_COOLDOWN_SECS
-            else:
-                self.cooldown_tracker[symbol] = time.time() + NORMAL_COOLDOWN_SECS
-            logger.info(f"{symbol} placed on cooldown.")
+            self.cooldown_tracker[symbol] = time.time() + NORMAL_COOLDOWN_SECS
+            logger.info(f"{symbol} assigned to normal cooldown.")
 
     # --------------------------------------------------------------------------
-    # POSITION MONITOR: DYNAMIC WIGGLE & FADE HARVESTER (NO BLIND STOPS)
+    # POSITION MONITOR: GRID 0.5% PEAK WALL & 90s DOA KILL SWITCH
     # --------------------------------------------------------------------------
     def monitor_active_trade(self):
         if not self.active_trade:
@@ -642,22 +617,26 @@ class QuantBot:
             ticker = self.exchange.fetch_ticker(symbol)
             current_price = ticker["last"]
 
+            # Track tick-by-tick peak and calculate exact reversal
             if side == "buy":
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
                 if current_price > trade["peak_price"]:
                     trade["peak_price"] = current_price
                 if current_price < trade["trough_price"]:
                     trade["trough_price"] = current_price
-                drawdown_from_peak = ((trade["peak_price"] - current_price) / trade["peak_price"]) * 100.0
+
                 peak_pnl = ((trade["peak_price"] - entry_price) / entry_price) * 100.0
+                drawdown_from_peak = ((trade["peak_price"] - current_price) / trade["peak_price"]) * 100.0
+
             else:
                 pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
                 if current_price < trade["peak_price"]:
                     trade["peak_price"] = current_price
                 if current_price > trade["trough_price"]:
                     trade["trough_price"] = current_price
-                drawdown_from_peak = ((current_price - trade["peak_price"]) / trade["peak_price"]) * 100.0
+
                 peak_pnl = ((entry_price - trade["peak_price"]) / entry_price) * 100.0
+                drawdown_from_peak = ((current_price - trade["peak_price"]) / trade["peak_price"]) * 100.0
 
             duration_secs = time.time() - entry_time
 
@@ -668,47 +647,38 @@ class QuantBot:
                 "current": current_price,
                 "pnl_pct": round(pnl_pct, 2),
                 "peak_pnl": round(peak_pnl, 2),
-                "duration_min": round(duration_secs / 60, 1),
-                "engine": trade.get("engine", "")
+                "drawdown_from_peak": round(drawdown_from_peak, 2),
+                "duration_sec": round(duration_secs, 1)
             }
 
             # ==================================================================
-            # LIVE TRADING MONITORING (Strict once 6/6 is earned)
+            # RULE 1: THE GRID 0.5% PEAK REVERSE (The Electrified Floor)
+            # If price pulls back 0.50% from ANY peak reached, SELL IMMEDIATELY!
+            # (Fixes LSK: banks +0.85% win instead of letting it bleed to -2.07%)
             # ==================================================================
-            if is_live:
-                if pnl_pct <= -LIVE_HARD_STOP_LOSS_PCT:
-                    self.execute_exit(f"Hard Stop-Loss (-{LIVE_HARD_STOP_LOSS_PCT}%)", is_win=False)
-                    return
-
-                if duration_secs >= LIVE_VELOCITY_TIMEOUT_SECS and pnl_pct < LIVE_VELOCITY_MIN_PROFIT:
-                    self.execute_exit(f"Velocity Cut (<+{LIVE_VELOCITY_MIN_PROFIT}% at 20m)", is_win=(pnl_pct > 0))
-                    return
-
-                # Bank profit when momentum wiggles
-                if peak_pnl >= PROFIT_BANK_THRESHOLD_PCT and drawdown_from_peak >= WIGGLE_GIVEBACK_PCT:
-                    self.execute_exit(f"Wiggle & Fade Harvest (+{pnl_pct:.2f}% locked)", is_win=True)
-                    return
+            if drawdown_from_peak >= GRID_PEAK_REVERSE_PCT:
+                is_win = pnl_pct > 0
+                reason = f"Grid 0.5% Peak Reverse (Peaked at +{peak_pnl:.2f}%, Reversal: {drawdown_from_peak:.2f}%)"
+                self.execute_exit(reason, is_win=is_win)
+                return
 
             # ==================================================================
-            # PAPER LABORATORY MONITORING (Behavioral Wiggle & Fade)
+            # RULE 2: 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
+            # If 90s pass and nothing pushed the price up (peak < +0.30%), ABORT!
+            # (Fixes XPL: aborts in 90 seconds instead of holding for 17.8 minutes)
             # ==================================================================
-            else:
-                # 1. Bank the profit the instant it wiggles and stalls!
-                # If trade was up >= 1.40% and pulls back 0.50% from its peak while stalling -> EXIT AND BANK PROFIT!
-                if peak_pnl >= PROFIT_BANK_THRESHOLD_PCT and drawdown_from_peak >= WIGGLE_GIVEBACK_PCT:
-                    self.execute_exit(f"Wiggle & Fade Banked (+{pnl_pct:.2f}% profit in USDT)", is_win=True)
-                    return
+            if duration_secs >= DOA_TIMEOUT_SECS and peak_pnl < DOA_MIN_THRUST_PCT:
+                is_win = pnl_pct > 0
+                reason = f"90s Dead-on-Arrival Kill Switch (Peak was only +{peak_pnl:.2f}%)"
+                self.execute_exit(reason, is_win=is_win)
+                return
 
-                # 2. Structural Momentum Collapse: The 3m thrust origin is completely violated (-2.0%)
-                if pnl_pct <= -MOMENTUM_COLLAPSE_PCT:
-                    self.execute_exit(f"Momentum Thrust Collapsed (-{MOMENTUM_COLLAPSE_PCT}%)", is_win=False)
-                    return
-
-                # 3. Behavioral Stagnation: If 20 minutes pass and coin refuses to move (< +0.50% profit), exit clean
-                if duration_secs >= 1200 and peak_pnl < 0.50:
-                    is_win = pnl_pct > 0
-                    self.execute_exit(f"Behavioral Stall (Momentum died, PnL: {pnl_pct:+.2f}%)", is_win=is_win)
-                    return
+            # ==================================================================
+            # RULE 3: LIVE HARD STOP LOSS (Once in live mode)
+            # ==================================================================
+            if is_live and pnl_pct <= -LIVE_HARD_STOP_LOSS_PCT:
+                self.execute_exit(f"Hard Stop-Loss (-{LIVE_HARD_STOP_LOSS_PCT}%)", is_win=False)
+                return
 
         except Exception as e:
             logger.error(f"Error monitoring active trade on {symbol}: {e}")
@@ -753,7 +723,7 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Fresh 3-Minute Ignition Quant Suite active. Event loop running...")
+        logger.info("Grid-Trailing 0.5% Quant Engine active. Fast event loop running...")
 
         while True:
             try:
@@ -771,21 +741,21 @@ class QuantBot:
 
                 self.print_desk_briefing()
 
-                # If managing an open trade, focus purely on monitoring
+                # If managing an open trade, check the 0.5% grid wall every second
                 if self.active_trade:
                     self.monitor_active_trade()
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
 
                 opportunity = self.scan_for_opportunities()
                 if opportunity:
                     self.execute_entry(opportunity)
 
-                time.sleep(4)
+                time.sleep(3)
 
             except Exception as e:
                 logger.error(f"Main loop error: {e}")
-                time.sleep(5)
+                time.sleep(4)
 
 # ==============================================================================
 # 5. ENTRY POINT
