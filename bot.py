@@ -42,8 +42,7 @@ def load_coinglass_module():
     """Dynamically imports get_coinglass_data from coinglass_feed.py or similar filenames."""
     global get_coinglass_data
     possible_names = ["coinglass_feed.py", "coinglass feed.py", "coinglass.py", "cg_feed.py"]
-    
-    # 1. Try standard import
+
     try:
         from coinglass_feed import get_coinglass_data as cg_func
         get_coinglass_data = cg_func
@@ -52,7 +51,6 @@ def load_coinglass_module():
     except ImportError:
         pass
 
-    # 2. Try file location dynamic loading
     for fname in possible_names:
         if os.path.exists(fname):
             try:
@@ -74,7 +72,6 @@ load_coinglass_module()
 # -----------------------------------------------------------------------------
 # SECTION 3: SYSTEM CONSTANTS & TOURNAMENT PARAMETERS
 # -----------------------------------------------------------------------------
-# Strict Blacklist: Illiquid, de-pegged, or historically errant symbols
 BLACKLIST = [
     "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP", 
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
@@ -190,7 +187,6 @@ dashboard_data = {
     "streak": 0,
     "universe_size": 0,
     "cg_synced_pairs": 0,
-    "top_candidate": None,
     "active_trade": None,
     "recent_trades": [],
     "last_update": ""
@@ -300,7 +296,7 @@ class BitgetDeskPartnerEngine:
         self.price_buffer = defaultdict(lambda: deque(maxlen=600))  # 15m tick memory
         self.cooldowns = {}
         self.active_trade = None
-        self.cg_map = {}  # Symbol -> CoinGlass metrics
+        self.cg_map = {}
 
         self._setup_connection_pool()
         self._setup_exchange()
@@ -333,7 +329,7 @@ class BitgetDeskPartnerEngine:
             logger.info("ℹ️ Running in Paper Mode without full private keys.")
 
     def sync_coinglass_leaderboard(self):
-        """Pulls global coins from your coinglass_feed.py module."""
+        """Pulls global coins from coinglass_feed.py."""
         global get_coinglass_data
         if not get_coinglass_data:
             return
@@ -364,7 +360,7 @@ class BitgetDeskPartnerEngine:
         return []
 
     def update_buffers(self, tickers):
-        """Stores local lastPrice into rolling memory buffer."""
+        """Stores local lastPrice and Open Interest into rolling memory buffer."""
         now = time.time()
         active_count = 0
 
@@ -375,12 +371,14 @@ class BitgetDeskPartnerEngine:
 
             try:
                 last_price = float(t.get("lastPr", 0.0))
+                oi = float(t.get("openInterest", 0.0) or 0.0)
                 if last_price <= 0:
                     continue
 
                 self.price_buffer[symbol].append({
                     "time": now,
-                    "price": last_price
+                    "price": last_price,
+                    "oi": oi
                 })
                 active_count += 1
             except (ValueError, TypeError):
@@ -390,9 +388,10 @@ class BitgetDeskPartnerEngine:
 
     def run_leaderboard_tournament(self):
         """
-        NO-FIXED-HURDLES RELATIVE RANKING TOURNAMENT:
-        Ranks all coins by 15-Minute David vs. Samuel Speed Ratio * CoinGlass OI.
-        Selects the #1 Undisputed Leader (Long or Short) in the entire market.
+        NO-FIXED-HURDLE RELATIVE RANKING TOURNAMENT WITH SELF-HEALING DUAL-ENGINE OI:
+        1. Calculates 15-Minute David vs. Samuel Speed Ratio.
+        2. Applies Global CoinGlass OI if available; otherwise uses Bitget Native OI.
+        3. Enforces Strict Polarities (+ for Long, - for Short with trap avoidance).
         """
         if self.active_trade is not None:
             return None
@@ -401,19 +400,28 @@ class BitgetDeskPartnerEngine:
         cutoff = now - LOOKBACK_SECONDS
         candidates = []
 
-        # Iterate through all coins tracked by Bitget
         for symbol, buf in list(self.price_buffer.items()):
             if symbol in self.cooldowns and (now - self.cooldowns[symbol]) < COOLDOWN_SECONDS:
                 continue
 
             ticks = [b for b in buf if b["time"] >= cutoff]
-            if len(ticks) < 45:  # Need adequate historical tick depth
+            if len(ticks) < 45:
                 continue
 
-            # Strip base asset for CoinGlass cross-referencing (e.g., BTCUSDT -> BTC)
+            # Check CoinGlass Global OI
             base_sym = symbol.replace("USDT", "").replace("_USDT", "").upper()
             cg_info = self.cg_map.get(base_sym, {})
-            cg_oi_15m = float(cg_info.get("oi_15m", 0.0) or 0.0)
+            cg_oi = float(cg_info.get("oi_15m", 0.0) or 0.0)
+
+            # Check Bitget Native OI as Autonomous Fallback
+            native_oi_delta = 0.0
+            oldest_oi = ticks[0]["oi"]
+            latest_oi = ticks[-1]["oi"]
+            if oldest_oi > 0:
+                native_oi_delta = ((latest_oi - oldest_oi) / oldest_oi) * 100.0
+
+            # Dual-Engine: Use CoinGlass OI if synced, otherwise use Native Bitget OI
+            effective_oi = cg_oi if len(self.cg_map) > 0 and cg_oi != 0.0 else native_oi_delta
 
             current_price = ticks[-1]["price"]
             prices = [t["price"] for t in ticks]
@@ -423,7 +431,7 @@ class BitgetDeskPartnerEngine:
             max_idx = prices.index(max_p)
 
             # -------------------------------------------------------------
-            # TOURNAMENT EVALUATION: LONG CANDIDATE
+            # TOURNAMENT: LONG CANDIDATE (David Reclaims Samuel's Bleed)
             # -------------------------------------------------------------
             if max_idx < min_idx and min_idx < (len(ticks) - 1):
                 t_peak = ticks[max_idx]["time"]
@@ -436,17 +444,16 @@ class BitgetDeskPartnerEngine:
                 drop_pct = ((max_p - min_p) / max_p) * 100.0
                 rebound_pct = ((current_price - min_p) / min_p) * 100.0
 
-                if drop_pct > 0.30 and rebound_pct > 0.30:
+                if drop_pct > 0.25 and rebound_pct > 0.25:
                     v_down = drop_pct / (drop_duration / 60.0)
                     v_up = rebound_pct / (rebound_duration / 60.0)
 
                     if v_down > 0:
                         speed_ratio = v_up / v_down
 
-                        # STRICT LONG POLARITY: Global OI must be strictly positive (+)
-                        if cg_oi_15m > 0:
-                            # Propulsion Score: Speed Ratio amplified by institutional OI inflow
-                            score = speed_ratio * (1.0 + (cg_oi_15m / 10.0))
+                        # STRICT LONG POLARITY: OI must be POSITIVE (+)
+                        if effective_oi > 0.0:
+                            score = speed_ratio * (1.0 + (effective_oi / 10.0))
                             candidates.append({
                                 "symbol": symbol,
                                 "side": "buy",
@@ -454,11 +461,11 @@ class BitgetDeskPartnerEngine:
                                 "entry_price": current_price,
                                 "baseline_speed": v_down,
                                 "speed_ratio": speed_ratio,
-                                "cg_oi_15m": cg_oi_15m
+                                "oi_delta": effective_oi
                             })
 
             # -------------------------------------------------------------
-            # TOURNAMENT EVALUATION: SHORT CANDIDATE
+            # TOURNAMENT: SHORT CANDIDATE (David Smashes Samuel's Crawl)
             # -------------------------------------------------------------
             if min_idx < max_idx and max_idx < (len(ticks) - 1):
                 t_trough = ticks[min_idx]["time"]
@@ -471,17 +478,17 @@ class BitgetDeskPartnerEngine:
                 climb_pct = ((max_p - min_p) / min_p) * 100.0
                 flush_pct = ((max_p - current_price) / max_p) * 100.0
 
-                if climb_pct > 0.30 and flush_pct > 0.30:
+                if climb_pct > 0.25 and flush_pct > 0.25:
                     v_up = climb_pct / (climb_duration / 60.0)
                     v_down = flush_pct / (flush_duration / 60.0)
 
                     if v_up > 0:
                         speed_ratio = v_down / v_up
 
-                        # STRICT SHORT POLARITY & TRAP AVOIDANCE:
-                        # OI must be strictly NEGATIVE (-). If OI is positive, score = 0 (TRAP BLOCKED)
-                        if cg_oi_15m < 0:
-                            score = speed_ratio * (1.0 + (abs(cg_oi_15m) / 10.0))
+                        # STRICT SHORT POLARITY & TRAP BLOCK:
+                        # OI must be strictly NEGATIVE (-). If OI is positive, block short!
+                        if effective_oi < 0.0:
+                            score = speed_ratio * (1.0 + (abs(effective_oi) / 10.0))
                             candidates.append({
                                 "symbol": symbol,
                                 "side": "sell",
@@ -489,19 +496,18 @@ class BitgetDeskPartnerEngine:
                                 "entry_price": current_price,
                                 "baseline_speed": v_up,
                                 "speed_ratio": speed_ratio,
-                                "cg_oi_15m": cg_oi_15m
+                                "oi_delta": effective_oi
                             })
 
-        # TOURNAMENT RANKING: Sort by highest propulsion score
+        # SELECT UNDISPUTED #1 LEADER
         if candidates:
             candidates.sort(key=lambda x: x["score"], reverse=True)
             top = candidates[0]
 
-            # Require minimum dominance to prevent chop (speed ratio >= 2.5x)
-            if top["speed_ratio"] >= 2.5:
+            if top["speed_ratio"] >= 2.0:
                 logger.info(
                     f"🏆 #1 TOURNAMENT LEADER: {top['symbol']} ({top['side'].upper()}) | "
-                    f"Score: {top['score']:.2f} | Speed Ratio: {top['speed_ratio']:.1f}x | CoinGlass 15m OI: {top['cg_oi_15m']:+.2f}%"
+                    f"Score: {top['score']:.2f} | Speed Ratio: {top['speed_ratio']:.1f}x | OI Delta: {top['oi_delta']:+.2f}%"
                 )
                 return top
 
@@ -597,7 +603,6 @@ class BitgetDeskPartnerEngine:
         current_price = latest["price"]
         elapsed = max(1.0, time.time() - trade["entry_time"])
 
-        # PnL & Peak Tracking
         if side == "buy":
             gain_pct = ((current_price - trade["entry_price"]) / trade["entry_price"]) * 100.0
             if current_price > trade["peak_price"]:
@@ -689,14 +694,12 @@ class BitgetDeskPartnerEngine:
             else:
                 logger.info(f"📝 [PAPER EXIT] Closed {side.upper()} {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
 
-            # Gauntlet Update
             self.state_mgr.record_trade(symbol, side, gain_pct, reason, is_paper)
             self.cooldowns[symbol] = time.time()
 
         except Exception as e:
             logger.error(f"Error during exit execution: {e}")
         finally:
-            # Atomic cleanup permanently eliminates phantom exit loops
             self.active_trade = None
             dashboard_data["active_trade"] = None
 
@@ -724,14 +727,12 @@ class BitgetDeskPartnerEngine:
                     if signal:
                         self.enter_trade(signal)
 
-                # Sync Dashboard Telemetry
                 dashboard_data["status"] = "RUNNING"
                 dashboard_data["mode"] = self.state_mgr.state["mode"]
                 dashboard_data["streak"] = self.state_mgr.state["consecutive_wins"]
                 dashboard_data["recent_trades"] = self.state_mgr.state["history"]
                 dashboard_data["last_update"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
-                # 15-Minute Desk Intelligence Briefing
                 if time.time() - last_briefing >= 900:
                     last_briefing = time.time()
                     logger.info(
@@ -751,10 +752,8 @@ class BitgetDeskPartnerEngine:
 # SECTION 8: BOOTSTRAP ENTRY POINT
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Start Keep-Alive Server on Port 10000 in Daemon Thread
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
 
-    # Start Trading Engine
     engine = BitgetDeskPartnerEngine()
     engine.run()
