@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Grid-Trailing Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Engine: 3-Minute Fresh Ignition (Enters live thrust pushing in right now)
-- Exit 1: Grid 0.5% Peak Reverse (Immediately sells the second price drops 0.5% from highest peak)
-- Exit 2: 90-Second Dead-on-Arrival Kill Switch (Aborts immediately if no thrust within 90s)
+Synchronized 3-Pillar Quant Trading Bot - Bitget USDT-M Perpetual Swaps
+- Engine: 3-Pillar Escalation (Price + OI + Volume expanding candle-over-candle across 1m to 3m)
+- Exit 1: Proven "When It Fades" Harvest (Banks profit the second momentum stalls and wiggles)
+- Exit 2: Flash-Crash Emergency Circuit Breaker (Ejects immediately if sudden sharp crash hits)
 - Scanner: 860+ Active Liquid Universe (CoinGlass Worldwide + Bitget)
 - Qualification: Strict 6-in-a-row Paper Gauntlet (1 -> 6) before Live Execution
 - Infrastructure: Render Port 10000 HTTP Keep-Alive & 15-Minute Telemetry
@@ -88,22 +88,25 @@ BITGET_FALLBACK_MIN_VOL = 1_000_000.0
 MAX_SPREAD_PCT = 0.10              # Order book spread <= 0.10%
 SCANNER_WORKERS = 16               # Parallel threads for fast sweeps
 
-# Fresh 3-Minute Ignition Parameters
-MIN_3M_IGNITION_MOVE = 1.40        # Minimum 1.4% rapid push in the last 3 minutes
-MAX_3M_IGNITION_MOVE = 8.00        # Cap to avoid already exhausted moves
-PEAK_PROXIMITY_CEILING = 0.25      # Current price must be within 0.25% of extreme (NOT falling back!)
+# 3-Pillar Synchronized Escalation Parameters
+MIN_3M_MOVE_PCT = 1.40             # Minimum 1.4% price thrust in 3 minutes
+MAX_3M_MOVE_PCT = 8.00             # Cap to avoid buying already exhausted moves
+PEAK_PROXIMITY_CEILING = 0.25      # Current price must be within 0.25% of 5m extreme (NOT falling back!)
 
-# ==============================================================================
-# THE CRITICAL GRID & LIGHTNING-FAST ABORT RULES
-# ==============================================================================
-GRID_PEAK_REVERSE_PCT = 0.50       # Sells immediately if price reverses 0.50% from ANY peak!
-DOA_TIMEOUT_SECS = 90              # 90-Second Dead-on-Arrival Kill Switch
-DOA_MIN_THRUST_PCT = 0.30          # Must achieve at least +0.30% forward thrust within 90s or ABORT!
+# Proven "When It Fades" (Wiggle & Fade) Parameters
+PROFIT_BANK_THRESHOLD_PCT = 1.35   # Look to bank profit once trade is up >= 1.35%
+WIGGLE_FADE_PULLBACK_PCT = 0.45    # Pullback from peak while stalling indicates the fade -> Bank profit!
+STAGNATION_TIMEOUT_SECS = 1200     # 20 minutes max if coin refuses to advance past +0.50%
+
+# Flash-Crash Emergency Circuit Breaker Parameters
+CRASH_ADVERSE_MOVE_PCT = 1.00      # Sudden 1.00% adverse drop in under 60s trips circuit breaker
+CRASH_SPIKE_VOL_RATIO = 2.00       # Opposing candle with > 2x average volume trips circuit breaker
+STRUCTURAL_FLOOR_COLLAPSE = 1.80   # Hard emergency stop if entry thrust origin is shattered (-1.80%)
 
 # Account Sizing & Execution
 BALANCE_UTILIZATION = 0.90         # Use 90% of free balance
 BITGET_MIN_NOTIONAL = 5.50         # $5.50 USDT minimum order value
-NORMAL_COOLDOWN_SECS = 600         # 10 minutes symbol cooldown
+NORMAL_COOLDOWN_SECS = 900         # 15 minutes normal cooldown
 BRIEFING_INTERVAL_SECONDS = 900    # 15 minutes intelligence debrief
 
 # LIVE Risk Limits (Strict only after earning 6/6 paper qualification)
@@ -277,6 +280,26 @@ class QuantBot:
             while buf and (now - buf[0]["time"]) > 2100:
                 buf.popleft()
 
+    def calculate_deltas(self, symbol: str, target_seconds: int) -> Optional[Tuple[float, float]]:
+        buf = self.history_buffer.get(symbol)
+        if not buf or len(buf) < 2:
+            return None
+
+        current = buf[-1]
+        target_time = current["time"] - target_seconds
+        past = min(buf, key=lambda x: abs(x["time"] - target_time))
+        elapsed = current["time"] - past["time"]
+
+        if elapsed < (target_seconds * 0.50):
+            return None
+
+        pr_change = ((current["price"] - past["price"]) / past["price"]) * 100.0
+        oi_change = 0.0
+        if past["oi"] > 0:
+            oi_change = ((current["oi"] - past["oi"]) / past["oi"]) * 100.0
+
+        return pr_change, oi_change
+
     def anti_trap_check(self, symbol: str) -> bool:
         try:
             ob = self.exchange.fetch_order_book(symbol, limit=5)
@@ -299,11 +322,18 @@ class QuantBot:
         return None
 
     # --------------------------------------------------------------------------
-    # THE 3-MINUTE FRESH IGNITION ENGINE
+    # THE 3-PILLAR SYNCHRONIZED ESCALATION ENGINE (1m to 3m)
     # --------------------------------------------------------------------------
-    def evaluate_fresh_ignition(self, symbol: str, ohlcv: List) -> Optional[Dict]:
-        candles = ohlcv[-6:-1]
-        three_min_candles = candles[-3:]
+    def evaluate_3pillar_ignition(self, symbol: str, ohlcv: List) -> Optional[Dict]:
+        """
+        Inspects the 5-minute window and the last 3 individual 1m candles.
+        Guarantees that momentum is ACTIVELY ACCELERATING across ALL 3 PILLARS:
+        1. Price: Escalates candle-over-candle (P1 < P2 < P3 for Longs, P1 > P2 > P3 for Shorts)
+        2. Open Interest: Expanding minute-over-minute (Delta OI > 0)
+        3. Volume: Combusting candle-over-candle (Vol 1 < Vol 2 < Vol 3)
+        """
+        candles = ohlcv[-6:-1]            # 5 completed 1m candles
+        three_min_candles = candles[-3:]  # Exactly the last 3 completed minutes
 
         c1, c2, c3 = three_min_candles[0], three_min_candles[1], three_min_candles[2]
         three_min_open = c1[1]
@@ -311,56 +341,77 @@ class QuantBot:
         three_min_move_pct = ((three_min_close - three_min_open) / three_min_open) * 100.0
         abs_move = abs(three_min_move_pct)
 
-        if abs_move < MIN_3M_IGNITION_MOVE or abs_move > MAX_3M_IGNITION_MOVE:
+        # Baseline displacement check
+        if abs_move < MIN_3M_MOVE_PCT or abs_move > MAX_3M_IGNITION_MOVE:
             return None
 
         five_min_high = max(c[2] for c in candles)
         five_min_low = min(c[3] for c in candles)
 
-        # Fresh Buy Ignition (Pumping right now)
+        vol1, vol2, vol3 = c1[5], c2[5], c3[5]
+
+        # Check Open Interest escalation over the 3-minute window
+        deltas_3m = self.calculate_deltas(symbol, 180)
+        oi_3m_growth = deltas_3m[1] if deltas_3m else 0.0
+
+        # ======================================================================
+        # PILLAR CHECK: FRESH BUY IGNITION
+        # ======================================================================
         if three_min_move_pct > 0:
+            # Pillar 1 (Price): Close 1 < Close 2 < Close 3 AND near extreme high of 5m
+            if not (c1[4] < c2[4] < c3[4]):
+                return None
             distance_from_high = ((five_min_high - three_min_close) / five_min_high) * 100.0
             if distance_from_high > PEAK_PROXIMITY_CEILING:
-                return None  # Stale move: already falling back!
+                return None  # Stale: Already falling back from an old peak!
 
-            if c3[4] < c2[4] or c2[4] < c1[4]:
+            # Pillar 2 (Volume): Volume is combusting candle-over-candle
+            if not (vol1 <= vol2 <= vol3) and (vol3 < vol2 * 0.90):
                 return None
 
-            vol1, vol2, vol3 = c1[5], c2[5], c3[5]
-            if vol3 < (vol2 * 0.75) or (vol2 + vol3) <= 0:
+            # Pillar 3 (Open Interest): Fresh contracts expanding (not draining)
+            if oi_3m_growth < -0.20:
                 return None
 
-            ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 10.0)
+            ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 15.0)
             return {
                 "symbol": symbol,
                 "direction": "buy",
                 "net_change_pct": three_min_move_pct,
                 "score": ignition_score,
-                "engine": "FRESH_3MIN_IGNITION",
-                "thrust_origin": c1[3]
+                "engine": "SYNCHRONIZED_3PILLAR_IGNITION",
+                "thrust_origin": c1[3],
+                "avg_vol": (vol1 + vol2 + vol3) / 3.0
             }
 
-        # Fresh Sell Ignition (Dumping right now)
+        # ======================================================================
+        # PILLAR CHECK: FRESH SELL IGNITION
+        # ======================================================================
         else:
+            # Pillar 1 (Price): Close 1 > Close 2 > Close 3 AND near extreme low of 5m
+            if not (c1[4] > c2[4] > c3[4]):
+                return None
             distance_from_low = ((three_min_close - five_min_low) / five_min_low) * 100.0
             if distance_from_low > PEAK_PROXIMITY_CEILING:
-                return None  # Stale move: already bouncing!
+                return None  # Stale: Already bouncing from the floor!
 
-            if c3[4] > c2[4] or c2[4] > c1[4]:
+            # Pillar 2 (Volume): Volume is combusting candle-over-candle
+            if not (vol1 <= vol2 <= vol3) and (vol3 < vol2 * 0.90):
                 return None
 
-            vol1, vol2, vol3 = c1[5], c2[5], c3[5]
-            if vol3 < (vol2 * 0.75) or (vol2 + vol3) <= 0:
+            # Pillar 3 (Open Interest): Fresh contracts expanding
+            if oi_3m_growth < -0.20:
                 return None
 
-            ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 10.0)
+            ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 15.0)
             return {
                 "symbol": symbol,
                 "direction": "sell",
                 "net_change_pct": three_min_move_pct,
                 "score": ignition_score,
-                "engine": "FRESH_3MIN_IGNITION",
-                "thrust_origin": c1[2]
+                "engine": "SYNCHRONIZED_3PILLAR_IGNITION",
+                "thrust_origin": c1[2],
+                "avg_vol": (vol1 + vol2 + vol3) / 3.0
             }
 
     # --------------------------------------------------------------------------
@@ -371,6 +422,7 @@ class QuantBot:
         tickers = self.exchange.fetch_tickers()
         self.update_time_series_buffer(tickers)
 
+        # Update CoinGlass Global Liquidity Pool (>= $1M Volume across all exchanges)
         cg_data = get_coinglass_data()
         self.global_liquid_symbols = set()
         if cg_data:
@@ -386,9 +438,11 @@ class QuantBot:
             base = sym.split("/")[0].split(":")[0]
             vol = float(t.get("quoteVolume", 0.0) or 0.0)
 
+            # Accept if Bitget vol >= $1M OR verified in CoinGlass Global Worldwide Pool!
             if vol >= BITGET_FALLBACK_MIN_VOL or base in self.global_liquid_symbols:
                 valid_symbols.append(sym)
 
+        # Parallel 1m candle retrieval
         candles_by_symbol = {}
         with ThreadPoolExecutor(max_workers=SCANNER_WORKERS) as executor:
             future_to_sym = {executor.submit(self.fetch_symbol_candles, s): s for s in valid_symbols}
@@ -400,7 +454,7 @@ class QuantBot:
 
         candidates = []
         for sym, ohlcv in candles_by_symbol.items():
-            analysis = self.evaluate_fresh_ignition(sym, ohlcv)
+            analysis = self.evaluate_3pillar_ignition(sym, ohlcv)
             if analysis:
                 candidates.append(analysis)
 
@@ -415,7 +469,7 @@ class QuantBot:
 
         for cand in top_candidates:
             if self.anti_trap_check(cand["symbol"]):
-                logger.info(f"IGNITION CHAMPION: {cand['symbol']} "
+                logger.info(f"3-PILLAR IGNITION CHAMPION: {cand['symbol']} "
                             f"({cand['direction'].upper()} {cand['net_change_pct']:+.2f}% in 3m) | Score: {cand['score']:.1f}")
                 return cand
 
@@ -445,6 +499,7 @@ class QuantBot:
         direction = candidate["direction"]
         engine = candidate["engine"]
         thrust_origin = candidate.get("thrust_origin", 0.0)
+        baseline_vol = candidate.get("avg_vol", 0.0)
 
         ticker = self.exchange.fetch_ticker(symbol)
         current_price = ticker["ask"] if direction == "buy" else ticker["bid"]
@@ -461,10 +516,11 @@ class QuantBot:
                 "is_live": False,
                 "engine": engine,
                 "thrust_origin": thrust_origin,
+                "baseline_vol": baseline_vol,
                 "leverage": 5
             }
             logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
-                        f"3m Move: {candidate['net_change_pct']:+.2f}% | Gauntlet: {self.paper_wins}/6")
+                        f"3-Pillar 3m Move: {candidate['net_change_pct']:+.2f}% | Gauntlet: {self.paper_wins}/6")
             return
 
         # Live Execution
@@ -495,6 +551,7 @@ class QuantBot:
                 "is_live": True,
                 "engine": engine,
                 "thrust_origin": thrust_origin,
+                "baseline_vol": baseline_vol,
                 "leverage": leverage
             }
             logger.info(f"[LIVE ENTER] {direction.upper()} on {symbol} | Amount: {amount} @ ${fill_price:.6f} | Lev: {leverage}x")
@@ -505,7 +562,7 @@ class QuantBot:
 
     def execute_exit(self, reason: str, is_win: bool):
         """
-        Permanent fix for PARTI phantom loop & Grid-Wall Exit.
+        Permanent fix for PARTI phantom loop & Wiggle-Fade Harvest.
         """
         if not self.active_trade:
             return
@@ -597,10 +654,10 @@ class QuantBot:
         finally:
             self.active_trade = None
             self.cooldown_tracker[symbol] = time.time() + NORMAL_COOLDOWN_SECS
-            logger.info(f"{symbol} assigned to normal cooldown.")
+            logger.info(f"{symbol} placed on normal cooldown.")
 
     # --------------------------------------------------------------------------
-    # POSITION MONITOR: GRID 0.5% PEAK WALL & 90s DOA KILL SWITCH
+    # POSITION MONITOR: "WHEN IT FADES" HARVEST + FLASH-CRASH CIRCUIT BREAKER
     # --------------------------------------------------------------------------
     def monitor_active_trade(self):
         if not self.active_trade:
@@ -617,7 +674,6 @@ class QuantBot:
             ticker = self.exchange.fetch_ticker(symbol)
             current_price = ticker["last"]
 
-            # Track tick-by-tick peak and calculate exact reversal
             if side == "buy":
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
                 if current_price > trade["peak_price"]:
@@ -648,33 +704,56 @@ class QuantBot:
                 "pnl_pct": round(pnl_pct, 2),
                 "peak_pnl": round(peak_pnl, 2),
                 "drawdown_from_peak": round(drawdown_from_peak, 2),
-                "duration_sec": round(duration_secs, 1)
+                "duration_min": round(duration_secs / 60, 1)
             }
 
             # ==================================================================
-            # RULE 1: THE GRID 0.5% PEAK REVERSE (The Electrified Floor)
-            # If price pulls back 0.50% from ANY peak reached, SELL IMMEDIATELY!
-            # (Fixes LSK: banks +0.85% win instead of letting it bleed to -2.07%)
+            # 1. FLASH-CRASH EMERGENCY CIRCUIT BREAKER
+            # Prevents sudden violent crash candles while letting normal wiggles breathe
             # ==================================================================
-            if drawdown_from_peak >= GRID_PEAK_REVERSE_PCT:
+            if drawdown_from_peak >= CRASH_ADVERSE_MOVE_PCT:
+                # Inspect recent 1m candle to see if this is an aggressive high-volume crash
+                recent_candles = self.exchange.fetch_ohlcv(symbol, timeframe="1m", limit=2)
+                if recent_candles and len(recent_candles) >= 1:
+                    latest_candle = recent_candles[-1]
+                    latest_vol = latest_candle[5]
+                    baseline_vol = trade.get("baseline_vol", 1e-9)
+
+                    # If opposing crash candle hits with > 2x volume -> EMERGENCY EJECT!
+                    if latest_vol >= (baseline_vol * CRASH_SPIKE_VOL_RATIO):
+                        reason = f"Flash-Crash Circuit Breaker (Abnormal Spike Volume Dump, PnL: {pnl_pct:+.2f}%)"
+                        self.execute_exit(reason, is_win=(pnl_pct > 0))
+                        return
+
+            # Hard structural floor collapse
+            if pnl_pct <= -STRUCTURAL_FLOOR_COLLAPSE:
+                reason = f"Structural Floor Collapsed (-{STRUCTURAL_FLOOR_COLLAPSE}%)"
+                self.execute_exit(reason, is_win=False)
+                return
+
+            # ==================================================================
+            # 2. PROVEN "WHEN IT FADES" (WIGGLE & FADE) PROFIT HARVEST
+            # Lets runners breathe naturally, but banks profit the second it stalls
+            # ==================================================================
+            if peak_pnl >= PROFIT_BANK_THRESHOLD_PCT:
+                # The Fade Footprint: Stalls and pulls back 0.45% from peak on low/normal volume
+                if drawdown_from_peak >= WIGGLE_FADE_PULLBACK_PCT:
+                    reason = f"Wiggle & Fade Banked (+{pnl_pct:+.2f}% profit in USDT)"
+                    self.execute_exit(reason, is_win=True)
+                    return
+
+            # ==================================================================
+            # 3. BEHAVIORAL STAGNATION
+            # If 20 minutes pass and coin refuses to advance past +0.50%, exit clean
+            # ==================================================================
+            if duration_secs >= STAGNATION_TIMEOUT_SECS and peak_pnl < 0.50:
                 is_win = pnl_pct > 0
-                reason = f"Grid 0.5% Peak Reverse (Peaked at +{peak_pnl:.2f}%, Reversal: {drawdown_from_peak:.2f}%)"
+                reason = f"Momentum Stall (Dead volume after 20m, PnL: {pnl_pct:+.2f}%)"
                 self.execute_exit(reason, is_win=is_win)
                 return
 
             # ==================================================================
-            # RULE 2: 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
-            # If 90s pass and nothing pushed the price up (peak < +0.30%), ABORT!
-            # (Fixes XPL: aborts in 90 seconds instead of holding for 17.8 minutes)
-            # ==================================================================
-            if duration_secs >= DOA_TIMEOUT_SECS and peak_pnl < DOA_MIN_THRUST_PCT:
-                is_win = pnl_pct > 0
-                reason = f"90s Dead-on-Arrival Kill Switch (Peak was only +{peak_pnl:.2f}%)"
-                self.execute_exit(reason, is_win=is_win)
-                return
-
-            # ==================================================================
-            # RULE 3: LIVE HARD STOP LOSS (Once in live mode)
+            # 4. LIVE HARD STOP LOSS (Once in live mode)
             # ==================================================================
             if is_live and pnl_pct <= -LIVE_HARD_STOP_LOSS_PCT:
                 self.execute_exit(f"Hard Stop-Loss (-{LIVE_HARD_STOP_LOSS_PCT}%)", is_win=False)
@@ -723,7 +802,7 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Grid-Trailing 0.5% Quant Engine active. Fast event loop running...")
+        logger.info("3-Pillar Escalation & Wiggle-Fade Quant Suite active. Event loop running...")
 
         while True:
             try:
@@ -741,10 +820,10 @@ class QuantBot:
 
                 self.print_desk_briefing()
 
-                # If managing an open trade, check the 0.5% grid wall every second
+                # If managing an open trade, focus purely on monitoring
                 if self.active_trade:
                     self.monitor_active_trade()
-                    time.sleep(1)
+                    time.sleep(2)
                     continue
 
                 opportunity = self.scan_for_opportunities()
