@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: QUANTITATIVE DESK ENGINE (BITGET USDT-M PERPETUALS)
-STRATEGY: GLOBAL INDEX CATCH-UP TRAP & MOMENTUM IGNITION
-DEPLOYMENT: RENDER (PORT 10000 HTTP DASHBOARD) VIA GITHUB
+BOT.PY: BI-DIRECTIONAL VELOCITY ASYMMETRY ENGINE (BITGET USDT-M PERPETUALS)
+CORE ENGINE: 15-MINUTE DAVID VS. SAMUEL SPEED RATIO (LONGS & SHORTS)
+EXIT ENGINE: VELOCITY DECAY (4x -> 2x) ARMED 0.5% PEAK REVERSE & 90s DOA
+INFRASTRUCTURE: RENDER PORT 10000 KEEP-ALIVE SERVER | GAUNTLET 1 -> 6 WINS
 ===============================================================================
 """
 
@@ -29,38 +30,39 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("DeskPartnerBot")
+logger = logging.getLogger("VelocityDeskEngine")
 
 # -----------------------------------------------------------------------------
-# SECTION 2: SYSTEM CONSTANTS & STRATEGY PARAMETERS
+# SECTION 2: SYSTEM CONSTANTS & PARAMETERS
 # -----------------------------------------------------------------------------
-# Blacklist: Illiquid, de-pegged, or historically errant symbols
+# Strict Blacklist: Illiquid, de-pegged, or historically errant symbols
 BLACKLIST = [
     "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP", 
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 ]
 
 # Market Filters
-MIN_24H_VOLUME_USDT = 1_000_000.0  # $1M Global/Local Liquidity Filter
-HISTORY_BUFFER_SECONDS = 300       # 5 minutes of rolling 1s tick memory
+MIN_24H_VOLUME_USDT = 1_000_000.0  # $1M Liquidity Universe
+LOOKBACK_SECONDS = 900             # 15-Minute Lookback Window
 
-# Global Index Catch-Up Trap Parameters
-MIN_SPREAD_GAP_PCT = 0.80          # Bitget must be at least 0.80% cheaper than Global Index
-MIN_GLOBAL_INDEX_3M_PCT = 1.00     # Global Index must have pushed >= +1.0% in last 3 mins
-MIN_BITGET_OI_DELTA_PCT = 0.50     # Bitget OI must have grown >= +0.50% in last 3 mins
+# Velocity Asymmetry Triggers (David vs. Samuel)
+MIN_VELOCITY_RATIO = 3.0           # Impulse must be at least 3.0x faster than correction
+MIN_IMPULSE_MOVE_PCT = 1.20        # Minimum physical thrust in the impulse phase
+LONG_MIN_OI_DELTA_PCT = 0.40       # Longs require positive OI expansion (>= +0.40%)
+SHORT_MAX_OI_DELTA_PCT = -0.40     # Shorts require negative OI liquidation flush (<= -0.40%)
 
-# Dynamic Exit Rules
-GAP_CLOSE_THRESHOLD_PCT = 0.10     # Exit when Bitget is within 0.10% of Global Index
+# Exit & Fading Rules
+VELOCITY_DECAY_RATIO = 2.0         # Armed when speed ratio drops to 2.0x (Momentum Fade)
 PEAK_REVERSE_PULLBACK_PCT = 0.50   # 0.5% Peak Reverse Trailing Wall
 DOA_TIMEOUT_SECONDS = 90           # 90-Second Dead-on-Arrival Kill Switch
 DOA_FORWARD_THRESHOLD_PCT = 0.30   # Must gain at least +0.30% in 90s or abort
 LIVE_HARD_STOP_PCT = 0.90          # Structural Emergency Hard Stop in Live Mode
 
 # Gauntlet & Execution Parameters
-QUALIFICATION_TARGET_WINS = 6      # Must achieve 6 consecutive paper wins to unlock Live
+QUALIFICATION_TARGET_WINS = 6      # Must hit 6 consecutive paper wins to unlock Live
 COOLDOWN_SECONDS = 600             # 10-Minute Cooldown per pair post-exit
-ALLOCATION_PCT = 0.90              # Allocate 90% of usable balance
-MIN_NOTIONAL_USDT = 5.50           # Bitget minimum order size constraint
+ALLOCATION_PCT = 0.90              # Allocate 90% of free balance
+MIN_NOTIONAL_USDT = 5.50           # Bitget minimum notional requirement
 MAX_LEVERAGE_CLAMP = 20
 MIN_LEVERAGE_CLAMP = 2
 
@@ -68,7 +70,7 @@ PORT = int(os.environ.get("PORT", 10000))
 STATE_FILE = "qualification_state.json"
 
 # -----------------------------------------------------------------------------
-# SECTION 3: CREDENTIAL READER (ROBUST STRIP IMPLEMENTATION)
+# SECTION 3: CREDENTIAL READER (.strip() PROTECTED)
 # -----------------------------------------------------------------------------
 def get_env_var(keys, default=""):
     for k in keys:
@@ -115,7 +117,7 @@ class StateManager:
             except Exception as e:
                 logger.error(f"Error saving state: {e}")
 
-    def record_trade(self, symbol, gain_pct, exit_reason, is_paper):
+    def record_trade(self, symbol, side, gain_pct, exit_reason, is_paper):
         with self.lock:
             self.state["total_trades"] += 1
             is_win = gain_pct > 0.0
@@ -137,6 +139,7 @@ class StateManager:
             trade_log = {
                 "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "symbol": symbol,
+                "side": side.upper(),
                 "gain_pct": round(gain_pct, 3),
                 "exit_reason": exit_reason,
                 "mode": "PAPER" if is_paper else "LIVE",
@@ -170,12 +173,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         at = dashboard_data.get("active_trade")
         active_html = "<p style='color: #888;'>No active positions. Scanning order flow...</p>"
         if at:
+            side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
+            fade_status = "<span style='color: #f59e0b; font-weight: bold;'>ARMED (FADING)</span>" if at.get("velocity_decayed") else "<span style='color: #4ade80;'>ACTIVE PROPULSION</span>"
             active_html = f"""
-            <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid #3b82f6;">
-                <h3 style="margin: 0 0 10px 0; color: #60a5fa;">ACTIVE TRADE: {at['symbol']} ({at['side'].upper()})</h3>
-                <p><b>Mode:</b> {at['mode']} | <b>Entry Price:</b> {at['entry_price']} | <b>Target Index:</b> {at['index_price']}</p>
-                <p><b>Current Price:</b> {at['current_price']} | <b>Current Gap:</b> {at['current_gap_pct']:.2f}%</p>
+            <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
+                <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE POSITION: {at['symbol']} ({at['side'].upper()})</h3>
+                <p><b>Mode:</b> {at['mode']} | <b>Entry Price:</b> {at['entry_price']} | <b>Current Price:</b> {at['current_price']}</p>
                 <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
+                <p><b>Speed Ratio:</b> {at.get('current_speed_ratio', 0.0):.1f}x (Peak: {at.get('peak_speed_ratio', 0.0):.1f}x) | <b>Fade Status:</b> {fade_status}</p>
                 <p><b>DOA Timer:</b> {at['elapsed_seconds']}s / {DOA_TIMEOUT_SECONDS}s</p>
             </div>
             """
@@ -187,6 +192,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <tr>
                 <td style="padding: 6px;">{t['timestamp']}</td>
                 <td style="padding: 6px;">{t['symbol']}</td>
+                <td style="padding: 6px;">{t['side']}</td>
                 <td style="padding: 6px; color: {color}; font-weight: bold;">{t['gain_pct']:+.2f}%</td>
                 <td style="padding: 6px;">{t['exit_reason']}</td>
                 <td style="padding: 6px;">{t['mode']}</td>
@@ -197,7 +203,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Desk Radar & Execution Engine</title>
+            <title>Velocity Desk Intelligence</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -210,11 +216,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>🛰️ Quantitative Desk Intelligence Dashboard</h2>
+            <h2>⚡ Velocity Asymmetry Desk Engine (Long/Short)</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Engine Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
-                <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Consecutive Wins | 
+                <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Wins | 
                 <b>Universe:</b> {dashboard_data['universe_size']} Pairs
             </div>
 
@@ -227,7 +233,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <h3>Recent Execution Log</h3>
                 <table>
                     <thead>
-                        <tr><th>Time</th><th>Symbol</th><th>PnL %</th><th>Exit Reason</th><th>Type</th></tr>
+                        <tr><th>Time</th><th>Symbol</th><th>Side</th><th>PnL %</th><th>Exit Reason</th><th>Type</th></tr>
                     </thead>
                     <tbody>
                         {history_rows}
@@ -253,10 +259,9 @@ class BitgetDeskPartnerEngine:
         self.state_mgr = StateManager()
         self.exchange = None
         self.http_session = None
-        self.price_buffer = defaultdict(lambda: deque(maxlen=360))  # Rolling ~5m tick memory
+        self.price_buffer = defaultdict(lambda: deque(maxlen=600))  # 15m tick memory
         self.cooldowns = {}
         self.active_trade = None
-        self.lock = threading.Lock()
 
         self._setup_connection_pool()
         self._setup_exchange()
@@ -281,7 +286,6 @@ class BitgetDeskPartnerEngine:
 
         if API_KEY and SECRET_KEY and PASSPHRASE:
             try:
-                # Enforce One-Way Position Mode
                 self.exchange.set_position_mode(hedged=False)
                 logger.info("🔒 Bitget account verified: One-Way Mode Active.")
             except Exception as e:
@@ -303,13 +307,12 @@ class BitgetDeskPartnerEngine:
         return []
 
     def update_buffers(self, tickers):
-        """Stores local lastPrice, global indexPrice, and OI into memory."""
+        """Stores local lastPrice and OI into rolling memory buffer."""
         now = time.time()
         active_count = 0
 
         for t in tickers:
             symbol = t.get("symbol", "")
-            # Filter Blacklist
             if any(b in symbol for b in BLACKLIST):
                 continue
 
@@ -319,16 +322,14 @@ class BitgetDeskPartnerEngine:
                     continue
 
                 last_price = float(t.get("lastPr", 0.0))
-                index_price = float(t.get("indexPrice", 0.0))
                 oi = float(t.get("openInterest", 0.0) or 0.0)
 
-                if last_price <= 0 or index_price <= 0:
+                if last_price <= 0:
                     continue
 
                 self.price_buffer[symbol].append({
                     "time": now,
-                    "last_price": last_price,
-                    "index_price": index_price,
+                    "price": last_price,
                     "oi": oi
                 })
                 active_count += 1
@@ -337,59 +338,115 @@ class BitgetDeskPartnerEngine:
 
         dashboard_data["universe_size"] = active_count
 
-    def scan_for_catchup_trap(self):
-        """Scans in-memory buffer for the Global Catch-Up Trap footprint."""
+    def scan_for_velocity_asymmetry(self):
+        """
+        Calculates 15-Minute David vs. Samuel Velocity Ratio for LONGS and SHORTS:
+        - LONG: Samuel took 8-12m dropping (-); David snapped back in 1-2m (+). OI strictly (+).
+        - SHORT: Samuel took 8-12m climbing (+); David smashed down in 1-2m (-). OI strictly (-).
+        """
         if self.active_trade is not None:
-            return None  # Max 1 focused trade at a time
+            return None
 
         now = time.time()
+        cutoff = now - LOOKBACK_SECONDS
 
         for symbol, buf in list(self.price_buffer.items()):
             if symbol in self.cooldowns and (now - self.cooldowns[symbol]) < COOLDOWN_SECONDS:
                 continue
 
-            if len(buf) < 60:  # Need at least ~1-2 minutes of history
+            ticks = [b for b in buf if b["time"] >= cutoff]
+            if len(ticks) < 60:  # Need adequate 15m resolution
                 continue
 
-            latest = buf[-1]
-            last_price = latest["last_price"]
-            index_price = latest["index_price"]
+            current_price = ticks[-1]["price"]
+            prices = [t["price"] for t in ticks]
+            min_p = min(prices)
+            max_p = max(prices)
+            min_idx = prices.index(min_p)
+            max_idx = prices.index(max_p)
 
-            # 1. THE SPREAD GAP (Bitget is cheaper than Global Index)
-            spread_gap_pct = ((index_price - last_price) / last_price) * 100.0
-            if spread_gap_pct < MIN_SPREAD_GAP_PCT:
-                continue
+            # -------------------------------------------------------------
+            # CASE A: EVALUATE LONG SIGNAL (David Reclaims Samuel's Bleed)
+            # -------------------------------------------------------------
+            # Pattern: Peak happened earlier -> Trough -> Rapid snapback to Current Price
+            if max_idx < min_idx and min_idx < (len(ticks) - 1):
+                t_peak = ticks[max_idx]["time"]
+                t_trough = ticks[min_idx]["time"]
+                t_current = ticks[-1]["time"]
 
-            # 2. GLOBAL INDEX 3-MINUTE MOMENTUM
-            cutoff_3m = now - 180
-            ticks_3m = [b for b in buf if b["time"] >= cutoff_3m]
-            if len(ticks_3m) < 10:
-                continue
+                drop_duration = max(60, t_trough - t_peak)
+                rebound_duration = max(30, t_current - t_trough)
 
-            oldest_index = ticks_3m[0]["index_price"]
-            index_3m_gain_pct = ((index_price - oldest_index) / oldest_index) * 100.0
-            if index_3m_gain_pct < MIN_GLOBAL_INDEX_3M_PCT:
-                continue
+                drop_pct = ((max_p - min_p) / max_p) * 100.0
+                rebound_pct = ((current_price - min_p) / min_p) * 100.0
 
-            # 3. BITGET OPEN INTEREST DELTA
-            oldest_oi = ticks_3m[0]["oi"]
-            latest_oi = latest["oi"]
-            oi_delta_pct = 0.0
-            if oldest_oi > 0:
-                oi_delta_pct = ((latest_oi - oldest_oi) / oldest_oi) * 100.0
+                if drop_pct >= 0.80 and rebound_pct >= (drop_pct * 0.85):
+                    v_down = drop_pct / (drop_duration / 60.0)
+                    v_up = rebound_pct / (rebound_duration / 60.0)
 
-            # Guard: OI must be expanding or at least positive in latest minute
-            if oi_delta_pct < MIN_BITGET_OI_DELTA_PCT and latest_oi < ticks_3m[-5]["oi"]:
-                continue
+                    if v_down > 0:
+                        speed_ratio = v_up / v_down
+                        if speed_ratio >= MIN_VELOCITY_RATIO and rebound_pct >= MIN_IMPULSE_MOVE_PCT:
+                            # Verify Open Interest (MUST BE POSITIVE)
+                            oldest_oi = ticks[min_idx]["oi"]
+                            latest_oi = ticks[-1]["oi"]
+                            oi_delta_pct = ((latest_oi - oldest_oi) / oldest_oi * 100.0) if oldest_oi > 0 else 0.0
 
-            # TRAP CONDITIONS MET!
-            logger.info(f"🎯 TRAP TRIGGERED: {symbol} | Gap: +{spread_gap_pct:.2f}% | Global 3m: +{index_3m_gain_pct:.2f}% | Bitget OI: +{oi_delta_pct:.2f}%")
-            return {
-                "symbol": symbol,
-                "entry_price": last_price,
-                "index_price": index_price,
-                "gap_pct": spread_gap_pct
-            }
+                            if oi_delta_pct >= LONG_MIN_OI_DELTA_PCT:
+                                logger.info(
+                                    f"🎯 LONG TRIGGERED: {symbol} | Speed Ratio: {speed_ratio:.1f}x "
+                                    f"(Rebound: {rebound_pct:.2f}% in {int(rebound_duration)}s) | OI: +{oi_delta_pct:.2f}%"
+                                )
+                                return {
+                                    "symbol": symbol,
+                                    "side": "buy",
+                                    "entry_price": current_price,
+                                    "baseline_speed": v_down,
+                                    "initial_speed_ratio": speed_ratio
+                                }
+
+            # -------------------------------------------------------------
+            # CASE B: EVALUATE SHORT SIGNAL (David Smashes Samuel's Crawl)
+            # -------------------------------------------------------------
+            # Pattern: Trough happened earlier -> Peak -> Rapid flush to Current Price
+            if min_idx < max_idx and max_idx < (len(ticks) - 1):
+                t_trough = ticks[min_idx]["time"]
+                t_peak = ticks[max_idx]["time"]
+                t_current = ticks[-1]["time"]
+
+                climb_duration = max(60, t_peak - t_trough)
+                flush_duration = max(30, t_current - t_peak)
+
+                climb_pct = ((max_p - min_p) / min_p) * 100.0
+                flush_pct = ((max_p - current_price) / max_p) * 100.0
+
+                if climb_pct >= 0.80 and flush_pct >= (climb_pct * 0.85):
+                    v_up = climb_pct / (climb_duration / 60.0)
+                    v_down = flush_pct / (flush_duration / 60.0)
+
+                    if v_up > 0:
+                        speed_ratio = v_down / v_up
+                        if speed_ratio >= MIN_VELOCITY_RATIO and flush_pct >= MIN_IMPULSE_MOVE_PCT:
+                            # Verify Open Interest (MUST BE NEGATIVE - LIQUIDATION CASCADE)
+                            # CRITICAL TRAP AVOIDANCE: Never short if OI is positive (+)
+                            oldest_oi = ticks[max_idx]["oi"]
+                            latest_oi = ticks[-1]["oi"]
+                            oi_delta_pct = ((latest_oi - oldest_oi) / oldest_oi * 100.0) if oldest_oi > 0 else 0.0
+
+                            if oi_delta_pct <= SHORT_MAX_OI_DELTA_PCT:
+                                logger.info(
+                                    f"🎯 SHORT TRIGGERED: {symbol} | Speed Ratio: {speed_ratio:.1f}x "
+                                    f"(Flush: -{flush_pct:.2f}% in {int(flush_duration)}s) | OI: {oi_delta_pct:.2f}%"
+                                )
+                                return {
+                                    "symbol": symbol,
+                                    "side": "sell",
+                                    "entry_price": current_price,
+                                    "baseline_speed": v_up,
+                                    "initial_speed_ratio": speed_ratio
+                                }
+                            else:
+                                logger.debug(f"🛡️ Short Trap Blocked on {symbol}: Price dumping but OI is positive ({oi_delta_pct:+.2f}%)")
 
         return None
 
@@ -404,14 +461,9 @@ class BitgetDeskPartnerEngine:
                 logger.warning(f"Usable margin too low: ${usable_margin:.2f}")
                 return 0, 0
 
-            # Dynamic Leverage calculation to clear $5.50 notional
             calculated_lev = math.ceil(MIN_NOTIONAL_USDT / usable_margin)
             leverage = max(MIN_LEVERAGE_CLAMP, min(calculated_lev, MAX_LEVERAGE_CLAMP))
-            notional = usable_margin * leverage
-
-            if notional < MIN_NOTIONAL_USDT:
-                notional = MIN_NOTIONAL_USDT
-
+            notional = max(MIN_NOTIONAL_USDT, usable_margin * leverage)
             contract_size = notional / current_price
             return contract_size, leverage
         except Exception as e:
@@ -421,136 +473,178 @@ class BitgetDeskPartnerEngine:
     def enter_trade(self, signal):
         """Executes trade entry in Paper or Live mode."""
         symbol = signal["symbol"]
+        side = signal["side"]
         price = signal["entry_price"]
         is_paper = (self.state_mgr.state["mode"] == "PAPER")
 
         trade_info = {
             "symbol": symbol,
-            "side": "buy",
+            "side": side,
             "entry_price": price,
-            "index_price": signal["index_price"],
             "entry_time": time.time(),
             "peak_price": price,
             "highest_gain_pct": 0.0,
+            "baseline_speed": signal["baseline_speed"],
+            "peak_speed_ratio": signal["initial_speed_ratio"],
+            "current_speed_ratio": signal["initial_speed_ratio"],
+            "velocity_decayed": False,
             "is_paper": is_paper,
             "mode": "PAPER" if is_paper else "LIVE",
             "size": 0
         }
 
         if is_paper:
-            logger.info(f"📝 [PAPER ENTRY] Bought {symbol} @ {price} | Target Index: {signal['index_price']}")
+            logger.info(f"📝 [PAPER ENTRY] Opened {side.upper()} on {symbol} @ {price}")
             self.active_trade = trade_info
         else:
             try:
                 size, lev = self.calculate_live_position_size(price)
                 if size <= 0:
                     return
-                # Set Leverage
+
                 ccxt_symbol = f"{symbol[:len(symbol)-4]}/USDT:USDT"
                 self.exchange.set_leverage(lev, ccxt_symbol)
-                # Fire Market Order
-                order = self.exchange.create_market_buy_order(ccxt_symbol, size)
+
+                if side == "buy":
+                    order = self.exchange.create_market_buy_order(ccxt_symbol, size)
+                else:
+                    order = self.exchange.create_market_sell_order(ccxt_symbol, size)
+
                 trade_info["size"] = size
                 self.active_trade = trade_info
-                logger.info(f"⚡ [LIVE ENTRY] Long {symbol} | Size: {size} | Lev: {lev}x | OrderID: {order.get('id')}")
+                logger.info(f"⚡ [LIVE ENTRY] {side.upper()} {symbol} | Size: {size} | Lev: {lev}x | OrderID: {order.get('id')}")
             except Exception as e:
                 logger.error(f"Live entry execution failed: {e}")
                 self.active_trade = None
 
     def manage_active_trade(self):
-        """Monitors active trade tick-by-tick for Gap-Closed, 0.5% Peak Reverse, or 90s DOA."""
+        """
+        Monitors active position tick-by-tick.
+        - Calculates Real-Time Speed Decay (Fade).
+        - Executes 0.5% Peak Reverse once faded or rolling over.
+        - Executes 90s DOA if forward progress < +0.30%.
+        """
         if not self.active_trade:
             return
 
         trade = self.active_trade
         symbol = trade["symbol"]
+        side = trade["side"]
         buf = self.price_buffer.get(symbol)
         if not buf:
             return
 
         latest = buf[-1]
-        current_price = latest["last_price"]
-        current_index = latest["index_price"]
-        elapsed = time.time() - trade["entry_time"]
+        current_price = latest["price"]
+        elapsed = max(1.0, time.time() - trade["entry_time"])
 
-        # Calculate PnL and Peak Tracking
-        gain_pct = ((current_price - trade["entry_price"]) / trade["entry_price"]) * 100.0
-        if gain_pct > trade["highest_gain_pct"]:
-            trade["highest_gain_pct"] = gain_pct
-            trade["peak_price"] = current_price
+        # -------------------------------------------------------------
+        # PnL & Peak Tracking (Bi-Directional)
+        # -------------------------------------------------------------
+        if side == "buy":
+            gain_pct = ((current_price - trade["entry_price"]) / trade["entry_price"]) * 100.0
+            if current_price > trade["peak_price"]:
+                trade["peak_price"] = current_price
+            if gain_pct > trade["highest_gain_pct"]:
+                trade["highest_gain_pct"] = gain_pct
+            pullback_from_peak = trade["highest_gain_pct"] - gain_pct
+        else:
+            gain_pct = ((trade["entry_price"] - current_price) / trade["entry_price"]) * 100.0
+            if current_price < trade["peak_price"]:
+                trade["peak_price"] = current_price
+            if gain_pct > trade["highest_gain_pct"]:
+                trade["highest_gain_pct"] = gain_pct
+            pullback_from_peak = trade["highest_gain_pct"] - gain_pct
 
-        # Update Live Telemetry
-        current_gap = ((current_index - current_price) / current_price) * 100.0
+        # -------------------------------------------------------------
+        # Real-Time Velocity Decay Calculation (The Fade Detection)
+        # -------------------------------------------------------------
+        current_speed = max(0.0, gain_pct) / (elapsed / 60.0)
+        baseline = trade["baseline_speed"]
+        if baseline > 0:
+            current_ratio = current_speed / baseline
+            trade["current_speed_ratio"] = current_ratio
+            if current_ratio > trade["peak_speed_ratio"]:
+                trade["peak_speed_ratio"] = current_ratio
+
+            # FADE DETECTED: Speed was explosive (>=3.0x) but has decayed to <= 2.0x
+            if trade["peak_speed_ratio"] >= 3.0 and current_ratio <= VELOCITY_DECAY_RATIO and gain_pct >= 0.50:
+                if not trade["velocity_decayed"]:
+                    trade["velocity_decayed"] = True
+                    logger.info(f"⚠️ MOMENTUM FADE CONFIRMED on {symbol}: Speed ratio decayed to {current_ratio:.1f}x. 0.5% Peak Reverse ARMED!")
+
+        # Update Telemetry for Port 10000 Dashboard
         dashboard_data["active_trade"] = {
             "symbol": symbol,
-            "side": trade["side"],
+            "side": side,
             "mode": trade["mode"],
             "entry_price": trade["entry_price"],
-            "index_price": current_index,
             "current_price": current_price,
-            "current_gap_pct": current_gap,
             "pnl_pct": gain_pct,
             "peak_gain_pct": trade["highest_gain_pct"],
+            "current_speed_ratio": trade.get("current_speed_ratio", 0.0),
+            "peak_speed_ratio": trade.get("peak_speed_ratio", 0.0),
+            "velocity_decayed": trade["velocity_decayed"],
             "elapsed_seconds": int(elapsed)
         }
 
         exit_reason = None
 
-        # RULE 1: THE GAP-CLOSED GRID TAKE-PROFIT (Bitget equalizes with Global Index)
-        if current_price >= current_index * (1.0 - (GAP_CLOSE_THRESHOLD_PCT / 100.0)):
-            exit_reason = "GAP_CLOSED_PROFIT"
+        # -------------------------------------------------------------
+        # EXIT RULES
+        # -------------------------------------------------------------
+        # RULE 1: 0.5% PEAK REVERSE (Triggered on pullback from peak)
+        if pullback_from_peak >= PEAK_REVERSE_PULLBACK_PCT:
+            exit_reason = "0.5%_PEAK_REVERSE (FADE_EXIT)"
 
-        # RULE 2: 0.5% PEAK REVERSE (Momentum Overshoot Wall)
-        elif (trade["highest_gain_pct"] - gain_pct) >= PEAK_REVERSE_PULLBACK_PCT:
-            exit_reason = "0.5%_PEAK_REVERSE"
-
-        # RULE 3: 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
+        # RULE 2: 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
         elif elapsed >= DOA_TIMEOUT_SECONDS and trade["highest_gain_pct"] < DOA_FORWARD_THRESHOLD_PCT:
             exit_reason = "90S_DOA_KILL_SWITCH"
 
-        # RULE 4: STRUCTURAL EMERGENCY HARD STOP (Live Mode)
+        # RULE 3: STRUCTURAL EMERGENCY HARD STOP (Live Mode Only)
         elif not trade["is_paper"] and gain_pct <= -LIVE_HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
 
-        # EXECUTE EXIT IF TRIGGERED
         if exit_reason:
             self._execute_exit(trade, current_price, gain_pct, exit_reason)
 
     def _execute_exit(self, trade, exit_price, gain_pct, reason):
         """Exits position cleanly and guarantees atomic active_trade = None cleanup."""
         symbol = trade["symbol"]
+        side = trade["side"]
         is_paper = trade["is_paper"]
 
         try:
             if not is_paper:
                 ccxt_symbol = f"{symbol[:len(symbol)-4]}/USDT:USDT"
-                # Query exact open size to prevent dust
                 pos = self.exchange.fetch_position(ccxt_symbol)
                 exact_size = abs(float(pos.get("contracts", 0.0) or trade["size"]))
-                if exact_size > 0:
-                    self.exchange.create_market_sell_order(
-                        ccxt_symbol, 
-                        exact_size, 
-                        params={"reduceOnly": True}
-                    )
-                logger.info(f"⚡ [LIVE EXIT] Closed {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
-            else:
-                logger.info(f"📝 [PAPER EXIT] Closed {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
 
-            # Record in Gauntlet Tracker
-            self.state_mgr.record_trade(symbol, gain_pct, reason, is_paper)
+                if exact_size > 0:
+                    # Invert order for clean close
+                    if side == "buy":
+                        self.exchange.create_market_sell_order(ccxt_symbol, exact_size, params={"reduceOnly": True})
+                    else:
+                        self.exchange.create_market_buy_order(ccxt_symbol, exact_size, params={"reduceOnly": True})
+
+                logger.info(f"⚡ [LIVE EXIT] Closed {side.upper()} {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
+            else:
+                logger.info(f"📝 [PAPER EXIT] Closed {side.upper()} {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
+
+            # Gauntlet Update
+            self.state_mgr.record_trade(symbol, side, gain_pct, reason, is_paper)
             self.cooldowns[symbol] = time.time()
 
         except Exception as e:
             logger.error(f"Error during exit execution: {e}")
         finally:
-            # ATOMIC CLEANUP: Eliminates PARTI phantom exit loops permanently
+            # Atomic cleanup eliminates phantom exit loops permanently
             self.active_trade = None
             dashboard_data["active_trade"] = None
 
     def run(self):
         """Main desk loop running every 1.5 seconds."""
-        logger.info("🚀 Desk Radar Engine Active. Tracking Global Catch-Up Signals...")
+        logger.info("🚀 Velocity Asymmetry Engine Active. Tracking Longs and Shorts...")
         last_briefing = 0
 
         while True:
@@ -562,24 +656,24 @@ class BitgetDeskPartnerEngine:
                 if self.active_trade:
                     self.manage_active_trade()
                 else:
-                    signal = self.scan_for_catchup_trap()
+                    signal = self.scan_for_velocity_asymmetry()
                     if signal:
                         self.enter_trade(signal)
 
-                # Dashboard Sync
+                # Sync Dashboard Data
                 dashboard_data["status"] = "RUNNING"
                 dashboard_data["mode"] = self.state_mgr.state["mode"]
                 dashboard_data["streak"] = self.state_mgr.state["consecutive_wins"]
                 dashboard_data["recent_trades"] = self.state_mgr.state["history"]
                 dashboard_data["last_update"] = datetime.utcnow().strftime("%H:%M:%S UTC")
 
-                # 15-Minute Desk Intelligence Briefing to Console
+                # 15-Minute Desk Intelligence Briefing
                 if time.time() - last_briefing >= 900:
                     last_briefing = time.time()
                     logger.info(
-                        f"📊 [15M DESK BRIEFING] Mode: {dashboard_data['mode']} | "
+                        f"📊 [15M BRIEFING] Mode: {dashboard_data['mode']} | "
                         f"Gauntlet: {dashboard_data['streak']}/{QUALIFICATION_TARGET_WINS} Wins | "
-                        f"Tracking: {dashboard_data['universe_size']} pairs"
+                        f"Active Universe: {dashboard_data['universe_size']} pairs"
                     )
 
                 time.sleep(1.5)
@@ -592,7 +686,7 @@ class BitgetDeskPartnerEngine:
 # SECTION 7: BOOTSTRAP ENTRY POINT
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Start Keep-Alive HTTP Server in Daemon Thread
+    # Start Keep-Alive Server on Port 10000 in Daemon Thread
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
 
