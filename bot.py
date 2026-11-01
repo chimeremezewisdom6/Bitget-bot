@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Triple-Ignition Quant Trading Bot - Bitget USDT-M Perpetual Swaps
-- Engine: 3-Minute Triple Ignition (Price Thrust + Volume Combustion + OI Expansion)
-- Exit 1: Grid 0.5% Peak Reverse (Immediately sells the second price drops 0.5% from highest peak)
-- Exit 2: 90-Second Dead-on-Arrival Kill Switch (Aborts immediately if no thrust within 90s)
-- Scanner: 860+ Active Liquid Universe (CoinGlass Worldwide + Bitget)
+Harmonic-Polarity Quant Trading Bot - Bitget USDT-M Perpetual Swaps
+- Longs: ALL THREE MUST BE PLUS (+) [Price + | OI + | Flow +]
+- Shorts: ALL THREE MUST BE MINUS (-) [Price - | OI - | Flow -]
+- Reject Traps: Never short when price dumps but OI is positive (+)
+- Exit 1: Grid 0.5% Peak Reverse (Instantly sells if price pulls back 0.50% from peak)
+- Exit 2: 90s Dead-on-Arrival Kill Switch (Aborts if no +0.30% thrust in 90 seconds)
 - Qualification: Strict 6-in-a-row Paper Gauntlet (1 -> 6) before Live Execution
 - Infrastructure: Render Port 10000 HTTP Keep-Alive & 15-Minute Telemetry
 """
@@ -89,12 +90,13 @@ MAX_SPREAD_PCT = 0.10              # Order book spread <= 0.10%
 SCANNER_WORKERS = 16               # Parallel threads for fast sweeps
 
 # ==============================================================================
-# 3-MINUTE TRIPLE IGNITION PARAMETERS (ALL EXPLICITLY DEFINED)
+# HARMONIC POLARITY TRIPLE IGNITION PARAMETERS
 # ==============================================================================
 MIN_3M_IGNITION_MOVE = 1.40        # Minimum 1.40% rapid push in the last 3 minutes
-MAX_3M_IGNITION_MOVE = 8.00        # Cap to avoid buying already exhausted spikes
-PEAK_PROXIMITY_CEILING = 0.25      # Current price must be within 0.25% of extreme
-MIN_3M_OI_GROWTH_PCT = 0.80        # Open interest must expand >= +0.80% in the 3m window
+MAX_3M_IGNITION_MOVE = 8.00        # Explicitly defined: Cap at 8.00%
+PEAK_PROXIMITY_CEILING = 0.25      # Must close within 0.25% of extreme (NOT falling back!)
+MIN_3M_OI_DELTA_PCT = 0.50         # Absolute minimum 0.50% OI change in 3 minutes
+MIN_FLOW_DOMINANCE_RATIO = 0.70    # At least 70% of 3m volume must match the trade direction
 
 # ==============================================================================
 # THE CRITICAL GRID & LIGHTNING-FAST ABORT RULES
@@ -281,13 +283,13 @@ class QuantBot:
                 buf.popleft()
 
     def get_3m_oi_delta(self, symbol: str) -> float:
-        """Calculates Open Interest percentage growth over the last 3 minutes."""
+        """Calculates Open Interest percentage delta over the last 3 minutes."""
         buf = self.history_buffer.get(symbol)
         if not buf or len(buf) < 2:
             return 0.0
 
         current_oi = buf[-1]["oi"]
-        target_time = buf[-1]["time"] - 180  # 3 minutes ago
+        target_time = buf[-1]["time"] - 180
         past = min(buf, key=lambda x: abs(x["time"] - target_time))
 
         if past["oi"] > 0:
@@ -316,17 +318,17 @@ class QuantBot:
         return None
 
     # --------------------------------------------------------------------------
-    # THE 3-MINUTE TRIPLE IGNITION ENGINE (PRICE + VOL + OI)
+    # HARMONIC POLARITY TRIPLE IGNITION ENGINE
     # --------------------------------------------------------------------------
     def evaluate_triple_ignition(self, symbol: str, ohlcv: List) -> Optional[Dict]:
         """
-        Evaluates the last 3 completed 1-minute candles for TRIPLE ALIGNMENT:
-        1. Price Thrust: Advancing consecutively, closing near peak, >= 1.40%
-        2. Volume Combustion: Volume expanding candle-over-candle
-        3. Open Interest Co-Expansion: Fresh leverage injection >= +0.80% in 3m
+        Enforces Harmonic Triple Polarity:
+        - LONG: ALL THREE MUST BE PLUS (+) [Price + | OI + | Flow +]
+        - SHORT: ALL THREE MUST BE MINUS (-) [Price - | OI - | Flow -]
+        - NEVER short when price is dumping but OI is positive (+)
         """
-        candles = ohlcv[-6:-1]            # 5 completed 1m candles
-        three_min_candles = candles[-3:]  # Last 3 completed minutes (C1, C2, C3)
+        candles = ohlcv[-6:-1]
+        three_min_candles = candles[-3:]
 
         c1, c2, c3 = three_min_candles[0], three_min_candles[1], three_min_candles[2]
         three_min_open = c1[1]
@@ -334,66 +336,91 @@ class QuantBot:
         three_min_move_pct = ((three_min_close - three_min_open) / three_min_open) * 100.0
         abs_move = abs(three_min_move_pct)
 
-        # 1. Price Thrust Threshold Check
         if abs_move < MIN_3M_IGNITION_MOVE or abs_move > MAX_3M_IGNITION_MOVE:
             return None
 
         five_min_high = max(c[2] for c in candles)
         five_min_low = min(c[3] for c in candles)
 
-        # 2. Volume Combustion Check (Expanding Volume across C1, C2, C3)
-        vol1, vol2, vol3 = c1[5], c2[5], c3[5]
-        if vol3 < (vol2 * 0.75) or (vol2 + vol3) <= 0:
-            return None  # Volume is drying up, not exploding
+        # 3-Minute Volume Flow Breakdown
+        buy_vol = sum(c[5] for c in three_min_candles if c[4] >= c[1])
+        sell_vol = sum(c[5] for c in three_min_candles if c[4] < c[1])
+        total_vol = buy_vol + sell_vol
+        if total_vol <= 0:
+            return None
 
-        # 3. Open Interest Co-Expansion Check
-        oi_3m_growth = self.get_3m_oi_delta(symbol)
+        oi_3m_delta = self.get_3m_oi_delta(symbol)
 
-        # ----------------------------------------------------------------------
-        # FRESH BUY IGNITION (Pump starting right now)
-        # ----------------------------------------------------------------------
+        # ======================================================================
+        # CASE 1: LONG IGNITION (ALL THREE MUST BE PLUS +)
+        # 1. Price is PLUS (+) (>= +1.40%)
+        # 2. OI is PLUS (+) (>= +0.50% fresh leverage inflow)
+        # 3. Flow is PLUS (+) (Buyers dominate >= 70% of 3m volume)
+        # ======================================================================
         if three_min_move_pct > 0:
-            # Proximity check: Must be closing at the very high of the move!
+            # Check Condition 2: OI MUST be PLUS (+)
+            if oi_3m_delta < MIN_3M_OI_DELTA_PCT:
+                return None  # Missing fresh leverage expansion
+
+            # Check Condition 3: Flow MUST be PLUS (+)
+            buyer_ratio = buy_vol / total_vol
+            if buyer_ratio < MIN_FLOW_DOMINANCE_RATIO:
+                return None  # Flow not strongly green
+
+            # Price Proximity: Closing at the high
             distance_from_high = ((five_min_high - three_min_close) / five_min_high) * 100.0
             if distance_from_high > PEAK_PROXIMITY_CEILING:
-                return None  # Stale move: already falling back!
+                return None  # Stale, falling back
 
             # Consecutive green advancement
             if c3[4] < c2[4] or c2[4] < c1[4]:
                 return None
 
-            ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 10.0) + (max(oi_3m_growth, 0) * 15.0)
+            ignition_score = 1000.0 + (abs_move * 25.0) + (buyer_ratio * 30.0) + (oi_3m_delta * 10.0)
             return {
                 "symbol": symbol,
                 "direction": "buy",
                 "net_change_pct": three_min_move_pct,
-                "oi_3m_pct": oi_3m_growth,
+                "oi_3m_pct": oi_3m_delta,
                 "score": ignition_score,
-                "engine": "TRIPLE_3MIN_IGNITION",
+                "engine": "HARMONIC_PLUS_TRIPLE_IGNITION",
                 "thrust_origin": c1[3]
             }
 
-        # ----------------------------------------------------------------------
-        # FRESH SELL IGNITION (Dump starting right now)
-        # ----------------------------------------------------------------------
+        # ======================================================================
+        # CASE 2: SHORT IGNITION (ALL THREE MUST BE MINUS -)
+        # 1. Price is MINUS (-) (<= -1.40%)
+        # 2. OI is MINUS (-) (<= -0.50% liquidation flush, NOT expanding!)
+        # 3. Flow is MINUS (-) (Sellers dominate >= 70% of 3m volume)
+        # ======================================================================
         else:
-            # Proximity check: Must be closing at the absolute low!
+            # Check Condition 2: OI MUST be MINUS (-)
+            # CRITICAL: If OI is positive or flat, REJECT! (Trapped short squeeze avoidance)
+            if oi_3m_delta > -MIN_3M_OI_DELTA_PCT:
+                return None
+
+            # Check Condition 3: Flow MUST be MINUS (-)
+            seller_ratio = sell_vol / total_vol
+            if seller_ratio < MIN_FLOW_DOMINANCE_RATIO:
+                return None  # Flow not strongly red
+
+            # Price Proximity: Closing at the low
             distance_from_low = ((three_min_close - five_min_low) / five_min_low) * 100.0
             if distance_from_low > PEAK_PROXIMITY_CEILING:
-                return None  # Stale move: already bouncing!
+                return None  # Stale, bouncing
 
             # Consecutive red advancement
             if c3[4] > c2[4] or c2[4] > c1[4]:
                 return None
 
-            ignition_score = 1000.0 + (abs_move * 25.0) + (vol3 / max(vol1, 1e-9) * 10.0) + (max(oi_3m_growth, 0) * 15.0)
+            ignition_score = 1000.0 + (abs_move * 25.0) + (seller_ratio * 30.0) + (abs(oi_3m_delta) * 10.0)
             return {
                 "symbol": symbol,
                 "direction": "sell",
                 "net_change_pct": three_min_move_pct,
-                "oi_3m_pct": oi_3m_growth,
+                "oi_3m_pct": oi_3m_delta,
                 "score": ignition_score,
-                "engine": "TRIPLE_3MIN_IGNITION",
+                "engine": "HARMONIC_MINUS_TRIPLE_IGNITION",
                 "thrust_origin": c1[2]
             }
 
@@ -449,8 +476,8 @@ class QuantBot:
 
         for cand in top_candidates:
             if self.anti_trap_check(cand["symbol"]):
-                logger.info(f"TRIPLE IGNITION CHAMPION: {cand['symbol']} "
-                            f"({cand['direction'].upper()} {cand['net_change_pct']:+.2f}% in 3m) | Score: {cand['score']:.1f}")
+                logger.info(f"HARMONIC CHAMPION: {cand['symbol']} via {cand['engine']} "
+                            f"({cand['direction'].upper()} {cand['net_change_pct']:+.2f}% | OI Delta: {cand['oi_3m_pct']:+.2f}%) | Score: {cand['score']:.1f}")
                 return cand
 
         return None
@@ -498,7 +525,7 @@ class QuantBot:
                 "leverage": 5
             }
             logger.info(f"[PAPER ENTER] {direction.upper()} on {symbol} @ ${current_price:.6f} | "
-                        f"3m Thrust: {candidate['net_change_pct']:+.2f}% | Gauntlet: {self.paper_wins}/6")
+                        f"3m Thrust: {candidate['net_change_pct']:+.2f}% (OI: {candidate['oi_3m_pct']:+.2f}%) | Gauntlet: {self.paper_wins}/6")
             return
 
         # Live Execution
@@ -651,7 +678,6 @@ class QuantBot:
             ticker = self.exchange.fetch_ticker(symbol)
             current_price = ticker["last"]
 
-            # Track tick-by-tick peak and calculate exact reversal
             if side == "buy":
                 pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
                 if current_price > trade["peak_price"]:
@@ -729,7 +755,7 @@ class QuantBot:
         if self.completed_trade_dossiers:
             d = self.completed_trade_dossiers[-1]
             last_dossier_str = (
-                f"{d['symbol']} -> PnL: {d['pnl_pct']:+.2f}% | "
+                f"{d['symbol']} [{d['engine']}] -> PnL: {d['pnl_pct']:+.2f}% | "
                 f"Peak: +{d['peak_mfe']:.2f}% | Worst: {d['worst_mae']:.2f}% | "
                 f"Duration: {d['duration_min']}m ({d['reason']})"
             )
@@ -755,7 +781,7 @@ class QuantBot:
     # MAIN EVENT LOOP
     # --------------------------------------------------------------------------
     def run(self):
-        logger.info("Triple-Ignition Grid-Trailing Quant Engine active. Fast event loop running...")
+        logger.info("Harmonic-Polarity Grid-Trailing Quant Engine active. Event loop running...")
 
         while True:
             try:
@@ -773,7 +799,7 @@ class QuantBot:
 
                 self.print_desk_briefing()
 
-                # If managing an open trade, check the 0.5% grid wall every second
+                # Check the 0.5% grid wall every second during active trade
                 if self.active_trade:
                     self.monitor_active_trade()
                     time.sleep(1)
