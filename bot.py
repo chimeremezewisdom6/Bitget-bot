@@ -7,7 +7,6 @@ STRATEGIES: 6 INSTITUTIONAL MODULES + 5-MIN BIRTH WINDOW + BTC SHIELD
 EXIT ENGINE: ORGANIC MOMENTUM FADE (NO 90S DOA TIMER - PURE GLIDE)
 LEARNING ENGINE: TRUE DYNAMIC AUTOPSY (READS LIVE HISTORY & WRITES LESSONS)
 GAUNTLET: STRICT 8 CONSECUTIVE WINS IN PAPER MODE BEFORE LIVE UNLOCK
-INFRASTRUCTURE: RENDER PORT 10000 INSTANT BIND (NO TIMEOUTS)
 ===============================================================================
 """
 
@@ -40,7 +39,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 
 # -----------------------------------------------------------------------------
-# SECTION 2: SYSTEM CONSTANTS & GLOBAL RULES
+# SECTION 2: SYSTEM CONSTANTS & GLOBAL RULES (GLOBALLY DEFINED)
 # -----------------------------------------------------------------------------
 BLACKLIST = [
     "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP", 
@@ -52,7 +51,8 @@ MIN_COINGLASS_GLOBAL_VOLUME = 1_000_000.0
 # Freshness Filter: Impulse must be <= 5 minutes old (Minutes 1, 2, 3, 4, 5)
 MAX_IMPULSE_AGE_SECONDS = 300
 
-# Exit Parameters (Organic Momentum Fade - No DOA Timer)
+# Exit Parameters
+MAX_LIFECYCLE_SECONDS = 900        # 15-Minute Maximum Trade Hold
 LIVE_HARD_STOP_PCT = 0.90          # Structural Emergency Hard Stop in Live Mode
 
 # Gauntlet: 8 Consecutive Wins
@@ -225,7 +225,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Master Matrix scanning for fresh <5m momentum...</p>"
+        active_html = "<p style='color: #888;'>Master Matrix scanning worldwide markets (Instant Port Bind)...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             fade_status = "<span style='color: #f59e0b; font-weight: bold;'>FADING (EXIT ARMED)</span>" if at.get("is_fading") else "<span style='color: #4ade80;'>INERTIAL GLIDE ACTIVE</span>"
@@ -235,7 +235,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <p><b>Strategy:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
                 <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
                 <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
-                <p><b>Fade Status:</b> {fade_status} | <b>Timer:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s (No DOA Limit)</p>
+                <p><b>Fade Status:</b> {fade_status} | <b>Timer:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s</p>
             </div>
             """
 
@@ -401,29 +401,14 @@ class MasterDeskEngine:
             pass
 
     def check_impulse_freshness(self, history):
-        """
-        THE 5-MINUTE BIRTH WINDOW FILTER:
-        Calculates when the current impulse started. Returns True only if
-        the impulse began <= 5 minutes ago (avoiding old moves / buying tops).
-        """
         if len(history) < 10:
             return False
-        
-        prices = [h["price"] for h in history]
-        now_t = time.time()
-        
-        # Find the last local swing extreme (trough for long, peak for short)
-        # We ensure the recent momentum acceleration started recently.
         recent_ticks = list(history)[-10:]
-        p_start = recent_ticks[0]["price"]
-        p_end = recent_ticks[-1]["price"]
-        
         move_duration = recent_ticks[-1]["time"] - recent_ticks[0]["time"]
-        # If the move took less than 300 seconds (5 mins) to build, it's fresh!
         return move_duration <= MAX_IMPULSE_AGE_SECONDS
 
     # -------------------------------------------------------------------------
-    # 6 STRATEGY MODULES (WITH 5-MIN BIRTH WINDOW & 1.5%+ MASS GATE)
+    # 6 STRATEGY MODULES
     # -------------------------------------------------------------------------
     def eval_module_1_regime_shift(self, base_sym, latest, history):
         if not self.check_impulse_freshness(history): return None
@@ -554,7 +539,7 @@ class MasterDeskEngine:
                 top["setup"] += "+WHALE_WALL"
 
             top["entry_price"] = exec_price
-            logger.info(f"🎯 FRESH MOMENTUM SIGNAL (<=5m Birth): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
+            logger.info(f"🎯 SIGNAL: {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
             return top
 
         return None
@@ -607,7 +592,7 @@ class MasterDeskEngine:
                 self.active_trade = None
 
     def manage_active_trade(self):
-        """Manages active trade with NO DOA timer. Relies on Organic Fade & Lifecycle."""
+        """Manages active trade with NO DOA timer. Exits strictly on Organic Fade or Lifecycle."""
         if not self.active_trade: return
         trade = self.active_trade
         symbol, side = trade["symbol"], trade["side"]
@@ -664,7 +649,6 @@ class MasterDeskEngine:
             
             if gain_pct >= 1.50:
                 self.learning_engine.autopsy_winning_trade(symbol, side, gain_pct, setup_name)
-                self.print_dynamic_learning_report()
 
             self.cooldowns[symbol] = time.time()
         except Exception as e:
@@ -672,20 +656,6 @@ class MasterDeskEngine:
         finally:
             self.active_trade = None
             dashboard_data["active_trade"] = None
-
-    def print_dynamic_learning_report(self):
-        history = self.state_mgr.state["history"]
-        dynamic_insight = self.learning_engine.synthesize_live_lessons(history)
-        
-        logger.info(
-            f"\n"
-            f"╔════════════════════════════════════════════════════════════════════╗\n"
-            f"║          🧠 TRUE DYNAMIC LEARNING ENGINE AUTOPSY REPORT            ║\n"
-            f"╠════════════════════════════════════════════════════════════════════╣\n"
-            f"║ {dynamic_insight:<66} ║\n"
-            f"║ Master Features Logged: {len(self.learning_engine.data['scenarios'])} scenarios stored securely.         ║\n"
-            f"╚════════════════════════════════════════════════════════════════════╝"
-        )
 
     def run(self):
         logger.info("🚀 Master Quantitative Desk Engine Online (Instant Port Bind + 5-Min Birth Window)...")
