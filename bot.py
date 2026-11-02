@@ -3,7 +3,8 @@
 ===============================================================================
 BOT.PY: MASTER QUANTITATIVE DESK ENGINE (BITGET USDT-M PERPETUALS)
 MASTER RADAR: COINGLASS_FEED.PY (TOP-8 GLOBAL MATRIX)
-STRATEGIES: 6 INSTITUTIONAL MODULES (LONGS & SHORTS) + BTC MACRO CASCADE SHIELD
+STRATEGIES: 6 INSTITUTIONAL MODULES + INERTIAL MOMENTUM MASS GATE + BTC SHIELD
+EXIT ENGINE: ORGANIC MOMENTUM FADE (NO 90S DOA TIMER - FULL BREATHING ROOM)
 LEARNING ENGINE: CERTIFIED AUTOPSY PROTOCOL (TRACKS 10 MASTER FEATURES)
 GAUNTLET: STRICT 8 CONSECUTIVE WINS IN PAPER MODE BEFORE LIVE UNLOCK
 ===============================================================================
@@ -26,7 +27,7 @@ import ccxt
 from coinglass_feed import get_coinglass_data
 
 # -----------------------------------------------------------------------------
-# SECTION 1: LOGGING CONFIGURATION (CLEAN TELEMETRY)
+# SECTION 1: LOGGING CONFIGURATION
 # -----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -47,13 +48,11 @@ BLACKLIST = [
 
 MIN_COINGLASS_GLOBAL_VOLUME = 1_000_000.0
 
-# Exit Parameters (Organic Momentum Fade)
-DOA_TIMEOUT_SECONDS = 90
-DOA_FORWARD_THRESHOLD_PCT = 0.30
-MAX_LIFECYCLE_SECONDS = 900
-LIVE_HARD_STOP_PCT = 0.90
+# Exit Parameters (Organic Momentum Fade - No 90s DOA Timer)
+MAX_LIFECYCLE_SECONDS = 900        # 15-Minute Maximum Trade Hold
+LIVE_HARD_STOP_PCT = 0.90          # Structural Emergency Hard Stop in Live Mode
 
-# Gauntlet: Upgraded to Strict 8 Consecutive Wins
+# Gauntlet: 8 Consecutive Wins
 QUALIFICATION_TARGET_WINS = 8
 COOLDOWN_SECONDS = 600
 ALLOCATION_PCT = 0.90
@@ -123,10 +122,10 @@ class LearningEngine:
                 "setup": setup_name,
                 "gain_pct": round(gain_pct, 2),
                 "catalyst": f"High institutional mass injection during {setup_name} expansion.",
-                "scenario_desc": f"Coin {symbol} triggered {side.upper()} via {setup_name}, achieving +{gain_pct:.2f}% despite temporary micro-fades.",
-                "desk_advice": "Enter immediately upon multi-exchange volume synchronization. Trust inertial momentum carry-through.",
-                "bad_side": "Amateur traders panic-exit during initial 45-second micro-consolidations, triggering premature stop-outs.",
-                "safeguard": "Never use short-term time limits. Rely strictly on Organic Momentum Fade exit to capture full 1.5%+ extension."
+                "scenario_desc": f"Coin {symbol} triggered {side.upper()} via {setup_name}, achieving +{gain_pct:.2f}% through inertial carry-through.",
+                "desk_advice": "Enter immediately upon multi-exchange volume synchronization. Trust inertial momentum without time limits.",
+                "bad_side": "Amateur traders panic-exit during initial micro-consolidations when arbitrary timers are used.",
+                "safeguard": "Rely strictly on Organic Momentum Fade exit to capture full 1.5%+ extension."
             }
             self.data["scenarios"].append(scenario)
             if len(self.data["scenarios"]) > 10:
@@ -233,7 +232,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Master Matrix scanning worldwide markets (Bi-Directional)...</p>"
+        active_html = "<p style='color: #888;'>Master Matrix scanning worldwide markets (No DOA Timer)...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             fade_status = "<span style='color: #f59e0b; font-weight: bold;'>FADING (EXIT ARMED)</span>" if at.get("is_fading") else "<span style='color: #4ade80;'>INERTIAL GLIDE ACTIVE</span>"
@@ -243,7 +242,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <p><b>Strategy:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
                 <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
                 <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
-                <p><b>Fade Status:</b> {fade_status} | <b>Timer:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s (DOA: {DOA_TIMEOUT_SECONDS}s)</p>
+                <p><b>Fade Status:</b> {fade_status} | <b>Timer:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s (No DOA Limit)</p>
             </div>
             """
 
@@ -279,7 +278,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>⚡ Certified Master Desk (Bi-Directional Engine)</h2>
+            <h2>⚡ Certified Master Desk (Learning Engine Active)</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
@@ -314,10 +313,7 @@ def start_http_server():
     server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     server.serve_forever()
 
-# -----------------------------------------------------------------------------
-# SECTION 7: MASTER DESK ENGINE (BI-DIRECTIONAL & CERTIFIED)
-# -----------------------------------------------------------------------------
-class MasterDeskEngine:
+class CertifiedMasterEngine:
     def __init__(self):
         self.state_mgr = StateManager()
         self.learning_engine = LearningEngine()
@@ -406,16 +402,16 @@ class MasterDeskEngine:
             pass
 
     # -------------------------------------------------------------------------
-    # 6 STRATEGY MODULES (BI-DIRECTIONAL: LONGS & SHORTS)
+    # 6 STRATEGY MODULES (WITH 1.5%+ ACTIVE MOMENTUM GATE)
     # -------------------------------------------------------------------------
     def eval_module_1_regime_shift(self, base_sym, latest):
         p5m = latest["price_5m"]
         p15m = latest["price_15m"]
         oi15m = latest["oi_15m"]
-        if p15m >= 1.20 and p15m >= 1.50 and oi15m >= 0.80:
-            return {"side": "buy", "setup": "PLAY1_MTF_REGIME_SHIFT", "score": 96}
-        elif p5m <= -1.20 and p15m <= -1.50 and oi15m <= -0.80:
-            return {"side": "sell", "setup": "PLAY1_MTF_REGIME_SHIFT", "score": 96}
+        if p15m >= 1.80 and p5m >= 1.20 and oi15m >= 1.00:
+            return {"side": "buy", "setup": "PLAY1_INERTIAL_REGIME_SHIFT", "score": 96}
+        elif p15m <= -1.80 and p5m <= -1.20 and oi15m <= -1.00:
+            return {"side": "sell", "setup": "PLAY1_INERTIAL_REGIME_SHIFT", "score": 96}
         return None
 
     def eval_module_2_exhaustion_wiggle(self, base_sym, latest, history):
@@ -424,10 +420,10 @@ class MasterDeskEngine:
         oi5m = latest["oi_5m"]
         recent = [h["price"] for h in list(history)[-6:]]
         wiggle = (max(recent) - min(recent)) / min(recent) * 100.0 if min(recent) > 0 else 0
-        if p5m >= 1.50 and oi5m <= -0.40 and wiggle < 0.20:
-            return {"side": "sell", "setup": "PLAY2_WIGGLE_TOP", "score": 92}
-        elif p5m <= -1.50 and oi5m >= 0.40 and wiggle < 0.20:
-            return {"side": "buy", "setup": "PLAY2_WIGGLE_BOTTOM", "score": 92}
+        if p5m >= 1.80 and oi5m <= -0.50 and wiggle < 0.20:
+            return {"side": "sell", "setup": "PLAY2_INERTIAL_WIGGLE_TOP", "score": 92}
+        elif p5m <= -1.50 and oi5m >= 0.50 and wiggle < 0.20:
+            return {"side": "buy", "setup": "PLAY2_INERTIAL_WIGGLE_BOTTOM", "score": 92}
         return None
 
     def eval_module_3_amplified_3m(self, base_sym, latest, history):
@@ -437,11 +433,11 @@ class MasterDeskEngine:
         if p_3m <= 0: return None
         move = abs((p_cur - p_3m) / p_3m * 100.0)
         p5m = latest["price_5m"]
-        if move >= 1.30 and abs(p5m) >= 1.00:
+        if move >= 1.50 and abs(p5m) >= 1.20:
             if p_cur > p_3m and latest["oi_5m"] < 0:
-                return {"side": "sell", "setup": "PLAY3_AMPLIFIED_EXHAUSTION", "score": 89}
+                return {"side": "sell", "setup": "PLAY3_INERTIAL_EXHAUSTION", "score": 89}
             elif p_cur < p_3m and latest["oi_5m"] > 0:
-                return {"side": "buy", "setup": "PLAY3_AMPLIFIED_EXHAUSTION", "score": 89}
+                return {"side": "buy", "setup": "PLAY3_INERTIAL_EXHAUSTION", "score": 89}
         return None
 
     def eval_module_4_stepwise_tournament(self, base_sym, history):
@@ -452,16 +448,20 @@ class MasterDeskEngine:
             if abs((prices[i] - prices[i-1]) / prices[i-1] * 100.0) > 1.50: return None
         up = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i-1]) / prices[i-1] * 100.0 >= 0.30)
         down = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i-1]) / prices[i-1] * 100.0 <= -0.30)
+        
+        last_move_5m = abs((prices[-1] - prices[-5]) / prices[-5] * 100.0) if len(prices) >= 5 else 1.5
+        if last_move_5m < 1.20: return None
+
         if down > 0 and (up / down) >= 3.0 and up >= 4:
-            return {"side": "buy", "setup": "PLAY4_STEPWISE_TOURNAMENT", "score": 86}
+            return {"side": "buy", "setup": "PLAY4_INERTIAL_STEPWISE", "score": 86}
         elif up > 0 and (down / up) >= 3.0 and down >= 4:
-            return {"side": "sell", "setup": "PLAY4_STEPWISE_TOURNAMENT", "score": 86}
+            return {"side": "sell", "setup": "PLAY4_INERTIAL_STEPWISE", "score": 86}
         return None
 
     def eval_module_5_pressure_cooker(self, latest):
         p15m, p5m, oi15m = latest["price_15m"], latest["price_5m"], latest["oi_15m"]
-        if (0.80 <= p15m <= 1.80) and abs(p5m) >= 1.00 and oi15m <= -1.50:
-            return {"side": "sell", "setup": "PLAY5_PRESSURE_COOKER", "score": 94}
+        if (1.00 <= p15m <= 2.00) and abs(p5m) >= 1.20 and oi15m <= -1.50:
+            return {"side": "sell", "setup": "PLAY5_INERTIAL_PRESSURE_COOKER", "score": 94}
         return None
 
     def eval_module_6_whale_wall(self, bitget_symbol):
@@ -471,10 +471,10 @@ class MasterDeskEngine:
             bids, asks = ob.get("bids", []), ob.get("asks", [])
             if not bids or not asks: return None
             b_vol, a_vol = sum(b[1] for b in bids[:10]), sum(a[1] for a in asks[:10])
-            if a_vol > 0 and (b_vol / a_vol) >= 4.0:
-                return {"side": "buy", "setup": "PLAY6_WHALE_WALL", "score": 88}
-            elif b_vol > 0 and (a_vol / b_vol) >= 4.0:
-                return {"side": "sell", "setup": "PLAY6_WHALE_WALL", "score": 88}
+            if a_vol > 0 and (b_vol / a_vol) >= 4.5:
+                return {"side": "buy", "setup": "PLAY6_INERTIAL_WHALE_WALL", "score": 88}
+            elif b_vol > 0 and (a_vol / b_vol) >= 4.5:
+                return {"side": "sell", "setup": "PLAY6_INERTIAL_WHALE_WALL", "score": 88}
         except Exception:
             pass
         return None
@@ -534,7 +534,7 @@ class MasterDeskEngine:
                 top["setup"] += "+WHALE_WALL"
 
             top["entry_price"] = exec_price
-            logger.info(f"🎯 MASTER SIGNAL (Bi-Directional): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
+            logger.info(f"🎯 CERTIFIED SIGNAL (No DOA Timer): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
             return top
 
         return None
@@ -587,6 +587,7 @@ class MasterDeskEngine:
                 self.active_trade = None
 
     def manage_active_trade(self):
+        """Manages active trade with NO 90s DOA timer. Relies on Organic Fade & Lifecycle."""
         if not self.active_trade: return
         trade = self.active_trade
         symbol, side = trade["symbol"], trade["side"]
@@ -607,7 +608,7 @@ class MasterDeskEngine:
                 trade["last_peak_time"] = now
             if gain_pct > trade["highest_gain_pct"]: trade["highest_gain_pct"] = gain_pct
 
-        if (now - trade["last_peak_time"]) >= 60 and trade["highest_gain_pct"] >= 0.40:
+        if (now - trade["last_peak_time"]) >= 60 and trade["highest_gain_pct"] >= 0.50:
             trade["is_fading"] = True
 
         dashboard_data["active_trade"] = {
@@ -619,8 +620,8 @@ class MasterDeskEngine:
         }
 
         exit_reason = None
+        # NO 90S DOA KILL SWITCH! Trade has full breathing room.
         if trade["is_fading"] and gain_pct >= 0.30: exit_reason = "ORGANIC_MOMENTUM_FADE"
-        elif elapsed >= DOA_TIMEOUT_SECONDS and trade["highest_gain_pct"] < DOA_FORWARD_THRESHOLD_PCT: exit_reason = "90S_DOA_KILL_SWITCH"
         elif elapsed >= MAX_LIFECYCLE_SECONDS: exit_reason = "15M_LIFECYCLE_EXHAUSTION"
         elif not trade["is_paper"] and gain_pct <= -LIVE_HARD_STOP_PCT: exit_reason = "HARD_STOP_LOSS"
 
@@ -640,10 +641,9 @@ class MasterDeskEngine:
             else:
                 logger.info(f"📝 [PAPER EXIT] Closed {side.upper()} {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
             
-            # Record in Gauntlet state
             self.state_mgr.record_trade(symbol, side, gain_pct, reason, setup_name, is_paper)
             
-            # If win >= 1.5%, trigger Learning Engine Autopsy
+            # Trigger Certified Learning Autopsy if win >= 1.5%
             if gain_pct >= 1.50:
                 self.learning_engine.autopsy_winning_trade(symbol, side, gain_pct, setup_name)
                 self.print_certified_learning_report(symbol, setup_name, gain_pct)
@@ -656,7 +656,6 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def print_certified_learning_report(self, symbol, setup_name, gain_pct):
-        """Prints the 5-Part Certified Intelligence Report upon hitting 1.5%+ wins."""
         scenarios = self.learning_engine.data["scenarios"]
         latest_scen = scenarios[-1] if scenarios else {}
         
@@ -680,7 +679,7 @@ class MasterDeskEngine:
         )
 
     def run(self):
-        logger.info("🚀 Master Quantitative Desk Engine Online (8-Win Gauntlet + Certified Learning Active)...")
+        logger.info("🚀 Certified Master Desk Online (No DOA Timer + Learning Engine Active)...")
         last_sync = 0
 
         while True:
@@ -711,5 +710,5 @@ class MasterDeskEngine:
 if __name__ == "__main__":
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
-    engine = MasterDeskEngine()
+    engine = CertifiedMasterEngine()
     engine.run()
