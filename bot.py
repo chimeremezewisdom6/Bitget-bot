@@ -3,7 +3,7 @@
 ===============================================================================
 BOT.PY: MASTER QUANTITATIVE DESK ENGINE (BITGET USDT-M PERPETUALS)
 MASTER RADAR: COINGLASS_FEED.PY (TOP-8 GLOBAL MATRIX)
-STRATEGIES: 6 INSTITUTIONAL MODULES + BTC MACRO CASCADE SHIELD
+STRATEGIES: 6 INSTITUTIONAL MODULES + ACTIVE 1% MOMENTUM GATE + BTC SHIELD
 GAUNTLET: STRICT 8 CONSECUTIVE WINS IN PAPER MODE BEFORE LIVE UNLOCK
 ===============================================================================
 """
@@ -161,7 +161,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Master Matrix scanning worldwide markets...</p>"
+        active_html = "<p style='color: #888;'>Master Matrix scanning worldwide markets (Active 1%+ Gate)...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             fade_status = "<span style='color: #f59e0b; font-weight: bold;'>FADING (EXIT ARMED)</span>" if at.get("is_fading") else "<span style='color: #4ade80;'>ACTIVE PROPULSION</span>"
@@ -330,14 +330,17 @@ class MasterDeskEngine:
             pass
 
     # -------------------------------------------------------------------------
-    # 6 STRATEGY MODULES
+    # 6 STRATEGY MODULES (WITH ACTIVE 1%+ MOMENTUM GATE)
     # -------------------------------------------------------------------------
     def eval_module_1_regime_shift(self, base_sym, latest):
+        p5m = latest["price_5m"]
         p15m = latest["price_15m"]
         oi15m = latest["oi_15m"]
-        if p15m >= 1.40 and oi15m >= 0.80:
+        
+        # Active Momentum Gate: Must be actively thrusting >= 1.0% right now
+        if p15m >= 1.40 and p5m >= 1.00 and oi15m >= 0.80:
             return {"side": "buy", "setup": "PLAY1_MTF_REGIME_SHIFT", "score": 96}
-        elif p15m <= -1.40 and oi15m <= -0.80:
+        elif p15m <= -1.40 and p5m <= -1.00 and oi15m <= -0.80:
             return {"side": "sell", "setup": "PLAY1_MTF_REGIME_SHIFT", "score": 96}
         return None
 
@@ -359,7 +362,8 @@ class MasterDeskEngine:
         p_cur, p_3m = h[-1]["price"], h[-6]["price"]
         if p_3m <= 0: return None
         move = abs((p_cur - p_3m) / p_3m * 100.0)
-        if move >= 1.30:
+        p5m = latest["price_5m"]
+        if move >= 1.30 and abs(p5m) >= 1.00:
             if p_cur > p_3m and latest["oi_5m"] < 0:
                 return {"side": "sell", "setup": "PLAY3_AMPLIFIED_EXHAUSTION", "score": 89}
             elif p_cur < p_3m and latest["oi_5m"] > 0:
@@ -375,6 +379,10 @@ class MasterDeskEngine:
             if abs((prices[i] - prices[i-1]) / prices[i-1] * 100.0) > 1.50: return None
         up = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i-1]) / prices[i-1] * 100.0 >= 0.30)
         down = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i-1]) / prices[i-1] * 100.0 <= -0.30)
+        
+        last_move_5m = abs((prices[-1] - prices[-5]) / prices[-5] * 100.0) if len(prices) >= 5 else 1.0
+        if last_move_5m < 1.00: return None
+
         if down > 0 and (up / down) >= 3.0 and up >= 4:
             return {"side": "buy", "setup": "PLAY4_STEPWISE_TOURNAMENT", "score": 86}
         elif up > 0 and (down / up) >= 3.0 and down >= 4:
@@ -382,8 +390,8 @@ class MasterDeskEngine:
         return None
 
     def eval_module_5_pressure_cooker(self, latest):
-        p15m, oi15m = latest["price_15m"], latest["oi_15m"]
-        if (0.80 <= p15m <= 1.80) and oi15m <= -1.50:
+        p15m, p5m, oi15m = latest["price_15m"], latest["price_5m"], latest["oi_15m"]
+        if (0.80 <= p15m <= 1.80) and abs(p5m) >= 1.00 and oi15m <= -1.50:
             return {"side": "sell", "setup": "PLAY5_PRESSURE_COOKER", "score": 94}
         return None
 
@@ -457,7 +465,7 @@ class MasterDeskEngine:
                 top["setup"] += "+WHALE_WALL"
 
             top["entry_price"] = exec_price
-            logger.info(f"🎯 MASTER SIGNAL: {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
+            logger.info(f"🎯 MASTER SIGNAL (1%+ Active Gate): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
             return top
 
         return None
@@ -571,7 +579,7 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def run(self):
-        logger.info("🚀 Master Quantitative Desk Engine Online (8-Win Gauntlet Active)...")
+        logger.info("🚀 Master Quantitative Desk Engine Online (8-Win Gauntlet + 1% Gate Active)...")
         last_sync = 0
 
         while True:
