@@ -366,9 +366,11 @@ class MasterDeskEngine:
                 return {"side": "buy", "setup": "PLAY3_AMPLIFIED_EXHAUSTION", "score": 89}
         return None
 
-    def eval_module_4_stepwise(self, base_sym, history):
+    def eval_module_4_stepwise_tournament(self, base_sym, history):
+        """Unified method name matching arbitrator call."""
         if len(history) < 15: return None
         prices = [h["price"] for h in history]
+        if len(prices) < 2: return None
         for i in range(1, len(prices)):
             if abs((prices[i] - prices[i-1]) / prices[i-1] * 100.0) > 1.50: return None
         up = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i-1]) / prices[i-1] * 100.0 >= 0.30)
@@ -401,12 +403,11 @@ class MasterDeskEngine:
         return None
 
     def check_bitcoin_macro_shield(self):
-        """BTC Cascade Shield: Blocks longs if Bitcoin is dumping hard."""
         btc_buf = self.cg_buffer.get("BTC", deque())
         if len(btc_buf) >= 5:
             btc_15m = btc_buf[-1]["price_15m"]
             if btc_15m <= -2.00:
-                return True  # CASCADE DETECTED
+                return True
         return False
 
     def run_master_arbitrator(self):
@@ -440,11 +441,9 @@ class MasterDeskEngine:
             if s5: candidates.append({**s5, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
 
         if candidates:
-            # Apply BTC Cascade Shield: Filter out Longs if BTC is crashing
             if btc_cascading:
                 candidates = [c for c in candidates if c["side"] == "sell"]
-                if not candidates:
-                    return None
+                if not candidates: return None
 
             candidates.sort(key=lambda x: x["score"], reverse=True)
             top = candidates[0]
