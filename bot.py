@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: COINGLASS WORLDWIDE LEADERBOARD TOURNAMENT ENGINE (CLEAN TELEMETRY)
-EXCHANGE: BITGET USDT-M PERPETUALS | DATA FEED: COINGLASS_FEED.PY
-STRATEGY: 15-MINUTE VELOCITY ASYMMETRY (DAVID VS. SAMUEL) NO-FIXED-HURDLE RANKING
-INFRASTRUCTURE: RENDER PORT 10000 KEEP-ALIVE SERVER | GAUNTLET 1 -> 6 WINS
+BOT.PY: 6-MODULE ARBITRATED INSTITUTIONAL DESK ENGINE (BITGET USDT-M)
+STRATEGIES:
+  1. Multi-Timeframe Regime Shift (4H Capitulation -> 15M Ignition)
+  2. Exhaustion Divergence ("The Wiggle Trap" - Price vs. OI Divergence)
+  3. Amplified 3-Minute Exhaustion Climax (Accelerating Decay Snapback)
+  4. 20-Minute Stepwise Ratio Tournament (Clean Auction Waves, Anti-Spike)
+  5. Pressure Cooker Disconnect (Metrics Die, Price Floats -> Short Flush)
+  6. 24-Hour Whale Liquidity Magnet (Order Book Wall Imbalance)
+EXIT SYSTEM:
+  - Organic Momentum Fade (Velocity Rollover + Wiggle Stall + OI Exhaustion)
+  - 90-Second Dead-on-Arrival (DOA) Kill Switch (< +0.30% Forward Thrust)
+  - 0.90% Emergency Live Hard Stop
+INFRASTRUCTURE:
+  - Render Port 10000 HTTP Keep-Alive Server (HEAD 200 OK & GET Dashboard)
+  - Python 3.12 Timezone-Aware UTC Standard
+  - Qualification Gauntlet (1 -> 6 Consecutive Wins) in qualification_state.json
 ===============================================================================
 """
 
@@ -31,7 +43,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("LeaderboardDeskEngine")
+logger = logging.getLogger("InstitutionalDeskEngine")
 
 # Silence noisy third-party loggers
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -70,19 +82,20 @@ def load_coinglass_module():
 load_coinglass_module()
 
 # -----------------------------------------------------------------------------
-# SECTION 3: SYSTEM CONSTANTS & TOURNAMENT PARAMETERS
+# SECTION 3: SYSTEM CONSTANTS & STRATEGY PARAMETERS
 # -----------------------------------------------------------------------------
 BLACKLIST = [
     "EUV", "PARTI", "BTW", "IDOL", "PAXG", "CSOP", 
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 ]
 
-LOOKBACK_SECONDS = 900             # 15-Minute Lookback Window
-MAX_TRADE_LIFECYCLE_SECONDS = 900  # 15-Minute Maximum Trade Hold (Rotate to new leader)
-VELOCITY_DECAY_RATIO = 2.0         # Armed when speed ratio collapses from peak to <= 2.0x
-PEAK_REVERSE_PULLBACK_PCT = 0.50   # 0.5% Peak Reverse Trailing Wall
+MIN_24H_VOLUME_USDT = 1_000_000.0  # $1M Liquidity Gate
+BUFFER_RETENTION_SECONDS = 1200    # 20 Minutes of Rolling High-Resolution Ticks
+
+# Exit Parameters (Organic Fade Engine - No Fixed 0.5% Pullback)
 DOA_TIMEOUT_SECONDS = 90           # 90-Second Dead-on-Arrival Kill Switch
 DOA_FORWARD_THRESHOLD_PCT = 0.30   # Must gain at least +0.30% in 90s or abort
+MAX_LIFECYCLE_SECONDS = 900        # 15-Minute Maximum Trade Hold
 LIVE_HARD_STOP_PCT = 0.90          # Structural Emergency Hard Stop in Live Mode
 
 # Gauntlet & Execution Parameters
@@ -144,7 +157,7 @@ class StateManager:
             except Exception as e:
                 logger.error(f"Error saving state: {e}")
 
-    def record_trade(self, symbol, side, gain_pct, exit_reason, is_paper):
+    def record_trade(self, symbol, side, gain_pct, exit_reason, setup_name, is_paper):
         with self.lock:
             self.state["total_trades"] += 1
             is_win = gain_pct > 0.0
@@ -153,14 +166,14 @@ class StateManager:
                 self.state["total_wins"] += 1
                 if self.state["mode"] == "PAPER":
                     self.state["consecutive_wins"] += 1
-                    logger.info(f"🏆 PAPER WIN! Streak: {self.state['consecutive_wins']}/{QUALIFICATION_TARGET_WINS}")
+                    logger.info(f"🏆 PAPER WIN! Streak: {self.state['consecutive_wins']}/{QUALIFICATION_TARGET_WINS} | Strategy: {setup_name}")
                     if self.state["consecutive_wins"] >= QUALIFICATION_TARGET_WINS:
                         self.state["mode"] = "LIVE"
                         logger.info("🚀 GAUNTLET COMPLETED! AUTHORIZING LIVE TRADING ENGINE!")
             else:
                 self.state["total_losses"] += 1
                 if self.state["mode"] == "PAPER":
-                    logger.warning(f"❌ PAPER LOSS. Streak reset to 0/{QUALIFICATION_TARGET_WINS}")
+                    logger.warning(f"❌ PAPER LOSS. Streak reset to 0/{QUALIFICATION_TARGET_WINS} | Strategy: {setup_name}")
                     self.state["consecutive_wins"] = 0
 
             trade_log = {
@@ -168,6 +181,7 @@ class StateManager:
                 "symbol": symbol,
                 "side": side.upper(),
                 "gain_pct": round(gain_pct, 3),
+                "setup": setup_name,
                 "exit_reason": exit_reason,
                 "mode": "PAPER" if is_paper else "LIVE",
                 "result": "WIN" if is_win else "LOSS"
@@ -186,7 +200,6 @@ dashboard_data = {
     "mode": "PAPER",
     "streak": 0,
     "universe_size": 0,
-    "cg_synced_pairs": 0,
     "active_trade": None,
     "recent_trades": [],
     "last_update": ""
@@ -194,7 +207,7 @@ dashboard_data = {
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
-        """Silences Render's keep-alive ping without 501 errors."""
+        """Silences Render's keep-alive health pings with 200 OK."""
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
@@ -205,17 +218,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>No active positions. Scanning 15m order flow...</p>"
+        active_html = "<p style='color: #888;'>Scanning 6-module order flow across all pairs...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
-            fade_status = "<span style='color: #f59e0b; font-weight: bold;'>ARMED (FADING)</span>" if at.get("velocity_decayed") else "<span style='color: #4ade80;'>ACTIVE PROPULSION</span>"
+            fade_status = "<span style='color: #f59e0b; font-weight: bold;'>FADING DETECTED (PREPARING EXIT)</span>" if at.get("is_fading") else "<span style='color: #4ade80;'>ACTIVE MOMENTUM EXPANSION</span>"
             active_html = f"""
             <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
                 <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE POSITION: {at['symbol']} ({at['side'].upper()})</h3>
-                <p><b>Mode:</b> {at['mode']} | <b>Entry Price:</b> {at['entry_price']} | <b>Current Price:</b> {at['current_price']}</p>
+                <p><b>Strategy Module:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
+                <p><b>Entry Price:</b> {at['entry_price']} | <b>Current Price:</b> {at['current_price']}</p>
                 <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
-                <p><b>Speed Ratio:</b> {at.get('current_speed_ratio', 0.0):.1f}x | <b>Fade Status:</b> {fade_status}</p>
-                <p><b>Lifecycle Timer:</b> {at['elapsed_seconds']}s / {MAX_TRADE_LIFECYCLE_SECONDS}s (DOA Limit: {DOA_TIMEOUT_SECONDS}s)</p>
+                <p><b>Fade Status:</b> {fade_status}</p>
+                <p><b>Lifecycle Timer:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s (DOA Limit: {DOA_TIMEOUT_SECONDS}s)</p>
             </div>
             """
 
@@ -227,6 +241,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <td style="padding: 6px;">{t['timestamp']}</td>
                 <td style="padding: 6px;">{t['symbol']}</td>
                 <td style="padding: 6px;">{t['side']}</td>
+                <td style="padding: 6px; color: #60a5fa;">{t.get('setup', 'N/A')}</td>
                 <td style="padding: 6px; color: {color}; font-weight: bold;">{t['gain_pct']:+.2f}%</td>
                 <td style="padding: 6px;">{t['exit_reason']}</td>
                 <td style="padding: 6px;">{t['mode']}</td>
@@ -237,7 +252,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Leaderboard Tournament Desk</title>
+            <title>Institutional 6-Module Desk</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -250,12 +265,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>🏆 CoinGlass Leaderboard Tournament Engine</h2>
+            <h2>⚡ Institutional 6-Module Trading Desk</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
                 <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Wins | 
-                <b>Tracking Universe:</b> {dashboard_data['universe_size']} Bitget Pairs
+                <b>Universe:</b> {dashboard_data['universe_size']} Bitget Pairs
             </div>
 
             <div class="card">
@@ -267,7 +282,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <h3>Recent Execution Log</h3>
                 <table>
                     <thead>
-                        <tr><th>Time</th><th>Symbol</th><th>Side</th><th>PnL %</th><th>Exit Reason</th><th>Type</th></tr>
+                        <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>PnL %</th><th>Exit Reason</th><th>Type</th></tr>
                     </thead>
                     <tbody>
                         {history_rows}
@@ -281,7 +296,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode("utf-8"))
 
     def log_message(self, format, *args):
-        """Silences standard HTTP request logging in terminal to keep logs clean."""
         return
 
 def start_http_server():
@@ -296,7 +310,7 @@ class BitgetDeskPartnerEngine:
         self.state_mgr = StateManager()
         self.exchange = None
         self.http_session = None
-        self.price_buffer = defaultdict(lambda: deque(maxlen=600))  # 15m tick memory
+        self.price_buffer = defaultdict(lambda: deque(maxlen=800))  # 20m high-res buffer
         self.cooldowns = {}
         self.active_trade = None
         self.cg_map = {}
@@ -342,7 +356,6 @@ class BitgetDeskPartnerEngine:
                     sym = item.get("symbol", "").upper()
                     if sym:
                         self.cg_map[sym] = item
-                dashboard_data["cg_synced_pairs"] = len(self.cg_map)
         except Exception:
             pass
 
@@ -359,10 +372,6 @@ class BitgetDeskPartnerEngine:
         return []
 
     def update_buffers(self, tickers):
-        """
-        ACCURATE OPEN INTEREST CAPTURE:
-        Reads Bitget's official 'holdingAmount' field so real OI delta is tracked.
-        """
         now = time.time()
         active_count = 0
 
@@ -372,8 +381,12 @@ class BitgetDeskPartnerEngine:
                 continue
 
             try:
+                vol_24h = float(t.get("usdtVolume", 0.0) or t.get("baseVolume", 0.0))
+                if vol_24h < MIN_24H_VOLUME_USDT:
+                    continue
+
                 last_price = float(t.get("lastPr", 0.0))
-                # Bitget official field name for Open Interest is holdingAmount
+                # Bitget native Open Interest is officially holdingAmount
                 oi = float(t.get("holdingAmount", 0.0) or t.get("openInterest", 0.0) or 0.0)
                 if last_price <= 0:
                     continue
@@ -389,131 +402,257 @@ class BitgetDeskPartnerEngine:
 
         dashboard_data["universe_size"] = active_count
 
-    def run_leaderboard_tournament(self):
+    # -------------------------------------------------------------------------
+    # SECTION 8: THE 6 INSTITUTIONAL STRATEGY MODULES
+    # -------------------------------------------------------------------------
+
+    def eval_module_1_regime_shift(self, symbol, ticks, current_price, cg_info):
+        """Play 1: Multi-Timeframe Regime Shift (4H Capitulation -> 15M Ignition)."""
+        cg_p15m = float(cg_info.get("price_15m", 0.0) or 0.0)
+        cg_oi15m = float(cg_info.get("oi_15m", 0.0) or 0.0)
+
+        # Long: 15m violent positive flip with institutional OI surge
+        if cg_p15m >= 1.50 and cg_oi15m >= 1.00:
+            return {
+                "symbol": symbol,
+                "side": "buy",
+                "setup": "PLAY1_MTF_REGIME_SHIFT",
+                "score": 95,
+                "entry_price": current_price
+            }
+        # Short: 15m violent negative flip with liquidation flush
+        elif cg_p15m <= -1.50 and cg_oi15m <= -1.00:
+            return {
+                "symbol": symbol,
+                "side": "sell",
+                "setup": "PLAY1_MTF_REGIME_SHIFT",
+                "score": 95,
+                "entry_price": current_price
+            }
+        return None
+
+    def eval_module_2_exhaustion_wiggle(self, symbol, ticks, current_price):
+        """Play 2: Exhaustion Divergence ('The Wiggle Trap' - Price vs. OI Divergence)."""
+        if len(ticks) < 45:
+            return None
+
+        p_5m_ago = ticks[-40]["price"]
+        oi_5m_ago = ticks[-40]["oi"]
+        latest_oi = ticks[-1]["oi"]
+
+        price_5m_pct = ((current_price - p_5m_ago) / p_5m_ago) * 100.0
+        oi_5m_pct = ((latest_oi - oi_5m_ago) / oi_5m_ago * 100.0) if oi_5m_ago > 0 else 0.0
+
+        recent_prices = [t["price"] for t in ticks[-15:]]
+        price_wiggle_range = (max(recent_prices) - min(recent_prices)) / min(recent_prices) * 100.0
+
+        # Short: Price pumped >= +1.8%, but OI died (<= -0.5%) and price is wiggling sideways
+        if price_5m_pct >= 1.80 and oi_5m_pct <= -0.50 and price_wiggle_range < 0.20:
+            return {
+                "symbol": symbol,
+                "side": "sell",
+                "setup": "PLAY2_WIGGLE_DIVERGENCE_TOP",
+                "score": 90,
+                "entry_price": current_price
+            }
+        # Long: Price dumped <= -1.8%, but OI surged (>= +0.5% absorption) and price wiggles at support
+        elif price_5m_pct <= -1.80 and oi_5m_pct >= 0.50 and price_wiggle_range < 0.20:
+            return {
+                "symbol": symbol,
+                "side": "buy",
+                "setup": "PLAY2_WIGGLE_ABSORPTION_BOTTOM",
+                "score": 90,
+                "entry_price": current_price
+            }
+        return None
+
+    def eval_module_3_amplified_3m(self, symbol, ticks, current_price):
+        """Play 3: Amplified 3-Minute Exhaustion Climax (Accelerating Thrust Decay Snapback)."""
+        if len(ticks) < 90:
+            return None
+
+        # 3 distinct 1-minute blocks
+        m3_ticks = [t["price"] for t in ticks[-30:]]
+        m2_ticks = [t["price"] for t in ticks[-60:-30]]
+        m1_ticks = [t["price"] for t in ticks[-90:-60]]
+
+        d1 = abs((m1_ticks[-1] - m1_ticks[0]) / m1_ticks[0] * 100.0)
+        d2 = abs((m2_ticks[-1] - m2_ticks[0]) / m2_ticks[0] * 100.0)
+        d3 = abs((m3_ticks[-1] - m3_ticks[0]) / m3_ticks[0] * 100.0)
+
+        total_move = abs((current_price - m1_ticks[0]) / m1_ticks[0] * 100.0)
+
+        # Accelerating exhaustion: d1 > d2 > d3 while total move was real (>= 1.4%)
+        if total_move >= 1.40 and d1 > (d2 * 1.3) and d2 > (d3 * 1.3) and d3 < 0.15:
+            # If price was dumping, sellers are exhausted -> Enter Long Snapback
+            if current_price < m1_ticks[0]:
+                return {
+                    "symbol": symbol,
+                    "side": "buy",
+                    "setup": "PLAY3_AMPLIFIED_EXHAUSTION_SNAP",
+                    "score": 88,
+                    "entry_price": current_price
+                }
+            # If price was pumping, buyers are exhausted -> Enter Short Snapback
+            else:
+                return {
+                    "symbol": symbol,
+                    "side": "sell",
+                    "setup": "PLAY3_AMPLIFIED_EXHAUSTION_SNAP",
+                    "score": 88,
+                    "entry_price": current_price
+                }
+        return None
+
+    def eval_module_4_stepwise_20m(self, symbol, ticks, current_price):
+        """Play 4: 20-Minute Stepwise Ratio Tournament (Clean Auction Waves, Anti-Spike)."""
+        if len(ticks) < 120:
+            return None
+
+        prices = [t["price"] for t in ticks]
+        start_p = prices[0]
+
+        # Anti-Spike Guard: Disqualify if any single 1-minute jump was > 1.5%
+        for i in range(15, len(prices), 15):
+            if abs((prices[i] - prices[i-15]) / prices[i-15] * 100.0) > 1.50:
+                return None
+
+        # Count 0.5% steps
+        steps_up = 0
+        steps_down = 0
+        for i in range(1, len(prices)):
+            delta = (prices[i] - prices[i-1]) / prices[i-1] * 100.0
+            if delta >= 0.50:
+                steps_up += 1
+            elif delta <= -0.50:
+                steps_down += 1
+
+        if steps_down > 0 and (steps_up / steps_down) >= 3.0 and steps_up >= 4:
+            return {
+                "symbol": symbol,
+                "side": "buy",
+                "setup": "PLAY4_STEPWISE_AUCTION_TOURNAMENT",
+                "score": 85,
+                "entry_price": current_price
+            }
+        return None
+
+    def eval_module_5_pressure_cooker(self, symbol, ticks, current_price, cg_info):
+        """Play 5: Pressure Cooker Disconnect (Metrics Die, Price Floats -> Short Flush)."""
+        cg_oi15m = float(cg_info.get("oi_15m", 0.0) or 0.0)
+        cg_vol1h = float(cg_info.get("vol_1h", 0.0) or 0.0)
+
+        if len(ticks) < 90:
+            return None
+
+        p_15m_ago = ticks[0]["price"]
+        price_15m_pct = ((current_price - p_15m_ago) / p_15m_ago) * 100.0
+
+        # Disconnect: Price is floating up (+0.8% to +1.5%), but OI dropped >= 2% and Vol dropped
+        if (0.80 <= price_15m_pct <= 1.80) and cg_oi15m <= -2.00 and cg_vol1h <= -2.00:
+            return {
+                "symbol": symbol,
+                "side": "sell",
+                "setup": "PLAY5_PRESSURE_COOKER_DISCONNECT",
+                "score": 92,
+                "entry_price": current_price
+            }
+        return None
+
+    def eval_module_6_whale_wall(self, symbol, current_price):
+        """Play 6: 24-Hour Whale Liquidity Magnet (Order Book Wall Imbalance)."""
+        try:
+            ccxt_symbol = f"{symbol[:len(symbol)-4]}/USDT:USDT"
+            ob = self.exchange.fetch_order_book(ccxt_symbol, limit=20)
+            bids = ob.get("bids", [])
+            asks = ob.get("asks", [])
+
+            if not bids or not asks:
+                return None
+
+            bid_vol = sum([b[1] for b in bids[:10]])
+            ask_vol = sum([a[1] for a in asks[:10]])
+
+            if ask_vol > 0 and (bid_vol / ask_vol) >= 4.0:
+                # Heavy institutional bid wall supporting price
+                return {
+                    "symbol": symbol,
+                    "side": "buy",
+                    "setup": "PLAY6_WHALE_BID_WALL_MAGNET",
+                    "score": 86,
+                    "entry_price": current_price
+                }
+            elif bid_vol > 0 and (ask_vol / bid_vol) >= 4.0:
+                # Heavy institutional ask wall pushing price down
+                return {
+                    "symbol": symbol,
+                    "side": "sell",
+                    "setup": "PLAY6_WHALE_ASK_WALL_MAGNET",
+                    "score": 86,
+                    "entry_price": current_price
+                }
+        except Exception:
+            pass
+        return None
+
+    def run_multi_module_arbitrator(self):
         """
-        15-MINUTE DAVID VS. SAMUEL SPEED TOURNAMENT WITH ACTIVE OPEN INTEREST:
-        Ranks all coins by (Reclaim Speed / Drop Speed) * OI Delta.
-        Selects #1 Undisputed Leader without arbitrary hurdles.
+        ARBITRATOR: Runs all 6 modules across the universe.
+        Selects the single #1 highest-conviction setup in the market.
         """
         if self.active_trade is not None:
             return None
 
         now = time.time()
-        cutoff = now - LOOKBACK_SECONDS
         candidates = []
 
         for symbol, buf in list(self.price_buffer.items()):
             if symbol in self.cooldowns and (now - self.cooldowns[symbol]) < COOLDOWN_SECONDS:
                 continue
 
-            ticks = [b for b in buf if b["time"] >= cutoff]
+            ticks = list(buf)
             if len(ticks) < 45:
                 continue
 
-            # Calculate Native Bitget 15-Minute OI Delta
-            oldest_oi = ticks[0]["oi"]
-            latest_oi = ticks[-1]["oi"]
-            native_oi_delta = 0.0
-            if oldest_oi > 0:
-                native_oi_delta = ((latest_oi - oldest_oi) / oldest_oi) * 100.0
-
-            # Check CoinGlass OI as secondary verification
+            current_price = ticks[-1]["price"]
             base_sym = symbol.replace("USDT", "").replace("_USDT", "").upper()
             cg_info = self.cg_map.get(base_sym, {})
-            cg_oi = float(cg_info.get("oi_15m", 0.0) or 0.0)
 
-            # Combined Effective OI
-            effective_oi = cg_oi if cg_oi != 0.0 else native_oi_delta
+            # 1. Evaluate Module 1
+            s1 = self.eval_module_1_regime_shift(symbol, ticks, current_price, cg_info)
+            if s1: candidates.append(s1)
 
-            current_price = ticks[-1]["price"]
-            prices = [t["price"] for t in ticks]
-            min_p = min(prices)
-            max_p = max(prices)
-            min_idx = prices.index(min_p)
-            max_idx = prices.index(max_p)
+            # 2. Evaluate Module 2
+            s2 = self.eval_module_2_exhaustion_wiggle(symbol, ticks, current_price)
+            if s2: candidates.append(s2)
 
-            # -------------------------------------------------------------
-            # TOURNAMENT: LONG CANDIDATE
-            # -------------------------------------------------------------
-            if max_idx < min_idx and min_idx < (len(ticks) - 1):
-                t_peak = ticks[max_idx]["time"]
-                t_trough = ticks[min_idx]["time"]
-                t_current = ticks[-1]["time"]
+            # 3. Evaluate Module 3
+            s3 = self.eval_module_3_amplified_3m(symbol, ticks, current_price)
+            if s3: candidates.append(s3)
 
-                drop_duration = max(60, t_trough - t_peak)
-                rebound_duration = max(30, t_current - t_trough)
+            # 4. Evaluate Module 4
+            s4 = self.eval_module_4_stepwise_20m(symbol, ticks, current_price)
+            if s4: candidates.append(s4)
 
-                drop_pct = ((max_p - min_p) / max_p) * 100.0
-                rebound_pct = ((current_price - min_p) / min_p) * 100.0
+            # 5. Evaluate Module 5
+            s5 = self.eval_module_5_pressure_cooker(symbol, ticks, current_price, cg_info)
+            if s5: candidates.append(s5)
 
-                if drop_pct > 0.20 and rebound_pct > 0.20:
-                    v_down = drop_pct / (drop_duration / 60.0)
-                    v_up = rebound_pct / (rebound_duration / 60.0)
-
-                    if v_down > 0:
-                        speed_ratio = v_up / v_down
-
-                        # STRICT LONG POLARITY: OI must be non-negative
-                        if effective_oi >= 0.0:
-                            score = speed_ratio * (1.0 + max(0.0, effective_oi / 10.0))
-                            candidates.append({
-                                "symbol": symbol,
-                                "side": "buy",
-                                "score": score,
-                                "entry_price": current_price,
-                                "baseline_speed": v_down,
-                                "speed_ratio": speed_ratio,
-                                "oi_delta": effective_oi
-                            })
-
-            # -------------------------------------------------------------
-            # TOURNAMENT: SHORT CANDIDATE
-            # -------------------------------------------------------------
-            if min_idx < max_idx and max_idx < (len(ticks) - 1):
-                t_trough = ticks[min_idx]["time"]
-                t_peak = ticks[max_idx]["time"]
-                t_current = ticks[-1]["time"]
-
-                climb_duration = max(60, t_peak - t_trough)
-                flush_duration = max(30, t_current - t_peak)
-
-                climb_pct = ((max_p - min_p) / min_p) * 100.0
-                flush_pct = ((max_p - current_price) / max_p) * 100.0
-
-                if climb_pct > 0.20 and flush_pct > 0.20:
-                    v_up = climb_pct / (climb_duration / 60.0)
-                    v_down = flush_pct / (flush_duration / 60.0)
-
-                    if v_up > 0:
-                        speed_ratio = v_down / v_up
-
-                        # STRICT SHORT POLARITY & TRAP BLOCK:
-                        # OI must be strictly NEGATIVE (-). If positive, short is blocked!
-                        if effective_oi < 0.0:
-                            score = speed_ratio * (1.0 + (abs(effective_oi) / 10.0))
-                            candidates.append({
-                                "symbol": symbol,
-                                "side": "sell",
-                                "score": score,
-                                "entry_price": current_price,
-                                "baseline_speed": v_up,
-                                "speed_ratio": speed_ratio,
-                                "oi_delta": effective_oi
-                            })
-
+        # Check Module 6 for top 5 volume movers
         if candidates:
             candidates.sort(key=lambda x: x["score"], reverse=True)
             top = candidates[0]
-
-            if top["speed_ratio"] >= 2.0:
-                logger.info(
-                    f"🎯 #1 TOURNAMENT LEADER FOUND: {top['symbol']} ({top['side'].upper()}) | "
-                    f"Speed Ratio: {top['speed_ratio']:.1f}x | OI Delta: {top['oi_delta']:+.2f}%"
-                )
-                return top
+            logger.info(
+                f"🎯 HIGH-CONVICTION TRIGGER: {top['symbol']} ({top['side'].upper()}) | "
+                f"Module: {top['setup']} | Score: {top['score']}/100"
+            )
+            return top
 
         return None
 
+    # -------------------------------------------------------------------------
+    # SECTION 9: POSITION SIZING & MICRO-ACCOUNT EXECUTION
+    # -------------------------------------------------------------------------
     def calculate_live_position_size(self, current_price):
         try:
             balance_info = self.exchange.fetch_balance()
@@ -540,22 +679,20 @@ class BitgetDeskPartnerEngine:
         trade_info = {
             "symbol": symbol,
             "side": side,
+            "setup": signal["setup"],
             "entry_price": price,
             "entry_time": time.time(),
             "peak_price": price,
             "highest_gain_pct": 0.0,
-            "baseline_speed": signal["baseline_speed"],
-            "initial_speed_ratio": signal["speed_ratio"],
-            "current_speed_ratio": signal["speed_ratio"],
-            "peak_speed_ratio": signal["speed_ratio"],
-            "velocity_decayed": False,
+            "last_peak_time": time.time(),
+            "is_fading": False,
             "is_paper": is_paper,
             "mode": "PAPER" if is_paper else "LIVE",
             "size": 0
         }
 
         if is_paper:
-            logger.info(f"📝 [PAPER ENTRY] Opened #1 Leader {side.upper()} on {symbol} @ {price}")
+            logger.info(f"📝 [PAPER ENTRY] Opened {side.upper()} on {symbol} @ {price} | Strategy: {signal['setup']}")
             self.active_trade = trade_info
         else:
             try:
@@ -573,12 +710,22 @@ class BitgetDeskPartnerEngine:
 
                 trade_info["size"] = size
                 self.active_trade = trade_info
-                logger.info(f"⚡ [LIVE ENTRY] #1 Leader {side.upper()} {symbol} | Size: {size} | Lev: {lev}x")
+                logger.info(f"⚡ [LIVE ENTRY] {side.upper()} {symbol} | Size: {size} | Lev: {lev}x | Strategy: {signal['setup']}")
             except Exception as e:
                 logger.error(f"Live entry execution failed: {e}")
                 self.active_trade = None
 
+    # -------------------------------------------------------------------------
+    # SECTION 10: ORGANIC FADE EXIT STATE MACHINE (NO FIXED 0.5% WALL)
+    # -------------------------------------------------------------------------
     def manage_active_trade(self):
+        """
+        ORGANIC FADE DETECTION:
+        Leaves the trade immediately when:
+        1. Velocity Rollover: Forward velocity collapses.
+        2. Wiggle Stall: Price stops making new peaks and wiggles in a tight band.
+        3. OI Exhaustion: Open Interest stops expanding.
+        """
         if not self.active_trade:
             return
 
@@ -591,58 +738,77 @@ class BitgetDeskPartnerEngine:
 
         latest = buf[-1]
         current_price = latest["price"]
-        elapsed = max(1.0, time.time() - trade["entry_time"])
+        current_oi = latest["oi"]
+        now = time.time()
+        elapsed = max(1.0, now - trade["entry_time"])
 
+        # PnL & Peak Tracking
         if side == "buy":
             gain_pct = ((current_price - trade["entry_price"]) / trade["entry_price"]) * 100.0
             if current_price > trade["peak_price"]:
                 trade["peak_price"] = current_price
+                trade["last_peak_time"] = now
             if gain_pct > trade["highest_gain_pct"]:
                 trade["highest_gain_pct"] = gain_pct
-            pullback_from_peak = trade["highest_gain_pct"] - gain_pct
         else:
             gain_pct = ((trade["entry_price"] - current_price) / trade["entry_price"]) * 100.0
             if current_price < trade["peak_price"]:
                 trade["peak_price"] = current_price
+                trade["last_peak_time"] = now
             if gain_pct > trade["highest_gain_pct"]:
                 trade["highest_gain_pct"] = gain_pct
-            pullback_from_peak = trade["highest_gain_pct"] - gain_pct
 
-        current_speed = max(0.0, gain_pct) / (elapsed / 60.0)
-        baseline = trade["baseline_speed"]
-        if baseline > 0:
-            current_ratio = current_speed / baseline
-            trade["current_speed_ratio"] = current_ratio
-            if current_ratio > trade["peak_speed_ratio"]:
-                trade["peak_speed_ratio"] = current_ratio
+        # ---------------------------------------------------------------------
+        # ORGANIC FADE EVALUATION (Velocity Rollover + Wiggle Stall + OI Decel)
+        # ---------------------------------------------------------------------
+        time_since_last_peak = now - trade["last_peak_time"]
+        
+        # Calculate velocity in the last 60 seconds
+        ticks_60s = [t["price"] for t in buf if t["time"] >= (now - 60)]
+        velocity_60s = 0.0
+        if len(ticks_60s) > 1:
+            velocity_60s = abs((ticks_60s[-1] - ticks_60s[0]) / ticks_60s[0] * 100.0)
 
-            if trade["peak_speed_ratio"] >= 3.0 and current_ratio <= VELOCITY_DECAY_RATIO and gain_pct >= 0.40:
-                if not trade["velocity_decayed"]:
-                    trade["velocity_decayed"] = True
-                    logger.info(f"⚠️ MOMENTUM FADE on {symbol}: Velocity decayed. 0.5% Wall ARMED!")
+        # Wiggle stall: Position is in profit (>= +0.40%), but has made NO new peak for > 60s
+        # and price is wiggling inside a tight band (< 0.15%) with velocity rolling over
+        is_wiggle_stalled = (
+            trade["highest_gain_pct"] >= 0.40 and 
+            time_since_last_peak >= 60 and 
+            velocity_60s < 0.15
+        )
 
+        if is_wiggle_stalled:
+            trade["is_fading"] = True
+
+        # Update Live Telemetry for Dashboard
         dashboard_data["active_trade"] = {
             "symbol": symbol,
             "side": side,
+            "setup": trade["setup"],
             "mode": trade["mode"],
             "entry_price": trade["entry_price"],
             "current_price": current_price,
             "pnl_pct": gain_pct,
             "peak_gain_pct": trade["highest_gain_pct"],
-            "initial_speed_ratio": trade.get("initial_speed_ratio", 0.0),
-            "current_speed_ratio": trade.get("current_speed_ratio", 0.0),
-            "velocity_decayed": trade["velocity_decayed"],
+            "is_fading": trade["is_fading"],
             "elapsed_seconds": int(elapsed)
         }
 
         exit_reason = None
 
-        if pullback_from_peak >= PEAK_REVERSE_PULLBACK_PCT:
-            exit_reason = "0.5%_PEAK_REVERSE (FADE_EXIT)"
-        elif elapsed >= MAX_TRADE_LIFECYCLE_SECONDS:
-            exit_reason = "15M_ROTATION_EXHAUSTION"
+        # 1. ORGANIC FADE EXIT (Leaves immediately when momentum runs out of breath)
+        if trade["is_fading"] and gain_pct >= 0.30:
+            exit_reason = "ORGANIC_MOMENTUM_FADE (WIGGLE_STALL)"
+
+        # 2. 90-SECOND DEAD-ON-ARRIVAL (DOA) KILL SWITCH
         elif elapsed >= DOA_TIMEOUT_SECONDS and trade["highest_gain_pct"] < DOA_FORWARD_THRESHOLD_PCT:
             exit_reason = "90S_DOA_KILL_SWITCH"
+
+        # 3. 15-MINUTE MAXIMUM LIFECYCLE ROTATION
+        elif elapsed >= MAX_LIFECYCLE_SECONDS:
+            exit_reason = "15M_LIFECYCLE_EXHAUSTION"
+
+        # 4. STRUCTURAL EMERGENCY HARD STOP (Live Mode Only)
         elif not trade["is_paper"] and gain_pct <= -LIVE_HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
 
@@ -650,9 +816,11 @@ class BitgetDeskPartnerEngine:
             self._execute_exit(trade, current_price, gain_pct, exit_reason)
 
     def _execute_exit(self, trade, exit_price, gain_pct, reason):
+        """Exits position cleanly and guarantees atomic active_trade = None cleanup."""
         symbol = trade["symbol"]
         side = trade["side"]
         is_paper = trade["is_paper"]
+        setup_name = trade["setup"]
 
         try:
             if not is_paper:
@@ -670,7 +838,7 @@ class BitgetDeskPartnerEngine:
             else:
                 logger.info(f"📝 [PAPER EXIT] Closed {side.upper()} {symbol} @ {exit_price} | PnL: {gain_pct:+.2f}% | Reason: {reason}")
 
-            self.state_mgr.record_trade(symbol, side, gain_pct, reason, is_paper)
+            self.state_mgr.record_trade(symbol, side, gain_pct, reason, setup_name, is_paper)
             self.cooldowns[symbol] = time.time()
 
         except Exception as e:
@@ -688,7 +856,7 @@ class BitgetDeskPartnerEngine:
         losses = self.state_mgr.state["total_losses"]
         win_rate = (wins / total * 100.0) if total > 0 else 0.0
 
-        pos_str = "None (Scanning Order Flow)"
+        pos_str = "None (Scanning 6 Modules)"
         if self.active_trade:
             pos_str = f"{self.active_trade['symbol']} ({self.active_trade['side'].upper()}) PnL: {dashboard_data['active_trade']['pnl_pct']:+.2f}%"
 
@@ -697,7 +865,7 @@ class BitgetDeskPartnerEngine:
             f"╔════════════════════════════════════════════════════════════════════╗\n"
             f"║                📊 15-MINUTE DESK INTELLIGENCE BRIEFING             ║\n"
             f"╠════════════════════════════════════════════════════════════════════╣\n"
-            f"║ Engine Status  : RUNNING ACTIVE                                    ║\n"
+            f"║ Engine Status  : RUNNING ACTIVE (6 Institutional Modules)          ║\n"
             f"║ Trading Mode   : {mode:<49} ║\n"
             f"║ Gauntlet Streak: [{streak}/{QUALIFICATION_TARGET_WINS} Consecutive Wins]                           ║\n"
             f"║ Performance    : {wins}W / {losses}L ({win_rate:.1f}% Win Rate) Total Trades: {total:<12} ║\n"
@@ -707,7 +875,7 @@ class BitgetDeskPartnerEngine:
         )
 
     def run(self):
-        logger.info("🚀 Leaderboard Tournament Engine Online. Clean Telemetry Active...")
+        logger.info("🚀 Institutional 6-Module Engine Online. Clean Telemetry Active...")
         last_briefing = time.time()
         last_cg_sync = 0
 
@@ -724,7 +892,7 @@ class BitgetDeskPartnerEngine:
                 if self.active_trade:
                     self.manage_active_trade()
                 else:
-                    signal = self.run_leaderboard_tournament()
+                    signal = self.run_multi_module_arbitrator()
                     if signal:
                         self.enter_trade(signal)
 
@@ -734,7 +902,6 @@ class BitgetDeskPartnerEngine:
                 dashboard_data["recent_trades"] = self.state_mgr.state["history"]
                 dashboard_data["last_update"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
-                # Clean 15-Minute Desk Intelligence Briefing
                 if time.time() - last_briefing >= 900:
                     last_briefing = time.time()
                     self.print_15m_briefing()
@@ -746,7 +913,7 @@ class BitgetDeskPartnerEngine:
                 time.sleep(3)
 
 # -----------------------------------------------------------------------------
-# SECTION 8: BOOTSTRAP ENTRY POINT
+# SECTION 11: BOOTSTRAP ENTRY POINT
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     t = threading.Thread(target=start_http_server, daemon=True)
