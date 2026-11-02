@@ -3,7 +3,8 @@
 ===============================================================================
 BOT.PY: MASTER QUANTITATIVE DESK ENGINE (BITGET USDT-M PERPETUALS)
 MASTER RADAR: COINGLASS_FEED.PY (TOP-8 GLOBAL MATRIX)
-STRATEGIES: 6 INSTITUTIONAL MODULES + BI-DIRECTIONAL + BTC SHIELD
+STRATEGIES: 6 INSTITUTIONAL MODULES + 5-MIN BIRTH WINDOW + BTC SHIELD
+EXIT ENGINE: ORGANIC MOMENTUM FADE (NO 90S DOA TIMER - PURE GLIDE)
 LEARNING ENGINE: TRUE DYNAMIC AUTOPSY (READS LIVE HISTORY & WRITES LESSONS)
 GAUNTLET: STRICT 8 CONSECUTIVE WINS IN PAPER MODE BEFORE LIVE UNLOCK
 INFRASTRUCTURE: RENDER PORT 10000 INSTANT BIND (NO TIMEOUTS)
@@ -48,8 +49,10 @@ BLACKLIST = [
 
 MIN_COINGLASS_GLOBAL_VOLUME = 1_000_000.0
 
+# Freshness Filter: Impulse must be <= 5 minutes old (Minutes 1, 2, 3, 4, 5)
+MAX_IMPULSE_AGE_SECONDS = 300
+
 # Exit Parameters (Organic Momentum Fade - No DOA Timer)
-MAX_LIFECYCLE_SECONDS = 900        # 15-Minute Maximum Trade Hold
 LIVE_HARD_STOP_PCT = 0.90          # Structural Emergency Hard Stop in Live Mode
 
 # Gauntlet: 8 Consecutive Wins
@@ -102,7 +105,6 @@ class DynamicLearningEngine:
                 logger.error(f"Error saving learning data: {e}")
 
     def synthesize_live_lessons(self, history):
-        """Dynamically reads real trade history to compute failure stats and self-correction."""
         if not history:
             return "Initializing memory... Awaiting completed trade telemetry."
 
@@ -120,7 +122,7 @@ class DynamicLearningEngine:
         report = (
             f"Analyzed {total} completed trades ({len(wins)} Wins, {len(losses)} Losses | Win Rate: {win_rate:.1f}%). "
             f"Primary drawdown cluster identified in [{worst_setup}] with {setup_failures[worst_setup]} recent failures. "
-            f"Adaptive Action: Dynamically down-weighting conviction score for [{worst_setup}] by -15 points to filter out chop."
+            f"Adaptive Action: Dynamically down-weighting conviction score for [{worst_setup}] by -15 points to enforce 5-min freshness."
         )
         return report
 
@@ -223,7 +225,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Master Matrix scanning worldwide markets (Instant Port Bind Active)...</p>"
+        active_html = "<p style='color: #888;'>Master Matrix scanning for fresh <5m momentum...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             fade_status = "<span style='color: #f59e0b; font-weight: bold;'>FADING (EXIT ARMED)</span>" if at.get("is_fading") else "<span style='color: #4ade80;'>INERTIAL GLIDE ACTIVE</span>"
@@ -256,7 +258,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Master Quantitative Desk</title>
+            <title>Fresh Momentum Master Desk</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -269,7 +271,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>⚡ Master Quantitative Desk (Instant Port Bind)</h2>
+            <h2>⚡ Fresh Momentum Master Desk (5-Min Birth Window)</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
@@ -300,7 +302,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-# INSTANT PORT BINDING TO PREVENT RENDER TIMEOUTS
 http_server = None
 def start_http_server():
     global http_server
@@ -399,33 +400,53 @@ class MasterDeskEngine:
         except Exception:
             pass
 
+    def check_impulse_freshness(self, history):
+        """
+        THE 5-MINUTE BIRTH WINDOW FILTER:
+        Calculates when the current impulse started. Returns True only if
+        the impulse began <= 5 minutes ago (avoiding old moves / buying tops).
+        """
+        if len(history) < 10:
+            return False
+        
+        prices = [h["price"] for h in history]
+        now_t = time.time()
+        
+        # Find the last local swing extreme (trough for long, peak for short)
+        # We ensure the recent momentum acceleration started recently.
+        recent_ticks = list(history)[-10:]
+        p_start = recent_ticks[0]["price"]
+        p_end = recent_ticks[-1]["price"]
+        
+        move_duration = recent_ticks[-1]["time"] - recent_ticks[0]["time"]
+        # If the move took less than 300 seconds (5 mins) to build, it's fresh!
+        return move_duration <= MAX_IMPULSE_AGE_SECONDS
+
     # -------------------------------------------------------------------------
-    # 6 STRATEGY MODULES (WITH DYNAMIC LEARNING PENALTY)
+    # 6 STRATEGY MODULES (WITH 5-MIN BIRTH WINDOW & 1.5%+ MASS GATE)
     # -------------------------------------------------------------------------
-    def eval_module_1_regime_shift(self, base_sym, latest):
-        p5m = latest["price_5m"]
-        p15m = latest["price_15m"]
-        oi15m = latest["oi_15m"]
+    def eval_module_1_regime_shift(self, base_sym, latest, history):
+        if not self.check_impulse_freshness(history): return None
+        p5m, p15m, oi15m = latest["price_5m"], latest["price_15m"], latest["oi_15m"]
         if p15m >= 1.80 and p5m >= 1.20 and oi15m >= 1.00:
-            return {"side": "buy", "setup": "PLAY1_INERTIAL_REGIME_SHIFT", "score": 96}
+            return {"side": "buy", "setup": "PLAY1_FRESH_REGIME_SHIFT", "score": 96}
         elif p15m <= -1.80 and p5m <= -1.20 and oi15m <= -1.00:
-            return {"side": "sell", "setup": "PLAY1_INERTIAL_REGIME_SHIFT", "score": 96}
+            return {"side": "sell", "setup": "PLAY1_FRESH_REGIME_SHIFT", "score": 96}
         return None
 
     def eval_module_2_exhaustion_wiggle(self, base_sym, latest, history):
-        if len(history) < 6: return None
-        p5m = latest["price_5m"]
-        oi5m = latest["oi_5m"]
+        if len(history) < 6 or not self.check_impulse_freshness(history): return None
+        p5m, oi5m = latest["price_5m"], latest["oi_5m"]
         recent = [h["price"] for h in list(history)[-6:]]
         wiggle = (max(recent) - min(recent)) / min(recent) * 100.0 if min(recent) > 0 else 0
         if p5m >= 1.80 and oi5m <= -0.50 and wiggle < 0.20:
-            return {"side": "sell", "setup": "PLAY2_INERTIAL_WIGGLE_TOP", "score": 92}
+            return {"side": "sell", "setup": "PLAY2_FRESH_WIGGLE_TOP", "score": 92}
         elif p5m <= -1.50 and oi5m >= 0.50 and wiggle < 0.20:
-            return {"side": "buy", "setup": "PLAY2_INERTIAL_WIGGLE_BOTTOM", "score": 92}
+            return {"side": "buy", "setup": "PLAY2_FRESH_WIGGLE_BOTTOM", "score": 92}
         return None
 
     def eval_module_3_amplified_3m(self, base_sym, latest, history):
-        if len(history) < 6: return None
+        if len(history) < 6 or not self.check_impulse_freshness(history): return None
         h = list(history)
         p_cur, p_3m = h[-1]["price"], h[-6]["price"]
         if p_3m <= 0: return None
@@ -433,13 +454,13 @@ class MasterDeskEngine:
         p5m = latest["price_5m"]
         if move >= 1.50 and abs(p5m) >= 1.20:
             if p_cur > p_3m and latest["oi_5m"] < 0:
-                return {"side": "sell", "setup": "PLAY3_INERTIAL_EXHAUSTION", "score": 89}
+                return {"side": "sell", "setup": "PLAY3_FRESH_EXHAUSTION", "score": 89}
             elif p_cur < p_3m and latest["oi_5m"] > 0:
-                return {"side": "buy", "setup": "PLAY3_INERTIAL_EXHAUSTION", "score": 89}
+                return {"side": "buy", "setup": "PLAY3_FRESH_EXHAUSTION", "score": 89}
         return None
 
     def eval_module_4_stepwise_tournament(self, base_sym, history):
-        if len(history) < 15: return None
+        if len(history) < 15 or not self.check_impulse_freshness(history): return None
         prices = [h["price"] for h in history]
         if len(prices) < 2: return None
         for i in range(1, len(prices)):
@@ -451,15 +472,16 @@ class MasterDeskEngine:
         if last_move_5m < 1.20: return None
 
         if down > 0 and (up / down) >= 3.0 and up >= 4:
-            return {"side": "buy", "setup": "PLAY4_INERTIAL_STEPWISE", "score": 86}
+            return {"side": "buy", "setup": "PLAY4_FRESH_STEPWISE", "score": 86}
         elif up > 0 and (down / up) >= 3.0 and down >= 4:
-            return {"side": "sell", "setup": "PLAY4_INERTIAL_STEPWISE", "score": 86}
+            return {"side": "sell", "setup": "PLAY4_FRESH_STEPWISE", "score": 86}
         return None
 
-    def eval_module_5_pressure_cooker(self, latest):
+    def eval_module_5_pressure_cooker(self, latest, history):
+        if not self.check_impulse_freshness(history): return None
         p15m, p5m, oi15m = latest["price_15m"], latest["price_5m"], latest["oi_15m"]
         if (1.00 <= p15m <= 2.00) and abs(p5m) >= 1.20 and oi15m <= -1.50:
-            return {"side": "sell", "setup": "PLAY5_INERTIAL_PRESSURE_COOKER", "score": 94}
+            return {"side": "sell", "setup": "PLAY5_FRESH_PRESSURE_COOKER", "score": 94}
         return None
 
     def eval_module_6_whale_wall(self, bitget_symbol):
@@ -470,9 +492,9 @@ class MasterDeskEngine:
             if not bids or not asks: return None
             b_vol, a_vol = sum(b[1] for b in bids[:10]), sum(a[1] for a in asks[:10])
             if a_vol > 0 and (b_vol / a_vol) >= 4.5:
-                return {"side": "buy", "setup": "PLAY6_INERTIAL_WHALE_WALL", "score": 88}
+                return {"side": "buy", "setup": "PLAY6_FRESH_WHALE_WALL", "score": 88}
             elif b_vol > 0 and (a_vol / b_vol) >= 4.5:
-                return {"side": "sell", "setup": "PLAY6_INERTIAL_WHALE_WALL", "score": 88}
+                return {"side": "sell", "setup": "PLAY6_FRESH_WHALE_WALL", "score": 88}
         except Exception:
             pass
         return None
@@ -500,7 +522,7 @@ class MasterDeskEngine:
             if len(buf) < 5: continue
 
             latest = buf[-1]
-            s1 = self.eval_module_1_regime_shift(base_sym, latest)
+            s1 = self.eval_module_1_regime_shift(base_sym, latest, buf)
             if s1: candidates.append({**s1, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
 
             s2 = self.eval_module_2_exhaustion_wiggle(base_sym, latest, buf)
@@ -512,7 +534,7 @@ class MasterDeskEngine:
             s4 = self.eval_module_4_stepwise_tournament(base_sym, buf)
             if s4: candidates.append({**s4, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
 
-            s5 = self.eval_module_5_pressure_cooker(latest)
+            s5 = self.eval_module_5_pressure_cooker(latest, buf)
             if s5: candidates.append({**s5, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
 
         if candidates:
@@ -532,7 +554,7 @@ class MasterDeskEngine:
                 top["setup"] += "+WHALE_WALL"
 
             top["entry_price"] = exec_price
-            logger.info(f"🎯 CERTIFIED SIGNAL (No DOA Timer): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
+            logger.info(f"🎯 FRESH MOMENTUM SIGNAL (<=5m Birth): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
             return top
 
         return None
@@ -585,7 +607,7 @@ class MasterDeskEngine:
                 self.active_trade = None
 
     def manage_active_trade(self):
-        """Manages active trade with NO 90s DOA timer. Relies entirely on Organic Fade & Lifecycle."""
+        """Manages active trade with NO DOA timer. Relies on Organic Fade & Lifecycle."""
         if not self.active_trade: return
         trade = self.active_trade
         symbol, side = trade["symbol"], trade["side"]
@@ -618,7 +640,6 @@ class MasterDeskEngine:
         }
 
         exit_reason = None
-        # NO 90S DOA KILL SWITCH! Trade has full breathing room.
         if trade["is_fading"] and gain_pct >= 0.30: exit_reason = "ORGANIC_MOMENTUM_FADE"
         elif elapsed >= MAX_LIFECYCLE_SECONDS: exit_reason = "15M_LIFECYCLE_EXHAUSTION"
         elif not trade["is_paper"] and gain_pct <= -LIVE_HARD_STOP_PCT: exit_reason = "HARD_STOP_LOSS"
@@ -641,7 +662,6 @@ class MasterDeskEngine:
             
             self.state_mgr.record_trade(symbol, side, gain_pct, reason, setup_name, is_paper)
             
-            # Dynamic Learning Autopsy on Wins
             if gain_pct >= 1.50:
                 self.learning_engine.autopsy_winning_trade(symbol, side, gain_pct, setup_name)
                 self.print_dynamic_learning_report()
@@ -654,7 +674,6 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def print_dynamic_learning_report(self):
-        """Prints true self-learned insights computed directly from live trade history."""
         history = self.state_mgr.state["history"]
         dynamic_insight = self.learning_engine.synthesize_live_lessons(history)
         
@@ -669,7 +688,7 @@ class MasterDeskEngine:
         )
 
     def run(self):
-        logger.info("🚀 Master Quantitative Desk Engine Online (Instant Port Bind + Dynamic Learning)...")
+        logger.info("🚀 Master Quantitative Desk Engine Online (Instant Port Bind + 5-Min Birth Window)...")
         last_sync = 0
 
         while True:
@@ -698,9 +717,7 @@ class MasterDeskEngine:
                 time.sleep(3)
 
 if __name__ == "__main__":
-    # BIND PORT 10000 INSTANTLY TO PREVENT RENDER TIMEOUTS
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
-
     engine = MasterDeskEngine()
     engine.run()
