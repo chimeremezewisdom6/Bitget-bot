@@ -3,7 +3,7 @@
 ===============================================================================
 BOT.PY: MASTER QUANTITATIVE DESK ENGINE (BITGET USDT-M PERPETUALS)
 MASTER RADAR: COINGLASS_FEED.PY (TOP-8 GLOBAL MATRIX)
-STRATEGIES: 6 INSTITUTIONAL MODULES + ACTIVE 1% MOMENTUM GATE + BTC SHIELD
+STRATEGIES: 6 INSTITUTIONAL MODULES + INERTIAL MOMENTUM MASS ENGINE
 GAUNTLET: STRICT 8 CONSECUTIVE WINS IN PAPER MODE BEFORE LIVE UNLOCK
 ===============================================================================
 """
@@ -29,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("MasterDeskEngine")
+logger = logging.getLogger("InertialDeskEngine")
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 
@@ -161,10 +161,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Master Matrix scanning worldwide markets (Active 1%+ Gate)...</p>"
+        active_html = "<p style='color: #888;'>Inertial Momentum Engine scanning worldwide markets...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
-            fade_status = "<span style='color: #f59e0b; font-weight: bold;'>FADING (EXIT ARMED)</span>" if at.get("is_fading") else "<span style='color: #4ade80;'>ACTIVE PROPULSION</span>"
+            fade_status = "<span style='color: #f59e0b; font-weight: bold;'>FADING (EXIT ARMED)</span>" if at.get("is_fading") else "<span style='color: #4ade80;'>INERTIAL GLIDE ACTIVE</span>"
             active_html = f"""
             <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
                 <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE POSITION: {at['symbol']} ({at['side'].upper()})</h3>
@@ -194,7 +194,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Master Quantitative Desk</title>
+            <title>Inertial Momentum Desk</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -207,7 +207,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>⚡ Master Quantitative Desk (Bitget Execution)</h2>
+            <h2>⚡ Inertial Momentum Desk (Bitget Execution)</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
@@ -242,7 +242,7 @@ def start_http_server():
     server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     server.serve_forever()
 
-class MasterDeskEngine:
+class InertialDeskEngine:
     def __init__(self):
         self.state_mgr = StateManager()
         self.exchange = None
@@ -330,18 +330,18 @@ class MasterDeskEngine:
             pass
 
     # -------------------------------------------------------------------------
-    # 6 STRATEGY MODULES (WITH ACTIVE 1%+ MOMENTUM GATE)
+    # 6 STRATEGY MODULES WITH INERTIAL MOMENTUM MASS GATE (1.5%+ GUARANTEE)
     # -------------------------------------------------------------------------
     def eval_module_1_regime_shift(self, base_sym, latest):
         p5m = latest["price_5m"]
         p15m = latest["price_15m"]
         oi15m = latest["oi_15m"]
         
-        # Active Momentum Gate: Must be actively thrusting >= 1.0% right now
-        if p15m >= 1.40 and p5m >= 1.00 and oi15m >= 0.80:
-            return {"side": "buy", "setup": "PLAY1_MTF_REGIME_SHIFT", "score": 96}
-        elif p15m <= -1.40 and p5m <= -1.00 and oi15m <= -0.80:
-            return {"side": "sell", "setup": "PLAY1_MTF_REGIME_SHIFT", "score": 96}
+        # Inertial Mass Gate: Requires robust 1.5%+ active move to guarantee carry-through
+        if p15m >= 1.80 and p5m >= 1.20 and oi15m >= 1.00:
+            return {"side": "buy", "setup": "PLAY1_INERTIAL_REGIME_SHIFT", "score": 96}
+        elif p15m <= -1.80 and p5m <= -1.20 and oi15m <= -1.00:
+            return {"side": "sell", "setup": "PLAY1_INERTIAL_REGIME_SHIFT", "score": 96}
         return None
 
     def eval_module_2_exhaustion_wiggle(self, base_sym, latest, history):
@@ -350,10 +350,10 @@ class MasterDeskEngine:
         oi5m = latest["oi_5m"]
         recent = [h["price"] for h in list(history)[-6:]]
         wiggle = (max(recent) - min(recent)) / min(recent) * 100.0 if min(recent) > 0 else 0
-        if p5m >= 1.50 and oi5m <= -0.40 and wiggle < 0.20:
-            return {"side": "sell", "setup": "PLAY2_WIGGLE_TOP", "score": 92}
-        elif p5m <= -1.50 and oi5m >= 0.40 and wiggle < 0.20:
-            return {"side": "buy", "setup": "PLAY2_WIGGLE_BOTTOM", "score": 92}
+        if p5m >= 1.80 and oi5m <= -0.50 and wiggle < 0.20:
+            return {"side": "sell", "setup": "PLAY2_INERTIAL_WIGGLE_TOP", "score": 92}
+        elif p5m <= -1.80 and oi5m >= 0.50 and wiggle < 0.20:
+            return {"side": "buy", "setup": "PLAY2_INERTIAL_WIGGLE_BOTTOM", "score": 92}
         return None
 
     def eval_module_3_amplified_3m(self, base_sym, latest, history):
@@ -363,15 +363,14 @@ class MasterDeskEngine:
         if p_3m <= 0: return None
         move = abs((p_cur - p_3m) / p_3m * 100.0)
         p5m = latest["price_5m"]
-        if move >= 1.30 and abs(p5m) >= 1.00:
+        if move >= 1.50 and abs(p5m) >= 1.20:
             if p_cur > p_3m and latest["oi_5m"] < 0:
-                return {"side": "sell", "setup": "PLAY3_AMPLIFIED_EXHAUSTION", "score": 89}
+                return {"side": "sell", "setup": "PLAY3_INERTIAL_EXHAUSTION", "score": 89}
             elif p_cur < p_3m and latest["oi_5m"] > 0:
-                return {"side": "buy", "setup": "PLAY3_AMPLIFIED_EXHAUSTION", "score": 89}
+                return {"side": "buy", "setup": "PLAY3_INERTIAL_EXHAUSTION", "score": 89}
         return None
 
     def eval_module_4_stepwise_tournament(self, base_sym, history):
-        """Unified method name matching arbitrator call."""
         if len(history) < 15: return None
         prices = [h["price"] for h in history]
         if len(prices) < 2: return None
@@ -380,19 +379,19 @@ class MasterDeskEngine:
         up = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i-1]) / prices[i-1] * 100.0 >= 0.30)
         down = sum(1 for i in range(1, len(prices)) if (prices[i] - prices[i-1]) / prices[i-1] * 100.0 <= -0.30)
         
-        last_move_5m = abs((prices[-1] - prices[-5]) / prices[-5] * 100.0) if len(prices) >= 5 else 1.0
-        if last_move_5m < 1.00: return None
+        last_move_5m = abs((prices[-1] - prices[-5]) / prices[-5] * 100.0) if len(prices) >= 5 else 1.5
+        if last_move_5m < 1.20: return None
 
         if down > 0 and (up / down) >= 3.0 and up >= 4:
-            return {"side": "buy", "setup": "PLAY4_STEPWISE_TOURNAMENT", "score": 86}
+            return {"side": "buy", "setup": "PLAY4_INERTIAL_STEPWISE", "score": 86}
         elif up > 0 and (down / up) >= 3.0 and down >= 4:
-            return {"side": "sell", "setup": "PLAY4_STEPWISE_TOURNAMENT", "score": 86}
+            return {"side": "sell", "setup": "PLAY4_INERTIAL_STEPWISE", "score": 86}
         return None
 
     def eval_module_5_pressure_cooker(self, latest):
         p15m, p5m, oi15m = latest["price_15m"], latest["price_5m"], latest["oi_15m"]
-        if (0.80 <= p15m <= 1.80) and abs(p5m) >= 1.00 and oi15m <= -1.50:
-            return {"side": "sell", "setup": "PLAY5_PRESSURE_COOKER", "score": 94}
+        if (1.00 <= p15m <= 2.00) and abs(p5m) >= 1.20 and oi15m <= -1.50:
+            return {"side": "sell", "setup": "PLAY5_INERTIAL_PRESSURE_COOKER", "score": 94}
         return None
 
     def eval_module_6_whale_wall(self, bitget_symbol):
@@ -402,10 +401,10 @@ class MasterDeskEngine:
             bids, asks = ob.get("bids", []), ob.get("asks", [])
             if not bids or not asks: return None
             b_vol, a_vol = sum(b[1] for b in bids[:10]), sum(a[1] for a in asks[:10])
-            if a_vol > 0 and (b_vol / a_vol) >= 4.0:
-                return {"side": "buy", "setup": "PLAY6_WHALE_WALL", "score": 88}
-            elif b_vol > 0 and (a_vol / b_vol) >= 4.0:
-                return {"side": "sell", "setup": "PLAY6_WHALE_WALL", "score": 88}
+            if a_vol > 0 and (b_vol / a_vol) >= 4.5:
+                return {"side": "buy", "setup": "PLAY6_INERTIAL_WHALE_WALL", "score": 88}
+            elif b_vol > 0 and (a_vol / b_vol) >= 4.5:
+                return {"side": "sell", "setup": "PLAY6_INERTIAL_WHALE_WALL", "score": 88}
         except Exception:
             pass
         return None
@@ -465,7 +464,7 @@ class MasterDeskEngine:
                 top["setup"] += "+WHALE_WALL"
 
             top["entry_price"] = exec_price
-            logger.info(f"🎯 MASTER SIGNAL (1%+ Active Gate): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
+            logger.info(f"🎯 INERTIAL MASTER SIGNAL (1.5%+ Mass Gate): {top['base_sym']} ({top['side'].upper()}) | Strategy: {top['setup']} | Score: {top['score']}")
             return top
 
         return None
@@ -538,7 +537,7 @@ class MasterDeskEngine:
                 trade["last_peak_time"] = now
             if gain_pct > trade["highest_gain_pct"]: trade["highest_gain_pct"] = gain_pct
 
-        if (now - trade["last_peak_time"]) >= 60 and trade["highest_gain_pct"] >= 0.40:
+        if (now - trade["last_peak_time"]) >= 60 and trade["highest_gain_pct"] >= 0.50:
             trade["is_fading"] = True
 
         dashboard_data["active_trade"] = {
@@ -550,7 +549,7 @@ class MasterDeskEngine:
         }
 
         exit_reason = None
-        if trade["is_fading"] and gain_pct >= 0.30: exit_reason = "ORGANIC_MOMENTUM_FADE"
+        if trade["is_fading"] and gain_pct >= 0.40: exit_reason = "ORGANIC_MOMENTUM_FADE"
         elif elapsed >= DOA_TIMEOUT_SECONDS and trade["highest_gain_pct"] < DOA_FORWARD_THRESHOLD_PCT: exit_reason = "90S_DOA_KILL_SWITCH"
         elif elapsed >= MAX_LIFECYCLE_SECONDS: exit_reason = "15M_LIFECYCLE_EXHAUSTION"
         elif not trade["is_paper"] and gain_pct <= -LIVE_HARD_STOP_PCT: exit_reason = "HARD_STOP_LOSS"
@@ -579,7 +578,7 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def run(self):
-        logger.info("🚀 Master Quantitative Desk Engine Online (8-Win Gauntlet + 1% Gate Active)...")
+        logger.info("🚀 Inertial Momentum Desk Online (8-Win Gauntlet + 1.5%+ Mass Gate Active)...")
         last_sync = 0
 
         while True:
@@ -610,5 +609,5 @@ class MasterDeskEngine:
 if __name__ == "__main__":
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
-    engine = MasterDeskEngine()
+    engine = InertialDeskEngine()
     engine.run()
