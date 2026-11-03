@@ -16,7 +16,7 @@ BITGET_API_PASSPHRASE = os.getenv("BITGET_API_PASSPHRASE", "")
 PORT = int(os.getenv("PORT", 10000))
 
 # LEVERAGE & MICROSTRUCTURE RULES
-LEVERAGE = 5                    # 5x Leverage: Safe buffer (~19% liquidation distance)
+LEVERAGE = 5                    # 5x Leverage: Safe liquidation distance (~19%), small-account optimized
 MIN_NOTIONAL_USDT = 5.2         # Bitget requires >= 5.0 USDT order value (clamped at $5.20)
 TARGET_NET_WIN_PCT = 1.0        # Strict +1.0% NET profit per win
 REQUIRED_WIN_STREAK = 8         # 8 consecutive wins required to unlock live trading
@@ -59,9 +59,10 @@ def start_health_server():
 # ----------------- DYNAMIC CROSS-VENUE AUDITOR -----------------
 class DynamicCrossVenueAuditor:
     def __init__(self):
+        # NOTE: Gate.io is registered as 'gate' in CCXT
         self.venues = {
             "bitget": ccxt_async.bitget({'options': {'defaultType': 'swap'}}),
-            "gateio": ccxt_async.gateio({'options': {'defaultType': 'swap'}}),
+            "gate": ccxt_async.gate({'options': {'defaultType': 'swap'}}),
             "mexc": ccxt_async.mexc({'options': {'defaultType': 'swap'}}),
             "bybit": ccxt_async.bybit({'options': {'defaultType': 'linear'}}),
             "binance": ccxt_async.binance({'options': {'defaultType': 'swap'}})
@@ -86,7 +87,7 @@ class DynamicCrossVenueAuditor:
             except Exception as e:
                 logger.warning(f"Market mapping error on {name}: {e}")
 
-        # Keep assets tradeable on Bitget + at least 1 other venue
+        # Keep only assets tradeable on Bitget + at least 1 other venue (2 to 5 total)
         self.listing_map = {
             b: venues for b, venues in self.listing_map.items()
             if "bitget" in venues and len(venues) >= 2
@@ -181,7 +182,7 @@ class TradingEngine:
         self.live_unlocked = False
 
     async def setup_symbol_mode(self, symbol: str):
-        """Configures isolated margin, one-way mode, and 5x leverage."""
+        """Sets isolated margin, one-way mode, and 5x leverage."""
         try:
             await self.exchange.set_margin_mode('isolated', symbol)
         except Exception:
@@ -204,7 +205,7 @@ class TradingEngine:
             bal = await self.exchange.fetch_balance()
             free_usdt = float(bal.get('USDT', {}).get('free', 0.0))
             if free_usdt < 0.5:
-                free_usdt = 1.50  # Simulation fallback if testing unfunded
+                free_usdt = 1.50  # Fallback for paper mode simulation
         except Exception:
             free_usdt = 1.50
 
@@ -235,7 +236,7 @@ class TradingEngine:
         return formatted_amount
 
     async def close_position_safely(self, symbol: str, side: str, amount: float):
-        """Closes position using reduceOnly with a 3-stage retry loop."""
+        """Closes position using reduceOnly with an emergency 3-stage retry loop."""
         close_side = "sell" if side == "buy" else "buy"
         for attempt in range(1, 4):
             try:
