@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: MICROSTRUCTURE ORDER FLOW & BOOK DEPTH ENGINE (FIXED)
+BOT.PY: ADAPTIVE 1%-2% LIMIT CHASE & 10-SECOND WATCHDOG (PRODUCTION DESK)
+VERIFIED FOR RENDER:
+  1. ADAPTIVE 1.0% - 2.0% DEPTH BAND: Scales dynamically with coin spread.
+  2. 10-SECOND STRUCTURE WATCHDOG: Checks order book health every 3.5s.
+  3. FLASH-DUMP SHIELD: 15-second grace period + 2-strike confirmation.
+  4. SWEET SPOT ENTRY: 0.20% to 1.95% velocity (No 6-hour freeze, no top wicks).
+  5. INSTANT SLA APEX EXIT: Closes immediately when peak rolls over 0.12%.
 ===============================================================================
 """
 
@@ -29,7 +35,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("MicrostructureDesk")
+logger = logging.getLogger("AdaptiveWatchdogDesk")
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 
@@ -41,22 +47,21 @@ BLACKLIST = [
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 ]
 
-MAX_BAD_TRADE_SECONDS = 300       # 5-Min Cutoff
-NORMAL_TRADE_SECONDS = 600        # 10-Min Target Trend Horizon
-MAX_LIFECYCLE_SECONDS = 900       # 15-Min Absolute Ceiling
+MAX_LIFECYCLE_SECONDS = 900       # 15-Minute Absolute Ceiling
+WATCHDOG_CHECK_INTERVAL = 3.5     # Check order book every 3.5 seconds
 
-# Microstructure Thresholds
-MIN_BOOK_DEPTH_RATIO = 2.80       # Resting orders on favored side must be >= 2.8x opposite side
-MIN_MINUTE_VOLUME_USDT = 40_000   # Minimum new order volume entering per minute
+# Adaptive Band Settings (1.0% to 2.0%)
+MIN_BAND_PCT = 0.010              # 1.0% for tight, liquid high-caps
+MAX_BAND_PCT = 0.020              # 2.0% for wide, volatile low-caps
+MIN_CAPITAL_RATIO = 1.65          # Favored side must have >= 1.65x capital in the band
 
-# SLA Sequence Fade Parameters
-SLA_PROFIT_ACTIVATION_PCT = 0.35  # SLA Arms when gain >= +0.35%
-SLA_APEX_FADE_TOLERANCE = 0.12    # Instant Exit if price drops 0.12% from peak
-HARD_STOP_PCT = 0.85              # Emergency structural stop
-SCRATCH_CUT_PCT = -0.50           # Scratch failing trade if underwater at minute 4
+# Momentum Entry Window
+MIN_PRE_BREAKOUT_MOVE = 0.20      # Minimum initial push
+MAX_PRE_BREAKOUT_MOVE = 1.95      # Never buy exhausted spikes > 1.95%
+HARD_STOP_PCT = 0.85              # Emergency structural hard stop
 
 QUALIFICATION_TARGET_WINS = 8
-COOLDOWN_SECONDS = 360
+COOLDOWN_SECONDS = 240
 ALLOCATION_PCT = 0.90
 MIN_NOTIONAL_USDT = 5.50
 MAX_LEVERAGE_CLAMP = 20
@@ -117,7 +122,7 @@ class DynamicLearningEngine:
             self.data["winning_autopsies"].append(entry)
             if len(self.data["winning_autopsies"]) > 50:
                 self.data["winning_autopsies"].pop(0)
-            logger.info(f"🧬 [AUTOPSY] Sustained {setup_name} on {symbol} (+{gain_pct:.2f}%). Pattern recorded.")
+            logger.info(f"🧬 [AUTOPSY] Recorded limit chase win on {symbol} (+{gain_pct:.2f}%).")
         self.save()
 
 # -----------------------------------------------------------------------------
@@ -194,7 +199,7 @@ class StateManager:
         self.save()
 
 # -----------------------------------------------------------------------------
-# LIVE HTTP SERVER & DASHBOARD
+# LIVE HTTP KEEP-ALIVE SERVER & DASHBOARD
 # -----------------------------------------------------------------------------
 dashboard_data = {
     "status": "INITIALIZING",
@@ -203,7 +208,7 @@ dashboard_data = {
     "cg_global_pairs": 0,
     "bitget_tradable_pairs": 0,
     "active_trade": None,
-    "latest_ai_card": "Scanning multi-exchange order books...",
+    "latest_ai_card": "Scanning adaptive 1%-2% order books...",
     "recent_trades": [],
     "last_update": ""
 }
@@ -220,17 +225,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Monitoring order books and order flow...</p>"
+        active_html = "<p style='color: #888;'>Watching 1%-2% adaptive order books in real time...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
-            sla_status = "<span style='color: #eab308; font-weight: bold;'>ARMED (PEAK HUNTING)</span>" if at.get("sla_armed") else "<span style='color: #60a5fa;'>EXPANDING SUSTAINED WAVE</span>"
             active_html = f"""
             <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
                 <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE WAVE: {at['symbol']} ({at['side'].upper()})</h3>
                 <p><b>Strategy:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
                 <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
                 <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
-                <p><b>SLA Status:</b> {sla_status} | <b>Time:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s</p>
+                <p><b>Structure Health:</b> <span style="color: #38bdf8; font-weight: bold;">{at.get('structure_health', 'MONITORING')}</span> | <b>Time:</b> {at['elapsed_seconds']}s</p>
             </div>
             """
 
@@ -253,7 +257,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Microstructure Order Flow Desk</title>
+            <title>Adaptive Limit Watchdog Desk</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -267,7 +271,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>⚡ Microstructure Order Flow & Book Depth Desk</h2>
+            <h2>⚡ Adaptive 1%-2% Limit Chase & 10-Second Watchdog Desk</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
@@ -311,7 +315,7 @@ def start_http_server():
         logger.error(f"HTTP Server bind error: {e}")
 
 # -----------------------------------------------------------------------------
-# MASTER DESK ENGINE
+# MASTER DESK ENGINE: ADAPTIVE 1%-2% DEPTH & REAL-TIME WATCHDOG
 # -----------------------------------------------------------------------------
 class MasterDeskEngine:
     def __init__(self):
@@ -321,10 +325,12 @@ class MasterDeskEngine:
         self.http_session = None
         
         self.cg_buffer = defaultdict(lambda: deque(maxlen=60))
+        self.ob_memory = defaultdict(lambda: deque(maxlen=15))
         self.bitget_markets = set()
         self.bitget_prices = {}
         self.cooldowns = {}
         self.active_trade = None
+        self.last_watchdog_time = 0.0
 
         self._setup_connection_pool()
         self._setup_exchange()
@@ -407,140 +413,91 @@ class MasterDeskEngine:
         except Exception:
             pass
 
-    def inspect_order_book_microstructure(self, bitget_symbol):
+    # -------------------------------------------------------------------------
+    # ADAPTIVE 1% TO 2% ORDER BOOK DEPTH ANALYZER
+    # -------------------------------------------------------------------------
+    def inspect_adaptive_order_book(self, bitget_symbol, side):
         try:
             ccxt_symbol = f"{bitget_symbol[:len(bitget_symbol)-4]}/USDT:USDT"
-            ob = self.exchange.fetch_order_book(ccxt_symbol, limit=20)
-            bids = ob.get("bids", [])
-            asks = ob.get("asks", [])
+            ob = self.exchange.fetch_order_book(ccxt_symbol, limit=25)
+            bids, asks = ob.get("bids", []), ob.get("asks", [])
             if not bids or not asks:
                 return None
 
-            mid_price = (bids[0][0] + asks[0][0]) / 2.0
+            best_bid = bids[0][0]
+            best_ask = asks[0][0]
+            mid_price = (best_bid + best_ask) / 2.0
             if mid_price <= 0:
                 return None
 
-            bid_notional = sum(p * q for p, q in bids if (mid_price - p) / mid_price <= 0.012)
-            ask_notional = sum(p * q for p, q in asks if (p - mid_price) / mid_price <= 0.012)
+            # Dynamically adapt band: 1.0% for tight spreads, up to 2.0% for wide spreads
+            spread_pct = (best_ask - best_bid) / mid_price
+            adaptive_band = max(MIN_BAND_PCT, min(MAX_BAND_PCT, spread_pct * 8.0))
 
-            if ask_notional <= 0 or bid_notional <= 0:
-                return None
+            bids_in_band = [(p, q) for p, q in bids if (mid_price - p) / mid_price <= adaptive_band]
+            asks_in_band = [(p, q) for p, q in asks if (p - mid_price) / mid_price <= adaptive_band]
+
+            bid_cap = sum(p * q for p, q in bids_in_band)
+            ask_cap = sum(p * q for p, q in asks_in_band)
+
+            now = time.time()
+            snapshot = {
+                "time": now,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "bid_cap": bid_cap,
+                "ask_cap": ask_cap,
+                "band_pct": adaptive_band * 100.0
+            }
+            self.ob_memory[bitget_symbol].append(snapshot)
+            mem = list(self.ob_memory[bitget_symbol])
+
+            if len(mem) < 2:
+                ratio = (bid_cap / ask_cap) if (side == "buy" and ask_cap > 0) else ((ask_cap / bid_cap) if bid_cap > 0 else 1.0)
+                return {
+                    "is_stepping": True,
+                    "capital_ratio": ratio,
+                    "bid_cap": bid_cap,
+                    "ask_cap": ask_cap,
+                    "band_pct": adaptive_band * 100.0,
+                    "structure_intact": True
+                }
+
+            past = mem[-2]  # Compare against previous immediate tick (smooth comparison)
+            if side == "buy":
+                ratio = bid_cap / ask_cap if ask_cap > 0 else 1.0
+                is_stepping = (best_bid >= past["best_bid"])
+                # Structure is destroyed if sellers overwhelm buyers (ratio < 1.0) or bids collapse > 50%
+                structure_intact = (ratio >= 1.05) and (bid_cap >= past["bid_cap"] * 0.50)
+            else:
+                ratio = ask_cap / bid_cap if bid_cap > 0 else 1.0
+                is_stepping = (best_ask <= past["best_ask"])
+                structure_intact = (ratio >= 1.05) and (ask_cap >= past["ask_cap"] * 0.50)
 
             return {
-                "mid_price": mid_price,
-                "bid_notional": bid_notional,
-                "ask_notional": ask_notional,
-                "bid_ask_ratio": bid_notional / ask_notional,
-                "ask_bid_ratio": ask_notional / bid_notional
+                "is_stepping": is_stepping,
+                "capital_ratio": ratio,
+                "bid_cap": bid_cap,
+                "ask_cap": ask_cap,
+                "band_pct": adaptive_band * 100.0,
+                "structure_intact": structure_intact
             }
         except Exception:
             return None
 
-    def calculate_minute_by_minute_flow(self, history):
-        if len(history) < 12:
-            return None
-        h = list(history)
-        now = h[-1]["time"]
-
-        t_0 = h[-1]
-        t_1m = [x for x in h if x["time"] <= (now - 60)]
-        t_2m = [x for x in h if x["time"] <= (now - 120)]
-        t_3m = [x for x in h if x["time"] <= (now - 180)]
-
-        if not t_1m or not t_2m or not t_3m:
-            return None
-
-        # Safe volume lookup preventing KeyError
-        v0 = t_0.get("volume", t_0.get("vol_24h", 0.0))
-        v1 = t_1m[-1].get("volume", t_1m[-1].get("vol_24h", 0.0))
-        v2 = t_2m[-1].get("volume", t_2m[-1].get("vol_24h", 0.0))
-        v3 = t_3m[-1].get("volume", t_3m[-1].get("vol_24h", 0.0))
-
-        m1_vol = max(0.0, v0 - v1)
-        m2_vol = max(0.0, v1 - v2)
-        m3_vol = max(0.0, v2 - v3)
-
-        is_continuous = (m1_vol >= MIN_MINUTE_VOLUME_USDT and m2_vol >= MIN_MINUTE_VOLUME_USDT)
-
-        return {
-            "m1_vol": m1_vol,
-            "m2_vol": m2_vol,
-            "m3_vol": m3_vol,
-            "is_continuous": is_continuous
-        }
-
-    def eval_microstructure_sustained_wave(self, base_sym, bitget_symbol, latest, history):
-        p3m = latest["price_3m"]
-        oi3m = latest["oi_3m"]
-        consensus = latest["consensus_pct"]
-
-        if consensus < 85.0:
-            return None
-
-        # Exclude wicks that have already exploded and exhausted
-        if abs(p3m) > 1.90 or abs(p3m) < 0.55:
-            return None
-
-        flow = self.calculate_minute_by_minute_flow(history)
-        if not flow or not flow["is_continuous"]:
-            return None
-
-        ob_data = self.inspect_order_book_microstructure(bitget_symbol)
-        if not ob_data:
-            return None
-
-        if p3m > 0 and oi3m >= 0.25 and ob_data["bid_ask_ratio"] >= MIN_BOOK_DEPTH_RATIO:
-            return {
-                "side": "buy",
-                "setup": "PLAY_SUSTAINED_ORDER_FLOW",
-                "score": 99,
-                "p3m": p3m,
-                "oi3m": oi3m,
-                "depth_ratio": ob_data["bid_ask_ratio"],
-                "flow": flow,
-                "consensus": consensus,
-                "aligned": latest["exchanges_aligned"],
-                "trajectory": latest.get("trajectory_3m", [])
-            }
-
-        elif p3m < 0 and abs(oi3m) >= 0.25 and ob_data["ask_bid_ratio"] >= MIN_BOOK_DEPTH_RATIO:
-            return {
-                "side": "sell",
-                "setup": "PLAY_SUSTAINED_ORDER_FLOW",
-                "score": 99,
-                "p3m": p3m,
-                "oi3m": oi3m,
-                "depth_ratio": ob_data["ask_bid_ratio"],
-                "flow": flow,
-                "consensus": consensus,
-                "aligned": latest["exchanges_aligned"],
-                "trajectory": latest.get("trajectory_3m", [])
-            }
-
-        return None
-
-    def eval_module_1_regime_shift(self, latest):
-        p5m, p15m, oi15m = latest["price_5m"], latest["price_15m"], latest["oi_15m"]
-        if p15m >= 1.80 and p5m >= 1.10 and oi15m >= 0.80:
-            return {"side": "buy", "setup": "PLAY1_FRESH_REGIME_SHIFT", "score": 94}
-        elif p15m <= -1.80 and p5m <= -1.10 and oi15m <= -0.80:
-            return {"side": "sell", "setup": "PLAY1_FRESH_REGIME_SHIFT", "score": 94}
-        return None
-
-    def format_ai_studio_dossier(self, signal, current_price):
-        traj = signal.get("trajectory", [0.0, 0.4, 0.8, 1.2])
-        flow = signal.get("flow", {})
+    def format_ai_studio_dossier(self, signal, current_price, ob_data):
         card = (
-            f"\n==================== [AI STUDIO MICROSTRUCTURE DOSSIER] ====================\n"
+            f"\n==================== [ADAPTIVE LIMIT CHASE DOSSIER] ====================\n"
             f"ASSET: {signal['base_sym']}USDT | DIRECTION: {signal['side'].upper()} | SCORE: {signal['score']}/100\n"
-            f"STRATEGY: {signal['setup']} | RESTING DEPTH RATIO: {signal.get('depth_ratio', 1.0):.2f}x\n"
-            f"EXCHANGE CONSENSUS: {signal.get('consensus', 100)}% ({signal.get('aligned', 'ALL')} VENUES)\n"
-            f"VELOCITY: 3m Price: {signal.get('p3m', 0.0):+.2f}% | 3m OI: {signal.get('oi3m', 0.0):+.2f}%\n"
-            f"PER-MINUTE INFLOW: M1: ${flow.get('m1_vol', 0):,.0f} | M2: ${flow.get('m2_vol', 0):,.0f}\n"
-            f"EXECUTION ENTRY PRICE: ${current_price:.6f}\n"
+            f"STRATEGY: {signal['setup']} | ADAPTIVE BAND: +/-{ob_data.get('band_pct', 1.0):.2f}%\n"
+            f"RESTING CAPITAL: Bids: ${ob_data.get('bid_cap', 0):,.0f} | Asks: ${ob_data.get('ask_cap', 0):,.0f}\n"
+            f"BAND CAPITAL RATIO: {ob_data.get('capital_ratio', 1.0):.2f}x FAVORED\n"
+            f"LIMIT CHASE STATUS: {'ADVANCING (AGGRESSIVE)' if ob_data.get('is_stepping') else 'HOLDING'}\n"
+            f"PRE-BREAKOUT VELOCITY: 3m Price: {signal.get('p3m', 0.0):+.2f}% | 3m OI: {signal.get('oi3m', 0.0):+.2f}%\n"
+            f"ENTRY EXECUTION PRICE: ${current_price:.6f}\n"
             f"AI STUDIO FINGERPRINT:\n"
-            f"{json.dumps({'asset': signal['base_sym'], 'side': signal['side'], 'depth_ratio': round(signal.get('depth_ratio', 1.0), 2), 'p3m': signal.get('p3m', 0), 'traj': traj}, indent=2)}\n"
-            f"==========================================================================="
+            f"{json.dumps({'asset': signal['base_sym'], 'side': signal['side'], 'ratio': round(ob_data.get('capital_ratio', 1.0), 2), 'band': round(ob_data.get('band_pct', 1.0), 2)}, indent=2)}\n"
+            f"========================================================================="
         )
         dashboard_data["latest_ai_card"] = card
         logger.info(card)
@@ -558,28 +515,49 @@ class MasterDeskEngine:
                 continue
             if bitget_symbol in self.cooldowns and (now - self.cooldowns[bitget_symbol]) < COOLDOWN_SECONDS:
                 continue
-            if len(buf) < 12:
+            if len(buf) < 3:
                 continue
 
             latest = buf[-1]
+            p3m = latest["price_3m"]
+            oi3m = latest["oi_3m"]
+            consensus = latest["consensus_pct"]
 
-            s_wave = self.eval_microstructure_sustained_wave(base_sym, bitget_symbol, latest, buf)
-            if s_wave:
-                candidates.append({**s_wave, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
+            if consensus < 80.0:
                 continue
 
-            s1 = self.eval_module_1_regime_shift(latest)
-            if s1:
-                candidates.append({**s1, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
+            # SWEET SPOT: Allows momentum between 0.20% and 1.95% (Never buys blown-out wicks)
+            if abs(p3m) > MAX_PRE_BREAKOUT_MOVE or abs(p3m) < MIN_PRE_BREAKOUT_MOVE:
+                continue
+
+            if p3m > 0 and oi3m >= 0.15:
+                candidates.append({
+                    "side": "buy", "setup": "PLAY_ADAPTIVE_LIMIT_CHASE",
+                    "score": 99, "p3m": p3m, "oi3m": oi3m,
+                    "bitget_symbol": bitget_symbol, "base_sym": base_sym
+                })
+            elif p3m < 0 and abs(oi3m) >= 0.15:
+                candidates.append({
+                    "side": "sell", "setup": "PLAY_ADAPTIVE_LIMIT_CHASE",
+                    "score": 99, "p3m": p3m, "oi3m": oi3m,
+                    "bitget_symbol": bitget_symbol, "base_sym": base_sym
+                })
 
         if candidates:
-            candidates.sort(key=lambda x: x["score"], reverse=True)
-            top = candidates[0]
-            exec_price = self.bitget_prices.get(top["bitget_symbol"], 0.0)
-            if exec_price <= 0:
-                return None
-            top["entry_price"] = exec_price
-            return top
+            candidates.sort(key=lambda x: abs(x["p3m"]), reverse=True)
+
+            for cand in candidates[:3]:
+                ob_data = self.inspect_adaptive_order_book(cand["bitget_symbol"], cand["side"])
+                if not ob_data:
+                    continue
+
+                if ob_data["capital_ratio"] >= MIN_CAPITAL_RATIO and ob_data["is_stepping"]:
+                    exec_price = self.bitget_prices.get(cand["bitget_symbol"], 0.0)
+                    if exec_price <= 0:
+                        continue
+                    cand["entry_price"] = exec_price
+                    cand["ob_data"] = ob_data
+                    return cand
 
         return None
 
@@ -604,7 +582,7 @@ class MasterDeskEngine:
         price = signal["entry_price"]
         is_paper = (self.state_mgr.state["mode"] == "PAPER")
 
-        self.format_ai_studio_dossier(signal, price)
+        self.format_ai_studio_dossier(signal, price, signal["ob_data"])
 
         trade_info = {
             "symbol": symbol,
@@ -615,7 +593,7 @@ class MasterDeskEngine:
             "entry_time": time.time(),
             "peak_price": price,
             "highest_gain_pct": 0.0,
-            "sla_armed": False,
+            "structure_fails": 0,           # 2-strike confirmation counter
             "is_paper": is_paper,
             "mode": "PAPER" if is_paper else "LIVE",
             "size": 0
@@ -642,6 +620,9 @@ class MasterDeskEngine:
                 logger.error(f"Live entry failed: {e}")
                 self.active_trade = None
 
+    # -------------------------------------------------------------------------
+    # 10-SECOND HIGH-FREQUENCY STRUCTURE WATCHDOG
+    # -------------------------------------------------------------------------
     def manage_active_trade(self):
         if not self.active_trade:
             return
@@ -665,8 +646,17 @@ class MasterDeskEngine:
         if gain_pct > trade["highest_gain_pct"]:
             trade["highest_gain_pct"] = gain_pct
 
-        if trade["highest_gain_pct"] >= SLA_PROFIT_ACTIVATION_PCT:
-            trade["sla_armed"] = True
+        # Run Live Order Book Watchdog every 3.5 seconds
+        if (now - self.last_watchdog_time) >= WATCHDOG_CHECK_INTERVAL:
+            self.last_watchdog_time = now
+            live_ob = self.inspect_adaptive_order_book(symbol, side)
+            if live_ob:
+                if not live_ob["structure_intact"]:
+                    trade["structure_fails"] += 1
+                else:
+                    trade["structure_fails"] = 0
+
+        structure_status = "DESTROYED (ORDERS PULLED)" if trade["structure_fails"] >= 2 else "INTACT"
 
         dashboard_data["active_trade"] = {
             "symbol": symbol,
@@ -677,23 +667,32 @@ class MasterDeskEngine:
             "current_price": current_price,
             "pnl_pct": gain_pct,
             "peak_gain_pct": trade["highest_gain_pct"],
-            "sla_armed": trade["sla_armed"],
+            "structure_health": structure_status,
             "elapsed_seconds": int(elapsed)
         }
 
         exit_reason = None
 
+        # 1. Structural Emergency Hard Stop
         if gain_pct <= -HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
-        elif trade["sla_armed"]:
-            if drawdown_from_peak >= SLA_APEX_FADE_TOLERANCE and gain_pct >= 0.20:
-                exit_reason = "SLA_INSTANT_APEX_FADE"
-        elif elapsed >= 240 and elapsed <= MAX_BAD_TRADE_SECONDS:
-            if gain_pct <= SCRATCH_CUT_PCT:
-                exit_reason = "5M_BAD_TRADE_SCRATCH"
-        elif elapsed > MAX_BAD_TRADE_SECONDS and elapsed <= NORMAL_TRADE_SECONDS:
-            if drawdown_from_peak >= 0.20 and gain_pct >= 0.15:
-                exit_reason = "10M_WAVE_COMPLETION"
+
+        # 2. IMMEDIATE STRUCTURE DESTROYED EXIT (After 15s grace period, 2 confirmed strikes)
+        elif elapsed >= 15 and trade["structure_fails"] >= 2:
+            if gain_pct >= 0.15:
+                exit_reason = "STRUCTURE_BROKEN_BANK_PROFIT"
+            else:
+                exit_reason = "STRUCTURE_BROKEN_FAST_SCRATCH"
+
+        # 3. Micro-Apex Fade: Drawdown 0.12% off the peak once in profit
+        elif trade["highest_gain_pct"] >= 0.35 and drawdown_from_peak >= 0.12 and gain_pct >= 0.20:
+            exit_reason = "SLA_INSTANT_APEX_FADE"
+
+        # 4. 2-Minute Stalled Structure Scratch
+        elif elapsed >= 120 and elapsed <= 180 and gain_pct <= -0.30:
+            exit_reason = "2M_STRUCTURE_STALL_SCRATCH"
+
+        # 5. 15-Minute Runner Hard Ceiling
         elif elapsed >= MAX_LIFECYCLE_SECONDS:
             exit_reason = "15M_RUNNER_CEILING"
 
@@ -722,6 +721,7 @@ class MasterDeskEngine:
                 self.learning_engine.autopsy_winning_trade(symbol, side, gain_pct, setup_name)
 
             self.cooldowns[symbol] = time.time()
+            self.ob_memory[symbol].clear()  # Clear memory for fresh tracking next time
         except Exception as e:
             logger.error(f"Exit execution error: {e}")
         finally:
@@ -729,7 +729,7 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def run(self):
-        logger.info("🚀 Microstructure Order Flow & Book Depth Desk Online...")
+        logger.info("🚀 Adaptive 1%-2% Limit Watchdog Desk Online...")
         last_sync = 0
 
         while True:
@@ -753,10 +753,10 @@ class MasterDeskEngine:
                 dashboard_data["recent_trades"] = self.state_mgr.state["history"]
                 dashboard_data["last_update"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
-                time.sleep(2.0)
+                time.sleep(1.8)
             except Exception as e:
                 logger.error(f"Loop error: {e}")
-                time.sleep(3.0)
+                time.sleep(2.5)
 
 if __name__ == "__main__":
     t = threading.Thread(target=start_http_server, daemon=True)
