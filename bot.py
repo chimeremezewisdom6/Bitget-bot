@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: DYNAMIC GAP DISPERSION & TERMINAL FILL ENGINE (PRODUCTION HARDENED)
-CORE ARCHITECTURE:
-  1. $1M+ GLOBAL POOL: Aggregates 24h volume across top-8 global derivatives venues.
-  2. DYNAMIC LEVEL GAP RANKING: Identifies top 20% widest-gap coins (high elasticity).
-  3. 2-MINUTE ABSORPTION INFLOW: Evaluates 2m momentum velocity (0.35% to 1.85%).
-  4. TERMINAL 1-2 FILLS EXIT: Closes position when only 1-2 fills remain to a wall.
-  5. BITGET CONTRACT SIZING SHIELD: Precision-compliant contract sizing for live orders.
-  6. NET PROFIT ACCOUNTING: Strict Bitget 0.12% fees + spread deduction.
+BOT.PY: CROSS-EXCHANGE TAPE RECORDER & MULTI-METHOD DESK (PRODUCTION AUDITED)
 ===============================================================================
 """
 
@@ -36,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("ProductionDesk")
+logger = logging.getLogger("ForensicTapeDesk")
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 
@@ -116,7 +109,7 @@ class DynamicLearningEngine:
             self.data["winning_autopsies"].append(entry)
             if len(self.data["winning_autopsies"]) > 50:
                 self.data["winning_autopsies"].pop(0)
-            logger.info(f"🧬 [AUTOPSY] Recorded gap-fill win on {symbol} (Net: +{net_gain_pct:.2f}%).")
+            logger.info(f"🧬 [AUTOPSY] Recorded forensic win on {symbol} (Net: +{net_gain_pct:.2f}%).")
         self.save()
 
 # -----------------------------------------------------------------------------
@@ -194,7 +187,7 @@ class StateManager:
         self.save()
 
 # -----------------------------------------------------------------------------
-# LIVE HTTP SERVER & REAL-TIME DASHBOARD
+# LIVE HTTP SERVER & DASHBOARD
 # -----------------------------------------------------------------------------
 dashboard_data = {
     "status": "INITIALIZING",
@@ -203,7 +196,7 @@ dashboard_data = {
     "cg_global_pairs": 0,
     "bitget_tradable_pairs": 0,
     "active_trade": None,
-    "latest_ai_card": "Ranking market order gaps and scanning for terminal fills...",
+    "latest_tape_dossier": "Recording cross-exchange order flow tapes for $1M+ coins...",
     "recent_trades": [],
     "last_update": ""
 }
@@ -220,17 +213,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Watching level fills and remaining gap runway...</p>"
+        active_html = "<p style='color: #888;'>Watching 2-minute order battles across the top 8 venues...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             net_color = "#4ade80" if at['net_pnl_pct'] >= 0 else "#f87171"
             active_html = f"""
             <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
                 <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE WAVE: {at['symbol']} ({at['side'].upper()})</h3>
-                <p><b>Strategy:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
+                <p><b>Strategy Method:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
                 <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
                 <p><b>Gross PnL:</b> {at['gross_pnl_pct']:+.2f}% | <b>NET PnL:</b> <span style="color: {net_color}; font-weight: bold; font-size: 16px;">{at['net_pnl_pct']:+.2f}%</span></p>
-                <p><b>Fills Remaining to Wall:</b> <span style="color: #f59e0b; font-weight: bold;">{at.get('remaining_fills', 'CALCULATING')}</span> | <b>Time:</b> {at['elapsed_seconds']}s</p>
+                <p><b>Remaining Fills to Wall:</b> <span style="color: #f59e0b; font-weight: bold;">{at.get('remaining_fills', 'CALCULATING')}</span> | <b>Time:</b> {at['elapsed_seconds']}s</p>
             </div>
             """
 
@@ -253,7 +246,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Dynamic Gap Dispersion Desk</title>
+            <title>Cross-Exchange Forensic Tape Desk</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -261,13 +254,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 .badge {{ padding: 4px 10px; border-radius: 4px; font-weight: bold; }}
                 .badge-live {{ background: #ef4444; color: white; }}
                 .badge-paper {{ background: #eab308; color: black; }}
-                pre {{ background: #090d16; padding: 12px; border-radius: 6px; font-size: 12px; color: #38bdf8; overflow-x: auto; }}
+                pre {{ background: #090d16; padding: 12px; border-radius: 6px; font-size: 12px; color: #38bdf8; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }}
                 table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
                 th {{ text-align: left; background: #334155; padding: 8px; font-size: 13px; }}
             </style>
         </head>
         <body>
-            <h2>⚡ Dynamic Gap Dispersion & Terminal Fill Desk</h2>
+            <h2>⚡ Cross-Exchange Forensic Tape Desk (2-Min Force Recorder)</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
@@ -280,14 +273,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {active_html}
             </div>
             <div class="card">
-                <h3>Google AI Studio Microstructure Dossier</h3>
-                <pre>{dashboard_data['latest_ai_card']}</pre>
+                <h3>Cross-Exchange Forensic Tape Dossier (Copy & Paste to Chat)</h3>
+                <pre>{dashboard_data['latest_tape_dossier']}</pre>
             </div>
             <div class="card">
                 <h3>Recent Execution Log (Strictly Net of Bitget 0.12% Fees & Spread)</h3>
                 <table>
                     <thead>
-                        <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Strategy</th><th>Net PnL %</th><th>Exit Reason</th><th>Type</th></tr>
+                        <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Strategy Method</th><th>Net PnL %</th><th>Exit Reason</th><th>Type</th></tr>
                     </thead>
                     <tbody>
                         {history_rows}
@@ -311,7 +304,7 @@ def start_http_server():
         logger.error(f"HTTP Server bind error: {e}")
 
 # -----------------------------------------------------------------------------
-# MASTER DESK ENGINE: DYNAMIC ORDER GAP & TERMINAL FILL TRACKER
+# MASTER DESK ENGINE: FORENSIC TAPE CLASSIFIER & EXECUTOR
 # -----------------------------------------------------------------------------
 class MasterDeskEngine:
     def __init__(self):
@@ -409,7 +402,8 @@ class MasterDeskEngine:
                         "volume": vol,
                         "exchange_count": int(item.get("exchange_count", 1)),
                         "consensus_pct": float(item.get("consensus_pct", 100.0)),
-                        "exchanges_aligned": item.get("exchanges_aligned", "1/1")
+                        "exchanges_aligned": item.get("exchanges_aligned", "1/1"),
+                        "tape_snapshot": item.get("tape_snapshot", {})
                     })
                     valid_count += 1
                 dashboard_data["cg_global_pairs"] = valid_count
@@ -417,7 +411,7 @@ class MasterDeskEngine:
             pass
 
     # -------------------------------------------------------------------------
-    # DYNAMIC ORDER DISPERSION & REMAINING FILLS CALCULATOR
+    # MULTI-METHOD TAPE CLASSIFIER & ORDER BOOK LEVEL PROFILER
     # -------------------------------------------------------------------------
     def evaluate_order_dispersion_and_fills(self, bitget_symbol, side):
         try:
@@ -436,7 +430,6 @@ class MasterDeskEngine:
             if spread_pct > 0.30:
                 return None
 
-            # Measure distance between adjacent orders
             bid_gaps = [((bids[i][0] - bids[i+1][0]) / mid_price) * 100.0 for i in range(min(12, len(bids)-1))]
             ask_gaps = [((asks[i+1][0] - asks[i][0]) / mid_price) * 100.0 for i in range(min(12, len(asks)-1))]
 
@@ -447,7 +440,6 @@ class MasterDeskEngine:
             if side == "buy":
                 level_volumes = [p * q for p, q in asks[:15]]
                 avg_vol = (sum(level_volumes) / len(level_volumes)) if level_volumes else 1.0
-                
                 remaining_fills = 0
                 for v in level_volumes:
                     if v >= (avg_vol * 2.5):
@@ -457,11 +449,9 @@ class MasterDeskEngine:
                 supporting_vol = sum(p * q for p, q in bids[:15])
                 opposing_vol = sum(level_volumes)
                 ratio = supporting_vol / opposing_vol if opposing_vol > 0 else 1.0
-
-            else:  # side == "sell"
+            else:
                 level_volumes = [p * q for p, q in bids[:15]]
                 avg_vol = (sum(level_volumes) / len(level_volumes)) if level_volumes else 1.0
-
                 remaining_fills = 0
                 for v in level_volumes:
                     if v >= (avg_vol * 2.5):
@@ -481,21 +471,72 @@ class MasterDeskEngine:
         except Exception:
             return None
 
-    def format_ai_studio_dossier(self, signal, current_price, ob_data):
-        card = (
-            f"\n==================== [GAP DISPERSION & TERMINAL FILL DOSSIER] ====================\n"
-            f"ASSET: {signal['base_sym']}USDT | DIRECTION: {signal['side'].upper()} | SCORE: {signal['score']}/100\n"
-            f"AVERAGE ORDER GAP: {ob_data['avg_level_gap']:.3f}% PER FILL (HIGH PRICE ELASTICITY)\n"
-            f"REMAINING FILLS TO WALL: {ob_data['remaining_fills']} LEVELS OF OPEN AIR\n"
-            f"BITGET ESTIMATED FRICTION: 0.12% Fees + {ob_data['spread_pct']:.2f}% Spread = {0.12 + ob_data['spread_pct']:.2f}%\n"
-            f"2-MIN VELOCITY: Price: {signal.get('p2m', 0.0):+.2f}% | OI: {signal.get('oi2m', 0.0):+.2f}%\n"
-            f"ENTRY EXECUTION PRICE: ${current_price:.6f}\n"
-            f"AI STUDIO FINGERPRINT:\n"
-            f"{json.dumps({'asset': signal['base_sym'], 'side': signal['side'], 'gap': round(ob_data['avg_level_gap'], 3), 'fills': ob_data['remaining_fills']}, indent=2)}\n"
-            f"=================================================================================="
-        )
-        dashboard_data["latest_ai_card"] = card
-        logger.info(card)
+    def classify_microstructure_method(self, cand, ob_data, tape):
+        p2m = cand["p2m"]
+        ratio = ob_data["depth_ratio"]
+        fills = ob_data["remaining_fills"]
+
+        ex_tapes = tape.get("exchanges", {})
+        total_2m_force_usd = sum(info.get("vol_inflow_2m", 0.0) for info in ex_tapes.values())
+
+        # Method 2: Iceberg Absorption Trap (High force, but price movement is coiled <= 0.40%)
+        if total_2m_force_usd >= 100_000.0 and abs(p2m) <= 0.40:
+            method_name = "METHOD_2_ICEBERG_ABSORPTION_TRAP"
+            score = 99
+        # Method 4: Cross-Exchange Latency Arbitrage (Bitget lags other exchanges)
+        elif len(ex_tapes) >= 2 and any(abs(info.get("price_delta_pct", 0.0)) >= abs(p2m) + 0.50 for info in ex_tapes.values()):
+            method_name = "METHOD_4_CROSS_EXCHANGE_LATENCY_ARB"
+            score = 100
+        # Method 6: Terminal Wall Breakthrough (2 fills before wall with heavy support)
+        elif fills <= 2 and ratio >= 1.60:
+            method_name = "METHOD_6_TERMINAL_WALL_BREAKTHROUGH"
+            score = 97
+        # Method 1: Liquidity Vacuum Sprint (Runway expansion through gapped levels)
+        else:
+            method_name = "METHOD_1_LIQUIDITY_VACUUM_SPRINT"
+            score = 98
+
+        return method_name, score, total_2m_force_usd
+
+    def format_forensic_tape_dossier(self, signal, current_price, ob_data, tape, method_name, force_usd):
+        ex_tapes = tape.get("exchanges", {})
+        duration = tape.get("duration_seconds", 120.0)
+
+        lines = [
+            f"==================== [CROSS-EXCHANGE FORENSIC TAPE DOSSIER] ====================",
+            f"TIMESTAMP: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | ASSET: {signal['base_sym']}USDT",
+            f"CLASSIFIED PATTERN: {method_name} | SCORE: {signal['score']}/100",
+            f"DIRECTION: {signal['side'].upper()} | ENTRY EXECUTION PRICE: ${current_price:.6f}",
+            f"TOTAL 2-MIN FORCE INJECTED: ${force_usd:,.0f} USD (Across {len(ex_tapes)} Venues)",
+            f"ORDER BOOK STRUCTURE: Level Gap: {ob_data['avg_level_gap']:.3f}% | Fills to Wall: {ob_data['remaining_fills']} | Depth Ratio: {ob_data['depth_ratio']:.2f}x",
+            f"BITGET ESTIMATED FRICTION: 0.12% Fees + {ob_data['spread_pct']:.2f}% Spread = {0.12 + ob_data['spread_pct']:.2f}%",
+            f"--------------------------------------------------------------------------------",
+            f"EXCHANGE-BY-EXCHANGE 2-MINUTE TAPE BREAKDOWN (Duration: {duration}s):"
+        ]
+
+        for ex_name, t_info in ex_tapes.items():
+            lines.append(
+                f"  * {ex_name:<12} | Price: {t_info['start_price']:.6f} -> {t_info['end_price']:.6f} ({t_info['price_delta_pct']:+.2f}%) | "
+                f"2m Inflow: ${t_info['vol_inflow_2m']:,.0f} | 2m OI Delta: ${t_info['oi_delta_2m']:+,.0f}"
+            )
+
+        lines.append(f"--------------------------------------------------------------------------------")
+        lines.append(f"RAW COPY-PASTE SNIPPET FOR AI ANALYSIS:")
+        json_snippet = {
+            "asset": signal['base_sym'],
+            "side": signal['side'],
+            "method": method_name,
+            "force_usd": round(force_usd, 0),
+            "gap_pct": round(ob_data['avg_level_gap'], 3),
+            "fills_remaining": ob_data['remaining_fills'],
+            "exchanges": ex_tapes
+        }
+        lines.append(json.dumps(json_snippet, indent=2))
+        lines.append(f"================================================================================")
+
+        dossier_text = "\n".join(lines)
+        dashboard_data["latest_tape_dossier"] = dossier_text
+        logger.info("\n" + dossier_text)
 
     def run_master_arbitrator(self):
         if self.active_trade is not None:
@@ -521,22 +562,22 @@ class MasterDeskEngine:
             if consensus < 75.0:
                 continue
 
-            # 2-Minute Velocity Sweet Spot (0.35% to 1.85%)
-            if abs(p2m) > 1.85 or abs(p2m) < 0.35:
+            # Velocity window (0.25% to 1.95%) allows both absorption coils and sprints
+            if abs(p2m) > 1.95 or abs(p2m) < 0.25:
                 continue
 
-            # Confirm Open Interest is expanding or holding (not dumping)
+            # Verify Open Interest is holding or expanding
             if p2m > 0 and oi2m >= -0.05:
                 candidates.append({
-                    "side": "buy", "setup": "PLAY_GAP_DISPERSION_INFLOW",
-                    "score": 98, "p2m": p2m, "oi2m": oi2m,
-                    "bitget_symbol": bitget_symbol, "base_sym": base_sym
+                    "side": "buy", "p2m": p2m, "oi2m": oi2m,
+                    "bitget_symbol": bitget_symbol, "base_sym": base_sym,
+                    "tape": latest.get("tape_snapshot", {})
                 })
             elif p2m < 0 and oi2m >= -0.05:
                 candidates.append({
-                    "side": "sell", "setup": "PLAY_GAP_DISPERSION_INFLOW",
-                    "score": 98, "p2m": p2m, "oi2m": oi2m,
-                    "bitget_symbol": bitget_symbol, "base_sym": base_sym
+                    "side": "sell", "p2m": p2m, "oi2m": oi2m,
+                    "bitget_symbol": bitget_symbol, "base_sym": base_sym,
+                    "tape": latest.get("tape_snapshot", {})
                 })
 
         if candidates:
@@ -548,9 +589,14 @@ class MasterDeskEngine:
                 if not ob_data:
                     continue
 
-                if ob_data["remaining_fills"] >= 3 and ob_data["depth_ratio"] >= 1.35:
+                # Must have at least 3 fills of runway at entry to allow expansion
+                if ob_data["remaining_fills"] >= 3 and ob_data["depth_ratio"] >= 1.30:
+                    method_name, score, force_usd = self.classify_microstructure_method(cand, ob_data, cand["tape"])
+                    cand["setup"] = method_name
+                    cand["score"] = score
+                    cand["force_usd"] = force_usd
                     cand["ob_data"] = ob_data
-                    cand["elasticity_score"] = ob_data["avg_level_gap"] * ob_data["remaining_fills"]
+                    cand["elasticity_score"] = ob_data["avg_level_gap"] * ob_data["remaining_fills"] + (score / 10.0)
                     profiled.append(cand)
 
             if profiled:
@@ -564,7 +610,6 @@ class MasterDeskEngine:
         return None
 
     def calculate_live_position_size(self, ccxt_symbol, current_price):
-        """Precision-safe position sizing with minimum contract limit enforcement."""
         try:
             balance_info = self.exchange.fetch_balance()
             free_usdt = float((balance_info.get("free") or {}).get("USDT", 0.0) or 0.0)
@@ -579,7 +624,6 @@ class MasterDeskEngine:
             raw_size = notional / current_price
             rounded_size = float(self.exchange.amount_to_precision(ccxt_symbol, raw_size))
 
-            # Validate against Bitget minimum contract step
             market = self.exchange.market(ccxt_symbol) if hasattr(self.exchange, "markets") and ccxt_symbol in self.exchange.markets else None
             min_amount = float((market.get("limits") or {}).get("amount", {}).get("min", 0.0) or 0.0) if market else 0.0
             
@@ -599,9 +643,10 @@ class MasterDeskEngine:
         side = signal["side"]
         price = signal["entry_price"]
         ob_data = signal["ob_data"]
+        tape = signal["tape"]
         is_paper = (self.state_mgr.state["mode"] == "PAPER")
 
-        self.format_ai_studio_dossier(signal, price, ob_data)
+        self.format_forensic_tape_dossier(signal, price, ob_data, tape, signal["setup"], signal["force_usd"])
 
         trade_info = {
             "symbol": symbol,
@@ -620,7 +665,7 @@ class MasterDeskEngine:
         }
 
         if is_paper:
-            logger.info(f"📝 [PAPER ENTRY] Opened {side.upper()} on {symbol} @ {price} | Level Gap: {ob_data['avg_level_gap']:.3f}% | Fills to Wall: {ob_data['remaining_fills']}")
+            logger.info(f"📝 [PAPER ENTRY] Opened {side.upper()} on {symbol} @ {price} | Pattern: {signal['setup']} | Fills to Wall: {ob_data['remaining_fills']}")
             self.active_trade = trade_info
         else:
             try:
@@ -703,7 +748,7 @@ class MasterDeskEngine:
         if gross_pnl <= -HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
 
-        # 2. THE TERMINAL FILL EXIT: Exit when 1-2 fills remain to the major wall and in pure net profit
+        # 2. Terminal Fill Exit: Bank profit when 1-2 fills remain to the wall
         elif trade["remaining_fills"] <= 2 and net_pnl >= MIN_TARGET_NET_PROFIT_PCT:
             exit_reason = "TERMINAL_FILL_PEAK_BANK"
 
@@ -729,23 +774,27 @@ class MasterDeskEngine:
                 ccxt_symbol = self.get_ccxt_symbol(symbol)
                 exact_size = trade.get("size", 0.0)
 
+                # Query live position to ensure full close of this specific coin
                 try:
                     positions = self.exchange.fetch_positions([ccxt_symbol])
                     if positions and isinstance(positions, list):
                         for p in positions:
-                            contracts = abs(float(p.get("contracts", 0.0) or 0.0))
-                            if contracts > 0:
-                                exact_size = contracts
-                                break
+                            pos_sym = p.get("symbol", "")
+                            if pos_sym == ccxt_symbol or pos_sym.replace("/", "").replace(":USDT", "") == symbol:
+                                contracts = abs(float(p.get("contracts", 0.0) or p.get("contractSize", 0.0) or 0.0))
+                                if contracts > 0:
+                                    exact_size = contracts
+                                    break
                 except Exception:
                     pass
 
                 exact_size = float(self.exchange.amount_to_precision(ccxt_symbol, exact_size))
                 if exact_size > 0:
+                    params = {"reduceOnly": True, "tradeSide": "close"}
                     if side == "buy":
-                        self.exchange.create_market_sell_order(ccxt_symbol, exact_size, params={"reduceOnly": True})
+                        self.exchange.create_market_sell_order(ccxt_symbol, exact_size, params=params)
                     else:
-                        self.exchange.create_market_buy_order(ccxt_symbol, exact_size, params={"reduceOnly": True})
+                        self.exchange.create_market_buy_order(ccxt_symbol, exact_size, params=params)
                 logger.info(f"⚡ [LIVE EXIT] Closed {side.upper()} {symbol} @ {exit_price} | NET: {net_pnl:+.2f}% (Gross: {gross_pnl:+.2f}%) | Reason: {reason}")
             else:
                 logger.info(f"📝 [PAPER EXIT] Closed {side.upper()} {symbol} @ {exit_price} | NET: {net_pnl:+.2f}% (Gross: {gross_pnl:+.2f}%) | Reason: {reason}")
@@ -763,7 +812,7 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def run(self):
-        logger.info("🚀 Production Gap Dispersion & Terminal Fill Desk Online...")
+        logger.info("🚀 Production Forensic Tape Desk Online...")
         last_sync = 0
 
         while True:
