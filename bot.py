@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: CROSS-EXCHANGE TAPE RECORDER & MULTI-METHOD DESK (PRODUCTION AUDITED)
+BOT.PY: MASTER QUANTITATIVE DESK (GAP DISPERSION & FORENSIC TAPE ENGINE)
+===============================================================================
+PRODUCTION ARCHITECTURE:
+  1. $1M+ GLOBAL POOL: Aggregates 24h volume across top-8 global derivatives venues.
+  2. DYNAMIC LEVEL GAP RANKING: Identifies top 20% widest-gap coins (high elasticity).
+  3. 2-MINUTE ABSORPTION INFLOW: Evaluates 2m momentum velocity (0.25% to 1.95%).
+  4. TERMINAL 1-2 FILLS EXIT: Closes position when only 1-2 fills remain to a wall.
+  5. BROKEN-PIPE SHIELD: Handles Render health-check disconnects silently.
+  6. BITGET LIVE EXECUTION: Precision-compliant contract sizing and hedge/one-way close.
+  7. NET PROFIT ACCOUNTING: Bitget 0.12% fees + real spread deducted automatically.
 ===============================================================================
 """
 
@@ -42,7 +51,7 @@ BLACKLIST = [
 ]
 
 BITGET_ROUNDTRIP_FEE_PCT = 0.12   # 0.06% open + 0.06% close = 0.12%
-MIN_TARGET_NET_PROFIT_PCT = 0.40  # Net profit target (in pocket)
+MIN_TARGET_NET_PROFIT_PCT = 0.40  # Net profit target (in pocket after fee/spread)
 MAX_LIFECYCLE_SECONDS = 600       # 10-Minute Maximum Lifecycle
 WATCHDOG_CHECK_INTERVAL = 2.5     # Check order book levels every 2.5 seconds
 HARD_STOP_PCT = 0.85              # Emergency structural stop
@@ -187,7 +196,7 @@ class StateManager:
         self.save()
 
 # -----------------------------------------------------------------------------
-# LIVE HTTP SERVER & DASHBOARD
+# LIVE HTTP SERVER & REAL-TIME DASHBOARD (BROKEN-PIPE SHIELDED)
 # -----------------------------------------------------------------------------
 dashboard_data = {
     "status": "INITIALIZING",
@@ -203,94 +212,102 @@ dashboard_data = {
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
+        try:
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, Exception):
+            pass
 
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
+        try:
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
 
-        at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Watching 2-minute order battles across the top 8 venues...</p>"
-        if at:
-            side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
-            net_color = "#4ade80" if at['net_pnl_pct'] >= 0 else "#f87171"
-            active_html = f"""
-            <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
-                <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE WAVE: {at['symbol']} ({at['side'].upper()})</h3>
-                <p><b>Strategy Method:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
-                <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
-                <p><b>Gross PnL:</b> {at['gross_pnl_pct']:+.2f}% | <b>NET PnL:</b> <span style="color: {net_color}; font-weight: bold; font-size: 16px;">{at['net_pnl_pct']:+.2f}%</span></p>
-                <p><b>Remaining Fills to Wall:</b> <span style="color: #f59e0b; font-weight: bold;">{at.get('remaining_fills', 'CALCULATING')}</span> | <b>Time:</b> {at['elapsed_seconds']}s</p>
-            </div>
+            at = dashboard_data.get("active_trade")
+            active_html = "<p style='color: #888;'>Watching 2-minute order battles across the top 8 venues...</p>"
+            if at:
+                side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
+                net_color = "#4ade80" if at['net_pnl_pct'] >= 0 else "#f87171"
+                active_html = f"""
+                <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
+                    <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE WAVE: {at['symbol']} ({at['side'].upper()})</h3>
+                    <p><b>Strategy Method:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
+                    <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
+                    <p><b>Gross PnL:</b> {at['gross_pnl_pct']:+.2f}% | <b>NET PnL:</b> <span style="color: {net_color}; font-weight: bold; font-size: 16px;">{at['net_pnl_pct']:+.2f}%</span></p>
+                    <p><b>Remaining Fills to Wall:</b> <span style="color: #f59e0b; font-weight: bold;">{at.get('remaining_fills', 'CALCULATING')}</span> | <b>Time:</b> {at['elapsed_seconds']}s</p>
+                </div>
+                """
+
+            history_rows = ""
+            for t in reversed(dashboard_data.get("recent_trades", [])[-10:]):
+                color = "#4ade80" if t["result"] == "WIN" else "#f87171"
+                history_rows += f"""
+                <tr>
+                    <td style="padding: 6px;">{t['timestamp']}</td>
+                    <td style="padding: 6px;">{t['symbol']}</td>
+                    <td style="padding: 6px;">{t['side']}</td>
+                    <td style="padding: 6px; color: #60a5fa;">{t.get('setup', 'N/A')}</td>
+                    <td style="padding: 6px; color: {color}; font-weight: bold;">{t['net_pct']:+.2f}% <span style='font-size: 11px; color: #94a3b8;'>(Gross: {t.get('gross_pct', 0):+.2f}%)</span></td>
+                    <td style="padding: 6px;">{t['exit_reason']}</td>
+                    <td style="padding: 6px;">{t['mode']}</td>
+                </tr>
+                """
+
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Cross-Exchange Forensic Tape Desk</title>
+                <meta http-equiv="refresh" content="3">
+                <style>
+                    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
+                    .card {{ background: #1e293b; border-radius: 8px; padding: 15px; margin-bottom: 20px; }}
+                    .badge {{ padding: 4px 10px; border-radius: 4px; font-weight: bold; }}
+                    .badge-live {{ background: #ef4444; color: white; }}
+                    .badge-paper {{ background: #eab308; color: black; }}
+                    pre {{ background: #090d16; padding: 12px; border-radius: 6px; font-size: 12px; color: #38bdf8; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }}
+                    table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+                    th {{ text-align: left; background: #334155; padding: 8px; font-size: 13px; }}
+                </style>
+            </head>
+            <body>
+                <h2>⚡ Cross-Exchange Forensic Tape Desk (2-Min Force Recorder)</h2>
+                <div class="card">
+                    <b>Status:</b> {dashboard_data['status']} | 
+                    <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
+                    <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Wins | 
+                    <b>Global $1M+ Pairs:</b> {dashboard_data['cg_global_pairs']} Pairs | 
+                    <b>Bitget Tradable:</b> {dashboard_data['bitget_tradable_pairs']} Pairs
+                </div>
+                <div class="card">
+                    <h3>Live Position Telemetry</h3>
+                    {active_html}
+                </div>
+                <div class="card">
+                    <h3>Cross-Exchange Forensic Tape Dossier (Copy & Paste to Chat)</h3>
+                    <pre>{dashboard_data['latest_tape_dossier']}</pre>
+                </div>
+                <div class="card">
+                    <h3>Recent Execution Log (Strictly Net of Bitget 0.12% Fees & Spread)</h3>
+                    <table>
+                        <thead>
+                            <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Strategy Method</th><th>Net PnL %</th><th>Exit Reason</th><th>Type</th></tr>
+                        </thead>
+                        <tbody>
+                            {history_rows}
+                        </tbody>
+                    </table>
+                </div>
+            </body>
+            </html>
             """
-
-        history_rows = ""
-        for t in reversed(dashboard_data.get("recent_trades", [])[-10:]):
-            color = "#4ade80" if t["result"] == "WIN" else "#f87171"
-            history_rows += f"""
-            <tr>
-                <td style="padding: 6px;">{t['timestamp']}</td>
-                <td style="padding: 6px;">{t['symbol']}</td>
-                <td style="padding: 6px;">{t['side']}</td>
-                <td style="padding: 6px; color: #60a5fa;">{t.get('setup', 'N/A')}</td>
-                <td style="padding: 6px; color: {color}; font-weight: bold;">{t['net_pct']:+.2f}% <span style='font-size: 11px; color: #94a3b8;'>(Gross: {t.get('gross_pct', 0):+.2f}%)</span></td>
-                <td style="padding: 6px;">{t['exit_reason']}</td>
-                <td style="padding: 6px;">{t['mode']}</td>
-            </tr>
-            """
-
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Cross-Exchange Forensic Tape Desk</title>
-            <meta http-equiv="refresh" content="3">
-            <style>
-                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
-                .card {{ background: #1e293b; border-radius: 8px; padding: 15px; margin-bottom: 20px; }}
-                .badge {{ padding: 4px 10px; border-radius: 4px; font-weight: bold; }}
-                .badge-live {{ background: #ef4444; color: white; }}
-                .badge-paper {{ background: #eab308; color: black; }}
-                pre {{ background: #090d16; padding: 12px; border-radius: 6px; font-size: 12px; color: #38bdf8; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }}
-                table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-                th {{ text-align: left; background: #334155; padding: 8px; font-size: 13px; }}
-            </style>
-        </head>
-        <body>
-            <h2>⚡ Cross-Exchange Forensic Tape Desk (2-Min Force Recorder)</h2>
-            <div class="card">
-                <b>Status:</b> {dashboard_data['status']} | 
-                <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
-                <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Wins | 
-                <b>Global $1M+ Pairs:</b> {dashboard_data['cg_global_pairs']} Pairs | 
-                <b>Bitget Tradable:</b> {dashboard_data['bitget_tradable_pairs']} Pairs
-            </div>
-            <div class="card">
-                <h3>Live Position Telemetry</h3>
-                {active_html}
-            </div>
-            <div class="card">
-                <h3>Cross-Exchange Forensic Tape Dossier (Copy & Paste to Chat)</h3>
-                <pre>{dashboard_data['latest_tape_dossier']}</pre>
-            </div>
-            <div class="card">
-                <h3>Recent Execution Log (Strictly Net of Bitget 0.12% Fees & Spread)</h3>
-                <table>
-                    <thead>
-                        <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Strategy Method</th><th>Net PnL %</th><th>Exit Reason</th><th>Type</th></tr>
-                    </thead>
-                    <tbody>
-                        {history_rows}
-                    </tbody>
-                </table>
-            </div>
-        </body>
-        </html>
-        """
-        self.wfile.write(html.encode("utf-8"))
+            self.wfile.write(html.encode("utf-8"))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            pass
 
     def log_message(self, format, *args):
         return
@@ -483,7 +500,7 @@ class MasterDeskEngine:
         if total_2m_force_usd >= 100_000.0 and abs(p2m) <= 0.40:
             method_name = "METHOD_2_ICEBERG_ABSORPTION_TRAP"
             score = 99
-        # Method 4: Cross-Exchange Latency Arbitrage (Bitget lags other exchanges)
+        # Method 4: Cross-Exchange Latency Arbitrage (Bitget lags other venues)
         elif len(ex_tapes) >= 2 and any(abs(info.get("price_delta_pct", 0.0)) >= abs(p2m) + 0.50 for info in ex_tapes.values()):
             method_name = "METHOD_4_CROSS_EXCHANGE_LATENCY_ARB"
             score = 100
@@ -562,11 +579,11 @@ class MasterDeskEngine:
             if consensus < 75.0:
                 continue
 
-            # Velocity window (0.25% to 1.95%) allows both absorption coils and sprints
+            # Velocity window (0.25% to 1.95%) allows both absorption coils and gap sprints
             if abs(p2m) > 1.95 or abs(p2m) < 0.25:
                 continue
 
-            # Verify Open Interest is holding or expanding
+            # Confirm Open Interest is not actively dumping
             if p2m > 0 and oi2m >= -0.05:
                 candidates.append({
                     "side": "buy", "p2m": p2m, "oi2m": oi2m,
