@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: MASTER QUANTITATIVE DESK (GAP DISPERSION & FORENSIC TAPE ENGINE)
-===============================================================================
-PRODUCTION ARCHITECTURE:
-  1. $1M+ GLOBAL POOL: Aggregates 24h volume across top-8 global derivatives venues.
-  2. DYNAMIC LEVEL GAP RANKING: Identifies top 20% widest-gap coins (high elasticity).
-  3. 2-MINUTE ABSORPTION INFLOW: Evaluates 2m momentum velocity (0.25% to 1.95%).
-  4. TERMINAL 1-2 FILLS EXIT: Closes position when only 1-2 fills remain to a wall.
-  5. BROKEN-PIPE SHIELD: Handles Render health-check disconnects silently.
-  6. BITGET LIVE EXECUTION: Precision-compliant contract sizing and hedge/one-way close.
-  7. NET PROFIT ACCOUNTING: Bitget 0.12% fees + real spread deducted automatically.
+BOT.PY: MASTER QUANTITATIVE DESK (GAP DISPERSION & PRODUCTION READY)
 ===============================================================================
 """
 
@@ -51,7 +42,7 @@ BLACKLIST = [
 ]
 
 BITGET_ROUNDTRIP_FEE_PCT = 0.12   # 0.06% open + 0.06% close = 0.12%
-MIN_TARGET_NET_PROFIT_PCT = 0.40  # Net profit target (in pocket after fee/spread)
+MIN_TARGET_NET_PROFIT_PCT = 0.40  # Net profit target (after fee and spread)
 MAX_LIFECYCLE_SECONDS = 600       # 10-Minute Maximum Lifecycle
 WATCHDOG_CHECK_INTERVAL = 2.5     # Check order book levels every 2.5 seconds
 HARD_STOP_PCT = 0.85              # Emergency structural stop
@@ -196,7 +187,7 @@ class StateManager:
         self.save()
 
 # -----------------------------------------------------------------------------
-# LIVE HTTP SERVER & REAL-TIME DASHBOARD (BROKEN-PIPE SHIELDED)
+# LIVE HTTP SERVER (WITH BROKEN-PIPE DISCONNECT SHIELD)
 # -----------------------------------------------------------------------------
 dashboard_data = {
     "status": "INITIALIZING",
@@ -330,7 +321,8 @@ class MasterDeskEngine:
         self.exchange = None
         self.http_session = None
         
-        self.cg_buffer = defaultdict(lambda: deque(maxlen=60))
+        # Lightweight buffer (maxlen=15) saves memory
+        self.cg_buffer = defaultdict(lambda: deque(maxlen=15))
         self.bitget_markets = set()
         self.bitget_prices = {}
         self.cooldowns = {}
@@ -342,7 +334,7 @@ class MasterDeskEngine:
 
     def _setup_connection_pool(self):
         self.http_session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=3)
+        adapter = HTTPAdapter(pool_connections=40, pool_maxsize=40, max_retries=3)
         self.http_session.mount("https://", adapter)
         self.http_session.mount("http://", adapter)
 
@@ -407,20 +399,14 @@ class MasterDeskEngine:
                     if not base_sym or any(b in base_sym for b in BLACKLIST):
                         continue
 
-                    vol = float(item.get("vol_24h", 0.0) or 0.0)
                     self.cg_buffer[base_sym].append({
                         "time": now,
                         "price": float(item.get("price", 0.0) or 0.0),
                         "price_2m": float(item.get("price_2m", 0.0) or 0.0),
                         "oi_2m": float(item.get("oi_2m", 0.0) or 0.0),
-                        "price_5m": float(item.get("price_5m", 0.0) or 0.0),
-                        "price_24h": float(item.get("price_24h", 0.0) or 0.0),
-                        "vol_24h": vol,
-                        "volume": vol,
-                        "exchange_count": int(item.get("exchange_count", 1)),
-                        "consensus_pct": float(item.get("consensus_pct", 100.0)),
-                        "exchanges_aligned": item.get("exchanges_aligned", "1/1"),
-                        "tape_snapshot": item.get("tape_snapshot", {})
+                        "vol_24h": float(item.get("vol_24h", 0.0) or 0.0),
+                        "est_force_2m": float(item.get("est_force_2m", 0.0) or 0.0),
+                        "exchange_count": int(item.get("exchange_count", 1))
                     })
                     valid_count += 1
                 dashboard_data["cg_global_pairs"] = valid_count
@@ -433,7 +419,7 @@ class MasterDeskEngine:
     def evaluate_order_dispersion_and_fills(self, bitget_symbol, side):
         try:
             ccxt_symbol = self.get_ccxt_symbol(bitget_symbol)
-            ob = self.exchange.fetch_order_book(ccxt_symbol, limit=30)
+            ob = self.exchange.fetch_order_book(ccxt_symbol, limit=25)
             bids, asks = ob.get("bids", []), ob.get("asks", [])
             if len(bids) < 8 or len(asks) < 8:
                 return None
@@ -447,15 +433,15 @@ class MasterDeskEngine:
             if spread_pct > 0.30:
                 return None
 
-            bid_gaps = [((bids[i][0] - bids[i+1][0]) / mid_price) * 100.0 for i in range(min(12, len(bids)-1))]
-            ask_gaps = [((asks[i+1][0] - asks[i][0]) / mid_price) * 100.0 for i in range(min(12, len(asks)-1))]
+            bid_gaps = [((bids[i][0] - bids[i+1][0]) / mid_price) * 100.0 for i in range(min(10, len(bids)-1))]
+            ask_gaps = [((asks[i+1][0] - asks[i][0]) / mid_price) * 100.0 for i in range(min(10, len(asks)-1))]
 
             avg_bid_gap = sum(bid_gaps) / len(bid_gaps) if bid_gaps else 0.0
             avg_ask_gap = sum(ask_gaps) / len(ask_gaps) if ask_gaps else 0.0
             avg_level_gap = (avg_bid_gap + avg_ask_gap) / 2.0
 
             if side == "buy":
-                level_volumes = [p * q for p, q in asks[:15]]
+                level_volumes = [p * q for p, q in asks[:12]]
                 avg_vol = (sum(level_volumes) / len(level_volumes)) if level_volumes else 1.0
                 remaining_fills = 0
                 for v in level_volumes:
@@ -463,11 +449,11 @@ class MasterDeskEngine:
                         break
                     remaining_fills += 1
 
-                supporting_vol = sum(p * q for p, q in bids[:15])
+                supporting_vol = sum(p * q for p, q in bids[:12])
                 opposing_vol = sum(level_volumes)
                 ratio = supporting_vol / opposing_vol if opposing_vol > 0 else 1.0
             else:
-                level_volumes = [p * q for p, q in bids[:15]]
+                level_volumes = [p * q for p, q in bids[:12]]
                 avg_vol = (sum(level_volumes) / len(level_volumes)) if level_volumes else 1.0
                 remaining_fills = 0
                 for v in level_volumes:
@@ -475,7 +461,7 @@ class MasterDeskEngine:
                         break
                     remaining_fills += 1
 
-                supporting_vol = sum(p * q for p, q in asks[:15])
+                supporting_vol = sum(p * q for p, q in asks[:12])
                 opposing_vol = sum(level_volumes)
                 ratio = supporting_vol / opposing_vol if opposing_vol > 0 else 1.0
 
@@ -488,24 +474,17 @@ class MasterDeskEngine:
         except Exception:
             return None
 
-    def classify_microstructure_method(self, cand, ob_data, tape):
+    def classify_microstructure_method(self, cand, ob_data, force_usd):
         p2m = cand["p2m"]
         ratio = ob_data["depth_ratio"]
         fills = ob_data["remaining_fills"]
 
-        ex_tapes = tape.get("exchanges", {})
-        total_2m_force_usd = sum(info.get("vol_inflow_2m", 0.0) for info in ex_tapes.values())
-
         # Method 2: Iceberg Absorption Trap (High force, but price movement is coiled <= 0.40%)
-        if total_2m_force_usd >= 100_000.0 and abs(p2m) <= 0.40:
+        if force_usd >= 80_000.0 and abs(p2m) <= 0.40:
             method_name = "METHOD_2_ICEBERG_ABSORPTION_TRAP"
             score = 99
-        # Method 4: Cross-Exchange Latency Arbitrage (Bitget lags other venues)
-        elif len(ex_tapes) >= 2 and any(abs(info.get("price_delta_pct", 0.0)) >= abs(p2m) + 0.50 for info in ex_tapes.values()):
-            method_name = "METHOD_4_CROSS_EXCHANGE_LATENCY_ARB"
-            score = 100
         # Method 6: Terminal Wall Breakthrough (2 fills before wall with heavy support)
-        elif fills <= 2 and ratio >= 1.60:
+        elif fills <= 2 and ratio >= 1.50:
             method_name = "METHOD_6_TERMINAL_WALL_BREAKTHROUGH"
             score = 97
         # Method 1: Liquidity Vacuum Sprint (Runway expansion through gapped levels)
@@ -513,44 +492,30 @@ class MasterDeskEngine:
             method_name = "METHOD_1_LIQUIDITY_VACUUM_SPRINT"
             score = 98
 
-        return method_name, score, total_2m_force_usd
+        return method_name, score
 
-    def format_forensic_tape_dossier(self, signal, current_price, ob_data, tape, method_name, force_usd):
-        ex_tapes = tape.get("exchanges", {})
-        duration = tape.get("duration_seconds", 120.0)
-
+    def format_forensic_tape_dossier(self, signal, current_price, ob_data, method_name, force_usd):
         lines = [
             f"==================== [CROSS-EXCHANGE FORENSIC TAPE DOSSIER] ====================",
             f"TIMESTAMP: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | ASSET: {signal['base_sym']}USDT",
             f"CLASSIFIED PATTERN: {method_name} | SCORE: {signal['score']}/100",
             f"DIRECTION: {signal['side'].upper()} | ENTRY EXECUTION PRICE: ${current_price:.6f}",
-            f"TOTAL 2-MIN FORCE INJECTED: ${force_usd:,.0f} USD (Across {len(ex_tapes)} Venues)",
+            f"2-MIN ESTIMATED FORCE INJECTED: ${force_usd:,.0f} USD (Across Venues)",
             f"ORDER BOOK STRUCTURE: Level Gap: {ob_data['avg_level_gap']:.3f}% | Fills to Wall: {ob_data['remaining_fills']} | Depth Ratio: {ob_data['depth_ratio']:.2f}x",
             f"BITGET ESTIMATED FRICTION: 0.12% Fees + {ob_data['spread_pct']:.2f}% Spread = {0.12 + ob_data['spread_pct']:.2f}%",
             f"--------------------------------------------------------------------------------",
-            f"EXCHANGE-BY-EXCHANGE 2-MINUTE TAPE BREAKDOWN (Duration: {duration}s):"
+            f"RAW COPY-PASTE SNIPPET FOR AI ANALYSIS:",
+            json.dumps({
+                "asset": signal['base_sym'],
+                "side": signal['side'],
+                "method": method_name,
+                "force_usd": round(force_usd, 0),
+                "gap_pct": round(ob_data['avg_level_gap'], 3),
+                "fills_remaining": ob_data['remaining_fills'],
+                "depth_ratio": round(ob_data['depth_ratio'], 2)
+            }, indent=2),
+            f"================================================================================"
         ]
-
-        for ex_name, t_info in ex_tapes.items():
-            lines.append(
-                f"  * {ex_name:<12} | Price: {t_info['start_price']:.6f} -> {t_info['end_price']:.6f} ({t_info['price_delta_pct']:+.2f}%) | "
-                f"2m Inflow: ${t_info['vol_inflow_2m']:,.0f} | 2m OI Delta: ${t_info['oi_delta_2m']:+,.0f}"
-            )
-
-        lines.append(f"--------------------------------------------------------------------------------")
-        lines.append(f"RAW COPY-PASTE SNIPPET FOR AI ANALYSIS:")
-        json_snippet = {
-            "asset": signal['base_sym'],
-            "side": signal['side'],
-            "method": method_name,
-            "force_usd": round(force_usd, 0),
-            "gap_pct": round(ob_data['avg_level_gap'], 3),
-            "fills_remaining": ob_data['remaining_fills'],
-            "exchanges": ex_tapes
-        }
-        lines.append(json.dumps(json_snippet, indent=2))
-        lines.append(f"================================================================================")
-
         dossier_text = "\n".join(lines)
         dashboard_data["latest_tape_dossier"] = dossier_text
         logger.info("\n" + dossier_text)
@@ -574,44 +539,39 @@ class MasterDeskEngine:
             latest = buf[-1]
             p2m = latest["price_2m"]
             oi2m = latest["oi_2m"]
-            consensus = latest["consensus_pct"]
-
-            if consensus < 75.0:
-                continue
 
             # Velocity window (0.25% to 1.95%) allows both absorption coils and gap sprints
             if abs(p2m) > 1.95 or abs(p2m) < 0.25:
                 continue
 
-            # Confirm Open Interest is not actively dumping
+            # Confirm Open Interest is holding or expanding
             if p2m > 0 and oi2m >= -0.05:
                 candidates.append({
                     "side": "buy", "p2m": p2m, "oi2m": oi2m,
                     "bitget_symbol": bitget_symbol, "base_sym": base_sym,
-                    "tape": latest.get("tape_snapshot", {})
+                    "force_usd": latest["est_force_2m"]
                 })
             elif p2m < 0 and oi2m >= -0.05:
                 candidates.append({
                     "side": "sell", "p2m": p2m, "oi2m": oi2m,
                     "bitget_symbol": bitget_symbol, "base_sym": base_sym,
-                    "tape": latest.get("tape_snapshot", {})
+                    "force_usd": latest["est_force_2m"]
                 })
 
         if candidates:
             candidates.sort(key=lambda x: abs(x["p2m"]), reverse=True)
 
             profiled = []
-            for cand in candidates[:6]:
+            for cand in candidates[:5]:
                 ob_data = self.evaluate_order_dispersion_and_fills(cand["bitget_symbol"], cand["side"])
                 if not ob_data:
                     continue
 
                 # Must have at least 3 fills of runway at entry to allow expansion
-                if ob_data["remaining_fills"] >= 3 and ob_data["depth_ratio"] >= 1.30:
-                    method_name, score, force_usd = self.classify_microstructure_method(cand, ob_data, cand["tape"])
+                if ob_data["remaining_fills"] >= 3 and ob_data["depth_ratio"] >= 1.25:
+                    method_name, score = self.classify_microstructure_method(cand, ob_data, cand["force_usd"])
                     cand["setup"] = method_name
                     cand["score"] = score
-                    cand["force_usd"] = force_usd
                     cand["ob_data"] = ob_data
                     cand["elasticity_score"] = ob_data["avg_level_gap"] * ob_data["remaining_fills"] + (score / 10.0)
                     profiled.append(cand)
@@ -660,10 +620,9 @@ class MasterDeskEngine:
         side = signal["side"]
         price = signal["entry_price"]
         ob_data = signal["ob_data"]
-        tape = signal["tape"]
         is_paper = (self.state_mgr.state["mode"] == "PAPER")
 
-        self.format_forensic_tape_dossier(signal, price, ob_data, tape, signal["setup"], signal["force_usd"])
+        self.format_forensic_tape_dossier(signal, price, ob_data, signal["setup"], signal["force_usd"])
 
         trade_info = {
             "symbol": symbol,
@@ -738,7 +697,6 @@ class MasterDeskEngine:
         friction_pct = BITGET_ROUNDTRIP_FEE_PCT + trade["entry_spread_pct"]
         net_pnl = gross_pnl - friction_pct
 
-        # Check remaining level fills every 2.5 seconds
         if (now - self.last_watchdog_time) >= WATCHDOG_CHECK_INTERVAL:
             self.last_watchdog_time = now
             live_ob = self.evaluate_order_dispersion_and_fills(symbol, side)
@@ -791,7 +749,6 @@ class MasterDeskEngine:
                 ccxt_symbol = self.get_ccxt_symbol(symbol)
                 exact_size = trade.get("size", 0.0)
 
-                # Query live position to ensure full close of this specific coin
                 try:
                     positions = self.exchange.fetch_positions([ccxt_symbol])
                     if positions and isinstance(positions, list):
