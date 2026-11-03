@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-COINGLASS_FEED.PY: TOP-8 GLOBAL DERIVATIVES AGGREGATOR (PRODUCTION READY)
+COINGLASS_FEED.PY: TOP-8 GLOBAL DERIVATIVES AGGREGATOR (PRODUCTION AUDITED)
 EXCHANGES: Binance, Bybit, Bitget, Gate.io, MEXC, KuCoin, Hyperliquid
-FEEDS TO BOT.PY:
-  - 2-Minute Velocity (Price & OI Deltas with Cold-Start Protection)
-  - 5-Minute and 24-Hour Macro Context
-  - Cross-Exchange Directional Consensus % (>= 75% Agreement Across Venues)
 ===============================================================================
 """
 
@@ -36,7 +32,10 @@ class GlobalMatrixAggregator:
 
     def clean_symbol(self, raw_sym: str) -> str:
         s = raw_sym.upper().replace("-", "").replace("_", "")
-        for suffix in ["USDT:USDT", ":USDT", "USDT", "USDC", "USD", "PERP", "SWAP"]:
+        # Normalize KuCoin XBT to BTC
+        if s.startswith("XBT"):
+            s = "BTC" + s[3:]
+        for suffix in ["USDT:USDT", ":USDT", "USDTM", "USDT", "USDC", "USD", "PERP", "SWAP"]:
             if s.endswith(suffix):
                 s = s[:-len(suffix)]
                 break
@@ -166,7 +165,7 @@ class GlobalMatrixAggregator:
         return res
 
     def sweep_top8_exchanges(self) -> Dict[str, Dict]:
-        merged = defaultdict(lambda: {"ex_prices": {}, "prices": [], "volumes": [], "ois": [], "p24s": []})
+        merged = defaultdict(lambda: {"ex_details": {}, "prices": [], "volumes": [], "ois": [], "p24s": []})
         tasks = [
             self.fetch_binance, self.fetch_bybit, self.fetch_bitget,
             self.fetch_gate, self.fetch_mexc, self.fetch_kucoin, self.fetch_hyperliquid
@@ -180,7 +179,12 @@ class GlobalMatrixAggregator:
                     for sym, m in data.items():
                         if m["price"] > 0:
                             merged[sym]["prices"].append((m["price"], m["volume"]))
-                            merged[sym]["ex_prices"][m["exchange"]] = m["price"]
+                            merged[sym]["ex_details"][m["exchange"]] = {
+                                "price": m["price"],
+                                "volume": m["volume"],
+                                "oi": m["oi"],
+                                "price_24h": m["price_24h"]
+                            }
                         if m["volume"] > 0:
                             merged[sym]["volumes"].append(m["volume"])
                         if m["oi"] > 0:
@@ -202,8 +206,8 @@ class GlobalMatrixAggregator:
                     "volume": tot_vol,
                     "oi": tot_oi,
                     "price_24h": p24_avg,
-                    "ex_prices": d["ex_prices"],
-                    "exchange_count": len(d["ex_prices"])
+                    "ex_details": d["ex_details"],
+                    "exchange_count": len(d["ex_details"])
                 }
         return unified
 
@@ -219,26 +223,25 @@ class GlobalMatrixAggregator:
 
             p = data["price"]
             oi = data["oi"]
-            cur_ex_prices = data.get("ex_prices", {})
+            cur_ex_details = data.get("ex_details", {})
 
             self.history[sym].append({
                 "time": now,
                 "price": p,
                 "oi": oi,
                 "volume": tot_vol,
-                "ex_prices": cur_ex_prices
+                "ex_details": cur_ex_details
             })
 
             h = list(self.history[sym])
             p_now = p
             oi_now = oi
 
-            # 2-Minute Deltas with Cold-Start Guard
+            # 2-Minute Deltas with 60-second Cold-Start Guard
             t_2m = now - 120
             ticks_2m = [x for x in h if x["time"] <= t_2m]
             old_2m_tick = ticks_2m[-1] if ticks_2m else h[0]
-            
-            # Cold-start validation: ensure at least 60 seconds of history has accumulated
+
             time_span = now - old_2m_tick["time"]
             if time_span >= 60.0 and old_2m_tick["price"] > 0:
                 p_chg_2m = ((p_now - old_2m_tick["price"]) / old_2m_tick["price"]) * 100.0
@@ -248,25 +251,19 @@ class GlobalMatrixAggregator:
                 p_chg_2m = 0.0
                 oi_chg_2m = 0.0
 
-            # 5-Minute Deltas
-            t_5m = now - 300
-            ticks_5m = [x for x in h if x["time"] <= t_5m]
-            old_5m_tick = ticks_5m[-1] if ticks_5m else h[0]
-            p_chg_5m = ((p_now - old_5m_tick["price"]) / old_5m_tick["price"] * 100.0) if old_5m_tick["price"] > 0 else 0.0
-
             # Cross-Exchange Consensus
-            old_ex_prices = old_2m_tick.get("ex_prices", {})
+            old_ex_details = old_2m_tick.get("ex_details", {})
             aligned_count = 0
             eligible_exchanges = 0
 
             if abs(p_chg_2m) >= 0.10:
                 is_bullish = p_chg_2m > 0
-                for ex_name, current_p in cur_ex_prices.items():
-                    if ex_name in old_ex_prices:
-                        past_p = old_ex_prices[ex_name]
+                for ex_name, cur_info in cur_ex_details.items():
+                    if ex_name in old_ex_details:
+                        past_p = old_ex_details[ex_name]["price"]
                         if past_p > 0:
                             eligible_exchanges += 1
-                            ex_delta = (current_p - past_p) / past_p * 100.0
+                            ex_delta = (cur_info["price"] - past_p) / past_p * 100.0
                             if (is_bullish and ex_delta >= 0) or (not is_bullish and ex_delta <= 0):
                                 aligned_count += 1
 
@@ -275,20 +272,45 @@ class GlobalMatrixAggregator:
                 aligned_str = f"{aligned_count}/{eligible_exchanges}"
             else:
                 consensus_pct = 100.0
-                aligned_str = f"{len(cur_ex_prices)}/{len(cur_ex_prices)}"
+                aligned_str = f"{len(cur_ex_details)}/{len(cur_ex_details)}"
+
+            # Package 2-minute tape history
+            tape_snapshot = {
+                "start_time": old_2m_tick["time"],
+                "end_time": now,
+                "duration_seconds": round(time_span, 1),
+                "exchanges": {}
+            }
+            for ex_name, cur_info in cur_ex_details.items():
+                past_info = old_ex_details.get(ex_name, cur_info)
+                p_delta = ((cur_info["price"] - past_info["price"]) / past_info["price"] * 100.0) if past_info["price"] > 0 else 0.0
+                # Fallback to turnover velocity if rolling volume drops off
+                raw_vol_delta = cur_info["volume"] - past_info["volume"]
+                if raw_vol_delta > 0:
+                    vol_inflow = raw_vol_delta
+                else:
+                    vol_inflow = (cur_info["volume"] / 720.0) * max(0.5, abs(p_delta))
+
+                oi_delta = cur_info["oi"] - past_info["oi"]
+                tape_snapshot["exchanges"][ex_name] = {
+                    "start_price": past_info["price"],
+                    "end_price": cur_info["price"],
+                    "price_delta_pct": round(p_delta, 2),
+                    "vol_inflow_2m": round(vol_inflow, 1),
+                    "oi_delta_2m": round(oi_delta, 1)
+                }
 
             results.append({
                 "symbol": sym,
                 "price": p_now,
                 "price_2m": p_chg_2m,
                 "oi_2m": oi_chg_2m,
-                "price_5m": p_chg_5m,
-                "price_24h": data["price_24h"],
                 "vol_24h": tot_vol,
                 "total_oi": oi_now,
-                "exchange_count": len(cur_ex_prices),
+                "exchange_count": len(cur_ex_details),
                 "consensus_pct": round(consensus_pct, 1),
-                "exchanges_aligned": aligned_str
+                "exchanges_aligned": aligned_str,
+                "tape_snapshot": tape_snapshot
             })
 
         with self.lock:
@@ -297,7 +319,7 @@ class GlobalMatrixAggregator:
 
     def get_master_data(self) -> List[Dict]:
         now = time.time()
-        # 5.0s cache protects against shared-IP rate limiting on Render
+        # 5.0-second cache prevents Render shared IP 429 rate limits
         if (now - self.last_sync_time) > 5.0 or not self.cached_results:
             self.update_matrix()
         with self.lock:
