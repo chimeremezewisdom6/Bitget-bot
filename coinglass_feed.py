@@ -7,11 +7,10 @@ import aiohttp
 import logging
 from collections import deque
 
-logger = logging.getLogger("FeedAggregator")
+logger = logging.getLogger("CoinglassFeed")
 logger.setLevel(logging.INFO)
 
 def normalize_base(symbol: str) -> str:
-    """Normalizes symbols like 1000PEPE, 1000000MOG, 1000BONK to PEPE, MOG, BONK."""
     s = symbol.upper()
     for prefix in ["10000000", "1000000", "100000", "10000", "1000", "K", "1M"]:
         if s.startswith(prefix) and len(s) > len(prefix) + 2:
@@ -23,25 +22,24 @@ def get_coinglass_data():
 
 class GlobalFeedAggregator:
     """
-    Lightweight, thread-safe global market aggregator.
-    Streams Binance Futures WebSocket volume + polls OKX, Bybit, and Bitget tickers/OI.
-    Tracks 5-minute price expansion curves and Open Interest trajectories.
-    RAM consumption strictly < 18MB.
+    Coinglass-style Volume Roll Call Engine.
+    Discovers which platforms trade each coin, calculates total global 24h volume,
+    and tracks 5-minute acceleration curves. RAM strictly < 18MB.
     """
-    def __init__(self, update_interval: int = 10):
-        self.update_interval = update_interval
+    def __init__(self, roll_call_interval: int = 12):
+        self.roll_call_interval = roll_call_interval
         self.running = False
         self.thread = None
         self.ws_thread = None
         self.lock = threading.Lock()
         self.session = requests.Session()
-        
+
         self._price_history = {}      # base -> deque([(ts, price)], maxlen=45)
         self._oi_history = {}         # base -> deque([(ts, oi)], maxlen=45)
-        self._global_volume = {}      # base -> 24h USD volume
+        self._global_volume = {}      # base -> total summed USD volume
+        self._venue_presence = {}     # base -> set([venues where coin is listed])
         self._binance_volume = {}     # base -> Binance 24h volume
         self._last_seen = {}
-        self._consecutive_hits = {}   # base -> count of consecutive qualifications
 
     def start(self):
         self.running = True
@@ -49,7 +47,7 @@ class GlobalFeedAggregator:
         self.ws_thread.start()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        logger.info("Global Feed Aggregator started.")
+        logger.info("Coinglass Feed Aggregator started.")
 
     def stop(self):
         self.running = False
@@ -79,8 +77,12 @@ class GlobalFeedAggregator:
                                         sym = item.get("s", "")
                                         if sym.endswith("USDT"):
                                             clean = normalize_base(sym[:-4])
-                                            self._binance_volume[clean] = float(item.get("q", 0.0))
+                                            vol = float(item.get("q", 0.0))
+                                            self._binance_volume[clean] = vol
                                             self._last_seen[clean] = now
+                                            if clean not in self._venue_presence:
+                                                self._venue_presence[clean] = set()
+                                            self._venue_presence[clean].add("binance")
                             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 break
             except Exception:
@@ -89,31 +91,36 @@ class GlobalFeedAggregator:
     def _run_loop(self):
         while self.running:
             try:
-                self._poll_secondary_tickers()
+                self._execute_volume_roll_call()
                 self._prune_stale()
             except Exception as e:
-                logger.error(f"Feed poll error: {e}")
-            time.sleep(self.update_interval)
+                logger.error(f"Roll call error: {e}")
+            time.sleep(self.roll_call_interval)
 
-    def _poll_secondary_tickers(self):
+    def _execute_volume_roll_call(self):
         now = time.time()
-        temp_volumes = {}
-        temp_prices = {}
-        temp_ois = {}
+        venue_vols = {}
+        venue_presence_temp = {}
+        bitget_prices = {}
+        bitget_ois = {}
 
-        # 1. OKX USDT Swaps
+        # 1. OKX Inquiry
         try:
             r = self.session.get("https://www.okx.com/api/v5/market/tickers?instType=SWAP", timeout=3.5)
             if r.status_code == 200:
                 for item in r.json().get("data", []):
-                    inst_id = item.get("instId", "")
-                    if inst_id.endswith("-USDT-SWAP"):
-                        clean = normalize_base(inst_id.split("-")[0])
-                        temp_volumes[clean] = temp_volumes.get(clean, 0.0) + float(item.get("volCcy24h", 0.0))
+                    inst = item.get("instId", "")
+                    if inst.endswith("-USDT-SWAP"):
+                        clean = normalize_base(inst.split("-")[0])
+                        vol = float(item.get("volCcy24h", 0.0))
+                        venue_vols[clean] = venue_vols.get(clean, 0.0) + vol
+                        if clean not in venue_presence_temp:
+                            venue_presence_temp[clean] = set()
+                        venue_presence_temp[clean].add("okx")
         except Exception:
             pass
 
-        # 2. Bybit Linear
+        # 2. Bybit Inquiry
         try:
             r = self.session.get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=3.5)
             if r.status_code == 200:
@@ -121,11 +128,15 @@ class GlobalFeedAggregator:
                     sym = item.get("symbol", "")
                     if sym.endswith("USDT"):
                         clean = normalize_base(sym[:-4])
-                        temp_volumes[clean] = temp_volumes.get(clean, 0.0) + float(item.get("turnover24h", 0.0))
+                        vol = float(item.get("turnover24h", 0.0))
+                        venue_vols[clean] = venue_vols.get(clean, 0.0) + vol
+                        if clean not in venue_presence_temp:
+                            venue_presence_temp[clean] = set()
+                        venue_presence_temp[clean].add("bybit")
         except Exception:
             pass
 
-        # 3. Bitget USDT Futures (Execution Anchor & OI Source)
+        # 3. Bitget Inquiry (The Execution Venue Anchor)
         try:
             r = self.session.get("https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures", timeout=3.5)
             if r.status_code == 200:
@@ -133,28 +144,40 @@ class GlobalFeedAggregator:
                     sym = item.get("symbol", "")
                     if sym.endswith("USDT"):
                         clean = normalize_base(sym[:-4])
-                        temp_volumes[clean] = temp_volumes.get(clean, 0.0) + float(item.get("usdtVolume", 0.0))
+                        vol = float(item.get("usdtVolume", 0.0))
                         price = float(item.get("lastPr", 0.0))
                         oi = float(item.get("holdingAmount", 0.0) or item.get("openInterest", 0.0))
+                        venue_vols[clean] = venue_vols.get(clean, 0.0) + vol
+                        if clean not in venue_presence_temp:
+                            venue_presence_temp[clean] = set()
+                        venue_presence_temp[clean].add("bitget")
+
                         if price > 0:
-                            temp_prices[clean] = price
+                            bitget_prices[clean] = price
                         if oi > 0:
-                            temp_ois[clean] = oi
+                            bitget_ois[clean] = oi
         except Exception:
             pass
 
         with self.lock:
-            for base, vol in temp_volumes.items():
-                b_vol = self._binance_volume.get(base, 0.0)
-                self._global_volume[base] = vol + b_vol
+            for base, vol in venue_vols.items():
+                binance_vol = self._binance_volume.get(base, 0.0)
+                total_sum = vol + binance_vol
+                self._global_volume[base] = total_sum
                 self._last_seen[base] = now
 
-            for base, price in temp_prices.items():
+                if base not in self._venue_presence:
+                    self._venue_presence[base] = set()
+                self._venue_presence[base].update(venue_presence_temp.get(base, set()))
+                if binance_vol > 0:
+                    self._venue_presence[base].add("binance")
+
+            for base, price in bitget_prices.items():
                 if base not in self._price_history:
                     self._price_history[base] = deque(maxlen=45)
                 self._price_history[base].append((now, price))
 
-            for base, oi in temp_ois.items():
+            for base, oi in bitget_ois.items():
                 if base not in self._oi_history:
                     self._oi_history[base] = deque(maxlen=45)
                 self._oi_history[base].append((now, oi))
@@ -168,25 +191,20 @@ class GlobalFeedAggregator:
                 self._binance_volume.pop(b, None)
                 self._price_history.pop(b, None)
                 self._oi_history.pop(b, None)
+                self._venue_presence.pop(b, None)
                 self._last_seen.pop(b, None)
-                self._consecutive_hits.pop(b, None)
 
     def get_candidate_coins(self, min_vol: float = 1_000_000.0) -> list:
-        """
-        Filters coins for:
-        1. Global Volume >= $1,000,000.
-        2. Inception age strictly 220s to 300s (4 to 5 minutes old).
-        3. Accelerating velocity (last 2m >= 52% of 5m move).
-        4. Strict Asymmetric OI check:
-           - LONG requires +OI expansion (>= +0.40%).
-           - SHORT requires PANIC WATERFALL with collapsing OI (<= -1.20%).
-        """
         now = time.time()
         candidates = []
 
         with self.lock:
             for base, vol in self._global_volume.items():
                 if vol < min_vol:
+                    continue
+
+                venues = self._venue_presence.get(base, set())
+                if "bitget" not in venues:
                     continue
 
                 hist = self._price_history.get(base)
@@ -234,7 +252,7 @@ class GlobalFeedAggregator:
                 if not (220.0 <= wave_age <= 300.0):
                     continue
 
-                # 5-Minute Open Interest Delta
+                # Open interest change
                 oi_hist = self._oi_history.get(base)
                 oi_5m_delta_pct = 0.0
                 if oi_hist and len(oi_hist) >= 12:
@@ -243,15 +261,10 @@ class GlobalFeedAggregator:
                     if old_oi > 0:
                         oi_5m_delta_pct = ((now_oi - old_oi) / old_oi) * 100.0
 
-                # PROTOCOL A: LONG requires positive OI expansion (+OI)
                 is_valid_long = (vel_5m >= 1.20) and (oi_5m_delta_pct >= 0.40)
-
-                # PROTOCOL B: SHORT strictly requires PANIC WATERFALL with collapsing OI (-OI)
                 is_panic_waterfall_short = (vel_5m <= -1.50) and (oi_5m_delta_pct <= -1.20) and (accel_ratio >= 0.55)
 
                 if is_valid_long or is_panic_waterfall_short:
-                    hits = self._consecutive_hits.get(base, 0) + 1
-                    self._consecutive_hits[base] = hits
                     candidates.append({
                         "base": base,
                         "global_vol": vol,
@@ -261,7 +274,7 @@ class GlobalFeedAggregator:
                         "accel_ratio": round(accel_ratio, 2),
                         "side_allowed": "buy" if is_valid_long else "sell",
                         "wave_age": int(wave_age),
-                        "consecutive_hits": hits,
+                        "confirmed_venues": list(venues),
                         "current_price": curr_price
                     })
 
