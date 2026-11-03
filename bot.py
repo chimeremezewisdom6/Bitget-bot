@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: MICROSTRUCTURE ORDER FLOW & BOOK DEPTH ENGINE
-THE BREAKTHROUGH UPGRADE:
-  1. REMOVES "LUCK": Stops chasing exhausted 3-minute price wicks.
-  2. MULTI-EXCHANGE RESTING DEPTH: Measures unfilled limit orders (Bids vs Asks)
-     across available exchanges to confirm structural support.
-  3. TAKER AGGRESSION RATIO: Measures active market orders lifting the book.
-  4. PER-MINUTE CONTINUOUS INFLOW: Validates that order flow is entering
-     consistently across Minute 1, 2, and 3 (the 6-to-10 minute fuel engine).
-  5. INSTANT SLA APEX EXIT: Closes instantly at peak exhaustion.
+BOT.PY: MICROSTRUCTURE ORDER FLOW & BOOK DEPTH ENGINE (FIXED)
 ===============================================================================
 """
 
@@ -55,7 +47,6 @@ MAX_LIFECYCLE_SECONDS = 900       # 15-Min Absolute Ceiling
 
 # Microstructure Thresholds
 MIN_BOOK_DEPTH_RATIO = 2.80       # Resting orders on favored side must be >= 2.8x opposite side
-MIN_AGGRESSION_RATIO = 2.00       # Taker market volume must be >= 2.0x opposing takers
 MIN_MINUTE_VOLUME_USDT = 40_000   # Minimum new order volume entering per minute
 
 # SLA Sequence Fade Parameters
@@ -203,7 +194,7 @@ class StateManager:
         self.save()
 
 # -----------------------------------------------------------------------------
-# LIVE HTTP KEEP-ALIVE SERVER & DASHBOARD
+# LIVE HTTP SERVER & DASHBOARD
 # -----------------------------------------------------------------------------
 dashboard_data = {
     "status": "INITIALIZING",
@@ -212,7 +203,7 @@ dashboard_data = {
     "cg_global_pairs": 0,
     "bitget_tradable_pairs": 0,
     "active_trade": None,
-    "latest_ai_card": "Scanning multi-exchange order books and minute-by-minute aggression...",
+    "latest_ai_card": "Scanning multi-exchange order books...",
     "recent_trades": [],
     "last_update": ""
 }
@@ -229,7 +220,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Monitoring multi-exchange order books and order flow...</p>"
+        active_html = "<p style='color: #888;'>Monitoring order books and order flow...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             sla_status = "<span style='color: #eab308; font-weight: bold;'>ARMED (PEAK HUNTING)</span>" if at.get("sla_armed") else "<span style='color: #60a5fa;'>EXPANDING SUSTAINED WAVE</span>"
@@ -320,7 +311,7 @@ def start_http_server():
         logger.error(f"HTTP Server bind error: {e}")
 
 # -----------------------------------------------------------------------------
-# MASTER DESK ENGINE: MICROSTRUCTURE ORDER FLOW ARBITRATOR
+# MASTER DESK ENGINE
 # -----------------------------------------------------------------------------
 class MasterDeskEngine:
     def __init__(self):
@@ -393,6 +384,7 @@ class MasterDeskEngine:
                     if not base_sym or any(b in base_sym for b in BLACKLIST):
                         continue
 
+                    vol = float(item.get("vol_24h", 0.0) or 0.0)
                     self.cg_buffer[base_sym].append({
                         "time": now,
                         "price": float(item.get("price", 0.0) or 0.0),
@@ -404,7 +396,8 @@ class MasterDeskEngine:
                         "price_24h": float(item.get("price_24h", 0.0) or 0.0),
                         "oi_5m": float(item.get("oi_5m", 0.0) or 0.0),
                         "oi_15m": float(item.get("oi_15m", 0.0) or 0.0),
-                        "vol_24h": float(item.get("vol_24h", 0.0) or 0.0),
+                        "vol_24h": vol,
+                        "volume": vol,
                         "exchange_count": int(item.get("exchange_count", 1)),
                         "consensus_pct": float(item.get("consensus_pct", 100.0)),
                         "exchanges_aligned": item.get("exchanges_aligned", "1/1")
@@ -414,15 +407,7 @@ class MasterDeskEngine:
         except Exception:
             pass
 
-    # -------------------------------------------------------------------------
-    # MICROSTRUCTURE ANALYSIS: RESTING BOOK DEPTH & TAKER AGGRESSION
-    # -------------------------------------------------------------------------
     def inspect_order_book_microstructure(self, bitget_symbol):
-        """
-        Pulls L2 Order Book depth and calculates:
-          1. Resting Bid Depth vs Ask Depth within 1.0% of market price.
-          2. Spread tightness (verifies high liquidity).
-        """
         try:
             ccxt_symbol = f"{bitget_symbol[:len(bitget_symbol)-4]}/USDT:USDT"
             ob = self.exchange.fetch_order_book(ccxt_symbol, limit=20)
@@ -435,37 +420,28 @@ class MasterDeskEngine:
             if mid_price <= 0:
                 return None
 
-            # Calculate resting depth within 1.2% range
             bid_notional = sum(p * q for p, q in bids if (mid_price - p) / mid_price <= 0.012)
             ask_notional = sum(p * q for p, q in asks if (p - mid_price) / mid_price <= 0.012)
 
             if ask_notional <= 0 or bid_notional <= 0:
                 return None
 
-            bid_ask_ratio = bid_notional / ask_notional
-            ask_bid_ratio = ask_notional / bid_notional
-
             return {
                 "mid_price": mid_price,
                 "bid_notional": bid_notional,
                 "ask_notional": ask_notional,
-                "bid_ask_ratio": bid_ask_ratio,
-                "ask_bid_ratio": ask_bid_ratio
+                "bid_ask_ratio": bid_notional / ask_notional,
+                "ask_bid_ratio": ask_notional / bid_notional
             }
         except Exception:
             return None
 
     def calculate_minute_by_minute_flow(self, history):
-        """
-        Calculates whether new order volume is entering consistently across
-        Minute 1, Minute 2, and Minute 3 (removes fluke wicks).
-        """
         if len(history) < 12:
             return None
         h = list(history)
         now = h[-1]["time"]
 
-        # Sample ticks at 1-min intervals: T-0, T-60s, T-120s, T-180s
         t_0 = h[-1]
         t_1m = [x for x in h if x["time"] <= (now - 60)]
         t_2m = [x for x in h if x["time"] <= (now - 120)]
@@ -474,14 +450,17 @@ class MasterDeskEngine:
         if not t_1m or not t_2m or not t_3m:
             return None
 
-        # Minute-by-minute volume differences
-        m1_vol = max(0.0, t_0["volume"] - t_1m[-1]["volume"])
-        m2_vol = max(0.0, t_1m[-1]["volume"] - t_2m[-1]["volume"])
-        m3_vol = max(0.0, t_2m[-1]["volume"] - t_3m[-1]["volume"])
+        # Safe volume lookup preventing KeyError
+        v0 = t_0.get("volume", t_0.get("vol_24h", 0.0))
+        v1 = t_1m[-1].get("volume", t_1m[-1].get("vol_24h", 0.0))
+        v2 = t_2m[-1].get("volume", t_2m[-1].get("vol_24h", 0.0))
+        v3 = t_3m[-1].get("volume", t_3m[-1].get("vol_24h", 0.0))
 
-        # Continuous flow check: Volume is entering every single minute
-        is_continuous = (m1_vol >= MIN_MINUTE_VOLUME_USDT and 
-                         m2_vol >= MIN_MINUTE_VOLUME_USDT)
+        m1_vol = max(0.0, v0 - v1)
+        m2_vol = max(0.0, v1 - v2)
+        m3_vol = max(0.0, v2 - v3)
+
+        is_continuous = (m1_vol >= MIN_MINUTE_VOLUME_USDT and m2_vol >= MIN_MINUTE_VOLUME_USDT)
 
         return {
             "m1_vol": m1_vol,
@@ -490,17 +469,7 @@ class MasterDeskEngine:
             "is_continuous": is_continuous
         }
 
-    # -------------------------------------------------------------------------
-    # STRATEGY EVALUATION (NO LUCK: DEPTH + AGGRESSION + MINUTE-BY-MINUTE FLOW)
-    # -------------------------------------------------------------------------
     def eval_microstructure_sustained_wave(self, base_sym, bitget_symbol, latest, history):
-        """
-        Identifies sustained 6-to-10 minute moves by confirming:
-          1. Resting limit depth imbalance >= 2.8x (The Wall).
-          2. Active price & OI alignment across exchanges (Consensus >= 85%).
-          3. Continuous per-minute order volume arriving minute after minute.
-          4. Entry occurs BEFORE the wick is exhausted (Price 3m is between 0.6% and 1.8%, not 3%+).
-        """
         p3m = latest["price_3m"]
         oi3m = latest["oi_3m"]
         consensus = latest["consensus_pct"]
@@ -508,7 +477,7 @@ class MasterDeskEngine:
         if consensus < 85.0:
             return None
 
-        # Filter out already-exhausted wicks (Don't buy at +2.8% or sell at -2.8%!)
+        # Exclude wicks that have already exploded and exhausted
         if abs(p3m) > 1.90 or abs(p3m) < 0.55:
             return None
 
@@ -516,12 +485,10 @@ class MasterDeskEngine:
         if not flow or not flow["is_continuous"]:
             return None
 
-        # Inspect real-time resting depth on the book
         ob_data = self.inspect_order_book_microstructure(bitget_symbol)
         if not ob_data:
             return None
 
-        # BULLISH SUSTAINED WAVE: Massive resting bid wall + continuous buyer inflow
         if p3m > 0 and oi3m >= 0.25 and ob_data["bid_ask_ratio"] >= MIN_BOOK_DEPTH_RATIO:
             return {
                 "side": "buy",
@@ -536,7 +503,6 @@ class MasterDeskEngine:
                 "trajectory": latest.get("trajectory_3m", [])
             }
 
-        # BEARISH SUSTAINED FLUSH: Massive resting ask wall + continuous seller dumping
         elif p3m < 0 and abs(oi3m) >= 0.25 and ob_data["ask_bid_ratio"] >= MIN_BOOK_DEPTH_RATIO:
             return {
                 "side": "sell",
@@ -554,7 +520,6 @@ class MasterDeskEngine:
         return None
 
     def eval_module_1_regime_shift(self, latest):
-        """Proven secondary setup: 15m & 5m regime breakout"""
         p5m, p15m, oi15m = latest["price_5m"], latest["price_15m"], latest["oi_15m"]
         if p15m >= 1.80 and p5m >= 1.10 and oi15m >= 0.80:
             return {"side": "buy", "setup": "PLAY1_FRESH_REGIME_SHIFT", "score": 94}
@@ -598,13 +563,11 @@ class MasterDeskEngine:
 
             latest = buf[-1]
 
-            # 1. Primary: Sustained Order Flow & Book Depth (No luck, structural fuel)
             s_wave = self.eval_microstructure_sustained_wave(base_sym, bitget_symbol, latest, buf)
             if s_wave:
                 candidates.append({**s_wave, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
                 continue
 
-            # 2. Secondary: Regime Shift
             s1 = self.eval_module_1_regime_shift(latest)
             if s1:
                 candidates.append({**s1, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
@@ -679,9 +642,6 @@ class MasterDeskEngine:
                 logger.error(f"Live entry failed: {e}")
                 self.active_trade = None
 
-    # -------------------------------------------------------------------------
-    # INSTANT SLA APEX FADE EXIT (FLEXIBLE 5M/10M/15M GLIDE)
-    # -------------------------------------------------------------------------
     def manage_active_trade(self):
         if not self.active_trade:
             return
@@ -723,26 +683,17 @@ class MasterDeskEngine:
 
         exit_reason = None
 
-        # 1. STRUCTURAL EMERGENCY HARD STOP
         if gain_pct <= -HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
-
-        # 2. INSTANT SLA SEQUENCE FADE (Exits immediately at peak exhaustion)
         elif trade["sla_armed"]:
             if drawdown_from_peak >= SLA_APEX_FADE_TOLERANCE and gain_pct >= 0.20:
                 exit_reason = "SLA_INSTANT_APEX_FADE"
-
-        # 3. 5-MINUTE BAD TRADE SCRATCH (Evaluated at Minute 4 to give the wave room)
         elif elapsed >= 240 and elapsed <= MAX_BAD_TRADE_SECONDS:
             if gain_pct <= SCRATCH_CUT_PCT:
                 exit_reason = "5M_BAD_TRADE_SCRATCH"
-
-        # 4. 10-MINUTE WAVE COMPLETION
         elif elapsed > MAX_BAD_TRADE_SECONDS and elapsed <= NORMAL_TRADE_SECONDS:
             if drawdown_from_peak >= 0.20 and gain_pct >= 0.15:
                 exit_reason = "10M_WAVE_COMPLETION"
-
-        # 5. 15-MINUTE RUNNER CEILING
         elif elapsed >= MAX_LIFECYCLE_SECONDS:
             exit_reason = "15M_RUNNER_CEILING"
 
