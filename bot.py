@@ -1,14 +1,14 @@
-
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: 3M ABSORPTION ASYMMETRY DESK (PRODUCTION LIVE-READY)
-PRODUCTION HARDENING:
-  1. BITGET CONTRACT PRECISION: Rounds exact contract size with amount_to_precision.
-  2. LOAD MARKETS INITIALIZATION: Loads Bitget swap rules, contract sizes, and limits.
-  3. SAFE POSITION CLOSE: Handles Bitget list/dict position payload variations.
-  4. LIVE HARD STOP: Enforces hard stop in BOTH Paper and Live modes.
-  5. NET PROFIT ACCOUNTING: Strict fee (0.12%) and spread deduction.
+BOT.PY: DYNAMIC GAP DISPERSION & TERMINAL FILL ENGINE (PRODUCTION HARDENED)
+CORE ARCHITECTURE:
+  1. $1M+ GLOBAL POOL: Aggregates 24h volume across top-8 global derivatives venues.
+  2. DYNAMIC LEVEL GAP RANKING: Identifies top 20% widest-gap coins (high elasticity).
+  3. 2-MINUTE ABSORPTION INFLOW: Evaluates 2m momentum velocity (0.35% to 1.85%).
+  4. TERMINAL 1-2 FILLS EXIT: Closes position when only 1-2 fills remain to a wall.
+  5. BITGET CONTRACT SIZING SHIELD: Precision-compliant contract sizing for live orders.
+  6. NET PROFIT ACCOUNTING: Strict Bitget 0.12% fees + spread deduction.
 ===============================================================================
 """
 
@@ -36,7 +36,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("AbsorptionAsymmetryDesk")
+logger = logging.getLogger("ProductionDesk")
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("requests").setLevel(logging.WARNING)
 
@@ -49,16 +49,13 @@ BLACKLIST = [
 ]
 
 BITGET_ROUNDTRIP_FEE_PCT = 0.12   # 0.06% open + 0.06% close = 0.12%
-MIN_TARGET_NET_PROFIT_PCT = 0.50  # Must clear at least +0.50% pure NET profit
-
-MIN_ABSORPTION_MULTIPLIER = 3.00  # 1-min inflow must overpower 3 minutes of opposing depth (>= 3.0x)
-MIN_RUNWAY_DISTANCE_PCT = 0.85    # Orders must be spaced out (at least 0.85% open air to next wall)
-MAX_LIFECYCLE_SECONDS = 900       # 15-Minute Absolute Ceiling
-WATCHDOG_CHECK_INTERVAL = 3.5     # Check order book health every 3.5 seconds
+MIN_TARGET_NET_PROFIT_PCT = 0.40  # Net profit target (in pocket)
+MAX_LIFECYCLE_SECONDS = 600       # 10-Minute Maximum Lifecycle
+WATCHDOG_CHECK_INTERVAL = 2.5     # Check order book levels every 2.5 seconds
 HARD_STOP_PCT = 0.85              # Emergency structural stop
 
 QUALIFICATION_TARGET_WINS = 8
-COOLDOWN_SECONDS = 300
+COOLDOWN_SECONDS = 180
 ALLOCATION_PCT = 0.90
 MIN_NOTIONAL_USDT = 5.50
 MAX_LEVERAGE_CLAMP = 20
@@ -119,7 +116,7 @@ class DynamicLearningEngine:
             self.data["winning_autopsies"].append(entry)
             if len(self.data["winning_autopsies"]) > 50:
                 self.data["winning_autopsies"].pop(0)
-            logger.info(f"🧬 [AUTOPSY] Recorded pure net win on {symbol} (Net: +{net_gain_pct:.2f}%).")
+            logger.info(f"🧬 [AUTOPSY] Recorded gap-fill win on {symbol} (Net: +{net_gain_pct:.2f}%).")
         self.save()
 
 # -----------------------------------------------------------------------------
@@ -197,7 +194,7 @@ class StateManager:
         self.save()
 
 # -----------------------------------------------------------------------------
-# LIVE HTTP KEEP-ALIVE SERVER & DASHBOARD
+# LIVE HTTP SERVER & REAL-TIME DASHBOARD
 # -----------------------------------------------------------------------------
 dashboard_data = {
     "status": "INITIALIZING",
@@ -206,7 +203,7 @@ dashboard_data = {
     "cg_global_pairs": 0,
     "bitget_tradable_pairs": 0,
     "active_trade": None,
-    "latest_ai_card": "Scanning for 3-minute absorption asymmetry and liquidity runways...",
+    "latest_ai_card": "Ranking market order gaps and scanning for terminal fills...",
     "recent_trades": [],
     "last_update": ""
 }
@@ -223,7 +220,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Monitoring liquidity runways and absorption asymmetry across 8 exchanges...</p>"
+        active_html = "<p style='color: #888;'>Watching level fills and remaining gap runway...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
             net_color = "#4ade80" if at['net_pnl_pct'] >= 0 else "#f87171"
@@ -232,8 +229,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE WAVE: {at['symbol']} ({at['side'].upper()})</h3>
                 <p><b>Strategy:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
                 <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
-                <p><b>Gross PnL:</b> {at['gross_pnl_pct']:+.2f}% | <b>NET PnL (After Fee & Spread):</b> <span style="color: {net_color}; font-weight: bold; font-size: 16px;">{at['net_pnl_pct']:+.2f}%</span></p>
-                <p><b>Peak Gross:</b> +{at['peak_gross_pct']:.2f}% | <b>Structure Health:</b> <span style="color: #38bdf8; font-weight: bold;">{at.get('structure_health', 'INTACT')}</span> | <b>Time:</b> {at['elapsed_seconds']}s</p>
+                <p><b>Gross PnL:</b> {at['gross_pnl_pct']:+.2f}% | <b>NET PnL:</b> <span style="color: {net_color}; font-weight: bold; font-size: 16px;">{at['net_pnl_pct']:+.2f}%</span></p>
+                <p><b>Fills Remaining to Wall:</b> <span style="color: #f59e0b; font-weight: bold;">{at.get('remaining_fills', 'CALCULATING')}</span> | <b>Time:</b> {at['elapsed_seconds']}s</p>
             </div>
             """
 
@@ -256,7 +253,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>3M Absorption Asymmetry Desk</title>
+            <title>Dynamic Gap Dispersion Desk</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -270,12 +267,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>⚡ 3-Minute Absorption Asymmetry & Pure Net Profit Desk</h2>
+            <h2>⚡ Dynamic Gap Dispersion & Terminal Fill Desk</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
                 <b>Gauntlet Streak:</b> {dashboard_data['streak']} / {QUALIFICATION_TARGET_WINS} Wins | 
-                <b>Global Matrix:</b> {dashboard_data['cg_global_pairs']} Pairs | 
+                <b>Global $1M+ Pairs:</b> {dashboard_data['cg_global_pairs']} Pairs | 
                 <b>Bitget Tradable:</b> {dashboard_data['bitget_tradable_pairs']} Pairs
             </div>
             <div class="card">
@@ -314,7 +311,7 @@ def start_http_server():
         logger.error(f"HTTP Server bind error: {e}")
 
 # -----------------------------------------------------------------------------
-# MASTER DESK ENGINE: 3M ABSORPTION ASYMMETRY & RUNWAY DETECTOR
+# MASTER DESK ENGINE: DYNAMIC ORDER GAP & TERMINAL FILL TRACKER
 # -----------------------------------------------------------------------------
 class MasterDeskEngine:
     def __init__(self):
@@ -349,12 +346,11 @@ class MasterDeskEngine:
         })
         self.exchange.session = self.http_session
 
-        # Load markets for precision rounding & contract sizing
         try:
             self.exchange.load_markets()
             logger.info("📦 CCXT loaded Bitget swap markets and contract rules.")
         except Exception as e:
-            logger.warning(f"Market loading warning (will retry on entry): {e}")
+            logger.warning(f"Market loading warning: {e}")
 
         if API_KEY and SECRET_KEY and PASSPHRASE:
             try:
@@ -366,7 +362,6 @@ class MasterDeskEngine:
             logger.info("ℹ️ Running in Paper Mode without full private keys.")
 
     def get_ccxt_symbol(self, bitget_symbol):
-        """Robust symbol conversion utilizing CCXT markets map."""
         if hasattr(self.exchange, "markets_by_id") and bitget_symbol in self.exchange.markets_by_id:
             return self.exchange.markets_by_id[bitget_symbol]["symbol"]
         base = bitget_symbol[:-4] if bitget_symbol.endswith("USDT") else bitget_symbol
@@ -406,14 +401,10 @@ class MasterDeskEngine:
                     self.cg_buffer[base_sym].append({
                         "time": now,
                         "price": float(item.get("price", 0.0) or 0.0),
-                        "price_3m": float(item.get("price_3m", 0.0) or 0.0),
-                        "oi_3m": float(item.get("oi_3m", 0.0) or 0.0),
-                        "trajectory_3m": item.get("trajectory_3m", []),
+                        "price_2m": float(item.get("price_2m", 0.0) or 0.0),
+                        "oi_2m": float(item.get("oi_2m", 0.0) or 0.0),
                         "price_5m": float(item.get("price_5m", 0.0) or 0.0),
-                        "price_15m": float(item.get("price_15m", 0.0) or 0.0),
                         "price_24h": float(item.get("price_24h", 0.0) or 0.0),
-                        "oi_5m": float(item.get("oi_5m", 0.0) or 0.0),
-                        "oi_15m": float(item.get("oi_15m", 0.0) or 0.0),
                         "vol_24h": vol,
                         "volume": vol,
                         "exchange_count": int(item.get("exchange_count", 1)),
@@ -426,92 +417,82 @@ class MasterDeskEngine:
             pass
 
     # -------------------------------------------------------------------------
-    # 3-MINUTE ABSORPTION ASYMMETRY & RUNWAY CALCULATOR
+    # DYNAMIC ORDER DISPERSION & REMAINING FILLS CALCULATOR
     # -------------------------------------------------------------------------
-    def evaluate_absorption_asymmetry(self, bitget_symbol, side, p3m):
+    def evaluate_order_dispersion_and_fills(self, bitget_symbol, side):
         try:
             ccxt_symbol = self.get_ccxt_symbol(bitget_symbol)
-            ob = self.exchange.fetch_order_book(ccxt_symbol, limit=40)
+            ob = self.exchange.fetch_order_book(ccxt_symbol, limit=30)
             bids, asks = ob.get("bids", []), ob.get("asks", [])
-            if not bids or not asks:
+            if len(bids) < 8 or len(asks) < 8:
                 return None
 
-            best_bid = bids[0][0]
-            best_ask = asks[0][0]
+            best_bid, best_ask = bids[0][0], asks[0][0]
             mid_price = (best_bid + best_ask) / 2.0
             if mid_price <= 0:
                 return None
 
             spread_pct = ((best_ask - best_bid) / mid_price) * 100.0
+            if spread_pct > 0.30:
+                return None
+
+            # Measure distance between adjacent orders
+            bid_gaps = [((bids[i][0] - bids[i+1][0]) / mid_price) * 100.0 for i in range(min(12, len(bids)-1))]
+            ask_gaps = [((asks[i+1][0] - asks[i][0]) / mid_price) * 100.0 for i in range(min(12, len(asks)-1))]
+
+            avg_bid_gap = sum(bid_gaps) / len(bid_gaps) if bid_gaps else 0.0
+            avg_ask_gap = sum(ask_gaps) / len(ask_gaps) if ask_gaps else 0.0
+            avg_level_gap = (avg_bid_gap + avg_ask_gap) / 2.0
 
             if side == "buy":
-                runway_dist = 0.0
-                for p, q in asks:
-                    dist = ((p - mid_price) / mid_price) * 100.0
-                    if dist >= MIN_RUNWAY_DISTANCE_PCT:
-                        runway_dist = dist
+                level_volumes = [p * q for p, q in asks[:15]]
+                avg_vol = (sum(level_volumes) / len(level_volumes)) if level_volumes else 1.0
+                
+                remaining_fills = 0
+                for v in level_volumes:
+                    if v >= (avg_vol * 2.5):
                         break
+                    remaining_fills += 1
 
-                opposing_depth_3m = sum(p * q for p, q in asks if ((p - mid_price) / mid_price) <= 0.025)
-                supporting_depth_1m = sum(p * q for p, q in bids if ((mid_price - p) / mid_price) <= 0.015)
+                supporting_vol = sum(p * q for p, q in bids[:15])
+                opposing_vol = sum(level_volumes)
+                ratio = supporting_vol / opposing_vol if opposing_vol > 0 else 1.0
 
-                if opposing_depth_3m <= 0:
-                    return None
+            else:  # side == "sell"
+                level_volumes = [p * q for p, q in bids[:15]]
+                avg_vol = (sum(level_volumes) / len(level_volumes)) if level_volumes else 1.0
 
-                absorption_multiplier = (supporting_depth_1m * 3.0) / opposing_depth_3m
-
-                return {
-                    "side": "buy",
-                    "spread_pct": spread_pct,
-                    "runway_dist": runway_dist or 1.5,
-                    "absorption_multiplier": absorption_multiplier,
-                    "supporting_depth": supporting_depth_1m,
-                    "opposing_depth": opposing_depth_3m,
-                    "structure_intact": (absorption_multiplier >= 1.20)
-                }
-
-            else:
-                runway_dist = 0.0
-                for p, q in bids:
-                    dist = ((mid_price - p) / mid_price) * 100.0
-                    if dist >= MIN_RUNWAY_DISTANCE_PCT:
-                        runway_dist = dist
+                remaining_fills = 0
+                for v in level_volumes:
+                    if v >= (avg_vol * 2.5):
                         break
+                    remaining_fills += 1
 
-                opposing_depth_3m = sum(p * q for p, q in bids if ((mid_price - p) / mid_price) <= 0.025)
-                supporting_depth_1m = sum(p * q for p, q in asks if ((p - mid_price) / mid_price) <= 0.015)
+                supporting_vol = sum(p * q for p, q in asks[:15])
+                opposing_vol = sum(level_volumes)
+                ratio = supporting_vol / opposing_vol if opposing_vol > 0 else 1.0
 
-                if opposing_depth_3m <= 0:
-                    return None
-
-                absorption_multiplier = (supporting_depth_1m * 3.0) / opposing_depth_3m
-
-                return {
-                    "side": "sell",
-                    "spread_pct": spread_pct,
-                    "runway_dist": runway_dist or 1.5,
-                    "absorption_multiplier": absorption_multiplier,
-                    "supporting_depth": supporting_depth_1m,
-                    "opposing_depth": opposing_depth_3m,
-                    "structure_intact": (absorption_multiplier >= 1.20)
-                }
-
+            return {
+                "avg_level_gap": avg_level_gap,
+                "remaining_fills": max(1, remaining_fills),
+                "spread_pct": spread_pct,
+                "depth_ratio": ratio
+            }
         except Exception:
             return None
 
-    def format_ai_studio_dossier(self, signal, current_price, asym_data):
+    def format_ai_studio_dossier(self, signal, current_price, ob_data):
         card = (
-            f"\n==================== [3M ABSORPTION ASYMMETRY DOSSIER] ====================\n"
+            f"\n==================== [GAP DISPERSION & TERMINAL FILL DOSSIER] ====================\n"
             f"ASSET: {signal['base_sym']}USDT | DIRECTION: {signal['side'].upper()} | SCORE: {signal['score']}/100\n"
-            f"ABSORPTION ASYMMETRY: {asym_data['absorption_multiplier']:.2f}x (REQUIRES >= 3 MIN TO OVERPOWER)\n"
-            f"LIQUIDITY RUNWAY: {asym_data['runway_dist']:.2f}% CLEAR SPACE BEFORE NEXT WALL\n"
-            f"BITGET ESTIMATED FRICTION: 0.12% Fees + {asym_data['spread_pct']:.2f}% Spread = {0.12 + asym_data['spread_pct']:.2f}%\n"
-            f"SUPPORTING RESTING CAPITAL: ${asym_data['supporting_depth']:,.0f} vs OPPOSING: ${asym_data['opposing_depth']:,.0f}\n"
-            f"3-MIN VELOCITY: Price: {signal.get('p3m', 0.0):+.2f}% | OI: {signal.get('oi3m', 0.0):+.2f}%\n"
-            f"EXECUTION ENTRY PRICE: ${current_price:.6f}\n"
+            f"AVERAGE ORDER GAP: {ob_data['avg_level_gap']:.3f}% PER FILL (HIGH PRICE ELASTICITY)\n"
+            f"REMAINING FILLS TO WALL: {ob_data['remaining_fills']} LEVELS OF OPEN AIR\n"
+            f"BITGET ESTIMATED FRICTION: 0.12% Fees + {ob_data['spread_pct']:.2f}% Spread = {0.12 + ob_data['spread_pct']:.2f}%\n"
+            f"2-MIN VELOCITY: Price: {signal.get('p2m', 0.0):+.2f}% | OI: {signal.get('oi2m', 0.0):+.2f}%\n"
+            f"ENTRY EXECUTION PRICE: ${current_price:.6f}\n"
             f"AI STUDIO FINGERPRINT:\n"
-            f"{json.dumps({'asset': signal['base_sym'], 'side': signal['side'], 'asymmetry': round(asym_data['absorption_multiplier'], 2), 'runway': round(asym_data['runway_dist'], 2)}, indent=2)}\n"
-            f"=========================================================================="
+            f"{json.dumps({'asset': signal['base_sym'], 'side': signal['side'], 'gap': round(ob_data['avg_level_gap'], 3), 'fills': ob_data['remaining_fills']}, indent=2)}\n"
+            f"=================================================================================="
         )
         dashboard_data["latest_ai_card"] = card
         logger.info(card)
@@ -529,62 +510,61 @@ class MasterDeskEngine:
                 continue
             if bitget_symbol in self.cooldowns and (now - self.cooldowns[bitget_symbol]) < COOLDOWN_SECONDS:
                 continue
-            if len(buf) < 3:
+            if len(buf) < 2:
                 continue
 
             latest = buf[-1]
-            p3m = latest["price_3m"]
-            oi3m = latest["oi_3m"]
+            p2m = latest["price_2m"]
+            oi2m = latest["oi_2m"]
             consensus = latest["consensus_pct"]
 
-            if consensus < 80.0:
+            if consensus < 75.0:
                 continue
 
-            # Momentum entry filter
-            if abs(p3m) > 1.95 or abs(p3m) < 0.25:
+            # 2-Minute Velocity Sweet Spot (0.35% to 1.85%)
+            if abs(p2m) > 1.85 or abs(p2m) < 0.35:
                 continue
 
-            if p3m > 0 and oi3m >= 0.15:
+            # Confirm Open Interest is expanding or holding (not dumping)
+            if p2m > 0 and oi2m >= -0.05:
                 candidates.append({
-                    "side": "buy", "setup": "PLAY_3M_ABSORPTION_ASYMMETRY",
-                    "score": 98, "p3m": p3m, "oi3m": oi3m,
+                    "side": "buy", "setup": "PLAY_GAP_DISPERSION_INFLOW",
+                    "score": 98, "p2m": p2m, "oi2m": oi2m,
                     "bitget_symbol": bitget_symbol, "base_sym": base_sym
                 })
-            elif p3m < 0 and abs(oi3m) >= 0.15:
+            elif p2m < 0 and oi2m >= -0.05:
                 candidates.append({
-                    "side": "sell", "setup": "PLAY_3M_ABSORPTION_ASYMMETRY",
-                    "score": 98, "p3m": p3m, "oi3m": oi3m,
+                    "side": "sell", "setup": "PLAY_GAP_DISPERSION_INFLOW",
+                    "score": 98, "p2m": p2m, "oi2m": oi2m,
                     "bitget_symbol": bitget_symbol, "base_sym": base_sym
                 })
 
         if candidates:
-            candidates.sort(key=lambda x: abs(x["p3m"]), reverse=True)
+            candidates.sort(key=lambda x: abs(x["p2m"]), reverse=True)
 
-            evaluated_candidates = []
-            for cand in candidates[:4]:
-                asym = self.evaluate_absorption_asymmetry(cand["bitget_symbol"], cand["side"], cand["p3m"])
-                if not asym:
+            profiled = []
+            for cand in candidates[:6]:
+                ob_data = self.evaluate_order_dispersion_and_fills(cand["bitget_symbol"], cand["side"])
+                if not ob_data:
                     continue
 
-                if (asym["absorption_multiplier"] >= MIN_ABSORPTION_MULTIPLIER and 
-                    asym["runway_dist"] >= MIN_RUNWAY_DISTANCE_PCT and 
-                    asym["spread_pct"] <= 0.25):
-                    
-                    exec_price = self.bitget_prices.get(cand["bitget_symbol"], 0.0)
-                    if exec_price > 0:
-                        cand["entry_price"] = exec_price
-                        cand["asym_data"] = asym
-                        cand["overall_score"] = asym["absorption_multiplier"] * asym["runway_dist"]
-                        evaluated_candidates.append(cand)
+                if ob_data["remaining_fills"] >= 3 and ob_data["depth_ratio"] >= 1.35:
+                    cand["ob_data"] = ob_data
+                    cand["elasticity_score"] = ob_data["avg_level_gap"] * ob_data["remaining_fills"]
+                    profiled.append(cand)
 
-            if evaluated_candidates:
-                evaluated_candidates.sort(key=lambda x: x["overall_score"], reverse=True)
-                return evaluated_candidates[0]
+            if profiled:
+                profiled.sort(key=lambda x: x["elasticity_score"], reverse=True)
+                top = profiled[0]
+                exec_price = self.bitget_prices.get(top["bitget_symbol"], 0.0)
+                if exec_price > 0:
+                    top["entry_price"] = exec_price
+                    return top
 
         return None
 
     def calculate_live_position_size(self, ccxt_symbol, current_price):
-        """Precision-safe position sizing compliant with Bitget contract step."""
+        """Precision-safe position sizing with minimum contract limit enforcement."""
         try:
             balance_info = self.exchange.fetch_balance()
             free_usdt = float((balance_info.get("free") or {}).get("USDT", 0.0) or 0.0)
@@ -597,8 +577,17 @@ class MasterDeskEngine:
             notional = max(MIN_NOTIONAL_USDT, usable_margin * leverage)
             
             raw_size = notional / current_price
-            # Precision round according to Bitget contract rules
             rounded_size = float(self.exchange.amount_to_precision(ccxt_symbol, raw_size))
+
+            # Validate against Bitget minimum contract step
+            market = self.exchange.market(ccxt_symbol) if hasattr(self.exchange, "markets") and ccxt_symbol in self.exchange.markets else None
+            min_amount = float((market.get("limits") or {}).get("amount", {}).get("min", 0.0) or 0.0) if market else 0.0
+            
+            if min_amount > 0 and rounded_size < min_amount:
+                required_notional = min_amount * current_price
+                if (required_notional / leverage) <= usable_margin:
+                    rounded_size = min_amount
+
             return rounded_size, leverage
         except Exception as e:
             logger.error(f"Sizing error: {e}")
@@ -609,10 +598,10 @@ class MasterDeskEngine:
         base_sym = signal["base_sym"]
         side = signal["side"]
         price = signal["entry_price"]
-        asym = signal["asym_data"]
+        ob_data = signal["ob_data"]
         is_paper = (self.state_mgr.state["mode"] == "PAPER")
 
-        self.format_ai_studio_dossier(signal, price, asym)
+        self.format_ai_studio_dossier(signal, price, ob_data)
 
         trade_info = {
             "symbol": symbol,
@@ -620,25 +609,25 @@ class MasterDeskEngine:
             "side": side,
             "setup": signal["setup"],
             "entry_price": price,
-            "entry_spread_pct": asym["spread_pct"],
+            "entry_spread_pct": ob_data["spread_pct"],
             "entry_time": time.time(),
             "peak_price": price,
             "highest_gross_pct": 0.0,
-            "structure_fails": 0,
+            "remaining_fills": ob_data["remaining_fills"],
             "is_paper": is_paper,
             "mode": "PAPER" if is_paper else "LIVE",
             "size": 0
         }
 
         if is_paper:
-            logger.info(f"📝 [PAPER ENTRY] Opened {side.upper()} on {symbol} @ {price} | Asymmetry: {asym['absorption_multiplier']:.1f}x | Runway: {asym['runway_dist']:.2f}%")
+            logger.info(f"📝 [PAPER ENTRY] Opened {side.upper()} on {symbol} @ {price} | Level Gap: {ob_data['avg_level_gap']:.3f}% | Fills to Wall: {ob_data['remaining_fills']}")
             self.active_trade = trade_info
         else:
             try:
                 ccxt_symbol = self.get_ccxt_symbol(symbol)
                 size, lev = self.calculate_live_position_size(ccxt_symbol, price)
                 if size <= 0:
-                    logger.warning(f"Aborting live trade: calculated size {size} is zero or sub-minimum.")
+                    logger.warning(f"Aborting live trade: calculated size {size} is sub-minimum.")
                     return
 
                 try:
@@ -659,7 +648,7 @@ class MasterDeskEngine:
                 self.active_trade = None
 
     # -------------------------------------------------------------------------
-    # REAL-TIME TRADE & NET PROFIT MANAGEMENT
+    # REAL-TIME TRADE MANAGEMENT & TERMINAL FILL EXIT
     # -------------------------------------------------------------------------
     def manage_active_trade(self):
         if not self.active_trade:
@@ -670,7 +659,6 @@ class MasterDeskEngine:
         now = time.time()
         elapsed = max(1.0, now - trade["entry_time"])
 
-        # 1. Gross PnL
         if side == "buy":
             gross_pnl = ((current_price - trade["entry_price"]) / trade["entry_price"]) * 100.0
             if current_price > trade["peak_price"]:
@@ -685,21 +673,15 @@ class MasterDeskEngine:
         if gross_pnl > trade["highest_gross_pct"]:
             trade["highest_gross_pct"] = gross_pnl
 
-        # 2. Strict Net PnL (Deducting Bitget 0.12% roundtrip fee + entry spread)
         friction_pct = BITGET_ROUNDTRIP_FEE_PCT + trade["entry_spread_pct"]
         net_pnl = gross_pnl - friction_pct
 
-        # 3. Check Order Book Health every 3.5s
+        # Check remaining level fills every 2.5 seconds
         if (now - self.last_watchdog_time) >= WATCHDOG_CHECK_INTERVAL:
             self.last_watchdog_time = now
-            live_asym = self.evaluate_absorption_asymmetry(symbol, side, 0.0)
-            if live_asym:
-                if not live_asym["structure_intact"]:
-                    trade["structure_fails"] += 1
-                else:
-                    trade["structure_fails"] = 0
-
-        structure_status = "DESTROYED" if trade["structure_fails"] >= 2 else "INTACT"
+            live_ob = self.evaluate_order_dispersion_and_fills(symbol, side)
+            if live_ob:
+                trade["remaining_fills"] = live_ob["remaining_fills"]
 
         dashboard_data["active_trade"] = {
             "symbol": symbol,
@@ -711,34 +693,31 @@ class MasterDeskEngine:
             "gross_pnl_pct": gross_pnl,
             "net_pnl_pct": net_pnl,
             "peak_gross_pct": trade["highest_gross_pct"],
-            "structure_health": structure_status,
+            "remaining_fills": f"{trade['remaining_fills']} FILLS LEFT",
             "elapsed_seconds": int(elapsed)
         }
 
         exit_reason = None
 
-        # Rule 1: Emergency Hard Stop (Active in BOTH modes)
+        # 1. Structural Hard Stop
         if gross_pnl <= -HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
 
-        # Rule 2: Pure Net Profit Bank
-        elif trade["highest_gross_pct"] >= 0.85 and drawdown_from_peak >= 0.14 and net_pnl >= MIN_TARGET_NET_PROFIT_PCT:
-            exit_reason = "SLA_NET_PROFIT_APEX_LOCK"
+        # 2. THE TERMINAL FILL EXIT: Exit when 1-2 fills remain to the major wall and in pure net profit
+        elif trade["remaining_fills"] <= 2 and net_pnl >= MIN_TARGET_NET_PROFIT_PCT:
+            exit_reason = "TERMINAL_FILL_PEAK_BANK"
 
-        # Rule 3: Confirmed Structural Breakdown
-        elif elapsed >= 20 and trade["structure_fails"] >= 2:
-            if net_pnl >= 0.20:
-                exit_reason = "STRUCTURE_COLLAPSE_BANK_NET"
-            elif elapsed >= 90:
-                exit_reason = "STRUCTURE_COLLAPSE_FAST_SCRATCH"
+        # 3. Apex Rollover Exit: Peak >= 0.70% and pulls back 0.12%
+        elif trade["highest_gross_pct"] >= 0.70 and drawdown_from_peak >= 0.12 and net_pnl >= MIN_TARGET_NET_PROFIT_PCT:
+            exit_reason = "SLA_APEX_LOCK"
 
-        # Rule 4: 3-Minute Momentum Stagnation
-        elif elapsed >= 180 and net_pnl <= 0.0:
-            exit_reason = "3M_ASYMMETRY_STAGNATION_CUT"
+        # 4. 2-Minute Stagnation Cut: If not green after 120s, exit cleanly
+        elif elapsed >= 120 and elapsed <= 180 and net_pnl <= -0.15:
+            exit_reason = "2M_STAGNATION_CUT"
 
-        # Rule 5: 15-Minute Runner Ceiling
+        # 5. Maximum Runner Ceiling
         elif elapsed >= MAX_LIFECYCLE_SECONDS:
-            exit_reason = "15M_RUNNER_CEILING"
+            exit_reason = "10M_RUNNER_EXPIRATION"
 
         if exit_reason:
             self._execute_exit(trade, current_price, gross_pnl, net_pnl, exit_reason)
@@ -750,7 +729,6 @@ class MasterDeskEngine:
                 ccxt_symbol = self.get_ccxt_symbol(symbol)
                 exact_size = trade.get("size", 0.0)
 
-                # Query live position to ensure full close
                 try:
                     positions = self.exchange.fetch_positions([ccxt_symbol])
                     if positions and isinstance(positions, list):
@@ -762,7 +740,6 @@ class MasterDeskEngine:
                 except Exception:
                     pass
 
-                # Round close order size according to Bitget contract rules
                 exact_size = float(self.exchange.amount_to_precision(ccxt_symbol, exact_size))
                 if exact_size > 0:
                     if side == "buy":
@@ -775,7 +752,7 @@ class MasterDeskEngine:
             
             self.state_mgr.record_trade(symbol, side, gross_pnl, net_pnl, reason, setup_name, is_paper)
             
-            if net_pnl >= 1.00:
+            if net_pnl >= 0.75:
                 self.learning_engine.autopsy_winning_trade(symbol, side, net_pnl, setup_name)
 
             self.cooldowns[symbol] = time.time()
@@ -786,7 +763,7 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def run(self):
-        logger.info("🚀 3M Absorption Asymmetry & Pure Net Profit Desk Online...")
+        logger.info("🚀 Production Gap Dispersion & Terminal Fill Desk Online...")
         last_sync = 0
 
         while True:
