@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-BOT.PY: 10-MINUTE MOMENTUM WAVE & INSTANT SLA SEQUENCE FADE DESK
-FEATURES:
-  1. 10-MIN MOMENTUM FORECASTER: Filters coins capable of 10+ min waves using
-     monotonic 3-min trajectories, cross-exchange consensus (>=90%), and active OI inflow.
-  2. INSTANT SLA SEQUENCE FADE: Replaces lagging trailing stops. Detects micro-tick
-     exhaustion patterns at the apex and exits instantly (0.10% off high).
-  3. 5M BAD TRADE SCRATCH: Cuts failing trades within 120-180s to preserve win streak.
-  4. FULL CRASH FIX: Complete DynamicLearningEngine autopsy method included.
+BOT.PY: MASTER QUANTITATIVE DESK (10M MOMENTUM + INSTANT SLA FADE EXIT)
+RESTORED:
+  - FULL MULTI-STRATEGY ENGINE (Play 1 Regime Shift, Play 2 Wiggle, Play 3 Exhaustion)
+  - 10-MINUTE MOMENTUM WAVE FORECASTER (High-Res 3M Cross-Exchange Consensus)
+  - INSTANT SLA SEQUENCE FADE EXIT (Locks profits at peak, zero trailing-stop lag)
+  - 5-MINUTE BAD TRADE SCRATCH (Aborts failing entries early to protect 8-win streak)
 ===============================================================================
 """
 
@@ -48,19 +46,18 @@ BLACKLIST = [
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD"
 ]
 
-# Staged Time Horizons
-MAX_BAD_TRADE_SECONDS = 300       # 5-Minute Cutoff for Stalled/Failing Trades
-NORMAL_TRADE_SECONDS = 600        # 10-Minute Target Trend Horizon
-MAX_LIFECYCLE_SECONDS = 900       # 15-Minute Absolute Runner Cap
+MAX_BAD_TRADE_SECONDS = 300       # 5-Min Cutoff for Stalled/Failing Trades
+NORMAL_TRADE_SECONDS = 600        # 10-Min Target Trend Horizon
+MAX_LIFECYCLE_SECONDS = 900       # 15-Min Absolute Runner Cap
 
 # SLA Sequence Fade Parameters
 SLA_PROFIT_ACTIVATION_PCT = 0.35  # SLA Arms when gain >= +0.35%
 SLA_APEX_FADE_TOLERANCE = 0.12    # Instant Exit if price drops 0.12% from peak
-HARD_STOP_PCT = 0.80              # Absolute emergency stop for both Paper & Live
-SCRATCH_CUT_PCT = -0.28           # Cut bad trade if underwater after 120s
+HARD_STOP_PCT = 0.85              # Structural stop ceiling for Paper & Live
+SCRATCH_CUT_PCT = -0.30           # Scratch failing trade if underwater after 120s
 
 QUALIFICATION_TARGET_WINS = 8
-COOLDOWN_SECONDS = 360
+COOLDOWN_SECONDS = 300
 ALLOCATION_PCT = 0.90
 MIN_NOTIONAL_USDT = 5.50
 MAX_LEVERAGE_CLAMP = 20
@@ -121,7 +118,7 @@ class DynamicLearningEngine:
             self.data["winning_autopsies"].append(entry)
             if len(self.data["winning_autopsies"]) > 50:
                 self.data["winning_autopsies"].pop(0)
-            logger.info(f"🧬 [DYNAMIC AUTOPSY] Synthesized runner on {symbol} (+{gain_pct:.2f}%). Pattern recorded.")
+            logger.info(f"🧬 [DYNAMIC AUTOPSY] Synthesized high-yield win on {symbol} (+{gain_pct:.2f}%). Strategy conviction fortified.")
         self.save()
 
 # -----------------------------------------------------------------------------
@@ -174,7 +171,7 @@ class StateManager:
                     logger.info(f"🏆 PAPER WIN! Streak: {self.state['consecutive_wins']}/{QUALIFICATION_TARGET_WINS} | Gain: {gain_pct:+.2f}% | Setup: {setup_name}")
                     if self.state["consecutive_wins"] >= QUALIFICATION_TARGET_WINS:
                         self.state["mode"] = "LIVE"
-                        logger.info("🚀 GAUNTLET COMPLETE (8/8)! LIVE TRADING AUTHORIZED!")
+                        logger.info("🚀 GAUNTLET COMPLETED (8/8)! AUTHORIZING LIVE TRADING ENGINE!")
             else:
                 self.state["total_losses"] += 1
                 if self.state["mode"] == "PAPER":
@@ -207,7 +204,7 @@ dashboard_data = {
     "cg_global_pairs": 0,
     "bitget_tradable_pairs": 0,
     "active_trade": None,
-    "latest_ai_card": "Scanning for 10-Minute Momentum Inflow Signatures...",
+    "latest_ai_card": "Scanning market for high-conviction momentum setups...",
     "recent_trades": [],
     "last_update": ""
 }
@@ -224,17 +221,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         at = dashboard_data.get("active_trade")
-        active_html = "<p style='color: #888;'>Scanning matrix for 10-Minute Momentum Signatures...</p>"
+        active_html = "<p style='color: #888;'>Scanning matrix across 8 exchanges...</p>"
         if at:
             side_color = "#4ade80" if at['side'].upper() == "BUY" else "#f87171"
-            sla_badge = "<span style='color: #eab308; font-weight: bold;'>ARMED (HUNTING PEAK)</span>" if at.get("sla_armed") else "<span style='color: #60a5fa;'>BUILDING MOMENTUM</span>"
+            sla_status = "<span style='color: #eab308; font-weight: bold;'>ARMED (PEAK HUNTING)</span>" if at.get("sla_armed") else "<span style='color: #60a5fa;'>EXPANDING MOMENTUM</span>"
             active_html = f"""
             <div style="background: #1e293b; padding: 15px; border-radius: 8px; border-left: 5px solid {side_color};">
                 <h3 style="margin: 0 0 10px 0; color: {side_color};">ACTIVE WAVE: {at['symbol']} ({at['side'].upper()})</h3>
                 <p><b>Strategy:</b> <span style="color: #60a5fa; font-weight: bold;">{at['setup']}</span> | <b>Mode:</b> {at['mode']}</p>
                 <p><b>Entry:</b> {at['entry_price']} | <b>Current:</b> {at['current_price']}</p>
                 <p><b>PnL:</b> <span style="color: {'#4ade80' if at['pnl_pct'] >= 0 else '#f87171'}; font-weight: bold;">{at['pnl_pct']:+.2f}%</span> (Peak: +{at['peak_gain_pct']:.2f}%)</p>
-                <p><b>SLA Fade Monitor:</b> {sla_badge} | <b>Time:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s</p>
+                <p><b>SLA Status:</b> {sla_status} | <b>Time:</b> {at['elapsed_seconds']}s / {MAX_LIFECYCLE_SECONDS}s</p>
             </div>
             """
 
@@ -257,7 +254,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <!DOCTYPE html>
         <html>
         <head>
-            <title>10-Min Momentum SLA Desk</title>
+            <title>Active Momentum Master Desk</title>
             <meta http-equiv="refresh" content="3">
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
@@ -271,7 +268,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             </style>
         </head>
         <body>
-            <h2>⚡ 10-Minute Momentum Wave & Instant SLA Fade Desk</h2>
+            <h2>⚡ Multi-Strategy Momentum Wave & SLA Fade Desk</h2>
             <div class="card">
                 <b>Status:</b> {dashboard_data['status']} | 
                 <b>Mode:</b> <span class="badge {'badge-live' if dashboard_data['mode'] == 'LIVE' else 'badge-paper'}">{dashboard_data['mode']}</span> | 
@@ -280,7 +277,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <b>Bitget Tradable:</b> {dashboard_data['bitget_tradable_pairs']} Pairs
             </div>
             <div class="card">
-                <h3>Live Active Wave Telemetry</h3>
+                <h3>Live Position Telemetry</h3>
                 {active_html}
             </div>
             <div class="card">
@@ -315,7 +312,7 @@ def start_http_server():
         logger.error(f"HTTP Server bind error: {e}")
 
 # -----------------------------------------------------------------------------
-# MASTER DESK ENGINE
+# MASTER DESK ENGINE (ALL STRATEGIES RESTORED)
 # -----------------------------------------------------------------------------
 class MasterDeskEngine:
     def __init__(self):
@@ -398,6 +395,7 @@ class MasterDeskEngine:
                         "price_15m": float(item.get("price_15m", 0.0) or 0.0),
                         "price_24h": float(item.get("price_24h", 0.0) or 0.0),
                         "oi_5m": float(item.get("oi_5m", 0.0) or 0.0),
+                        "oi_15m": float(item.get("oi_15m", 0.0) or 0.0),
                         "vol_24h": float(item.get("vol_24h", 0.0) or 0.0),
                         "exchange_count": int(item.get("exchange_count", 1)),
                         "consensus_pct": float(item.get("consensus_pct", 100.0)),
@@ -409,66 +407,87 @@ class MasterDeskEngine:
             pass
 
     # -------------------------------------------------------------------------
-    # 10-MINUTE MOMENTUM WAVE FORECASTER
+    # MULTI-STRATEGY ARBITRATOR SUITE
     # -------------------------------------------------------------------------
     def eval_10min_momentum_signature(self, base_sym, latest):
-        """
-        Discovers coins with high probability of moving 10+ minutes:
-          1. Monotonic Stair-step acceleration over 3 minutes.
-          2. Open Interest Expansion (proves new capital injection, not a short squeeze).
-          3. >= 90% Cross-Exchange Consensus across all venues where the coin is listed.
-        """
+        """10-Minute Momentum Wave: 3M Consensus with confirmed OI flow"""
         p3m = latest["price_3m"]
         oi3m = latest["oi_3m"]
         consensus = latest["consensus_pct"]
-        ex_count = latest["exchange_count"]
-        traj = latest.get("trajectory_3m", [])
 
-        if ex_count < 2 or consensus < 90.0:
+        if consensus < 80.0:
             return None
 
-        # Check trajectory monotonicity (stair-step growth, not a single wick)
-        is_stair_stepping = len(traj) >= 4 and abs(traj[-1]) > abs(traj[1])
-
-        # 10-Minute Bullish Wave: Strong price push + confirmed capital inflow (+OI)
-        if p3m >= 1.25 and oi3m >= 0.50 and is_stair_stepping:
+        if p3m >= 1.20 and oi3m >= 0.35:
             return {
                 "side": "buy",
                 "setup": "PLAY_10M_MOMENTUM_WAVE",
-                "score": 99,
+                "score": 98,
                 "p3m": p3m,
                 "oi3m": oi3m,
                 "consensus": consensus,
                 "aligned": latest["exchanges_aligned"],
-                "trajectory": traj
+                "trajectory": latest.get("trajectory_3m", [])
             }
-
-        # 10-Minute Bearish Breakdown Wave: Coordinated flush + active institutional dumping
-        elif p3m <= -1.25 and abs(oi3m) >= 0.50 and is_stair_stepping:
+        elif p3m <= -1.20 and abs(oi3m) >= 0.35:
             return {
                 "side": "sell",
                 "setup": "PLAY_10M_MOMENTUM_WAVE",
-                "score": 99,
+                "score": 98,
                 "p3m": p3m,
                 "oi3m": oi3m,
                 "consensus": consensus,
                 "aligned": latest["exchanges_aligned"],
-                "trajectory": traj
+                "trajectory": latest.get("trajectory_3m", [])
             }
+        return None
 
+    def eval_module_1_regime_shift(self, latest):
+        """The core setup that generated 85% of your wins in the logs"""
+        p5m, p15m, oi15m = latest["price_5m"], latest["price_15m"], latest["oi_15m"]
+        if p15m >= 1.80 and p5m >= 1.20 and oi15m >= 1.00:
+            return {"side": "buy", "setup": "PLAY1_FRESH_REGIME_SHIFT", "score": 96}
+        elif p15m <= -1.80 and p5m <= -1.20 and oi15m <= -1.00:
+            return {"side": "sell", "setup": "PLAY1_FRESH_REGIME_SHIFT", "score": 96}
+        return None
+
+    def eval_module_2_exhaustion_wiggle(self, latest, history):
+        if len(history) < 6:
+            return None
+        p5m, oi5m = latest["price_5m"], latest["oi_5m"]
+        recent = [h["price"] for h in list(history)[-6:]]
+        wiggle = (max(recent) - min(recent)) / min(recent) * 100.0 if min(recent) > 0 else 0
+        if p5m >= 1.80 and oi5m <= -0.50 and wiggle < 0.20:
+            return {"side": "sell", "setup": "PLAY2_FRESH_WIGGLE_TOP", "score": 92}
+        elif p5m <= -1.50 and oi5m >= 0.50 and wiggle < 0.20:
+            return {"side": "buy", "setup": "PLAY2_FRESH_WIGGLE_BOTTOM", "score": 92}
+        return None
+
+    def eval_module_3_amplified_3m(self, latest, history):
+        if len(history) < 6:
+            return None
+        h = list(history)
+        p_cur, p_3m = h[-1]["price"], h[-6]["price"]
+        if p_3m <= 0:
+            return None
+        move = abs((p_cur - p_3m) / p_3m * 100.0)
+        p5m = latest["price_5m"]
+        if move >= 1.40 and abs(p5m) >= 1.10:
+            if p_cur > p_3m and latest["oi_5m"] < 0:
+                return {"side": "sell", "setup": "PLAY3_FRESH_EXHAUSTION", "score": 89}
+            elif p_cur < p_3m and latest["oi_5m"] > 0:
+                return {"side": "buy", "setup": "PLAY3_FRESH_EXHAUSTION", "score": 89}
         return None
 
     def format_ai_studio_dossier(self, signal, current_price):
         traj = signal.get("trajectory", [0.0, 0.4, 0.8, 1.2])
         card = (
-            f"\n==================== [10-MIN MOMENTUM WAVE DOSSIER] ====================\n"
+            f"\n==================== [AI STUDIO MOMENTUM DOSSIER] ====================\n"
             f"ASSET: {signal['base_sym']}USDT | DIRECTION: {signal['side'].upper()} | SCORE: {signal['score']}/100\n"
-            f"EXCHANGE CONSENSUS: {signal.get('consensus', 100)}% ({signal.get('aligned', 'ALL')} VENUES CONFIRMED)\n"
-            f"3-MIN VELOCITY: Price Delta: {signal.get('p3m', 0.0):+.2f}% | OI Delta: {signal.get('oi3m', 0.0):+.2f}%\n"
-            f"ACCELERATION PROFILE: {' -> '.join([f'{p:+.2f}%' for p in traj])}\n"
-            f"EXECUTION PRICE: ${current_price:.6f}\n"
-            f"AI STUDIO PATTERN FINGERPRINT:\n"
-            f"{json.dumps({'asset': signal['base_sym'], 'side': signal['side'], 'p3m': signal.get('p3m', 0), 'traj': traj, 'consensus': signal.get('consensus', 100)}, indent=2)}\n"
+            f"STRATEGY: {signal['setup']} | CONSENSUS: {signal.get('consensus', 100)}% ({signal.get('aligned', 'ALL')} VENUES)\n"
+            f"PRICE VELOCITY: 3m: {signal.get('p3m', 0.0):+.2f}% | ENTRY PRICE: ${current_price:.6f}\n"
+            f"AI STUDIO FINGERPRINT:\n"
+            f"{json.dumps({'asset': signal['base_sym'], 'side': signal['side'], 'setup': signal['setup'], 'traj': traj}, indent=2)}\n"
             f"======================================================================="
         )
         dashboard_data["latest_ai_card"] = card
@@ -491,9 +510,30 @@ class MasterDeskEngine:
                 continue
 
             latest = buf[-1]
-            s = self.eval_10min_momentum_signature(base_sym, latest)
-            if s:
-                candidates.append({**s, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
+
+            # 1. 10-Minute Momentum Wave (3M Consensus)
+            s_wave = self.eval_10min_momentum_signature(base_sym, latest)
+            if s_wave:
+                candidates.append({**s_wave, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
+                continue
+
+            # 2. Play 1: Fresh Regime Shift
+            s1 = self.eval_module_1_regime_shift(latest)
+            if s1:
+                candidates.append({**s1, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
+                continue
+
+            # 3. Play 2: Exhaustion Wiggle (Apex reversals)
+            s2 = self.eval_module_2_exhaustion_wiggle(latest, buf)
+            if s2:
+                candidates.append({**s2, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
+                continue
+
+            # 4. Play 3: Amplified 3M Exhaustion
+            s3 = self.eval_module_3_amplified_3m(latest, buf)
+            if s3:
+                candidates.append({**s3, "bitget_symbol": bitget_symbol, "base_sym": base_sym})
+                continue
 
         if candidates:
             candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -539,7 +579,6 @@ class MasterDeskEngine:
             "peak_price": price,
             "highest_gain_pct": 0.0,
             "sla_armed": False,
-            "consecutive_fades": 0,
             "is_paper": is_paper,
             "mode": "PAPER" if is_paper else "LIVE",
             "size": 0
@@ -567,15 +606,14 @@ class MasterDeskEngine:
                 self.active_trade = None
 
     # -------------------------------------------------------------------------
-    # INSTANT SLA SEQUENCE FADE & DYNAMIC LIFECYCLE ENGINE
+    # INSTANT SLA SEQUENCE FADE EXIT ENGINE
     # -------------------------------------------------------------------------
     def manage_active_trade(self):
         """
-        INSTANT SLA SEQUENCE FADE:
-          - As long as momentum expands (new highs/lows), trade continues untouched.
-          - Once gain >= +0.35%, SLA Sequence Monitor arms.
-          - If the impulse rolls over by even 0.12% from peak, EXIT IMMEDIATELY.
-          - Bad trades (failing to pop in 120-180s) cut at -0.28% to prevent streak reset.
+        INSTANT SLA SEQUENCE FADE EXIT:
+          - Arms once profit reaches >= +0.35%.
+          - Exits immediately at the apex if price pulls back 0.12% from peak.
+          - Bad trade scratch: Aborts trades underwater at minute 2-5 to protect streak.
         """
         if not self.active_trade:
             return
@@ -588,21 +626,19 @@ class MasterDeskEngine:
         # PnL Calculation
         if side == "buy":
             gain_pct = ((current_price - trade["entry_price"]) / trade["entry_price"]) * 100.0
-            is_new_high = current_price > trade["peak_price"]
-            if is_new_high:
+            if current_price > trade["peak_price"]:
                 trade["peak_price"] = current_price
             drawdown_from_peak = ((trade["peak_price"] - current_price) / trade["peak_price"]) * 100.0
         else:
             gain_pct = ((trade["entry_price"] - current_price) / trade["entry_price"]) * 100.0
-            is_new_high = current_price < trade["peak_price"]
-            if is_new_high:
+            if current_price < trade["peak_price"]:
                 trade["peak_price"] = current_price
             drawdown_from_peak = ((current_price - trade["peak_price"]) / trade["peak_price"]) * 100.0
 
         if gain_pct > trade["highest_gain_pct"]:
             trade["highest_gain_pct"] = gain_pct
 
-        # Arm SLA sequence once in meaningful profit
+        # Arm SLA sequence when in profit
         if trade["highest_gain_pct"] >= SLA_PROFIT_ACTIVATION_PCT:
             trade["sla_armed"] = True
 
@@ -621,27 +657,26 @@ class MasterDeskEngine:
 
         exit_reason = None
 
-        # 1. EMERGENCY STRUCTURAL STOP (Active on BOTH Paper & Live)
+        # 1. STRUCTURAL EMERGENCY STOP (Enforced on BOTH Paper & Live)
         if gain_pct <= -HARD_STOP_PCT:
             exit_reason = "HARD_STOP_LOSS"
 
-        # 2. INSTANT SLA SEQUENCE FADE (Exits right at the peak)
+        # 2. INSTANT SLA SEQUENCE FADE (Exits immediately at peak exhaustion)
         elif trade["sla_armed"]:
-            # If price draws down 0.12% from peak, sequence has faded -> EXIT IMMEDIATELY
             if drawdown_from_peak >= SLA_APEX_FADE_TOLERANCE and gain_pct >= 0.20:
                 exit_reason = "SLA_INSTANT_APEX_FADE"
 
-        # 3. BAD TRADE 5-MINUTE CUTOFF (Entered on 3m, abort at minute 2-5 if stalled)
+        # 3. BAD TRADE 5-MINUTE CUTOFF (Cut before bleeding out)
         elif elapsed >= 120 and elapsed <= MAX_BAD_TRADE_SECONDS:
             if gain_pct <= SCRATCH_CUT_PCT:
                 exit_reason = "5M_BAD_TRADE_SCRATCH"
 
-        # 4. 10-MINUTE NORMAL HORIZON FADE
+        # 4. 10-MINUTE WAVE COMPLETION
         elif elapsed > MAX_BAD_TRADE_SECONDS and elapsed <= NORMAL_TRADE_SECONDS:
             if drawdown_from_peak >= 0.20 and gain_pct >= 0.15:
                 exit_reason = "10M_WAVE_COMPLETION"
 
-        # 5. 15-MINUTE CEILING (Super runner exit)
+        # 5. 15-MINUTE CEILING (Hard cap for super runners)
         elif elapsed >= MAX_LIFECYCLE_SECONDS:
             exit_reason = "15M_RUNNER_CEILING"
 
@@ -677,7 +712,7 @@ class MasterDeskEngine:
             dashboard_data["active_trade"] = None
 
     def run(self):
-        logger.info("🚀 10-Min Momentum Wave & SLA Fade Desk Online...")
+        logger.info("🚀 Master Quantitative Desk Engine Online...")
         last_sync = 0
 
         while True:
