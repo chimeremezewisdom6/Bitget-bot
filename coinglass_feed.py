@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
 ===============================================================================
-COINGLASS_FEED.PY: TOP-8 GLOBAL DERIVATIVES AGGREGATOR (3M HIGH-RES ENGINE)
+COINGLASS_FEED.PY: TOP-8 GLOBAL DERIVATIVES AGGREGATOR (PRODUCTION READY)
 EXCHANGES: Binance, Bybit, Bitget, Gate.io, MEXC, KuCoin, Hyperliquid
+FEEDS TO BOT.PY:
+  - 2-Minute Velocity (Price & OI Deltas with Cold-Start Protection)
+  - 5-Minute and 24-Hour Macro Context
+  - Cross-Exchange Directional Consensus % (>= 75% Agreement Across Venues)
 ===============================================================================
 """
 
@@ -25,7 +29,6 @@ session.mount("http://", adapter)
 
 class GlobalMatrixAggregator:
     def __init__(self):
-        # 30-minute rolling buffer storing high-res ticks
         self.history = defaultdict(lambda: deque(maxlen=360))
         self.cached_results: List[Dict] = []
         self.last_sync_time = 0.0
@@ -230,49 +233,34 @@ class GlobalMatrixAggregator:
             p_now = p
             oi_now = oi
 
-            # 3-Minute Deltas
-            t_3m = now - 180
-            ticks_3m = [x for x in h if x["time"] <= t_3m]
-            old_3m_tick = ticks_3m[-1] if ticks_3m else h[0]
-            old_p3 = old_3m_tick["price"]
-            old_oi3 = old_3m_tick["oi"]
-            p_chg_3m = ((p_now - old_p3) / old_p3 * 100.0) if old_p3 > 0 else 0.0
-            oi_chg_3m = ((oi_now - old_oi3) / old_oi3 * 100.0) if old_oi3 > 0 else 0.0
+            # 2-Minute Deltas with Cold-Start Guard
+            t_2m = now - 120
+            ticks_2m = [x for x in h if x["time"] <= t_2m]
+            old_2m_tick = ticks_2m[-1] if ticks_2m else h[0]
+            
+            # Cold-start validation: ensure at least 60 seconds of history has accumulated
+            time_span = now - old_2m_tick["time"]
+            if time_span >= 60.0 and old_2m_tick["price"] > 0:
+                p_chg_2m = ((p_now - old_2m_tick["price"]) / old_2m_tick["price"]) * 100.0
+                old_oi = old_2m_tick["oi"]
+                oi_chg_2m = ((oi_now - old_oi) / old_oi * 100.0) if old_oi > 0 else 0.0
+            else:
+                p_chg_2m = 0.0
+                oi_chg_2m = 0.0
 
             # 5-Minute Deltas
             t_5m = now - 300
             ticks_5m = [x for x in h if x["time"] <= t_5m]
             old_5m_tick = ticks_5m[-1] if ticks_5m else h[0]
-            old_p5 = old_5m_tick["price"]
-            old_oi5 = old_5m_tick["oi"]
-            p_chg_5m = ((p_now - old_p5) / old_p5 * 100.0) if old_p5 > 0 else 0.0
-            oi_chg_5m = ((oi_now - old_oi5) / old_oi5 * 100.0) if old_oi5 > 0 else 0.0
+            p_chg_5m = ((p_now - old_5m_tick["price"]) / old_5m_tick["price"] * 100.0) if old_5m_tick["price"] > 0 else 0.0
 
-            # 15-Minute Deltas
-            t_15m = now - 900
-            ticks_15m = [x for x in h if x["time"] <= t_15m]
-            old_15m_tick = ticks_15m[-1] if ticks_15m else h[0]
-            old_p15 = old_15m_tick["price"]
-            old_oi15 = old_15m_tick["oi"]
-            p_chg_15m = ((p_now - old_p15) / old_p15 * 100.0) if old_p15 > 0 else 0.0
-            oi_chg_15m = ((oi_now - old_oi15) / old_oi15 * 100.0) if old_oi15 > 0 else 0.0
-
-            # 3-Minute Price Trajectory Profile
-            profile = []
-            for dt in [180, 120, 60, 0]:
-                pt = [x["price"] for x in h if x["time"] <= (now - dt)]
-                val = pt[-1] if pt else p_now
-                rel_pct = ((val - old_p3) / old_p3 * 100.0) if old_p3 > 0 else 0.0
-                profile.append(round(rel_pct, 2))
-
-            # ACCURATE 3-MINUTE CROSS-EXCHANGE CONSENSUS:
-            # Compares the 3-minute price delta on each exchange individually
-            old_ex_prices = old_3m_tick.get("ex_prices", {})
+            # Cross-Exchange Consensus
+            old_ex_prices = old_2m_tick.get("ex_prices", {})
             aligned_count = 0
             eligible_exchanges = 0
 
-            if abs(p_chg_3m) >= 0.10:
-                is_bullish = p_chg_3m > 0
+            if abs(p_chg_2m) >= 0.10:
+                is_bullish = p_chg_2m > 0
                 for ex_name, current_p in cur_ex_prices.items():
                     if ex_name in old_ex_prices:
                         past_p = old_ex_prices[ex_name]
@@ -292,14 +280,10 @@ class GlobalMatrixAggregator:
             results.append({
                 "symbol": sym,
                 "price": p_now,
-                "price_3m": p_chg_3m,
-                "oi_3m": oi_chg_3m,
-                "trajectory_3m": profile,
+                "price_2m": p_chg_2m,
+                "oi_2m": oi_chg_2m,
                 "price_5m": p_chg_5m,
-                "price_15m": p_chg_15m,
                 "price_24h": data["price_24h"],
-                "oi_5m": oi_chg_5m,
-                "oi_15m": oi_chg_15m,
                 "vol_24h": tot_vol,
                 "total_oi": oi_now,
                 "exchange_count": len(cur_ex_prices),
@@ -313,7 +297,8 @@ class GlobalMatrixAggregator:
 
     def get_master_data(self) -> List[Dict]:
         now = time.time()
-        if (now - self.last_sync_time) > 4 or not self.cached_results:
+        # 5.0s cache protects against shared-IP rate limiting on Render
+        if (now - self.last_sync_time) > 5.0 or not self.cached_results:
             self.update_matrix()
         with self.lock:
             return list(self.cached_results)
