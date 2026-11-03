@@ -15,6 +15,10 @@ def normalize_base(symbol: str) -> str:
             return s[len(prefix):]
     return s
 
+# Backward compatibility helper
+def get_coinglass_data():
+    return {}
+
 class GlobalFeedAggregator:
     """
     Lightweight, thread-safe global market aggregator.
@@ -28,7 +32,7 @@ class GlobalFeedAggregator:
         self.lock = threading.Lock()
         self.session = requests.Session()
         
-        # State stores: symbol -> (global_volume, deque([(ts, price)], maxlen=30))
+        # State stores: base_asset -> (volume, deque([(ts, price)], maxlen=30))
         self._price_history = {}
         self._global_volume = {}
         self._last_seen = {}
@@ -97,7 +101,6 @@ class GlobalFeedAggregator:
                         price = float(item.get("lastPr", 0.0))
                         temp_volumes[clean_base] = temp_volumes.get(clean_base, 0.0) + vol
                         if price > 0:
-                            # Primary execution price reference
                             temp_prices[clean_base] = price
         except Exception:
             pass
@@ -135,11 +138,11 @@ class GlobalFeedAggregator:
                 if not hist or len(hist) < 4:
                     continue
 
-                # Thread-safe copy of deque items
+                # Thread-safe copy of deque snapshot
                 hist_copy = list(hist)
                 curr_time, curr_price = hist_copy[-1]
 
-                # Stale price check (must be fresh within 45s)
+                # Stale price check (must be fresh within 45 seconds)
                 if now - curr_time > 45.0:
                     continue
 
@@ -156,6 +159,7 @@ class GlobalFeedAggregator:
 
                 vel_2m = ((curr_price - old_price) / old_price) * 100.0
 
+                # Velocity sweet spot: between 0.25% and 1.95% (excluding blown-out wicks >2.0%)
                 if 0.25 <= abs(vel_2m) <= 1.95:
                     candidates.append({
                         "base": base,
