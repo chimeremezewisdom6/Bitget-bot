@@ -16,7 +16,7 @@ from market_math import MarketMath
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("GlobalSentinel")
 
-# Option B: Reads either variable name format from Render
+# Option B: Reads either variable name format from Render dashboard
 API_KEY = os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")
 SECRET_KEY = os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")
 PASSPHRASE = os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")
@@ -66,9 +66,8 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-# ----------------- BITGET V2 NATIVE CLIENT (ONE-WAY & REDUCE-ONLY) -----------------
+# ----------------- BITGET V2 CLIENT (ONE-WAY & REDUCE-ONLY) -----------------
 class BitgetClient:
-    """Zero-dependency HMAC-signed client for Bitget V2 with One-Way Mode & Reduce-Only."""
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
         self.base_url = "https://api.bitget.com"
@@ -90,7 +89,7 @@ class BitgetClient:
         }
 
     async def setup_one_way_mode(self, symbol: str):
-        """Sets Bitget futures account to One-Way Mode (non-hedged) & Isolated 5x."""
+        """Enforces One-Way Mode (non-hedged) & Isolated 5x leverage on Bitget."""
         if not API_KEY or not SECRET_KEY:
             return
         path = "/api/v2/mix/account/set-position-mode"
@@ -100,7 +99,6 @@ class BitgetClient:
             await self.s.post(self.base_url + path, data=payload, headers=headers, timeout=2.0)
         except Exception: pass
 
-        # Set Leverage to 5x
         lev_path = "/api/v2/mix/account/set-leverage"
         lev_payload = json.dumps({"symbol": symbol, "productType": "usdt-futures", "marginCoin": "USDT", "leverage": str(LEVERAGE)})
         try:
@@ -109,7 +107,7 @@ class BitgetClient:
         except Exception: pass
 
     async def open_market_long(self, symbol: str, size: float) -> bool:
-        """Opens Live Long Position in One-Way Mode."""
+        """Opens Long Position in One-Way Mode."""
         path = "/api/v2/mix/order/place-order"
         payload = json.dumps({
             "symbol": symbol,
@@ -129,7 +127,7 @@ class BitgetClient:
         except Exception: return False
 
     async def close_market_long_reduce_only(self, symbol: str, size: float) -> bool:
-        """Closes Long Position strictly with REDUCE-ONLY in One-Way Mode."""
+        """Closes Long Position strictly using REDUCE-ONLY in One-Way Mode."""
         path = "/api/v2/mix/order/place-order"
         payload = json.dumps({
             "symbol": symbol,
@@ -140,9 +138,9 @@ class BitgetClient:
             "side": "sell",
             "orderType": "market",
             "tradeSide": "close",
-            "reduceOnly": "yes"    # <--- REDUCE ONLY ENFORCED
+            "reduceOnly": "yes"    # <--- Enforces Reduce-Only
         })
-        for _ in range(3):  # 3 safety retries
+        for _ in range(3):
             try:
                 headers = self._headers("POST", path, payload)
                 async with self.s.post(self.base_url + path, data=payload, headers=headers, timeout=2.0) as r:
@@ -175,7 +173,10 @@ class EightExchangeProbe:
             async with self.s.get(url, timeout=0.8) as r:
                 if r.status == 200:
                     d = (await r.json()).get("data", [{}])[0]
-                    return ("okx", d.get("bids", []), d.get("asks", []))
+                    # Sanitizes OKX's 4-item list to [price, size]
+                    bids = [[x[0], x[1]] for x in d.get("bids", []) if len(x) >= 2]
+                    asks = [[x[0], x[1]] for x in d.get("asks", []) if len(x) >= 2]
+                    return ("okx", bids, asks)
         except Exception: pass
         return None
 
@@ -195,7 +196,9 @@ class EightExchangeProbe:
             async with self.s.get(url, timeout=0.8) as r:
                 if r.status == 200:
                     d = await r.json()
-                    return ("gate", [[x["p"], x["s"]] for x in d.get("bids", [])], [[x["p"], x["s"]] for x in d.get("asks", [])])
+                    bids = [[x["p"], x["s"]] for x in d.get("bids", []) if "p" in x and "s" in x]
+                    asks = [[x["p"], x["s"]] for x in d.get("asks", []) if "p" in x and "s" in x]
+                    return ("gate", bids, asks)
         except Exception: pass
         return None
 
@@ -237,7 +240,9 @@ class EightExchangeProbe:
                 if r.status == 200:
                     d = await r.json()
                     levels = d.get("levels", [[], []])
-                    return ("hyperliquid", [[x["px"], x["sz"]] for x in levels[0]], [[x["px"], x["sz"]] for x in levels[1]])
+                    bids = [[x["px"], x["sz"]] for x in levels[0] if "px" in x and "sz" in x]
+                    asks = [[x["px"], x["sz"]] for x in levels[1] if "px" in x and "sz" in x]
+                    return ("hyperliquid", bids, asks)
         except Exception: pass
         return None
 
@@ -305,7 +310,6 @@ class MasterEngine:
 
         if is_live:
             await self.bitget.setup_one_way_mode(sym)
-            # Example min position size (can be customized)
             await self.bitget.open_market_long(sym, size=1.0)
             logger.info(f"⚡ LIVE ORDER OPENED (One-Way Mode): {sym} at 5x")
 
@@ -317,7 +321,6 @@ class MasterEngine:
         for cycle in range(1, 31):  # 30 cycles * 20s = 600s (10-minute maximum hold)
             await asyncio.sleep(20.0)
 
-            # Query Bitget ticker price
             url = f"https://api.bitget.com/api/v2/mix/market/ticker?symbol={sym}&productType=usdt-futures"
             curr_price = 0.0
             try:
@@ -338,12 +341,12 @@ class MasterEngine:
                 f"Net Move: {net_move:+.2f}% | Net ROE (5x): {net_roe:+.2f}%"
             )
 
-            # ----------------- 1. WIN EXIT (TARGET +1.50% NET = +7.50% ROE) -----------------
+            # ----------------- 1. WIN TARGET (+1.50% Net Move = +7.50% Net ROE) -----------------
             if net_move >= TARGET_NET_MOVE:
                 if is_live:
                     await self.bitget.close_market_long_reduce_only(sym, size=1.0)
                 state["streak"] += 1
-                logger.info(f"🏆 BIG WIN #{state['streak']} BANKED! Net ROE: +{net_roe:.2f}%")
+                logger.info(f"🏆 BIG WIN #{state['streak']} BANKED! Net ROE: +{net_roe:.2f}% (Gross: +{gross:.2f}%)")
                 if state["streak"] >= REQUIRED_STREAK:
                     state["unlocked"] = True
                     logger.info("🚨 8 CONSECUTIVE 7.5% ROE WINS ACHIEVED! LIVE TRADING UNLOCKED! 🚨")
@@ -354,13 +357,13 @@ class MasterEngine:
             if gross <= HARD_STOP_GROSS:
                 if is_live:
                     await self.bitget.close_market_long_reduce_only(sym, size=1.0)
-                logger.warning(f"🛑 STOPPED OUT! Gross: {gross:.2f}%. Streak reset.")
+                logger.warning(f"🛑 STOPPED OUT! Gross: {gross:.2f}%. Streak reset to 0.")
                 state["streak"] = 0
                 state["unlocked"] = False
                 save_state(state)
                 break
 
-            # ----------------- 3. TIMEOUT EXIT (10m) -----------------
+            # ----------------- 3. TIMEOUT (10 Minutes) -----------------
             if cycle == 30:
                 if is_live:
                     await self.bitget.close_market_long_reduce_only(sym, size=1.0)
@@ -368,7 +371,7 @@ class MasterEngine:
                     state["streak"] += 1
                     logger.info(f"🏆 WIN #{state['streak']} BANKED ON TIMEOUT!")
                 else:
-                    logger.info(f"⏱️ 10m Window Expired (+{net_move:.2f}%). Streak reset.")
+                    logger.info(f"⏱️ 10m Window Expired (+{net_move:.2f}%). Streak reset to 0.")
                     state["streak"] = 0
                     state["unlocked"] = False
                 save_state(state)
@@ -399,14 +402,13 @@ class MasterEngine:
                     for coin in breakouts:
                         base = coin["base"]
 
-                        # Check 5m aggressive buy inflow
                         candles = await self.fetch_5m_flow(base)
                         fuel = MarketMath.calculate_5m_fuel(candles)
 
                         if not fuel["has_fuel"]:
                             continue
 
-                        # Check resting order books across all 8 exchanges
+                        # Queries all 8 exchanges in parallel
                         depths = await self.probe.get_depths_all_8(base)
                         runway = MarketMath.audit_runway_clearance(depths, fuel["net_inflow_5m"])
 
