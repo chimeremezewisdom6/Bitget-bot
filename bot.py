@@ -16,17 +16,16 @@ from market_math import MarketMath
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("GlobalSentinel")
 
-# Option B: Reads either variable name format from Render dashboard
 API_KEY = os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")
 SECRET_KEY = os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")
 PASSPHRASE = os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")
 PORT = int(os.getenv("PORT", 10000))
 
-# ----------------- CONSTANTS -----------------
 LEVERAGE = 5
 FEE_AND_SPREAD = 0.17           # 0.12% fees + 0.05% spread
 TARGET_NET_MOVE = 1.50          # +1.50% Net Move = +7.50% Net ROE at 5x
 HARD_STOP_GROSS = -0.50         # Stop Loss at -0.50% gross (1:3 Risk/Reward)
+GLOBAL_MIN_VOL_USD = 1_000_000.0  # Summed across all exchanges >= $1M
 REQUIRED_STREAK = 8
 STATE_FILE = "streak.json"
 
@@ -46,7 +45,7 @@ def save_state(s: dict):
 
 state = load_state()
 
-# ----------------- RENDER KEEP-ALIVE SERVER -----------------
+# ----------------- RENDER HEALTH SERVER -----------------
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -57,8 +56,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
             "trades": state["total_trades"],
-            "one_way_mode": True,
-            "reduce_only": True
+            "global_volume_filter": "$1M+ across all exchanges"
         }).encode("utf-8"))
     def log_message(self, *args): pass
 
@@ -89,14 +87,12 @@ class BitgetClient:
         }
 
     async def setup_one_way_mode(self, symbol: str):
-        """Enforces One-Way Mode (non-hedged) & Isolated 5x leverage on Bitget."""
-        if not API_KEY or not SECRET_KEY:
-            return
+        if not API_KEY or not SECRET_KEY: return
         path = "/api/v2/mix/account/set-position-mode"
         payload = json.dumps({"productType": "usdt-futures", "posMode": "one_way_mode"})
         try:
-            headers = self._headers("POST", path, payload)
-            await self.s.post(self.base_url + path, data=payload, headers=headers, timeout=2.0)
+            h = self._headers("POST", path, payload)
+            await self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.0)
         except Exception: pass
 
         lev_path = "/api/v2/mix/account/set-leverage"
@@ -107,43 +103,30 @@ class BitgetClient:
         except Exception: pass
 
     async def open_market_long(self, symbol: str, size: float) -> bool:
-        """Opens Long Position in One-Way Mode."""
         path = "/api/v2/mix/order/place-order"
         payload = json.dumps({
-            "symbol": symbol,
-            "productType": "usdt-futures",
-            "marginMode": "isolated",
-            "marginCoin": "USDT",
-            "size": str(size),
-            "side": "buy",
-            "orderType": "market",
-            "tradeSide": "open"
+            "symbol": symbol, "productType": "usdt-futures", "marginMode": "isolated",
+            "marginCoin": "USDT", "size": str(size), "side": "buy",
+            "orderType": "market", "tradeSide": "open"
         })
         try:
-            headers = self._headers("POST", path, payload)
-            async with self.s.post(self.base_url + path, data=payload, headers=headers, timeout=2.0) as r:
+            h = self._headers("POST", path, payload)
+            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.0) as r:
                 res = await r.json()
                 return res.get("code") == "00000"
         except Exception: return False
 
     async def close_market_long_reduce_only(self, symbol: str, size: float) -> bool:
-        """Closes Long Position strictly using REDUCE-ONLY in One-Way Mode."""
         path = "/api/v2/mix/order/place-order"
         payload = json.dumps({
-            "symbol": symbol,
-            "productType": "usdt-futures",
-            "marginMode": "isolated",
-            "marginCoin": "USDT",
-            "size": str(size),
-            "side": "sell",
-            "orderType": "market",
-            "tradeSide": "close",
-            "reduceOnly": "yes"    # <--- Enforces Reduce-Only
+            "symbol": symbol, "productType": "usdt-futures", "marginMode": "isolated",
+            "marginCoin": "USDT", "size": str(size), "side": "sell",
+            "orderType": "market", "tradeSide": "close", "reduceOnly": "yes"
         })
         for _ in range(3):
             try:
-                headers = self._headers("POST", path, payload)
-                async with self.s.post(self.base_url + path, data=payload, headers=headers, timeout=2.0) as r:
+                h = self._headers("POST", path, payload)
+                async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.0) as r:
                     res = await r.json()
                     if res.get("code") == "00000":
                         logger.info(f"🔒 Position closed cleanly on Bitget with REDUCE-ONLY: {symbol}")
@@ -152,7 +135,7 @@ class BitgetClient:
             await asyncio.sleep(0.5)
         return False
 
-# ----------------- PARALLEL 8-EXCHANGE PROBE (<250ms) -----------------
+# ----------------- PARALLEL 8-EXCHANGE PROBE -----------------
 class EightExchangeProbe:
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
@@ -173,7 +156,6 @@ class EightExchangeProbe:
             async with self.s.get(url, timeout=0.8) as r:
                 if r.status == 200:
                     d = (await r.json()).get("data", [{}])[0]
-                    # Sanitizes OKX's 4-item list to [price, size]
                     bids = [[x[0], x[1]] for x in d.get("bids", []) if len(x) >= 2]
                     asks = [[x[0], x[1]] for x in d.get("asks", []) if len(x) >= 2]
                     return ("okx", bids, asks)
@@ -254,16 +236,94 @@ class EightExchangeProbe:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return [r for r in results if isinstance(r, tuple) and r is not None]
 
-# ----------------- MAIN SCANNER & EXECUTION LOOP -----------------
+# ----------------- COINGLASS-STYLE GLOBAL 24H VOLUME AGGREGATOR -----------------
+class GlobalVolumeEngine:
+    """Calculates true aggregated 24h USD volume across all major exchanges in 6 batch calls."""
+    def __init__(self, session: aiohttp.ClientSession):
+        self.s = session
+        self.global_volume_cache = {}  # base -> total_24h_usd
+        self.last_update = 0
+
+    async def refresh_global_volumes(self):
+        now = time.time()
+        # Refresh once every 5 minutes (300 seconds)
+        if (now - self.last_update) < 300 and self.global_volume_cache:
+            return
+
+        totals = {}
+
+        # 1. Binance Batch 24h Tickers
+        async def _binance():
+            try:
+                url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+                async with self.s.get(url, timeout=2.5) as r:
+                    if r.status == 200:
+                        for item in await r.json():
+                            sym = item.get("symbol", "")
+                            if sym.endswith("USDT"):
+                                base = sym[:-4]
+                                totals[base] = totals.get(base, 0.0) + float(item.get("quoteVolume", 0.0))
+            except Exception: pass
+
+        # 2. Bybit Batch 24h Tickers
+        async def _bybit():
+            try:
+                url = "https://api.bybit.com/v5/market/tickers?category=linear"
+                async with self.s.get(url, timeout=2.5) as r:
+                    if r.status == 200:
+                        for item in (await r.json()).get("result", {}).get("list", []):
+                            sym = item.get("symbol", "")
+                            if sym.endswith("USDT"):
+                                base = sym[:-4]
+                                totals[base] = totals.get(base, 0.0) + float(item.get("turnover24h", 0.0))
+            except Exception: pass
+
+        # 3. Gate.io Batch 24h Tickers
+        async def _gate():
+            try:
+                url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
+                async with self.s.get(url, timeout=2.5) as r:
+                    if r.status == 200:
+                        for item in await r.json():
+                            contract = item.get("contract", "")
+                            if contract.endswith("_USDT"):
+                                base = contract[:-5]
+                                totals[base] = totals.get(base, 0.0) + float(item.get("volume_24h_quote", 0.0))
+            except Exception: pass
+
+        # 4. MEXC Batch 24h Tickers
+        async def _mexc():
+            try:
+                url = "https://contract.mexc.com/api/v1/contract/ticker"
+                async with self.s.get(url, timeout=2.5) as r:
+                    if r.status == 200:
+                        for item in (await r.json()).get("data", []):
+                            sym = item.get("symbol", "")
+                            if sym.endswith("_USDT"):
+                                base = sym[:-5]
+                                totals[base] = totals.get(base, 0.0) + float(item.get("amount24", 0.0))
+            except Exception: pass
+
+        await asyncio.gather(_binance(), _bybit(), _gate(), _mexc(), return_exceptions=True)
+        self.global_volume_cache = totals
+        self.last_update = now
+
+    def get_global_volume(self, base: str, bitget_vol: float) -> float:
+        return self.global_volume_cache.get(base, 0.0) + bitget_vol
+
+# ----------------- MAIN BREAKOUT SCANNER & WATCHDOG -----------------
 class MasterEngine:
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
         self.probe = EightExchangeProbe(session)
         self.bitget = BitgetClient(session)
+        self.global_vol_engine = GlobalVolumeEngine(session)
         self.highs_30m = {}
         self.active_trade = None
 
     async def scan_market_breakouts(self) -> list:
+        await self.global_vol_engine.refresh_global_volumes()
+
         url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
         breakouts = []
         try:
@@ -274,11 +334,17 @@ class MasterEngine:
                         sym = item.get("symbol", "")
                         if not sym.endswith("USDT"): continue
 
-                        vol = float(item.get("usdtVolume", 0.0))
+                        bitget_vol = float(item.get("usdtVolume", 0.0))
                         curr_price = float(item.get("lastPr", 0.0))
                         base = sym[:-4]
 
-                        if vol < 1_000_000.0 or curr_price <= 0:
+                        if curr_price <= 0: continue
+
+                        # Sum Bitget + Binance + Bybit + Gate + MEXC 24h volume
+                        global_vol = self.global_vol_engine.get_global_volume(base, bitget_vol)
+
+                        # Filter: Global volume across exchanges >= $1,000,000
+                        if global_vol < GLOBAL_MIN_VOL_USD:
                             continue
 
                         if base not in self.highs_30m:
@@ -286,8 +352,10 @@ class MasterEngine:
                         else:
                             self.highs_30m[base] = max(self.highs_30m[base], curr_price)
 
-                        if MarketMath.audit_15m_breakout(curr_price, self.highs_30m[base], vol):
-                            breakouts.append({"symbol": sym, "base": base, "price": curr_price, "vol": vol})
+                        if MarketMath.audit_15m_breakout(curr_price, self.highs_30m[base], global_vol):
+                            breakouts.append({
+                                "symbol": sym, "base": base, "price": curr_price, "global_vol": global_vol
+                            })
         except Exception: pass
         return breakouts
 
@@ -341,7 +409,7 @@ class MasterEngine:
                 f"Net Move: {net_move:+.2f}% | Net ROE (5x): {net_roe:+.2f}%"
             )
 
-            # ----------------- 1. WIN TARGET (+1.50% Net Move = +7.50% Net ROE) -----------------
+            # ----------------- 1. TARGET WIN (+1.50% Net Move = +7.50% Net ROE) -----------------
             if net_move >= TARGET_NET_MOVE:
                 if is_live:
                     await self.bitget.close_market_long_reduce_only(sym, size=1.0)
@@ -363,7 +431,7 @@ class MasterEngine:
                 save_state(state)
                 break
 
-            # ----------------- 3. TIMEOUT (10 Minutes) -----------------
+            # ----------------- 3. TIMEOUT EXIT (10m) -----------------
             if cycle == 30:
                 if is_live:
                     await self.bitget.close_market_long_reduce_only(sym, size=1.0)
@@ -382,9 +450,10 @@ class MasterEngine:
     async def main_loop(self):
         run_health_server()
         logger.info(
-            f"⚡ 8-Exchange Mid-Range Sentinel Online.\n"
-            f"   - Target: +1.50% Net (+7.50% ROE at 5x)\n"
-            f"   - Venues: Binance, OKX, Bybit, Gate, MEXC, KuCoin, BingX, Hyperliquid\n"
+            f"⚡ CoinGlass-Style Aggregated Radar Online.\n"
+            f"   - Global 24h Vol Filter: >= $1,000,000 summed across all exchanges\n"
+            f"   - Target: +1.50% Net (+7.50% ROE at 5x) | Stop Loss: -0.50%\n"
+            f"   - Exchanges Polled: Binance, Bybit, OKX, Gate, MEXC, KuCoin, BingX, Hyperliquid\n"
             f"   - One-Way Mode: ENFORCED | Close: REDUCE-ONLY\n"
             f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
         )
@@ -397,7 +466,10 @@ class MasterEngine:
                     breakouts = await self.scan_market_breakouts()
 
                     if cycle % 4 == 0:
-                        logger.info(f"💓 Breakout Radar: Tracking {len(self.highs_30m)} coins | Breakout Candidates: {len(breakouts)}")
+                        logger.info(
+                            f"💓 Global Radar: Tracking {len(self.highs_30m)} coins with Global 24h Vol >= $1M | "
+                            f"Breakout Candidates: {len(breakouts)}"
+                        )
 
                     for coin in breakouts:
                         base = coin["base"]
@@ -408,13 +480,14 @@ class MasterEngine:
                         if not fuel["has_fuel"]:
                             continue
 
-                        # Queries all 8 exchanges in parallel
+                        # Query resting order books across all 8 exchanges
                         depths = await self.probe.get_depths_all_8(base)
                         runway = MarketMath.audit_runway_clearance(depths, fuel["net_inflow_5m"])
 
                         if runway["has_runway"]:
                             logger.info(
                                 f"🎯 +1.5% RUNWAY CONFIRMED: {base}!\n"
+                                f"   - Global 24h Vol: ${coin['global_vol']:,.0f}\n"
                                 f"   - 5m Net Inflow: ${fuel['net_inflow_5m']:,.0f}\n"
                                 f"   - Resting Wall (+1.5% zone): ${runway['wall_usd']:,.0f}\n"
                                 f"   - Clearance: {runway['clearance_ratio']}x across {runway['venues_count']}/8 exchanges"
