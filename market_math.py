@@ -9,19 +9,31 @@ class MarketMath:
         return curr_price >= (high_30m * 0.998)
 
     @staticmethod
-    def calculate_5m_fuel(candles: list) -> dict:
-        """Measures net aggressive market buy dollars (Taker Buy) over the last 5 minutes."""
-        if not candles or len(candles) < 5:
+    def calculate_5m_fuel(candles) -> dict:
+        """
+        Measures net aggressive market buy dollars (Taker Buy) over the last 5 minutes.
+        Safely validates that Binance returned a valid list of candles.
+        """
+        if not isinstance(candles, list) or len(candles) < 5:
             return {"has_fuel": False, "net_inflow_5m": 0.0}
 
         net_inflows = []
-        for c in candles[-5:]:
-            q_vol = float(c[7])
-            taker_buy = float(c[10])
-            taker_sell = max(0.0, q_vol - taker_buy)
-            net_inflows.append(taker_buy - taker_sell)
+        try:
+            for c in candles[-5:]:
+                if not isinstance(c, (list, tuple)) or len(c) < 11:
+                    continue
+                q_vol = float(c[7])
+                taker_buy = float(c[10])
+                taker_sell = max(0.0, q_vol - taker_buy)
+                net_inflows.append(taker_buy - taker_sell)
+        except Exception:
+            return {"has_fuel": False, "net_inflow_5m": 0.0}
+
+        if len(net_inflows) < 5:
+            return {"has_fuel": False, "net_inflow_5m": 0.0}
 
         total_net_inflow = sum(net_inflows)
+        # Requires at least $60,000 in net aggressive buying power over 5m
         has_fuel = (total_net_inflow >= 60_000.0) and (net_inflows[-1] > 0)
 
         return {
@@ -34,13 +46,13 @@ class MarketMath:
         """
         Sums resting sell orders across all reporting platforms strictly inside
         the +1.50% target runway.
-        Safely handles 2-item, 3-item, or 4-item order book rows (e.g. OKX).
+        Safely handles 2-item, 3-item, or 4-item order book rows (like OKX).
         """
         total_ask_wall_usd = 0.0
         venues_reporting = 0
 
         for name, bids, asks in orderbooks:
-            if not bids or not asks:
+            if not isinstance(bids, list) or not isinstance(asks, list) or not bids or not asks:
                 continue
 
             try:
