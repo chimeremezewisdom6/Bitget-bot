@@ -1,28 +1,29 @@
 # bot.py
 import os
 import json
+import time
 import asyncio
 import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import aiohttp
 
-from market_math import MarketMath, EightExchangeProbe
+from market_math import MarketMath
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("GauntletBot")
+logger = logging.getLogger("MidRangeEngine")
 
-# Option B: Reads either variable name from Render environment
+# Option B: Reads either variable name format
 API_KEY = os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")
 SECRET_KEY = os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")
 PASSPHRASE = os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")
 PORT = int(os.getenv("PORT", 10000))
 
-# ----------------- GAUNTLET PARAMETERS -----------------
+# ----------------- MID-RANGE TARGET CONSTANTS -----------------
 LEVERAGE = 5
-FEE_AND_SPREAD_DRAG = 0.17       # 0.12% fees + 0.05% spread
-TARGET_NET_MOVE = 0.50           # +0.50% Net Move = +2.50% Net ROE at 5x
-HARD_STOP_GROSS = -0.40          # -0.40% Gross Move = -2.00% ROE Stop Loss
+FEE_AND_SPREAD = 0.17           # 0.12% fees + 0.05% spread
+TARGET_NET_MOVE = 1.50          # +1.50% Net Price Move = +7.50% Net ROE at 5x
+HARD_STOP_GROSS = -0.50         # Stop Loss at -0.50% (1:3 Risk/Reward ratio)
 REQUIRED_STREAK = 8
 STATE_FILE = "streak.json"
 
@@ -42,196 +43,240 @@ def save_state(s: dict):
 
 state = load_state()
 
-# ----------------- RENDER KEEP-ALIVE SERVER -----------------
+# ----------------- RENDER HEALTH SERVER -----------------
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        payload = json.dumps({
+        self.wfile.write(json.dumps({
             "status": "ONLINE",
-            "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
+            "mode": "MID_RANGE_MOMENTUM (+1.5% TARGET)",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
-            "total_trades": state["total_trades"]
-        }).encode("utf-8")
-        self.wfile.write(payload)
+            "trades": state["total_trades"]
+        }).encode("utf-8"))
     def log_message(self, *args): pass
 
 def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    logger.info(f"Render Health Server bound to 0.0.0.0:{PORT}")
 
-# ----------------- MASTER ENGINE -----------------
-class MasterEngine:
+# ----------------- PARALLEL ORDER BOOK READER -----------------
+class MultiExchangeProbe:
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
-        self.probe = EightExchangeProbe(session)
+
+    async def _binance_depth(self, base: str):
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/depth?symbol={base}USDT&limit=50"
+            async with self.s.get(url, timeout=0.8) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    return ("binance", d.get("bids", []), d.get("asks", []))
+        except Exception: pass
+        return None
+
+    async def _bybit_depth(self, base: str):
+        try:
+            url = f"https://api.bybit.com/v5/market/orderbook?category=linear&symbol={base}USDT&limit=50"
+            async with self.s.get(url, timeout=0.8) as r:
+                if r.status == 200:
+                    d = (await r.json()).get("result", {})
+                    return ("bybit", d.get("b", []), d.get("a", []))
+        except Exception: pass
+        return None
+
+    async def _bitget_depth(self, base: str):
+        try:
+            url = f"https://api.bitget.com/api/v2/mix/market/orderbook?symbol={base}USDT&productType=usdt-futures&limit=50"
+            async with self.s.get(url, timeout=0.8) as r:
+                if r.status == 200:
+                    d = (await r.json()).get("data", {})
+                    return ("bitget", d.get("bids", []), d.get("asks", []))
+        except Exception: pass
+        return None
+
+    async def get_depths(self, base: str) -> list:
+        tasks = [self._binance_depth(base), self._bybit_depth(base), self._bitget_depth(base)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r for r in results if isinstance(r, tuple) and r is not None]
+
+# ----------------- MASTER ENGINE -----------------
+class MidRangeEngine:
+    def __init__(self, session: aiohttp.ClientSession):
+        self.s = session
+        self.probe = MultiExchangeProbe(session)
+        self.highs_30m = {}  # base -> highest price in 30m window
         self.active_trade = None
 
-    async def scan_bitget_top(self) -> list:
+    async def scan_market_breakouts(self) -> list:
+        """
+        Scans all 400+ coins in a single batch call.
+        Finds coins breaking 30m highs with > $1M 24h volume.
+        """
         url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
-        candidates = []
+        breakouts = []
+
         try:
-            async with self.s.get(url, timeout=3.0) as r:
+            async with self.s.get(url, timeout=2.5) as r:
                 if r.status == 200:
                     data = await r.json()
                     for item in data.get("data", []):
                         sym = item.get("symbol", "")
-                        if sym.endswith("USDT") and float(item.get("usdtVolume", 0.0)) >= 1_000_000.0:
-                            candidates.append({
-                                "symbol": sym,
-                                "base": sym[:-4],
-                                "change24h": float(item.get("change24h", 0.0)),
-                                "last_price": float(item.get("lastPr", 0.0))
-                            })
-        except Exception: pass
-        candidates.sort(key=lambda x: x["change24h"], reverse=True)
-        return candidates[:10]
+                        if not sym.endswith("USDT"): continue
 
-    async def fetch_flow_candles(self, base: str) -> list:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={base}USDT&interval=1m&limit=15"
+                        vol = float(item.get("usdtVolume", 0.0))
+                        curr_price = float(item.get("lastPr", 0.0))
+                        high_price = float(item.get("high24h", 0.0))
+                        base = sym[:-4]
+
+                        if vol < 1_000_000.0 or curr_price <= 0:
+                            continue
+
+                        # Keep track of local high
+                        if base not in self.highs_30m:
+                            self.highs_30m[base] = curr_price
+                        else:
+                            self.highs_30m[base] = max(self.highs_30m[base], curr_price)
+
+                        # Check breakout
+                        if MarketMath.audit_15m_breakout(curr_price, self.highs_30m[base], vol):
+                            breakouts.append({
+                                "symbol": sym,
+                                "base": base,
+                                "price": curr_price,
+                                "vol": vol
+                            })
+        except Exception as e:
+            logger.error(f"Batch scan error: {e}")
+
+        return breakouts
+
+    async def fetch_5m_flow(self, base: str) -> list:
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={base}USDT&interval=1m&limit=5"
         try:
-            async with self.s.get(url, timeout=1.5) as r:
+            async with self.s.get(url, timeout=1.2) as r:
                 if r.status == 200:
                     return await r.json()
         except Exception: pass
         return []
 
-    async def get_current_price(self, symbol: str) -> float:
-        url = f"https://api.bitget.com/api/v2/mix/market/ticker?symbol={symbol}&productType=usdt-futures"
-        try:
-            async with self.s.get(url, timeout=1.5) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    return float(d.get("data", [{}])[0].get("lastPr", 0.0))
-        except Exception: pass
-        return 0.0
-
-    async def run_20s_trade_watchdog(self, sym: str, base: str, entry_price: float, initial_buy_force: float):
+    async def run_midrange_watchdog(self, sym: str, base: str, entry_price: float):
         global state
         self.active_trade = sym
         state["total_trades"] += 1
         save_state(state)
 
         logger.info(
-            f"🎯 GAUNTLET TRADE #{state['total_trades']} OPENED: {base} @ ${entry_price:.4f} | "
-            f"Streak: {state['streak']}/{REQUIRED_STREAK} | Mode: {'LIVE' if state['unlocked'] else 'PAPER'}"
+            f"🚀 MID-RANGE TRADE #{state['total_trades']} OPENED: {base} @ ${entry_price:.4f} | "
+            f"Target: +1.50% Net (+7.50% ROE) | Streak: {state['streak']}/{REQUIRED_STREAK}"
         )
 
-        last_pulse_buy = initial_buy_force / 3.0
-
-        for cycle in range(1, 10):  # 9 cycles * 20s = 180s (3-minute maximum run)
+        # 30 cycles * 20s = 600s (10-minute maximum hold window)
+        for cycle in range(1, 31):
             await asyncio.sleep(20.0)
 
-            curr_price = await self.get_current_price(sym)
+            # Query current price
+            url = f"https://api.bitget.com/api/v2/mix/market/ticker?symbol={sym}&productType=usdt-futures"
+            curr_price = 0.0
+            try:
+                async with self.s.get(url, timeout=1.0) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        curr_price = float(d.get("data", [{}])[0].get("lastPr", 0.0))
+            except Exception: pass
+
             if curr_price <= 0: continue
 
-            gross_move = ((curr_price - entry_price) / entry_price) * 100.0
-            net_move = gross_move - FEE_AND_SPREAD_DRAG
+            gross = ((curr_price - entry_price) / entry_price) * 100.0
+            net_move = gross - FEE_AND_SPREAD
             net_roe = net_move * LEVERAGE
 
-            # Query 8 platforms for sell wall absorption
-            venues_data = await self.probe.query_all_venues(base)
-            sweep_audit = MarketMath.aggregate_8_exchanges(venues_data, initial_buy_force)
-
-            candles = await self.fetch_flow_candles(base)
-            curr_pulse_buy = float(candles[-1][10]) / 3.0 if candles else last_pulse_buy
-
-            buyer_fatigued = curr_pulse_buy < (last_pulse_buy * 0.60)
-            wall_blocked = sweep_audit["clearance_ratio"] < 0.85
-
             logger.info(
-                f"⏱️ 20s [{base}]: Gross: {gross_move:+.2f}% | Net ROE (5x): {net_roe:+.2f}% | "
-                f"Reporting: {sweep_audit['venues_count']}/8 | Wall Ratio: {sweep_audit['clearance_ratio']}x"
+                f"⏱️ {(cycle * 20)}s [{base}]: Gross: {gross:+.2f}% | "
+                f"Net Move: {net_move:+.2f}% | Net ROE (5x): {net_roe:+.2f}%"
             )
 
-            # WIN CONDITION: Net price move >= +0.50% (+2.50% Net ROE at 5x)
+            # ----------------- 1. TARGET WIN (+1.50% Net Move = +7.50% Net ROE) -----------------
             if net_move >= TARGET_NET_MOVE:
                 state["streak"] += 1
-                logger.info(f"🏆 WIN #{state['streak']} BANKED! Net ROE: +{net_roe:.2f}% (Gross: +{gross_move:.2f}%)")
+                logger.info(f"🏆 BIG WIN #{state['streak']} BANKED! Net ROE: +{net_roe:.2f}% (Gross: +{gross:.2f}%)")
                 if state["streak"] >= REQUIRED_STREAK:
                     state["unlocked"] = True
-                    logger.info("🚨 8 CONSECUTIVE WINS ACHIEVED! LIVE TRADING UNLOCKED! 🚨")
+                    logger.info("🚨 8 CONSECUTIVE 7.5% ROE WINS ACHIEVED! LIVE UNLOCKED! 🚨")
                 save_state(state)
                 break
 
-            # HARD STOP LOSS
-            if gross_move <= HARD_STOP_GROSS:
-                logger.warning(f"🛑 STOPPED OUT! Gross: {gross_move:.2f}%. Streak reset to 0.")
+            # ----------------- 2. STRICT STOP LOSS (-0.50% Gross) -----------------
+            if gross <= HARD_STOP_GROSS:
+                logger.warning(f"🛑 STOPPED OUT! Gross: {gross:.2f}%. Streak reset.")
                 state["streak"] = 0
                 state["unlocked"] = False
                 save_state(state)
                 break
 
-            # FADE EXIT: Buyers fatigued or sell wall replenished
-            if buyer_fatigued or wall_blocked:
-                reason = "BUYERS FATIGUED" if buyer_fatigued else "SELL WALL REPLENISHED"
-                logger.warning(f"💨 FADE DETECTED ({reason}) on {base}! Exiting.")
-                if net_move < TARGET_NET_MOVE:
+            # ----------------- 3. TIMEOUT (10 Minutes) -----------------
+            if cycle == 30:
+                if net_move >= TARGET_NET_MOVE:
+                    state["streak"] += 1
+                    logger.info(f"🏆 WIN #{state['streak']} BANKED ON TIMEOUT!")
+                else:
+                    logger.info(f"⏱️ 10m Momentum window closed (+{net_move:.2f}%). Streak reset.")
                     state["streak"] = 0
                     state["unlocked"] = False
                 save_state(state)
                 break
 
-            # TIMEOUT EXIT (3 Minutes)
-            if cycle == 9:
-                logger.warning(f"⏱️ 3-Minute Window Expired. Net Move: +{net_move:.2f}%. Streak reset.")
-                state["streak"] = 0
-                state["unlocked"] = False
-                save_state(state)
-                break
-
-            last_pulse_buy = curr_pulse_buy
-
         self.active_trade = None
 
     async def main_loop(self):
         run_health_server()
-        logger.info(f"⚡ Gauntlet Engine Online. Streak: {state['streak']}/{REQUIRED_STREAK}. RAM < 150 KB.")
+        logger.info(f"⚡ Mid-Range Sentinel Online. Target: +1.50% Net (+7.50% ROE). Streak: {state['streak']}/{REQUIRED_STREAK}")
         cycle = 0
 
         while True:
             cycle += 1
             try:
                 if not self.active_trade:
-                    candidates = await self.scan_bitget_top()
+                    # 1. Scan all 400+ coins in 1 single HTTP request
+                    breakouts = await self.scan_market_breakouts()
 
                     if cycle % 4 == 0:
-                        logger.info(f"💓 Heartbeat: Streak {state['streak']}/{REQUIRED_STREAK} | Tracking {len(candidates)} coins.")
+                        logger.info(f"💓 Breakout Radar: Tracking {len(self.highs_30m)} coins | Breakout Candidates: {len(breakouts)}")
 
-                    for coin in candidates:
+                    for coin in breakouts:
                         base = coin["base"]
-                        candles = await self.fetch_flow_candles(base)
-                        flow = MarketMath.parse_flow_candles(candles)
 
-                        if not flow or not flow["is_accelerating"] or flow["squeeze_ratio"] < 25.0:
+                        # 2. Check 5-minute Taker Buy Inflow
+                        candles = await self.fetch_5m_flow(base)
+                        fuel = MarketMath.calculate_5m_fuel(candles)
+
+                        if not fuel["has_fuel"]:
                             continue
 
-                        # Query the Big 8 exchanges in parallel
-                        venues_data = await self.probe.query_all_venues(base)
-                        sweep = MarketMath.aggregate_8_exchanges(venues_data, flow["last_minute_buy_force"])
+                        # 3. Check Order Book Highway (Is +1.5% clear of sell walls?)
+                        depths = await self.probe.get_depths(base)
+                        runway = MarketMath.audit_runway_clearance(depths, fuel["net_inflow_5m"])
 
-                        if sweep["can_sweep"]:
+                        if runway["has_runway"]:
                             logger.info(
-                                f"🎯 SQUEEZE DETECTED: {base}!\n"
-                                f"   - 5m Move: +{flow['total_5m_move']}%\n"
-                                f"   - Locked Ratio: {flow['squeeze_ratio']}%\n"
-                                f"   - Clearance: {sweep['clearance_ratio']}x across {sweep['venues_count']}/8 venues: {sweep['reporting_venues']}"
+                                f"🎯 +1.5% RUNWAY CONFIRMED: {base}!\n"
+                                f"   - 5m Net Inflow: ${fuel['net_inflow_5m']:,.0f}\n"
+                                f"   - Resting Wall (+1.5% zone): ${runway['wall_usd']:,.0f}\n"
+                                f"   - Clearance Ratio: {runway['clearance_ratio']}x across {runway['venues_count']} exchanges"
                             )
-                            await self.run_20s_trade_watchdog(
-                                coin["symbol"], base, coin["last_price"], flow["last_minute_buy_force"]
-                            )
+                            await self.run_midrange_watchdog(coin["symbol"], base, coin["price"])
                             break
+
             except Exception as e:
                 logger.error(f"Loop error: {e}")
 
-            await asyncio.sleep(15.0)
+            await asyncio.sleep(12.0)
 
 async def main():
     connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
     async with aiohttp.ClientSession(connector=connector) as session:
-        engine = MasterEngine(session)
+        engine = MidRangeEngine(session)
         await engine.main_loop()
 
 if __name__ == "__main__":
