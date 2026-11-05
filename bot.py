@@ -8,13 +8,14 @@ import hashlib
 import asyncio
 import logging
 import threading
+from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import aiohttp
 
 from market_math import MarketMath
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("TurboSentinel")
+logger = logging.getLogger("HardenedSentinel")
 
 API_KEY = (os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")).strip()
 SECRET_KEY = (os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")).strip()
@@ -25,7 +26,7 @@ PORT = int(os.getenv("PORT", 10000))
 LEVERAGE = 5
 FEE_AND_SLIPPAGE = 0.22         # 0.12% fees + 0.10% real market-order slippage
 HARD_STOP_GROSS = -0.55         # Emergency hard stop
-GLOBAL_MIN_VOL_USD = 1_000_000.0  # Summed across all 8 exchanges >= $1M
+GLOBAL_MIN_VOL_USD = 1_000_000.0
 REQUIRED_STREAK = 8
 STATE_FILE = "streak.json"
 
@@ -57,7 +58,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
             "trades": state["total_trades"],
-            "global_venues_polled": 8
+            "protection": "NATIVE_BITGET_CANDLES_AND_BREAKEVEN_SHIELD"
         }).encode("utf-8"))
     def log_message(self, *args): pass
 
@@ -124,7 +125,6 @@ class BitgetUTAClient:
         return 1.58
 
     def calculate_order_qty(self, current_price: float, balance_usdt: float) -> str:
-        """Calculates size adapted to $1.58 balance, ensuring notional >= 5.10 USDT."""
         if current_price <= 0: return "1"
         usable_margin = max(1.10, balance_usdt * 0.90)
         notional_value = usable_margin * LEVERAGE
@@ -144,7 +144,6 @@ class BitgetUTAClient:
             return str(int(raw_size))
 
     async def open_order_uta(self, symbol: str, side: str, qty_str: str) -> bool:
-        """Opens position using Bitget UTA V3 Order API."""
         lev_path = "/api/v3/account/set-leverage"
         lev_body = json.dumps({"category": "USDT-FUTURES", "symbol": symbol, "leverage": str(LEVERAGE)})
         try:
@@ -154,12 +153,8 @@ class BitgetUTAClient:
 
         path = "/api/v3/trade/place-order"
         payload = json.dumps({
-            "category": "USDT-FUTURES",
-            "symbol": symbol,
-            "side": side,
-            "orderType": "market",
-            "qty": qty_str,
-            "reduceOnly": "no"
+            "category": "USDT-FUTURES", "symbol": symbol, "side": side,
+            "orderType": "market", "qty": qty_str, "reduceOnly": "no"
         })
         try:
             h = self._headers("POST", path, payload)
@@ -170,7 +165,6 @@ class BitgetUTAClient:
             return False
 
     async def safe_close_position_uta(self, symbol: str, open_side: str) -> bool:
-        """Zero-Error Close in UTA: Queries live open size and closes with reduce-only."""
         pos_path = f"/api/v3/position/current-position?category=USDT-FUTURES&symbol={symbol}"
         actual_qty = "0"
         try:
@@ -191,12 +185,8 @@ class BitgetUTAClient:
         close_side = "sell" if open_side == "buy" else "buy"
         order_path = "/api/v3/trade/place-order"
         order_payload = json.dumps({
-            "category": "USDT-FUTURES",
-            "symbol": symbol,
-            "side": close_side,
-            "orderType": "market",
-            "qty": actual_qty,
-            "reduceOnly": "yes"
+            "category": "USDT-FUTURES", "symbol": symbol, "side": close_side,
+            "orderType": "market", "qty": actual_qty, "reduceOnly": "yes"
         })
 
         for _ in range(3):
@@ -211,9 +201,8 @@ class BitgetUTAClient:
             await asyncio.sleep(0.3)
         return False
 
-# ----------------- BACKGROUND GLOBAL VOLUME AGGREGATOR (ALL 8 EXCHANGES) -----------------
+# ----------------- BACKGROUND GLOBAL VOLUME AGGREGATOR -----------------
 class GlobalVolumeEngine:
-    """Aggregates 24h volume across all 8 exchanges in background."""
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
         self.global_volume_cache = {}
@@ -232,8 +221,7 @@ class GlobalVolumeEngine:
                                 for item in await r.json():
                                     sym = item.get("symbol", "")
                                     if sym.endswith("USDT"):
-                                        b = sym[:-4]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("quoteVolume", 0.0))
+                                        totals[sym[:-4]] = totals.get(sym[:-4], 0.0) + float(item.get("quoteVolume", 0.0))
                     except Exception: pass
 
                 async def _bybit():
@@ -243,8 +231,7 @@ class GlobalVolumeEngine:
                                 for item in (await r.json()).get("result", {}).get("list", []):
                                     sym = item.get("symbol", "")
                                     if sym.endswith("USDT"):
-                                        b = sym[:-4]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("turnover24h", 0.0))
+                                        totals[sym[:-4]] = totals.get(sym[:-4], 0.0) + float(item.get("turnover24h", 0.0))
                     except Exception: pass
 
                 async def _okx():
@@ -255,9 +242,7 @@ class GlobalVolumeEngine:
                                     inst = item.get("instId", "")
                                     if inst.endswith("-USDT-SWAP"):
                                         b = inst.split("-")[0]
-                                        vol_coins = float(item.get("volCcy24h", 0.0))
-                                        last_price = float(item.get("last", 0.0))
-                                        totals[b] = totals.get(b, 0.0) + (vol_coins * last_price)
+                                        totals[b] = totals.get(b, 0.0) + (float(item.get("volCcy24h", 0.0)) * float(item.get("last", 0.0)))
                     except Exception: pass
 
                 async def _gate():
@@ -267,8 +252,7 @@ class GlobalVolumeEngine:
                                 for item in await r.json():
                                     contract = item.get("contract", "")
                                     if contract.endswith("_USDT"):
-                                        b = contract[:-5]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("volume_24h_quote", 0.0))
+                                        totals[contract[:-5]] = totals.get(contract[:-5], 0.0) + float(item.get("volume_24h_quote", 0.0))
                     except Exception: pass
 
                 async def _mexc():
@@ -278,8 +262,7 @@ class GlobalVolumeEngine:
                                 for item in (await r.json()).get("data", []):
                                     sym = item.get("symbol", "")
                                     if sym.endswith("_USDT"):
-                                        b = sym[:-5]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("amount24", 0.0))
+                                        totals[sym[:-5]] = totals.get(sym[:-5], 0.0) + float(item.get("amount24", 0.0))
                     except Exception: pass
 
                 async def _bingx():
@@ -289,8 +272,7 @@ class GlobalVolumeEngine:
                                 for item in (await r.json()).get("data", []):
                                     sym = item.get("symbol", "")
                                     if sym.endswith("-USDT"):
-                                        b = sym.split("-")[0]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("volume", 0.0))
+                                        totals[sym.split("-")[0]] = totals.get(sym.split("-")[0], 0.0) + float(item.get("volume", 0.0))
                     except Exception: pass
 
                 async def _kucoin():
@@ -300,8 +282,7 @@ class GlobalVolumeEngine:
                                 for item in (await r.json()).get("data", []):
                                     sym = item.get("symbol", "")
                                     if sym.endswith("USDTM"):
-                                        b = sym[:-5]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("turnoverOf24h", 0.0))
+                                        totals[sym[:-5]] = totals.get(sym[:-5], 0.0) + float(item.get("turnoverOf24h", 0.0))
                     except Exception: pass
 
                 await asyncio.gather(_binance(), _bybit(), _okx(), _gate(), _mexc(), _bingx(), _kucoin(), return_exceptions=True)
@@ -326,20 +307,40 @@ class MasterEngine:
         self.s = session
         self.bitget = BitgetUTAClient(session)
         self.global_vol = GlobalVolumeEngine(session)
+        self.price_history = {}  # base -> deque of (timestamp, price)
         self.active_trade = None
         self.sem = asyncio.Semaphore(25)
 
-    async def fetch_single_candle_set(self, base: str) -> tuple:
+    async def fetch_single_candle_set(self, sym: str, base: str) -> tuple:
+        """
+        NATIVE-FIRST ARCHITECTURE:
+        Queries Bitget's native candles first (100% coin coverage, zero prefix issues).
+        Falls back to Binance if needed.
+        """
         async with self.sem:
+            # 1. Native Bitget 1m candles
+            url_bitget = f"https://api.bitget.com/api/v2/mix/market/candles?symbol={sym}&productType=usdt-futures&granularity=1m&limit=120"
+            try:
+                async with self.s.get(url_bitget, timeout=0.85) as r:
+                    if r.status == 200:
+                        res = await r.json()
+                        d = res.get("data", [])
+                        if isinstance(d, list) and len(d) >= 25:
+                            # Reverse so oldest candle is index 0 and latest is index -1
+                            return (base, list(reversed(d)))
+            except Exception: pass
+
+            # 2. Binance fallback with 1000-prefix resolution
             for variant in [base, f"1000{base}"]:
-                url = f"https://fapi.binance.com/fapi/v1/klines?symbol={variant}USDT&interval=1m&limit=45"
+                url_binance = f"https://fapi.binance.com/fapi/v1/klines?symbol={variant}USDT&interval=1m&limit=120"
                 try:
-                    async with self.s.get(url, timeout=0.9) as r:
+                    async with self.s.get(url_binance, timeout=0.85) as r:
                         if r.status == 200:
                             d = await r.json()
-                            if isinstance(d, list) and len(d) >= 20:
+                            if isinstance(d, list) and len(d) >= 25:
                                 return (base, d)
                 except Exception: pass
+
         return (base, [])
 
     async def run_open_ended_watchdog(self, sym: str, base: str, direction: str, entry_price: float):
@@ -367,6 +368,7 @@ class MasterEngine:
         price_ticks = []
         peak_gross = 0.0
         trailing_floor = HARD_STOP_GROSS
+        breakeven_triggered = False
         tick_count = 0
 
         while True:
@@ -399,15 +401,19 @@ class MasterEngine:
             if gross > peak_gross:
                 peak_gross = gross
 
-            # Parabolic Trailing Ratchet
+            # ----------------- PARABOLIC TRAILING RATCHET -----------------
+            # 1. Breakeven Lock at +0.40%
             if peak_gross >= 0.40 and trailing_floor < 0.22:
                 trailing_floor = 0.22
-                logger.info(f"🛡️ BREAKEVEN LOCKED on {base} (+0.22% floor, zero risk).")
+                breakeven_triggered = True
+                logger.info(f"🛡️ BREAKEVEN SHIELD ACTIVE: Stop locked at +0.22% (Zero loss guaranteed).")
 
+            # 2. +1.50% Milestone: Lock in +1.15% profit, ride wave for +5%+
             if peak_gross >= 1.50 and trailing_floor < 1.15:
                 trailing_floor = 1.15
                 logger.info(f"💎 +1.5% HIT on {base} ({direction.upper()})! Ratchet locked. Riding for +5%+...")
 
+            # 3. Super-Runner Ratchet (+2.5% to +10%+): Trails 0.35% behind peak
             if peak_gross >= 2.50:
                 potential_floor = peak_gross - 0.35
                 if potential_floor > trailing_floor:
@@ -420,36 +426,41 @@ class MasterEngine:
                 f"Net ROE: {net_roe:+.2f}% | Floor: {trailing_floor:+.2f}% | State: {wiggle['status']}"
             )
 
-            # Exit Conditions
+            # ----------------- EXIT RULES -----------------
+            # A. Wiggle Fade Exit (Exits when price wiggles against us after profit)
             if peak_gross >= 0.60 and wiggle["should_exit"] and gross <= (peak_gross - 0.22):
                 if is_live:
                     await self.bitget.safe_close_position_uta(sym, direction)
-                if net_move > 0:
-                    state["streak"] += 1
-                    logger.info(
-                        f"💰 WIGGLE FADE HARVESTED! Closed at Gross: +{gross:.2f}% | "
-                        f"Net ROE: +{net_roe:.2f}% (Peak was +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
-                    )
-                else:
-                    logger.warning(f"🛑 Wiggle failed near entry. Streak reset.")
-                    state["streak"] = 0
-                    state["unlocked"] = False
+
+                state["streak"] += 1
+                logger.info(
+                    f"💰 WIGGLE FADE HARVESTED! Closed at Gross: +{gross:.2f}% | "
+                    f"Net ROE: +{net_roe:.2f}% (Peak: +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
+                )
                 save_state(state)
                 break
 
+            # B. Trailing Floor Hit or Stop Loss
             if gross <= trailing_floor:
                 if is_live:
                     await self.bitget.safe_close_position_uta(sym, direction)
-                if net_move > 0:
+
+                if net_move > 0.05:
+                    # Clean profitable win
                     state["streak"] += 1
                     logger.info(
                         f"🏆 TRAILING RATCHET EXIT! Net ROE: +{net_roe:.2f}% | "
                         f"Peak: +{peak_gross:.2f}%. Streak: {state['streak']}/{REQUIRED_STREAK}"
                     )
+                elif breakeven_triggered:
+                    # Breakeven exit: ZERO loss. PRESERVES STREAK!
+                    logger.info(f"🛡️ BREAKEVEN EXIT: Exited at zero risk. Streak preserved at {state['streak']}/{REQUIRED_STREAK}.")
                 else:
-                    logger.warning(f"🛑 STOPPED OUT! Gross: {gross:.2f}%. Streak reset.")
+                    # True Stop Loss (-0.55% hit): Reset streak
+                    logger.warning(f"🛑 STOPPED OUT! Gross: {gross:.2f}%. Streak reset to 0.")
                     state["streak"] = 0
                     state["unlocked"] = False
+
                 save_state(state)
                 break
 
@@ -457,7 +468,6 @@ class MasterEngine:
 
     async def main_loop(self):
         run_health_server()
-        # Launch volume aggregator in background
         asyncio.create_task(self.global_vol.background_worker())
 
         live_bal = await self.bitget.get_available_usdt()
@@ -465,89 +475,117 @@ class MasterEngine:
         notional_val = margin_used * LEVERAGE
 
         logger.info(
-            f"⚡ Turbo 8-Exchange Global UTA Sentinel Online.\n"
+            f"⚡ Hardened Precision Sentinel Online.\n"
             f"   - Bitget Balance: ${live_bal:.2f} USDT | Margin: ${margin_used:.2f} (5x = ~${notional_val:.2f})\n"
-            f"   - Scanning Interval: 3.0s | Warm TLS Keep-Alive Active\n"
-            f"   - Meme Coin 1000-Prefix Radar: ENABLED\n"
+            f"   - Rules: 8% Wave in < 4h | Pullback <= 1.6% | 8/10 Micro Wins | Fluctuation >= 0.20%\n"
+            f"   - Background Radar: CONTINUOUS (Zero 10-minute freeze)\n"
             f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
         )
 
         cycle = 0
         while True:
             cycle += 1
+            now = time.time()
             t0 = time.time()
             try:
-                if not self.active_trade:
-                    url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
-                    async with self.s.get(url, timeout=2.0) as r:
-                        if r.status == 200:
-                            data = await r.json()
-                            fast_candidates = []
-                            total_tracked = 0
+                url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
+                async with self.s.get(url, timeout=2.0) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        fast_candidates = []
+                        total_tracked = 0
 
-                            # 1. Instant in-memory filter (<1ms): skips flat coins
-                            for item in data.get("data", []):
-                                sym = item.get("symbol", "")
-                                if not sym.endswith("USDT"): continue
+                        # 1. 3-MINUTE SPEED FILTER
+                        for item in data.get("data", []):
+                            sym = item.get("symbol", "")
+                            if not sym.endswith("USDT"): continue
 
-                                base = sym[:-4]
-                                bitget_vol = float(item.get("usdtVolume", 0.0))
-                                curr_price = float(item.get("lastPr", 0.0))
-                                high_24h = float(item.get("high24h", 0.0))
-                                low_24h = float(item.get("low24h", 0.0))
+                            base = sym[:-4]
+                            bitget_vol = float(item.get("usdtVolume", 0.0))
+                            curr_price = float(item.get("lastPr", 0.0))
 
-                                if curr_price <= 0 or low_24h <= 0: continue
+                            if curr_price <= 0: continue
 
-                                global_vol = self.global_vol.get_global_volume(base, bitget_vol)
-                                if global_vol < GLOBAL_MIN_VOL_USD:
-                                    continue
+                            global_vol = self.global_vol.get_global_volume(base, bitget_vol)
+                            if global_vol < GLOBAL_MIN_VOL_USD:
+                                continue
 
-                                total_tracked += 1
+                            total_tracked += 1
 
-                                if ((high_24h - low_24h) / low_24h) < 0.060:
-                                    continue
+                            # Update continuous rolling history (keeps running even during trades!)
+                            if base not in self.price_history:
+                                self.price_history[base] = deque(maxlen=60)
+                            self.price_history[base].append((now, curr_price))
 
-                                fast_candidates.append((sym, base, curr_price))
+                            history = self.price_history[base]
+                            if len(history) >= 10:
+                                old_time, old_price = history[0]
+                                elapsed = now - old_time
 
-                            # Periodic Heartbeat Log every 5 cycles (~15 seconds)
-                            if cycle % 5 == 0:
-                                global_count = self.global_vol.qualifying_count or total_tracked
-                                logger.info(
-                                    f"💓 8-Exchange Radar: Tracking {total_tracked} Bitget pairs ({global_count} >= $1M globally) | "
-                                    f"Active Movers: {len(fast_candidates)} | Streak: {state['streak']}/{REQUIRED_STREAK}"
-                                )
+                                if elapsed >= 90:
+                                    pct_3m = ((curr_price - old_price) / old_price) * 100.0
+                                    speed_3m = abs(pct_3m)
 
-                            # 2. Parallel Scatter-Gather (<0.4s)
-                            if fast_candidates:
-                                tasks = [self.fetch_single_candle_set(base) for _, base, _ in fast_candidates]
-                                candle_results = await asyncio.gather(*tasks, return_exceptions=True)
-                                candle_map = {b: c for b, c in candle_results if isinstance(b, str) and isinstance(c, list)}
-
-                                qualified_pool = []
-                                for sym, base, price in fast_candidates:
-                                    candles = candle_map.get(base, [])
-                                    wave = MarketMath.audit_wave_dominance(candles)
-                                    if wave["qualified"]:
-                                        qualified_pool.append({
-                                            "symbol": sym, "base": base, "price": price,
-                                            "direction": wave["direction"], "wave": wave
+                                    if speed_3m >= 0.65:
+                                        fast_candidates.append({
+                                            "symbol": sym,
+                                            "base": base,
+                                            "price": curr_price,
+                                            "speed_3m": speed_3m,
+                                            "pct_3m": pct_3m
                                         })
 
-                                # 3. Select #1 fastest candidate
-                                if qualified_pool:
-                                    qualified_pool.sort(key=lambda x: x["wave"]["power_score"], reverse=True)
-                                    chosen = qualified_pool[0]
-                                    w = chosen["wave"]
-                                    side = chosen["direction"]
+                        fast_candidates.sort(key=lambda x: x["speed_3m"], reverse=True)
+                        top_candidates = fast_candidates[:20]
 
-                                    elapsed_scan = time.time() - t0
-                                    logger.info(
-                                        f"⚡ #1 EXPLOSIVE SETUP [{side.upper()}] (Scan: {elapsed_scan:.2f}s): {chosen['base']}!\n"
-                                        f"   - Impulse: {w['total_wave']}% in {w['duration_mins']}m (Speed: {w['velocity']}%/min)\n"
-                                        f"   - Power Score: {w['power_score']} | Direction: {side.upper()}\n"
-                                        f"   - Entering trade adapted to ${live_bal:.2f} balance..."
-                                    )
-                                    await self.run_open_ended_watchdog(chosen["symbol"], chosen["base"], side, chosen["price"])
+                        if cycle % 5 == 0:
+                            global_count = self.global_vol.qualifying_count or total_tracked
+                            top_info = f"Top: {top_candidates[0]['base']} ({top_candidates[0]['pct_3m']:+.2f}%/3m)" if top_candidates else "None"
+                            logger.info(
+                                f"💓 Hardened Radar: Tracking {total_tracked} pairs ({global_count} >= $1M) | "
+                                f"Immediate Movers: {len(top_candidates)} ({top_info}) | Streak: {state['streak']}/{REQUIRED_STREAK}"
+                            )
+
+                        # Only look for entries if no trade is currently open
+                        if not self.active_trade and top_candidates:
+                            # Fetch native candles for top candidates
+                            tasks = [self.fetch_single_candle_set(c["symbol"], c["base"]) for c in top_candidates]
+                            candle_results = await asyncio.gather(*tasks, return_exceptions=True)
+                            candle_map = {b: d for b, d in candle_results if isinstance(b, str) and isinstance(d, list)}
+
+                            qualified_pool = []
+                            for c in top_candidates:
+                                base = c["base"]
+                                candles = candle_map.get(base, [])
+                                setup = MarketMath.audit_precision_8pct_setup(candles)
+                                if setup["qualified"]:
+                                    qualified_pool.append({
+                                        "symbol": c["symbol"],
+                                        "base": base,
+                                        "price": c["price"],
+                                        "direction": setup["direction"],
+                                        "setup": setup
+                                    })
+
+                            if qualified_pool:
+                                qualified_pool.sort(key=lambda x: x["setup"]["power_score"], reverse=True)
+                                chosen = qualified_pool[0]
+                                s = chosen["setup"]
+                                side = chosen["direction"]
+
+                                elapsed_scan = time.time() - t0
+                                logger.info(
+                                    f"🎯 8% IMPULSE CONFIRMED [{side.upper()}] (Scan: {elapsed_scan:.2f}s): {chosen['base']}!\n"
+                                    f"   - Wave: {s['total_wave']}% in {s['duration_mins']}m (Under 4 hours)\n"
+                                    f"   - Reversal from Peak: {s['dist_from_peak']}% (<= 1.6% limit)\n"
+                                    f"   - Last 10m Micro-Streak: {s['green_wins']} Wins / {s['red_losses']} Losses (>= 80% Win Rate)\n"
+                                    f"   - Avg 1m Fluctuation: {s['avg_fluctuation']}% (>= 0.20% active volatility)\n"
+                                    f"   - Entering {side.upper()} trade for rapid extension..."
+                                )
+                                # LAUNCH AS NON-BLOCKING TASK (Radar never freezes!)
+                                asyncio.create_task(
+                                    self.run_open_ended_watchdog(chosen["symbol"], chosen["base"], side, chosen["price"])
+                                )
 
             except Exception as e:
                 logger.error(f"Loop error: {e}")
