@@ -16,7 +16,6 @@ from market_math import MarketMath
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("TurboSentinel")
 
-# Option B: Reads either variable name format from Render (stripped of whitespace)
 API_KEY = (os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")).strip()
 SECRET_KEY = (os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")).strip()
 PASSPHRASE = (os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")).strip()
@@ -46,7 +45,7 @@ def save_state(s: dict):
 
 state = load_state()
 
-# ----------------- RENDER KEEP-ALIVE SERVER -----------------
+# ----------------- KEEP-ALIVE SERVER -----------------
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -58,7 +57,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
             "trades": state["total_trades"],
-            "pipeline": "SUB_SECOND_WARM_TLS"
+            "global_venues_polled": 8
         }).encode("utf-8"))
     def log_message(self, *args): pass
 
@@ -89,7 +88,7 @@ class BitgetUTAClient:
         }
 
     async def get_available_usdt(self) -> float:
-        """Pulls actual live balance using Bitget UTA V3 endpoints."""
+        """Pulls live balance using Bitget UTA V3 endpoints."""
         if not API_KEY or not SECRET_KEY or not PASSPHRASE:
             return 1.58
 
@@ -212,18 +211,19 @@ class BitgetUTAClient:
             await asyncio.sleep(0.3)
         return False
 
-# ----------------- BACKGROUND GLOBAL VOLUME AGGREGATOR (DECOUPLED) -----------------
+# ----------------- BACKGROUND GLOBAL VOLUME AGGREGATOR (ALL 8 EXCHANGES) -----------------
 class GlobalVolumeEngine:
-    """Runs as a detached background worker. NEVER freezes the main scanner!"""
+    """Aggregates 24h volume across all 8 exchanges in background."""
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
         self.global_volume_cache = {}
+        self.qualifying_count = 0
 
     async def background_worker(self):
-        """Refreshes volume across all 7 external exchanges every 5 minutes in background."""
         while True:
             try:
                 totals = {}
+                t_start = time.time()
 
                 async def _binance():
                     try:
@@ -305,13 +305,19 @@ class GlobalVolumeEngine:
                     except Exception: pass
 
                 await asyncio.gather(_binance(), _bybit(), _okx(), _gate(), _mexc(), _bingx(), _kucoin(), return_exceptions=True)
+
                 if totals:
                     self.global_volume_cache = totals
+                    over_1m = sum(1 for v in totals.values() if v >= GLOBAL_MIN_VOL_USD)
+                    self.qualifying_count = over_1m
+                    logger.info(
+                        f"🌐 8-Exchange Volume Synced in {time.time() - t_start:.2f}s | "
+                        f"Mapped: {len(totals)} coins | Qualifying (>= $1M Global): {over_1m} coins"
+                    )
             except Exception: pass
             await asyncio.sleep(300)
 
     def get_global_volume(self, base: str, bitget_vol: float) -> float:
-        """Instant in-memory lookup (0.00001 seconds)."""
         return self.global_volume_cache.get(base, 0.0) + bitget_vol
 
 # ----------------- PARALLEL BI-DIRECTIONAL MASTER ENGINE -----------------
@@ -324,10 +330,6 @@ class MasterEngine:
         self.sem = asyncio.Semaphore(25)
 
     async def fetch_single_candle_set(self, base: str) -> tuple:
-        """
-        Fetches 45 1m candles.
-        Includes automatic fallback for meme coins with '1000' prefix on Binance!
-        """
         async with self.sem:
             for variant in [base, f"1000{base}"]:
                 url = f"https://fapi.binance.com/fapi/v1/klines?symbol={variant}USDT&interval=1m&limit=45"
@@ -426,7 +428,7 @@ class MasterEngine:
                     state["streak"] += 1
                     logger.info(
                         f"💰 WIGGLE FADE HARVESTED! Closed at Gross: +{gross:.2f}% | "
-                        f"Net ROE: +{net_roe:.2f}% (Peak: +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
+                        f"Net ROE: +{net_roe:.2f}% (Peak was +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
                     )
                 else:
                     logger.warning(f"🛑 Wiggle failed near entry. Streak reset.")
@@ -455,7 +457,7 @@ class MasterEngine:
 
     async def main_loop(self):
         run_health_server()
-        # Launch volume aggregator in decoupled background task
+        # Launch volume aggregator in background
         asyncio.create_task(self.global_vol.background_worker())
 
         live_bal = await self.bitget.get_available_usdt()
@@ -470,7 +472,9 @@ class MasterEngine:
             f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
         )
 
+        cycle = 0
         while True:
+            cycle += 1
             t0 = time.time()
             try:
                 if not self.active_trade:
@@ -479,6 +483,7 @@ class MasterEngine:
                         if r.status == 200:
                             data = await r.json()
                             fast_candidates = []
+                            total_tracked = 0
 
                             # 1. Instant in-memory filter (<1ms): skips flat coins
                             for item in data.get("data", []):
@@ -493,16 +498,26 @@ class MasterEngine:
 
                                 if curr_price <= 0 or low_24h <= 0: continue
 
-                                if ((high_24h - low_24h) / low_24h) < 0.060:
-                                    continue
-
                                 global_vol = self.global_vol.get_global_volume(base, bitget_vol)
                                 if global_vol < GLOBAL_MIN_VOL_USD:
                                     continue
 
+                                total_tracked += 1
+
+                                if ((high_24h - low_24h) / low_24h) < 0.060:
+                                    continue
+
                                 fast_candidates.append((sym, base, curr_price))
 
-                            # 2. Parallel Scatter-Gather (<0.4s) with meme coin resolution
+                            # Periodic Heartbeat Log every 5 cycles (~15 seconds)
+                            if cycle % 5 == 0:
+                                global_count = self.global_vol.qualifying_count or total_tracked
+                                logger.info(
+                                    f"💓 8-Exchange Radar: Tracking {total_tracked} Bitget pairs ({global_count} >= $1M globally) | "
+                                    f"Active Movers: {len(fast_candidates)} | Streak: {state['streak']}/{REQUIRED_STREAK}"
+                                )
+
+                            # 2. Parallel Scatter-Gather (<0.4s)
                             if fast_candidates:
                                 tasks = [self.fetch_single_candle_set(base) for _, base, _ in fast_candidates]
                                 candle_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -537,11 +552,9 @@ class MasterEngine:
             except Exception as e:
                 logger.error(f"Loop error: {e}")
 
-            # Polling every 3.0 seconds for maximum reaction speed
             await asyncio.sleep(3.0)
 
 async def main():
-    # Warm TCP connection pool with 60s keep-alive
     connector = aiohttp.TCPConnector(
         limit=80,
         limit_per_host=25,
