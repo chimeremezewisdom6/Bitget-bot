@@ -8,6 +8,7 @@ class MarketMath:
         - LONG: Move >= +6.5% in <= 45m with shallow pullback <= 22% (10m vs 1.3m rule).
         - SHORT: Dump <= -6.5% in <= 45m with shallow bounce <= 22%.
         - Velocity >= 0.18%/min (Rejects slow multi-hour crawlers).
+        - Volume fuel: Green/Red >= 1.7x for Long, Red/Green >= 1.7x for Short.
         """
         if not isinstance(candles, list) or len(candles) < 20:
             return {"qualified": False}
@@ -30,7 +31,7 @@ class MarketMath:
                 start_idx = lows.index(start_low)
                 duration = max(1, peak_idx - start_idx)
 
-                # Hard time window: between 5 and 45 minutes
+                # Time window: between 5 and 45 minutes
                 if 5 <= duration <= 45:
                     up_move = ((max_p - start_low) / start_low) * 100.0
                     velocity = up_move / duration
@@ -56,7 +57,7 @@ class MarketMath:
                                     "power_score": round(velocity * (1.0 - reversal_ratio) * fuel_ratio, 2)
                                 }
 
-            # ----------------- 2. EVALUATE SHORT DUMP -----------------
+            # ----------------- 2. EVALUATE SHORT WATERFALL DUMP -----------------
             if trough_idx > 4:
                 start_high = max(highs[:trough_idx])
                 start_idx = highs.index(start_high)
@@ -94,7 +95,7 @@ class MarketMath:
     @staticmethod
     def audit_wiggle_direction(price_ticks: list, direction: str) -> dict:
         """
-        Identifies structural momentum exhaustion:
+        Detects momentum exhaustion without arbitrary time limits:
         - For BUY: Exits when lower highs / lower lows form (wiggling down).
         - For SELL: Exits when higher highs / higher lows form (wiggling up).
         """
