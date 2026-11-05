@@ -16,9 +16,10 @@ from market_math import MarketMath
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("DualSentinel")
 
-API_KEY = os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")
-SECRET_KEY = os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")
-PASSPHRASE = os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")
+# Option B: Reads either variable name from Render, stripped of accidental spaces
+API_KEY = (os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")).strip()
+SECRET_KEY = (os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")).strip()
+PASSPHRASE = (os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")).strip()
 PORT = int(os.getenv("PORT", 10000))
 
 # ----------------- RISK & EXECUTION PARAMETERS -----------------
@@ -55,8 +56,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             "status": "ONLINE",
             "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
-            "trades": state["total_trades"],
-            "wallet_adaptation": "DYNAMIC_BALANCE_5X"
+            "trades": state["total_trades"]
         }).encode("utf-8"))
     def log_message(self, *args): pass
 
@@ -88,51 +88,54 @@ class BitgetClient:
 
     async def get_available_usdt(self) -> float:
         """Pulls actual live USDT futures balance directly from Bitget wallet."""
-        if not API_KEY or not SECRET_KEY:
-            return 1.50  # Default simulation value for paper trading
-        path = "/api/v2/mix/account/account?productType=usdt-futures"
+        if not API_KEY or not SECRET_KEY or not PASSPHRASE:
+            logger.warning("⚠️ API Credentials missing in Render Environment Variables.")
+            return 0.0
+
+        # Exact Bitget V2 Futures account balance endpoint (plural 'accounts')
+        path = "/api/v2/mix/account/accounts?productType=usdt-futures"
         try:
             h = self._headers("GET", path)
-            async with self.s.get(self.base_url + path, headers=h, timeout=2.5) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    for acc in d.get("data", []):
+            async with self.s.get(self.base_url + path, headers=h, timeout=3.5) as r:
+                res = await r.json()
+                if res.get("code") == "00000":
+                    for acc in res.get("data", []):
                         if acc.get("marginCoin") == "USDT":
-                            val = float(acc.get("available", 0.0) or acc.get("maxOpenPosAvailable", 0.0))
-                            return val if val > 0 else 1.50
-        except Exception: pass
-        return 1.50
+                            val = float(acc.get("available", 0.0) or acc.get("maxOpenPosAvailable", 0.0) or acc.get("usdtEquity", 0.0))
+                            logger.info(f"✅ Bitget API Connected Successfully! Live USDT Balance: ${val:.2f}")
+                            return val
+                else:
+                    logger.error(f"❌ Bitget API Error [{res.get('code')}]: {res.get('msg')}")
+        except Exception as e:
+            logger.error(f"❌ Connection error while fetching Bitget balance: {e}")
+        return 0.0
 
     async def ensure_one_way_mode(self):
-        """Verifies One-Way Mode on boot once (avoids error 40774)."""
+        """Verifies One-Way Mode on boot once."""
         if not API_KEY or not SECRET_KEY: return
         path = "/api/v2/mix/account/set-position-mode"
         payload = json.dumps({"productType": "usdt-futures", "posMode": "one_way_mode"})
         try:
             h = self._headers("POST", path, payload)
-            await self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.0)
-            logger.info("🔒 One-Way Mode verified on Bitget.")
+            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.5) as r:
+                res = await r.json()
+                if res.get("code") == "00000":
+                    logger.info("🔒 One-Way Mode verified on Bitget.")
         except Exception: pass
 
     def calculate_order_size(self, current_price: float, balance_usdt: float) -> str:
-        """
-        Dynamically adapts to balance ($1.50 USDT).
-        Uses 90% of wallet with 5x leverage ($6.75 notional).
-        Satisfies Bitget >= 5.0 USDT minimum notional rule.
-        """
+        """Dynamically adapts to balance ($1.58 USDT) at 5x leverage (~$7.10 notional)."""
         if current_price <= 0: return "1"
 
-        # Use 90% of balance to leave buffer for fees
+        # Use 90% of wallet, minimum $1.10 margin to ensure notional >= 5.10 USDT
         usable_margin = max(1.10, balance_usdt * 0.90)
-        notional_value = usable_margin * LEVERAGE  # e.g., $1.35 * 5 = $6.75
+        notional_value = usable_margin * LEVERAGE
 
-        # Bitget requires minimum 5.0 USDT order value
         if notional_value < 5.10:
             notional_value = 5.20
 
         raw_size = notional_value / current_price
 
-        # Precision handling
         if current_price >= 1000:
             return f"{raw_size:.4f}"
         elif current_price >= 1:
@@ -159,10 +162,15 @@ class BitgetClient:
         })
         try:
             h = self._headers("POST", path, payload)
-            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.0) as r:
+            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.5) as r:
                 res = await r.json()
-                return res.get("code") == "00000"
-        except Exception: return False
+                if res.get("code") == "00000":
+                    return True
+                else:
+                    logger.error(f"❌ Bitget Order Error [{res.get('code')}]: {res.get('msg')}")
+        except Exception as e:
+            logger.error(f"❌ Order failed: {e}")
+        return False
 
     async def safe_close_position(self, symbol: str, open_side: str) -> bool:
         """Zero-Error Close: Reads exact position size and closes with reduce-only."""
@@ -280,13 +288,12 @@ class MasterEngine:
         is_live = state["unlocked"] and bool(API_KEY and SECRET_KEY)
 
         if is_live:
-            # Query actual live balance
             balance_usdt = await self.bitget.get_available_usdt()
             size_str = self.bitget.calculate_order_size(entry_price, balance_usdt)
             await self.bitget.open_order(sym, side=direction, size_str=size_str)
             logger.info(
                 f"⚡ LIVE {direction.upper()} OPENED: {size_str} contracts @ ${entry_price:.4f} "
-                f"(Wallet: ${balance_usdt:.2f} USDT | Margin: ~${(balance_usdt * 0.9):.2f} @ 5x)"
+                f"(Balance: ${balance_usdt:.2f} USDT | Notional: ~${(balance_usdt * 0.9 * LEVERAGE):.2f})"
             )
 
         logger.info(
@@ -330,17 +337,14 @@ class MasterEngine:
                 peak_gross = gross
 
             # ----------------- PARABOLIC TRAILING RATCHET -----------------
-            # 1. Breakeven Lock at +0.40% gross
             if peak_gross >= 0.40 and trailing_floor < 0.22:
                 trailing_floor = 0.22
                 logger.info(f"🛡️ BREAKEVEN LOCKED on {base} (+0.22% floor, zero risk).")
 
-            # 2. +1.50% Milestone: Lock in +1.15% profit, ride wave for +5%+
             if peak_gross >= 1.50 and trailing_floor < 1.15:
                 trailing_floor = 1.15
                 logger.info(f"💎 +1.5% HIT on {base} ({direction.upper()})! Ratchet locked. Riding for +5%+...")
 
-            # 3. Super-Runner Ratchet (+2.5% to +10%+): Trails 0.35% behind peak
             if peak_gross >= 2.50:
                 potential_floor = peak_gross - 0.35
                 if potential_floor > trailing_floor:
@@ -353,8 +357,7 @@ class MasterEngine:
                 f"Net ROE: {net_roe:+.2f}% | Floor: {trailing_floor:+.2f}% | State: {wiggle['status']}"
             )
 
-            # ----------------- EXIT RULES -----------------
-            # A. Wiggle Fade Exit (Momentum exhausted)
+            # A. Wiggle Fade Exit
             if peak_gross >= 0.60 and wiggle["should_exit"] and gross <= (peak_gross - 0.22):
                 if is_live:
                     await self.bitget.safe_close_position(sym, direction)
@@ -362,7 +365,7 @@ class MasterEngine:
                     state["streak"] += 1
                     logger.info(
                         f"💰 WIGGLE FADE HARVESTED! Closed at Gross: +{gross:.2f}% | "
-                        f"Net ROE: +{net_roe:.2f}% (Peak was +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
+                        f"Net ROE: +{net_roe:.2f}% (Peak: +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
                     )
                 else:
                     logger.warning(f"🛑 Wiggle failed near entry. Streak reset.")
@@ -396,10 +399,13 @@ class MasterEngine:
         
         # Check actual balance on boot
         live_bal = await self.bitget.get_available_usdt()
+        margin_used = live_bal * 0.90
+        notional_val = margin_used * LEVERAGE
+        
         logger.info(
             f"⚡ Bi-Directional High-Speed Sentinel Online.\n"
-            f"   - Bitget Wallet Balance: ${live_bal:.2f} USDT (Adapts to $1.50 dynamically)\n"
-            f"   - Position Sizing: 90% of Balance (${(live_bal * 0.9):.2f}) at {LEVERAGE}x (~${(live_bal * 0.9 * LEVERAGE):.2f} Notional)\n"
+            f"   - Bitget Wallet Balance: ${live_bal:.2f} USDT\n"
+            f"   - Position Sizing: 90% (${margin_used:.2f}) at {LEVERAGE}x (~${notional_val:.2f} Notional)\n"
             f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
         )
 
