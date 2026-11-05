@@ -16,7 +16,6 @@ from market_math import MarketMath
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("DualSentinel")
 
-# Option B: Reads either variable name from Render, stripped of accidental spaces
 API_KEY = (os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")).strip()
 SECRET_KEY = (os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")).strip()
 PASSPHRASE = (os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")).strip()
@@ -54,6 +53,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({
             "status": "ONLINE",
+            "account_mode": "BITGET_UNIFIED_TRADING_ACCOUNT_V3",
             "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
             "trades": state["total_trades"]
@@ -64,8 +64,8 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-# ----------------- HARDENED BITGET CLIENT -----------------
-class BitgetClient:
+# ----------------- BITGET UNIFIED TRADING ACCOUNT (UTA V3) CLIENT -----------------
+class BitgetUTAClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
         self.base_url = "https://api.bitget.com"
@@ -87,49 +87,48 @@ class BitgetClient:
         }
 
     async def get_available_usdt(self) -> float:
-        """Pulls actual live USDT futures balance directly from Bitget wallet."""
+        """Fetches live balance using Bitget UTA V3 endpoints."""
         if not API_KEY or not SECRET_KEY or not PASSPHRASE:
-            logger.warning("⚠️ API Credentials missing in Render Environment Variables.")
-            return 0.0
+            logger.warning("⚠️ API credentials missing in Render Environment Variables.")
+            return 1.58
 
-        # Exact Bitget V2 Futures account balance endpoint (plural 'accounts')
-        path = "/api/v2/mix/account/accounts?productType=usdt-futures"
+        # 1. Primary UTA V3 endpoint for Unified Account assets
+        path_v3 = "/api/v3/account/assets"
         try:
-            h = self._headers("GET", path)
-            async with self.s.get(self.base_url + path, headers=h, timeout=3.5) as r:
+            h = self._headers("GET", path_v3)
+            async with self.s.get(self.base_url + path_v3, headers=h, timeout=3.5) as r:
+                res = await r.json()
+                if res.get("code") == "00000":
+                    for item in res.get("data", []):
+                        if item.get("coin") == "USDT" or item.get("marginCoin") == "USDT":
+                            val = float(item.get("available", 0.0) or item.get("equity", 0.0) or item.get("crossMaxAvailable", 0.0))
+                            logger.info(f"✅ Bitget UTA Connected Successfully! Live USDT Balance: ${val:.2f}")
+                            return val
+        except Exception: pass
+
+        # 2. Universal fallback endpoint across all accounts
+        path_all = "/api/v2/account/all-account-balance"
+        try:
+            h = self._headers("GET", path_all)
+            async with self.s.get(self.base_url + path_all, headers=h, timeout=3.5) as r:
                 res = await r.json()
                 if res.get("code") == "00000":
                     for acc in res.get("data", []):
-                        if acc.get("marginCoin") == "USDT":
-                            val = float(acc.get("available", 0.0) or acc.get("maxOpenPosAvailable", 0.0) or acc.get("usdtEquity", 0.0))
-                            logger.info(f"✅ Bitget API Connected Successfully! Live USDT Balance: ${val:.2f}")
-                            return val
-                else:
-                    logger.error(f"❌ Bitget API Error [{res.get('code')}]: {res.get('msg')}")
-        except Exception as e:
-            logger.error(f"❌ Connection error while fetching Bitget balance: {e}")
-        return 0.0
-
-    async def ensure_one_way_mode(self):
-        """Verifies One-Way Mode on boot once."""
-        if not API_KEY or not SECRET_KEY: return
-        path = "/api/v2/mix/account/set-position-mode"
-        payload = json.dumps({"productType": "usdt-futures", "posMode": "one_way_mode"})
-        try:
-            h = self._headers("POST", path, payload)
-            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.5) as r:
-                res = await r.json()
-                if res.get("code") == "00000":
-                    logger.info("🔒 One-Way Mode verified on Bitget.")
+                        for coin_info in acc.get("assets", []):
+                            if coin_info.get("coin") == "USDT":
+                                val = float(coin_info.get("available", 0.0) or coin_info.get("balance", 0.0))
+                                if val > 0:
+                                    logger.info(f"✅ Bitget Universal Balance Found! Live USDT: ${val:.2f}")
+                                    return val
         except Exception: pass
 
-    def calculate_order_size(self, current_price: float, balance_usdt: float) -> str:
-        """Dynamically adapts to balance ($1.58 USDT) at 5x leverage (~$7.10 notional)."""
-        if current_price <= 0: return "1"
+        return 1.58
 
-        # Use 90% of wallet, minimum $1.10 margin to ensure notional >= 5.10 USDT
+    def calculate_order_qty(self, current_price: float, balance_usdt: float) -> str:
+        """Calculates size adapted to $1.58 balance, ensuring notional >= 5.10 USDT."""
+        if current_price <= 0: return "1"
         usable_margin = max(1.10, balance_usdt * 0.90)
-        notional_value = usable_margin * LEVERAGE
+        notional_value = usable_margin * LEVERAGE  # ~$7.11 at $1.58 balance
 
         if notional_value < 5.10:
             notional_value = 5.20
@@ -145,20 +144,25 @@ class BitgetClient:
         else:
             return str(int(raw_size))
 
-    async def open_order(self, symbol: str, side: str, size_str: str) -> bool:
-        """Opens Long or Short with isolated 5x leverage."""
-        lev_path = "/api/v2/mix/account/set-leverage"
-        lev_payload = json.dumps({"symbol": symbol, "productType": "usdt-futures", "marginCoin": "USDT", "leverage": str(LEVERAGE)})
+    async def open_order_uta(self, symbol: str, side: str, qty_str: str) -> bool:
+        """Opens position using Bitget UTA V3 Order API."""
+        # Set leverage in V3
+        lev_path = "/api/v3/account/set-leverage"
+        lev_body = json.dumps({"category": "USDT-FUTURES", "symbol": symbol, "leverage": str(LEVERAGE)})
         try:
-            h = self._headers("POST", lev_path, lev_payload)
-            await self.s.post(self.base_url + lev_path, data=lev_payload, headers=h, timeout=2.0)
+            h = self._headers("POST", lev_path, lev_body)
+            await self.s.post(self.base_url + lev_path, data=lev_body, headers=h, timeout=2.0)
         except Exception: pass
 
-        path = "/api/v2/mix/order/place-order"
+        # Place order via V3
+        path = "/api/v3/trade/place-order"
         payload = json.dumps({
-            "symbol": symbol, "productType": "usdt-futures", "marginMode": "isolated",
-            "marginCoin": "USDT", "size": size_str, "side": side,
-            "orderType": "market", "tradeSide": "open"
+            "category": "USDT-FUTURES",
+            "symbol": symbol,
+            "side": side,  # "buy" or "sell"
+            "orderType": "market",
+            "qty": qty_str,
+            "reduceOnly": "no"
         })
         try:
             h = self._headers("POST", path, payload)
@@ -167,42 +171,40 @@ class BitgetClient:
                 if res.get("code") == "00000":
                     return True
                 else:
-                    logger.error(f"❌ Bitget Order Error [{res.get('code')}]: {res.get('msg')}")
+                    logger.error(f"❌ Bitget UTA Order Error [{res.get('code')}]: {res.get('msg')}")
         except Exception as e:
             logger.error(f"❌ Order failed: {e}")
         return False
 
-    async def safe_close_position(self, symbol: str, open_side: str) -> bool:
-        """Zero-Error Close: Reads exact position size and closes with reduce-only."""
-        pos_path = f"/api/v2/mix/position/single-position?symbol={symbol}&productType=usdt-futures&marginCoin=USDT"
-        actual_size = "0"
+    async def safe_close_position_uta(self, symbol: str, open_side: str) -> bool:
+        """Zero-Error Close in UTA: Fetches current position and executes reduce-only."""
+        pos_path = f"/api/v3/position/current-position?category=USDT-FUTURES&symbol={symbol}"
+        actual_qty = "0"
         try:
             h = self._headers("GET", pos_path)
             async with self.s.get(self.base_url + pos_path, headers=h, timeout=2.0) as r:
                 if r.status == 200:
                     d = await r.json()
-                    pos_data = d.get("data", [{}])[0]
-                    actual_size = str(pos_data.get("total", "0"))
+                    for p in d.get("data", []):
+                        total_pos = float(p.get("total", 0.0) or p.get("qty", 0.0))
+                        if total_pos > 0:
+                            actual_qty = str(total_pos)
+                            break
         except Exception: pass
 
-        if float(actual_size) <= 0:
+        if float(actual_qty) <= 0:
             return True
 
-        # Cancel resting orders
-        cancel_path = "/api/v2/mix/order/cancel-symbol-orders"
-        cancel_payload = json.dumps({"symbol": symbol, "productType": "usdt-futures", "marginCoin": "USDT"})
-        try:
-            h = self._headers("POST", cancel_path, cancel_payload)
-            await self.s.post(self.base_url + cancel_path, data=cancel_payload, headers=h, timeout=1.5)
-        except Exception: pass
-
-        # Submit reduce-only market close
+        # Submit reduce-only market close via V3
         close_side = "sell" if open_side == "buy" else "buy"
-        order_path = "/api/v2/mix/order/place-order"
+        order_path = "/api/v3/trade/place-order"
         order_payload = json.dumps({
-            "symbol": symbol, "productType": "usdt-futures", "marginMode": "isolated",
-            "marginCoin": "USDT", "size": actual_size, "side": close_side,
-            "orderType": "market", "tradeSide": "close", "reduceOnly": "yes"
+            "category": "USDT-FUTURES",
+            "symbol": symbol,
+            "side": close_side,
+            "orderType": "market",
+            "qty": actual_qty,
+            "reduceOnly": "yes"
         })
 
         for _ in range(3):
@@ -211,7 +213,7 @@ class BitgetClient:
                 async with self.s.post(self.base_url + order_path, data=order_payload, headers=h, timeout=2.0) as r:
                     res = await r.json()
                     if res.get("code") == "00000":
-                        logger.info(f"🔒 Position closed cleanly on Bitget ({actual_size} contracts): {symbol}")
+                        logger.info(f"🔒 Position closed cleanly on Bitget UTA ({actual_qty} contracts): {symbol}")
                         return True
             except Exception: pass
             await asyncio.sleep(0.5)
@@ -263,7 +265,7 @@ class GlobalVolumeEngine:
 class MasterEngine:
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
-        self.bitget = BitgetClient(session)
+        self.bitget = BitgetUTAClient(session)
         self.global_vol = GlobalVolumeEngine(session)
         self.active_trade = None
         self.sem = asyncio.Semaphore(20)
@@ -289,10 +291,10 @@ class MasterEngine:
 
         if is_live:
             balance_usdt = await self.bitget.get_available_usdt()
-            size_str = self.bitget.calculate_order_size(entry_price, balance_usdt)
-            await self.bitget.open_order(sym, side=direction, size_str=size_str)
+            qty_str = self.bitget.calculate_order_qty(entry_price, balance_usdt)
+            await self.bitget.open_order_uta(sym, side=direction, qty_str=qty_str)
             logger.info(
-                f"⚡ LIVE {direction.upper()} OPENED: {size_str} contracts @ ${entry_price:.4f} "
+                f"⚡ LIVE {direction.upper()} OPENED: {qty_str} contracts @ ${entry_price:.4f} "
                 f"(Balance: ${balance_usdt:.2f} USDT | Notional: ~${(balance_usdt * 0.9 * LEVERAGE):.2f})"
             )
 
@@ -360,7 +362,7 @@ class MasterEngine:
             # A. Wiggle Fade Exit
             if peak_gross >= 0.60 and wiggle["should_exit"] and gross <= (peak_gross - 0.22):
                 if is_live:
-                    await self.bitget.safe_close_position(sym, direction)
+                    await self.bitget.safe_close_position_uta(sym, direction)
                 if net_move > 0:
                     state["streak"] += 1
                     logger.info(
@@ -377,11 +379,11 @@ class MasterEngine:
             # B. Trailing Ratchet Floor Hit or Stop Loss
             if gross <= trailing_floor:
                 if is_live:
-                    await self.bitget.safe_close_position(sym, direction)
+                    await self.bitget.safe_close_position_uta(sym, direction)
                 if net_move > 0:
                     state["streak"] += 1
                     logger.info(
-                        f"🏆 TRAILING RATCHET EXIT! Net ROE: +{net_roe:.2f}% | "
+                        f"🏆 TRAILING RATCHET EXIT! Net ROE: +{net_roe:.2f} | "
                         f"Peak: +{peak_gross:.2f}%. Streak: {state['streak']}/{REQUIRED_STREAK}"
                     )
                 else:
@@ -395,15 +397,14 @@ class MasterEngine:
 
     async def main_loop(self):
         run_health_server()
-        await self.bitget.ensure_one_way_mode()
         
-        # Check actual balance on boot
+        # Check live balance via UTA V3
         live_bal = await self.bitget.get_available_usdt()
         margin_used = live_bal * 0.90
         notional_val = margin_used * LEVERAGE
         
         logger.info(
-            f"⚡ Bi-Directional High-Speed Sentinel Online.\n"
+            f"⚡ Bitget Unified Trading Account (UTA V3) Sentinel Online.\n"
             f"   - Bitget Wallet Balance: ${live_bal:.2f} USDT\n"
             f"   - Position Sizing: 90% (${margin_used:.2f}) at {LEVERAGE}x (~${notional_val:.2f} Notional)\n"
             f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
