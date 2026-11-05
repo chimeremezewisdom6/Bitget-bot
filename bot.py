@@ -23,7 +23,6 @@ PORT = int(os.getenv("PORT", 10000))
 
 # ----------------- RISK & EXECUTION PARAMETERS -----------------
 LEVERAGE = 5
-MARGIN_USDT = 10.0              # $10 margin per trade ($50 notional at 5x)
 FEE_AND_SLIPPAGE = 0.22         # 0.12% fees + 0.10% real market-order slippage
 HARD_STOP_GROSS = -0.55         # Emergency hard stop
 GLOBAL_MIN_VOL_USD = 1_000_000.0
@@ -57,7 +56,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
             "trades": state["total_trades"],
-            "execution": "DYNAMIC_SIZING_AND_SAFE_REDUCE_ONLY"
+            "wallet_adaptation": "DYNAMIC_BALANCE_5X"
         }).encode("utf-8"))
     def log_message(self, *args): pass
 
@@ -65,7 +64,7 @@ def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-# ----------------- HARDENED BITGET V2 CLIENT -----------------
+# ----------------- HARDENED BITGET CLIENT -----------------
 class BitgetClient:
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
@@ -87,8 +86,25 @@ class BitgetClient:
             "locale": "en-US"
         }
 
+    async def get_available_usdt(self) -> float:
+        """Pulls actual live USDT futures balance directly from Bitget wallet."""
+        if not API_KEY or not SECRET_KEY:
+            return 1.50  # Default simulation value for paper trading
+        path = "/api/v2/mix/account/account?productType=usdt-futures"
+        try:
+            h = self._headers("GET", path)
+            async with self.s.get(self.base_url + path, headers=h, timeout=2.5) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    for acc in d.get("data", []):
+                        if acc.get("marginCoin") == "USDT":
+                            val = float(acc.get("available", 0.0) or acc.get("maxOpenPosAvailable", 0.0))
+                            return val if val > 0 else 1.50
+        except Exception: pass
+        return 1.50
+
     async def ensure_one_way_mode(self):
-        """Verifies One-Way Mode on boot once (avoids active-position error 40774)."""
+        """Verifies One-Way Mode on boot once (avoids error 40774)."""
         if not API_KEY or not SECRET_KEY: return
         path = "/api/v2/mix/account/set-position-mode"
         payload = json.dumps({"productType": "usdt-futures", "posMode": "one_way_mode"})
@@ -98,10 +114,22 @@ class BitgetClient:
             logger.info("🔒 One-Way Mode verified on Bitget.")
         except Exception: pass
 
-    def calculate_order_size(self, current_price: float) -> str:
-        """Dynamic contract size calculation based on fixed $10 margin at 5x leverage."""
+    def calculate_order_size(self, current_price: float, balance_usdt: float) -> str:
+        """
+        Dynamically adapts to balance ($1.50 USDT).
+        Uses 90% of wallet with 5x leverage ($6.75 notional).
+        Satisfies Bitget >= 5.0 USDT minimum notional rule.
+        """
         if current_price <= 0: return "1"
-        notional_value = MARGIN_USDT * LEVERAGE  # $50.0 USDT
+
+        # Use 90% of balance to leave buffer for fees
+        usable_margin = max(1.10, balance_usdt * 0.90)
+        notional_value = usable_margin * LEVERAGE  # e.g., $1.35 * 5 = $6.75
+
+        # Bitget requires minimum 5.0 USDT order value
+        if notional_value < 5.10:
+            notional_value = 5.20
+
         raw_size = notional_value / current_price
 
         # Precision handling
@@ -116,7 +144,6 @@ class BitgetClient:
 
     async def open_order(self, symbol: str, side: str, size_str: str) -> bool:
         """Opens Long or Short with isolated 5x leverage."""
-        # Set leverage first
         lev_path = "/api/v2/mix/account/set-leverage"
         lev_payload = json.dumps({"symbol": symbol, "productType": "usdt-futures", "marginCoin": "USDT", "leverage": str(LEVERAGE)})
         try:
@@ -124,7 +151,6 @@ class BitgetClient:
             await self.s.post(self.base_url + lev_path, data=lev_payload, headers=h, timeout=2.0)
         except Exception: pass
 
-        # Open market order
         path = "/api/v2/mix/order/place-order"
         payload = json.dumps({
             "symbol": symbol, "productType": "usdt-futures", "marginMode": "isolated",
@@ -139,13 +165,7 @@ class BitgetClient:
         except Exception: return False
 
     async def safe_close_position(self, symbol: str, open_side: str) -> bool:
-        """
-        Zero-Error Close:
-        1. Queries live position size down to exact decimal.
-        2. Cancels resting orders to free margin.
-        3. Sends exact reduce-only close.
-        """
-        # 1. Fetch exact open position size from Bitget
+        """Zero-Error Close: Reads exact position size and closes with reduce-only."""
         pos_path = f"/api/v2/mix/position/single-position?symbol={symbol}&productType=usdt-futures&marginCoin=USDT"
         actual_size = "0"
         try:
@@ -158,9 +178,9 @@ class BitgetClient:
         except Exception: pass
 
         if float(actual_size) <= 0:
-            return True  # Already closed
+            return True
 
-        # 2. Cancel open orders to avoid reduce-only lockout
+        # Cancel resting orders
         cancel_path = "/api/v2/mix/order/cancel-symbol-orders"
         cancel_payload = json.dumps({"symbol": symbol, "productType": "usdt-futures", "marginCoin": "USDT"})
         try:
@@ -168,7 +188,7 @@ class BitgetClient:
             await self.s.post(self.base_url + cancel_path, data=cancel_payload, headers=h, timeout=1.5)
         except Exception: pass
 
-        # 3. Submit reduce-only market close
+        # Submit reduce-only market close
         close_side = "sell" if open_side == "buy" else "buy"
         order_path = "/api/v2/mix/order/place-order"
         order_payload = json.dumps({
@@ -260,9 +280,14 @@ class MasterEngine:
         is_live = state["unlocked"] and bool(API_KEY and SECRET_KEY)
 
         if is_live:
-            size_str = self.bitget.calculate_order_size(entry_price)
+            # Query actual live balance
+            balance_usdt = await self.bitget.get_available_usdt()
+            size_str = self.bitget.calculate_order_size(entry_price, balance_usdt)
             await self.bitget.open_order(sym, side=direction, size_str=size_str)
-            logger.info(f"⚡ LIVE {direction.upper()} OPENED: {size_str} contracts @ ${entry_price:.4f} (5x)")
+            logger.info(
+                f"⚡ LIVE {direction.upper()} OPENED: {size_str} contracts @ ${entry_price:.4f} "
+                f"(Wallet: ${balance_usdt:.2f} USDT | Margin: ~${(balance_usdt * 0.9):.2f} @ 5x)"
+            )
 
         logger.info(
             f"🚀 TRADE #{state['total_trades']} OPENED: {base} ({direction.upper()}) @ ${entry_price:.4f} | "
@@ -293,7 +318,6 @@ class MasterEngine:
             if len(price_ticks) > 10:
                 price_ticks.pop(0)
 
-            # Gross PnL
             if direction == "buy":
                 gross = ((curr_price - entry_price) / entry_price) * 100.0
             else:
@@ -306,12 +330,12 @@ class MasterEngine:
                 peak_gross = gross
 
             # ----------------- PARABOLIC TRAILING RATCHET -----------------
-            # 1. Breakeven Lock at +0.40% gross (Protects fees + real slippage)
+            # 1. Breakeven Lock at +0.40% gross
             if peak_gross >= 0.40 and trailing_floor < 0.22:
                 trailing_floor = 0.22
                 logger.info(f"🛡️ BREAKEVEN LOCKED on {base} (+0.22% floor, zero risk).")
 
-            # 2. +1.50% Milestone: Lock in +1.15% profit, DO NOT EXIT! Ride for +5%+
+            # 2. +1.50% Milestone: Lock in +1.15% profit, ride wave for +5%+
             if peak_gross >= 1.50 and trailing_floor < 1.15:
                 trailing_floor = 1.15
                 logger.info(f"💎 +1.5% HIT on {base} ({direction.upper()})! Ratchet locked. Riding for +5%+...")
@@ -338,7 +362,7 @@ class MasterEngine:
                     state["streak"] += 1
                     logger.info(
                         f"💰 WIGGLE FADE HARVESTED! Closed at Gross: +{gross:.2f}% | "
-                        f"Net ROE: +{net_roe:.2f}% (Peak: +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
+                        f"Net ROE: +{net_roe:.2f}% (Peak was +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
                     )
                 else:
                     logger.warning(f"🛑 Wiggle failed near entry. Streak reset.")
@@ -369,11 +393,13 @@ class MasterEngine:
     async def main_loop(self):
         run_health_server()
         await self.bitget.ensure_one_way_mode()
+        
+        # Check actual balance on boot
+        live_bal = await self.bitget.get_available_usdt()
         logger.info(
             f"⚡ Bi-Directional High-Speed Sentinel Online.\n"
-            f"   - Target: 50 to 100+ Trades/Day across 680+ Coins\n"
-            f"   - Dynamic Sizing: ${MARGIN_USDT} Margin at {LEVERAGE}x ($50 Notional)\n"
-            f"   - Precision: Safe live reduceOnly with zero-mismatch protection\n"
+            f"   - Bitget Wallet Balance: ${live_bal:.2f} USDT (Adapts to $1.50 dynamically)\n"
+            f"   - Position Sizing: 90% of Balance (${(live_bal * 0.9):.2f}) at {LEVERAGE}x (~${(live_bal * 0.9 * LEVERAGE):.2f} Notional)\n"
             f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
         )
 
@@ -389,7 +415,6 @@ class MasterEngine:
                             data = await r.json()
                             fast_candidates = []
 
-                            # 1. Instant in-memory filter (<1ms): skips flat coins
                             for item in data.get("data", []):
                                 sym = item.get("symbol", "")
                                 if not sym.endswith("USDT"): continue
@@ -411,7 +436,6 @@ class MasterEngine:
 
                                 fast_candidates.append((sym, base, curr_price))
 
-                            # 2. Parallel Scatter-Gather (<0.6s)
                             if fast_candidates:
                                 tasks = [self.fetch_single_candle_set(base) for _, base, _ in fast_candidates]
                                 candle_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -427,7 +451,6 @@ class MasterEngine:
                                             "direction": wave["direction"], "wave": wave
                                         })
 
-                                # 3. Select #1 fastest candidate
                                 if qualified_pool:
                                     qualified_pool.sort(key=lambda x: x["wave"]["power_score"], reverse=True)
                                     chosen = qualified_pool[0]
@@ -438,8 +461,8 @@ class MasterEngine:
                                     logger.info(
                                         f"⚡ #1 EXPLOSIVE SETUP [{side.upper()}] (Scan: {elapsed_scan:.2f}s): {chosen['base']}!\n"
                                         f"   - Impulse: {w['total_wave']}% in {w['duration_mins']}m (Speed: {w['velocity']}%/min)\n"
-                                        f"   - Shallow Reversal: {w['max_reversal']}% | Power Score: {w['power_score']}\n"
-                                        f"   - Entering {side.upper()} with parabolic trailing ratchet..."
+                                        f"   - Power Score: {w['power_score']} | Direction: {side.upper()}\n"
+                                        f"   - Entering trade adapted to ${live_bal:.2f} balance..."
                                     )
                                     await self.run_open_ended_watchdog(chosen["symbol"], chosen["base"], side, chosen["price"])
 
