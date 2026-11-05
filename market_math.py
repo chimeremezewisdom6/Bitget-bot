@@ -2,96 +2,109 @@
 
 class MarketMath:
     @staticmethod
-    def audit_wave_dominance(candles: list) -> dict:
+    def audit_precision_8pct_setup(candles: list) -> dict:
         """
-        Calculates speed, wave dominance (10m vs 1.3m shallow retrace),
-        and confirms duration is <= 45 minutes in O(N) optimized linear time.
+        Your Exact Setup:
+        1. MACRO: Move >= 8.0% in < 4 hours (between 15 and 240 mins).
+        2. TIGHT ABSORPTION: Distance from peak/trough <= 1.60%.
+        3. 10-CANDLE WIN STREAK: Last 10 1m candles have >= 8 wins, <= 2 losses.
+        4. ACTIVE FLUCTUATION: Average 1m candle amplitude (high-low) >= 0.20%.
         """
-        if not isinstance(candles, list) or len(candles) < 20:
+        if not isinstance(candles, list) or len(candles) < 25:
             return {"qualified": False}
 
         try:
+            # Handles both Bitget [ts, o, h, l, c, ...] and Binance formats
             highs = [float(c[2]) for c in candles]
             lows = [float(c[3]) for c in candles]
+            curr_price = float(candles[-1][4])
 
             max_p = max(highs)
             min_p = min(lows)
             peak_idx = highs.index(max_p)
             trough_idx = lows.index(min_p)
 
-            green_vol = sum(float(c[7]) for c in candles if float(c[4]) >= float(c[1]))
-            red_vol = sum(float(c[7]) for c in candles if float(c[4]) < float(c[1]))
+            # Inspect the last 10 completed 1-minute candles
+            last_10 = candles[-10:]
+            candle_amplitudes = []
+            green_count = 0
+            red_count = 0
 
-            # ----------------- 1. EVALUATE LONG SURGE -----------------
-            if peak_idx > 4:
-                start_low = min(lows[:peak_idx])
-                start_idx = lows.index(start_low)
+            for c in last_10:
+                o, h, l, cl = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+                # True candle fluctuation range (High - Low)
+                amp = ((h - l) / l) * 100.0 if l > 0 else 0.0
+                candle_amplitudes.append(amp)
+
+                if cl >= o:
+                    green_count += 1
+                else:
+                    red_count += 1
+
+            avg_fluctuation = sum(candle_amplitudes) / len(candle_amplitudes)
+
+            # Rule 4: Average 1m candle fluctuation must be >= 0.20%
+            if avg_fluctuation < 0.20:
+                return {"qualified": False}
+
+            # ----------------- 1. EVALUATE LONG -----------------
+            if peak_idx > 5:
+                # Scan backwards up to 90 mins to find true impulse origin
+                lookback_start = max(0, peak_idx - 90)
+                sub_lows = lows[lookback_start:peak_idx]
+                start_low = min(sub_lows)
+                start_idx = lookback_start + sub_lows.index(start_low)
                 duration = max(1, peak_idx - start_idx)
 
-                if 5 <= duration <= 45:
+                # Rule 1: Move >= 8.0% in < 4 hours (15m to 240m)
+                if 10 <= duration <= 240:
                     up_move = ((max_p - start_low) / start_low) * 100.0
-                    velocity = up_move / duration
-
-                    if up_move >= 6.5 and velocity >= 0.18:
-                        # Linear O(N) pullback tracking
-                        max_drop = 0.0
-                        running_high = highs[start_idx]
-                        for i in range(start_idx + 1, peak_idx):
-                            if highs[i] > running_high:
-                                running_high = highs[i]
-                            drop = ((running_high - lows[i]) / running_high) * 100.0
-                            if drop > max_drop:
-                                max_drop = drop
-
-                        reversal_ratio = max_drop / max(up_move, 1.0)
-
-                        if reversal_ratio <= 0.22 and max_drop <= 1.80:
-                            fuel_ratio = green_vol / max(red_vol, 1.0)
-                            if fuel_ratio >= 1.70:
+                    if up_move >= 8.0:
+                        # Rule 2: Reversal from peak <= 1.6%
+                        dist_from_peak = ((max_p - curr_price) / max_p) * 100.0
+                        if dist_from_peak <= 1.60:
+                            # Rule 3: Last 10m has >= 8 green, <= 2 red
+                            if green_count >= 8 and red_count <= 2:
+                                velocity = up_move / duration
                                 return {
                                     "qualified": True,
                                     "direction": "buy",
                                     "total_wave": round(up_move, 2),
                                     "duration_mins": duration,
+                                    "dist_from_peak": round(dist_from_peak, 2),
+                                    "green_wins": green_count,
+                                    "red_losses": red_count,
+                                    "avg_fluctuation": round(avg_fluctuation, 3),
                                     "velocity": round(velocity, 3),
-                                    "max_reversal": round(max_drop, 2),
-                                    "power_score": round(velocity * (1.0 - reversal_ratio) * fuel_ratio, 2)
+                                    "power_score": round(velocity * avg_fluctuation * 100, 2)
                                 }
 
-            # ----------------- 2. EVALUATE SHORT WATERFALL DUMP -----------------
-            if trough_idx > 4:
-                start_high = max(highs[:trough_idx])
-                start_idx = highs.index(start_high)
+            # ----------------- 2. EVALUATE SHORT -----------------
+            if trough_idx > 5:
+                lookback_start = max(0, trough_idx - 90)
+                sub_highs = highs[lookback_start:trough_idx]
+                start_high = max(sub_highs)
+                start_idx = lookback_start + sub_highs.index(start_high)
                 duration = max(1, trough_idx - start_idx)
 
-                if 5 <= duration <= 45:
+                if 10 <= duration <= 240:
                     down_move = ((start_high - min_p) / start_high) * 100.0
-                    velocity = down_move / duration
-
-                    if down_move >= 6.5 and velocity >= 0.18:
-                        # Linear O(N) bounce tracking
-                        max_bounce = 0.0
-                        running_low = lows[start_idx]
-                        for i in range(start_idx + 1, trough_idx):
-                            if lows[i] < running_low:
-                                running_low = lows[i]
-                            bounce = ((highs[i] - running_low) / running_low) * 100.0
-                            if bounce > max_bounce:
-                                max_bounce = bounce
-
-                        reversal_ratio = max_bounce / max(down_move, 1.0)
-
-                        if reversal_ratio <= 0.22 and max_bounce <= 1.80:
-                            fuel_ratio = red_vol / max(green_vol, 1.0)
-                            if fuel_ratio >= 1.70:
+                    if down_move >= 8.0:
+                        dist_from_trough = ((curr_price - min_p) / min_p) * 100.0
+                        if dist_from_trough <= 1.60:
+                            if red_count >= 8 and green_count <= 2:
+                                velocity = down_move / duration
                                 return {
                                     "qualified": True,
                                     "direction": "sell",
                                     "total_wave": round(down_move, 2),
                                     "duration_mins": duration,
+                                    "dist_from_peak": round(dist_from_trough, 2),
+                                    "green_wins": red_count,
+                                    "red_losses": green_count,
+                                    "avg_fluctuation": round(avg_fluctuation, 3),
                                     "velocity": round(velocity, 3),
-                                    "max_reversal": round(max_bounce, 2),
-                                    "power_score": round(velocity * (1.0 - reversal_ratio) * fuel_ratio, 2)
+                                    "power_score": round(velocity * avg_fluctuation * 100, 2)
                                 }
 
             return {"qualified": False}
