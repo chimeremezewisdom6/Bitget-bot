@@ -4,11 +4,8 @@ class MarketMath:
     @staticmethod
     def audit_wave_dominance(candles: list) -> dict:
         """
-        Bi-directional wave analysis:
-        - LONG: Move >= +6.5% in <= 45m with shallow pullback <= 22% (10m vs 1.3m rule).
-        - SHORT: Dump <= -6.5% in <= 45m with shallow bounce <= 22%.
-        - Velocity >= 0.18%/min (Rejects slow multi-hour crawlers).
-        - Volume fuel: Green/Red >= 1.7x for Long, Red/Green >= 1.7x for Short.
+        Calculates speed, wave dominance (10m vs 1.3m shallow retrace),
+        and confirms duration is <= 45 minutes in O(N) optimized linear time.
         """
         if not isinstance(candles, list) or len(candles) < 20:
             return {"qualified": False}
@@ -31,17 +28,21 @@ class MarketMath:
                 start_idx = lows.index(start_low)
                 duration = max(1, peak_idx - start_idx)
 
-                # Time window: between 5 and 45 minutes
                 if 5 <= duration <= 45:
                     up_move = ((max_p - start_low) / start_low) * 100.0
                     velocity = up_move / duration
 
                     if up_move >= 6.5 and velocity >= 0.18:
-                        drops = [
-                            ((max(highs[:i+1]) - lows[i]) / max(highs[:i+1])) * 100.0
-                            for i in range(start_idx + 1, peak_idx)
-                        ]
-                        max_drop = max(drops) if drops else 0.0
+                        # Linear O(N) pullback tracking
+                        max_drop = 0.0
+                        running_high = highs[start_idx]
+                        for i in range(start_idx + 1, peak_idx):
+                            if highs[i] > running_high:
+                                running_high = highs[i]
+                            drop = ((running_high - lows[i]) / running_high) * 100.0
+                            if drop > max_drop:
+                                max_drop = drop
+
                         reversal_ratio = max_drop / max(up_move, 1.0)
 
                         if reversal_ratio <= 0.22 and max_drop <= 1.80:
@@ -68,11 +69,16 @@ class MarketMath:
                     velocity = down_move / duration
 
                     if down_move >= 6.5 and velocity >= 0.18:
-                        bounces = [
-                            ((highs[i] - min(lows[:i+1])) / min(lows[:i+1])) * 100.0
-                            for i in range(start_idx + 1, trough_idx)
-                        ]
-                        max_bounce = max(bounces) if bounces else 0.0
+                        # Linear O(N) bounce tracking
+                        max_bounce = 0.0
+                        running_low = lows[start_idx]
+                        for i in range(start_idx + 1, trough_idx):
+                            if lows[i] < running_low:
+                                running_low = lows[i]
+                            bounce = ((highs[i] - running_low) / running_low) * 100.0
+                            if bounce > max_bounce:
+                                max_bounce = bounce
+
                         reversal_ratio = max_bounce / max(down_move, 1.0)
 
                         if reversal_ratio <= 0.22 and max_bounce <= 1.80:
@@ -94,11 +100,7 @@ class MarketMath:
 
     @staticmethod
     def audit_wiggle_direction(price_ticks: list, direction: str) -> dict:
-        """
-        Detects momentum exhaustion without arbitrary time limits:
-        - For BUY: Exits when lower highs / lower lows form (wiggling down).
-        - For SELL: Exits when higher highs / higher lows form (wiggling up).
-        """
+        """Zero-latency structural momentum exhaustion detection."""
         if len(price_ticks) < 4:
             return {"should_exit": False, "status": "STABLE"}
 
