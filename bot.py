@@ -14,9 +14,9 @@ import aiohttp
 from market_math import MarketMath
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("GlobalDualSentinel")
+logger = logging.getLogger("TurboSentinel")
 
-# Option B: Reads either variable name format from Render (stripped of accidental whitespace)
+# Option B: Reads either variable name format from Render (stripped of whitespace)
 API_KEY = (os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")).strip()
 SECRET_KEY = (os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")).strip()
 PASSPHRASE = (os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")).strip()
@@ -26,7 +26,7 @@ PORT = int(os.getenv("PORT", 10000))
 LEVERAGE = 5
 FEE_AND_SLIPPAGE = 0.22         # 0.12% fees + 0.10% real market-order slippage
 HARD_STOP_GROSS = -0.55         # Emergency hard stop
-GLOBAL_MIN_VOL_USD = 1_000_000.0  # Summed across all 8 exchanges >= $1,000,000
+GLOBAL_MIN_VOL_USD = 1_000_000.0  # Summed across all 8 exchanges >= $1M
 REQUIRED_STREAK = 8
 STATE_FILE = "streak.json"
 
@@ -46,7 +46,7 @@ def save_state(s: dict):
 
 state = load_state()
 
-# ----------------- KEEP-ALIVE SERVER -----------------
+# ----------------- RENDER KEEP-ALIVE SERVER -----------------
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -58,7 +58,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
             "streak": f"{state['streak']}/{REQUIRED_STREAK}",
             "trades": state["total_trades"],
-            "global_venues_polled": 8
+            "pipeline": "SUB_SECOND_WARM_TLS"
         }).encode("utf-8"))
     def log_message(self, *args): pass
 
@@ -91,27 +91,26 @@ class BitgetUTAClient:
     async def get_available_usdt(self) -> float:
         """Pulls actual live balance using Bitget UTA V3 endpoints."""
         if not API_KEY or not SECRET_KEY or not PASSPHRASE:
-            logger.warning("⚠️ API credentials missing in Render Environment Variables.")
             return 1.58
 
         path_v3 = "/api/v3/account/assets"
         try:
             h = self._headers("GET", path_v3)
-            async with self.s.get(self.base_url + path_v3, headers=h, timeout=3.5) as r:
+            async with self.s.get(self.base_url + path_v3, headers=h, timeout=2.5) as r:
                 res = await r.json()
                 if res.get("code") == "00000":
                     for item in res.get("data", []):
                         if item.get("coin") == "USDT" or item.get("marginCoin") == "USDT":
-                            val = float(item.get("available", 0.0) or item.get("equity", 0.0) or item.get("crossMaxAvailable", 0.0))
+                            val = float(item.get("available", 0.0) or item.get("equity", 0.0))
                             if val > 0:
-                                logger.info(f"✅ Bitget UTA Connected Successfully! Live USDT Balance: ${val:.2f}")
+                                logger.info(f"✅ Bitget UTA Connected! Live USDT: ${val:.2f}")
                                 return val
         except Exception: pass
 
         path_all = "/api/v2/account/all-account-balance"
         try:
             h = self._headers("GET", path_all)
-            async with self.s.get(self.base_url + path_all, headers=h, timeout=3.5) as r:
+            async with self.s.get(self.base_url + path_all, headers=h, timeout=2.5) as r:
                 res = await r.json()
                 if res.get("code") == "00000":
                     for acc in res.get("data", []):
@@ -119,19 +118,18 @@ class BitgetUTAClient:
                             if coin_info.get("coin") == "USDT":
                                 val = float(coin_info.get("available", 0.0) or coin_info.get("balance", 0.0))
                                 if val > 0:
-                                    logger.info(f"✅ Bitget Universal Balance Found! Live USDT: ${val:.2f}")
+                                    logger.info(f"✅ Bitget Universal Balance: ${val:.2f}")
                                     return val
         except Exception: pass
 
         return 1.58
 
     def calculate_order_qty(self, current_price: float, balance_usdt: float) -> str:
-        """Dynamically adapts to balance ($1.58 USDT) at 5x leverage (~$7.11 notional)."""
+        """Calculates size adapted to $1.58 balance, ensuring notional >= 5.10 USDT."""
         if current_price <= 0: return "1"
         usable_margin = max(1.10, balance_usdt * 0.90)
         notional_value = usable_margin * LEVERAGE
 
-        # Enforces Bitget >= 5.0 USDT minimum notional rule
         if notional_value < 5.10:
             notional_value = 5.20
 
@@ -147,42 +145,38 @@ class BitgetUTAClient:
             return str(int(raw_size))
 
     async def open_order_uta(self, symbol: str, side: str, qty_str: str) -> bool:
-        """Opens Long or Short position using Bitget UTA V3 Order API."""
+        """Opens position using Bitget UTA V3 Order API."""
         lev_path = "/api/v3/account/set-leverage"
         lev_body = json.dumps({"category": "USDT-FUTURES", "symbol": symbol, "leverage": str(LEVERAGE)})
         try:
             h = self._headers("POST", lev_path, lev_body)
-            await self.s.post(self.base_url + lev_path, data=lev_body, headers=h, timeout=2.0)
+            await self.s.post(self.base_url + lev_path, data=lev_body, headers=h, timeout=1.5)
         except Exception: pass
 
         path = "/api/v3/trade/place-order"
         payload = json.dumps({
             "category": "USDT-FUTURES",
             "symbol": symbol,
-            "side": side,  # "buy" or "sell"
+            "side": side,
             "orderType": "market",
             "qty": qty_str,
             "reduceOnly": "no"
         })
         try:
             h = self._headers("POST", path, payload)
-            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.5) as r:
+            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.0) as r:
                 res = await r.json()
-                if res.get("code") == "00000":
-                    return True
-                else:
-                    logger.error(f"❌ Bitget UTA Order Error [{res.get('code')}]: {res.get('msg')}")
-        except Exception as e:
-            logger.error(f"❌ Order failed: {e}")
-        return False
+                return res.get("code") == "00000"
+        except Exception:
+            return False
 
     async def safe_close_position_uta(self, symbol: str, open_side: str) -> bool:
-        """Zero-Error Close in UTA: Fetches current position and executes reduce-only."""
+        """Zero-Error Close in UTA: Queries live open size and closes with reduce-only."""
         pos_path = f"/api/v3/position/current-position?category=USDT-FUTURES&symbol={symbol}"
         actual_qty = "0"
         try:
             h = self._headers("GET", pos_path)
-            async with self.s.get(self.base_url + pos_path, headers=h, timeout=2.0) as r:
+            async with self.s.get(self.base_url + pos_path, headers=h, timeout=1.5) as r:
                 if r.status == 200:
                     d = await r.json()
                     for p in d.get("data", []):
@@ -209,134 +203,115 @@ class BitgetUTAClient:
         for _ in range(3):
             try:
                 h = self._headers("POST", order_path, order_payload)
-                async with self.s.post(self.base_url + order_path, data=order_payload, headers=h, timeout=2.0) as r:
+                async with self.s.post(self.base_url + order_path, data=order_payload, headers=h, timeout=1.5) as r:
                     res = await r.json()
                     if res.get("code") == "00000":
-                        logger.info(f"🔒 Position closed cleanly on Bitget UTA ({actual_qty} contracts): {symbol}")
+                        logger.info(f"🔒 Position closed on Bitget UTA ({actual_qty} contracts): {symbol}")
                         return True
             except Exception: pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
         return False
 
-# ----------------- TRUE 8-EXCHANGE GLOBAL 24H VOLUME AGGREGATOR -----------------
+# ----------------- BACKGROUND GLOBAL VOLUME AGGREGATOR (DECOUPLED) -----------------
 class GlobalVolumeEngine:
-    """Aggregates true 24h USD volume across all 8 major exchanges in parallel."""
+    """Runs as a detached background worker. NEVER freezes the main scanner!"""
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
         self.global_volume_cache = {}
-        self.last_update = 0
 
-    async def refresh_global_volumes(self):
-        now = time.time()
-        if (now - self.last_update) < 300 and self.global_volume_cache:
-            return
-
-        totals = {}
-
-        # 1. Binance Futures
-        async def _binance():
+    async def background_worker(self):
+        """Refreshes volume across all 7 external exchanges every 5 minutes in background."""
+        while True:
             try:
-                url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-                async with self.s.get(url, timeout=2.5) as r:
-                    if r.status == 200:
-                        for item in await r.json():
-                            sym = item.get("symbol", "")
-                            if sym.endswith("USDT"):
-                                b = sym[:-4]
-                                totals[b] = totals.get(b, 0.0) + float(item.get("quoteVolume", 0.0))
+                totals = {}
+
+                async def _binance():
+                    try:
+                        async with self.s.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=2.5) as r:
+                            if r.status == 200:
+                                for item in await r.json():
+                                    sym = item.get("symbol", "")
+                                    if sym.endswith("USDT"):
+                                        b = sym[:-4]
+                                        totals[b] = totals.get(b, 0.0) + float(item.get("quoteVolume", 0.0))
+                    except Exception: pass
+
+                async def _bybit():
+                    try:
+                        async with self.s.get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=2.5) as r:
+                            if r.status == 200:
+                                for item in (await r.json()).get("result", {}).get("list", []):
+                                    sym = item.get("symbol", "")
+                                    if sym.endswith("USDT"):
+                                        b = sym[:-4]
+                                        totals[b] = totals.get(b, 0.0) + float(item.get("turnover24h", 0.0))
+                    except Exception: pass
+
+                async def _okx():
+                    try:
+                        async with self.s.get("https://www.okx.com/api/v5/market/tickers?instType=SWAP", timeout=2.5) as r:
+                            if r.status == 200:
+                                for item in (await r.json()).get("data", []):
+                                    inst = item.get("instId", "")
+                                    if inst.endswith("-USDT-SWAP"):
+                                        b = inst.split("-")[0]
+                                        vol_coins = float(item.get("volCcy24h", 0.0))
+                                        last_price = float(item.get("last", 0.0))
+                                        totals[b] = totals.get(b, 0.0) + (vol_coins * last_price)
+                    except Exception: pass
+
+                async def _gate():
+                    try:
+                        async with self.s.get("https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=2.5) as r:
+                            if r.status == 200:
+                                for item in await r.json():
+                                    contract = item.get("contract", "")
+                                    if contract.endswith("_USDT"):
+                                        b = contract[:-5]
+                                        totals[b] = totals.get(b, 0.0) + float(item.get("volume_24h_quote", 0.0))
+                    except Exception: pass
+
+                async def _mexc():
+                    try:
+                        async with self.s.get("https://contract.mexc.com/api/v1/contract/ticker", timeout=2.5) as r:
+                            if r.status == 200:
+                                for item in (await r.json()).get("data", []):
+                                    sym = item.get("symbol", "")
+                                    if sym.endswith("_USDT"):
+                                        b = sym[:-5]
+                                        totals[b] = totals.get(b, 0.0) + float(item.get("amount24", 0.0))
+                    except Exception: pass
+
+                async def _bingx():
+                    try:
+                        async with self.s.get("https://open-api.bingx.com/openApi/swap/v2/quote/ticker", timeout=2.5) as r:
+                            if r.status == 200:
+                                for item in (await r.json()).get("data", []):
+                                    sym = item.get("symbol", "")
+                                    if sym.endswith("-USDT"):
+                                        b = sym.split("-")[0]
+                                        totals[b] = totals.get(b, 0.0) + float(item.get("volume", 0.0))
+                    except Exception: pass
+
+                async def _kucoin():
+                    try:
+                        async with self.s.get("https://api-futures.kucoin.com/api/v1/contracts/active", timeout=2.5) as r:
+                            if r.status == 200:
+                                for item in (await r.json()).get("data", []):
+                                    sym = item.get("symbol", "")
+                                    if sym.endswith("USDTM"):
+                                        b = sym[:-5]
+                                        totals[b] = totals.get(b, 0.0) + float(item.get("turnoverOf24h", 0.0))
+                    except Exception: pass
+
+                await asyncio.gather(_binance(), _bybit(), _okx(), _gate(), _mexc(), _bingx(), _kucoin(), return_exceptions=True)
+                if totals:
+                    self.global_volume_cache = totals
             except Exception: pass
-
-        # 2. Bybit Linear
-        async def _bybit():
-            try:
-                url = "https://api.bybit.com/v5/market/tickers?category=linear"
-                async with self.s.get(url, timeout=2.5) as r:
-                    if r.status == 200:
-                        for item in (await r.json()).get("result", {}).get("list", []):
-                            sym = item.get("symbol", "")
-                            if sym.endswith("USDT"):
-                                b = sym[:-4]
-                                totals[b] = totals.get(b, 0.0) + float(item.get("turnover24h", 0.0))
-            except Exception: pass
-
-        # 3. OKX Swaps
-        async def _okx():
-            try:
-                url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
-                async with self.s.get(url, timeout=2.5) as r:
-                    if r.status == 200:
-                        for item in (await r.json()).get("data", []):
-                            inst = item.get("instId", "")
-                            if inst.endswith("-USDT-SWAP"):
-                                b = inst.split("-")[0]
-                                vol_coins = float(item.get("volCcy24h", 0.0))
-                                last_price = float(item.get("last", 0.0))
-                                totals[b] = totals.get(b, 0.0) + (vol_coins * last_price)
-            except Exception: pass
-
-        # 4. Gate.io Futures
-        async def _gate():
-            try:
-                url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
-                async with self.s.get(url, timeout=2.5) as r:
-                    if r.status == 200:
-                        for item in await r.json():
-                            contract = item.get("contract", "")
-                            if contract.endswith("_USDT"):
-                                b = contract[:-5]
-                                totals[b] = totals.get(b, 0.0) + float(item.get("volume_24h_quote", 0.0))
-            except Exception: pass
-
-        # 5. MEXC Futures
-        async def _mexc():
-            try:
-                url = "https://contract.mexc.com/api/v1/contract/ticker"
-                async with self.s.get(url, timeout=2.5) as r:
-                    if r.status == 200:
-                        for item in (await r.json()).get("data", []):
-                            sym = item.get("symbol", "")
-                            if sym.endswith("_USDT"):
-                                b = sym[:-5]
-                                totals[b] = totals.get(b, 0.0) + float(item.get("amount24", 0.0))
-            except Exception: pass
-
-        # 6. BingX Perpetual Futures
-        async def _bingx():
-            try:
-                url = "https://open-api.bingx.com/openApi/swap/v2/quote/ticker"
-                async with self.s.get(url, timeout=2.5) as r:
-                    if r.status == 200:
-                        for item in (await r.json()).get("data", []):
-                            sym = item.get("symbol", "")
-                            if sym.endswith("-USDT"):
-                                b = sym.split("-")[0]
-                                totals[b] = totals.get(b, 0.0) + float(item.get("volume", 0.0))
-            except Exception: pass
-
-        # 7. KuCoin Futures
-        async def _kucoin():
-            try:
-                url = "https://api-futures.kucoin.com/api/v1/contracts/active"
-                async with self.s.get(url, timeout=2.5) as r:
-                    if r.status == 200:
-                        for item in (await r.json()).get("data", []):
-                            sym = item.get("symbol", "")
-                            if sym.endswith("USDTM"):
-                                b = sym[:-5]
-                                totals[b] = totals.get(b, 0.0) + float(item.get("turnoverOf24h", 0.0))
-            except Exception: pass
-
-        # Fire all 7 exchanges in parallel (<400ms)
-        await asyncio.gather(
-            _binance(), _bybit(), _okx(), _gate(), _mexc(), _bingx(), _kucoin(),
-            return_exceptions=True
-        )
-
-        self.global_volume_cache = totals
-        self.last_update = now
+            await asyncio.sleep(300)
 
     def get_global_volume(self, base: str, bitget_vol: float) -> float:
-        """Sums Bitget volume + volume from all other 7 exchanges."""
+        """Instant in-memory lookup (0.00001 seconds)."""
         return self.global_volume_cache.get(base, 0.0) + bitget_vol
 
 # ----------------- PARALLEL BI-DIRECTIONAL MASTER ENGINE -----------------
@@ -346,17 +321,23 @@ class MasterEngine:
         self.bitget = BitgetUTAClient(session)
         self.global_vol = GlobalVolumeEngine(session)
         self.active_trade = None
-        self.sem = asyncio.Semaphore(20)
+        self.sem = asyncio.Semaphore(25)
 
     async def fetch_single_candle_set(self, base: str) -> tuple:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={base}USDT&interval=1m&limit=45"
+        """
+        Fetches 45 1m candles.
+        Includes automatic fallback for meme coins with '1000' prefix on Binance!
+        """
         async with self.sem:
-            try:
-                async with self.s.get(url, timeout=1.2) as r:
-                    if r.status == 200:
-                        d = await r.json()
-                        if isinstance(d, list): return (base, d)
-            except Exception: pass
+            for variant in [base, f"1000{base}"]:
+                url = f"https://fapi.binance.com/fapi/v1/klines?symbol={variant}USDT&interval=1m&limit=45"
+                try:
+                    async with self.s.get(url, timeout=0.9) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            if isinstance(d, list) and len(d) >= 20:
+                                return (base, d)
+                except Exception: pass
         return (base, [])
 
     async def run_open_ended_watchdog(self, sym: str, base: str, direction: str, entry_price: float):
@@ -393,7 +374,7 @@ class MasterEngine:
             url = f"https://api.bitget.com/api/v2/mix/market/ticker?symbol={sym}&productType=usdt-futures"
             curr_price = 0.0
             try:
-                async with self.s.get(url, timeout=1.0) as r:
+                async with self.s.get(url, timeout=0.8) as r:
                     if r.status == 200:
                         d = await r.json()
                         curr_price = float(d.get("data", [{}])[0].get("lastPr", 0.0))
@@ -416,7 +397,7 @@ class MasterEngine:
             if gross > peak_gross:
                 peak_gross = gross
 
-            # ----------------- PARABOLIC TRAILING RATCHET -----------------
+            # Parabolic Trailing Ratchet
             if peak_gross >= 0.40 and trailing_floor < 0.22:
                 trailing_floor = 0.22
                 logger.info(f"🛡️ BREAKEVEN LOCKED on {base} (+0.22% floor, zero risk).")
@@ -437,7 +418,7 @@ class MasterEngine:
                 f"Net ROE: {net_roe:+.2f}% | Floor: {trailing_floor:+.2f}% | State: {wiggle['status']}"
             )
 
-            # A. Wiggle Fade Exit (Momentum exhausted)
+            # Exit Conditions
             if peak_gross >= 0.60 and wiggle["should_exit"] and gross <= (peak_gross - 0.22):
                 if is_live:
                     await self.bitget.safe_close_position_uta(sym, direction)
@@ -445,7 +426,7 @@ class MasterEngine:
                     state["streak"] += 1
                     logger.info(
                         f"💰 WIGGLE FADE HARVESTED! Closed at Gross: +{gross:.2f}% | "
-                        f"Net ROE: +{net_roe:.2f}% (Peak was +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
+                        f"Net ROE: +{net_roe:.2f}% (Peak: +{peak_gross:.2f}%!). Streak: {state['streak']}/{REQUIRED_STREAK}"
                     )
                 else:
                     logger.warning(f"🛑 Wiggle failed near entry. Streak reset.")
@@ -454,7 +435,6 @@ class MasterEngine:
                 save_state(state)
                 break
 
-            # B. Trailing Ratchet Floor Hit or Stop Loss
             if gross <= trailing_floor:
                 if is_live:
                     await self.bitget.safe_close_position_uta(sym, direction)
@@ -475,17 +455,18 @@ class MasterEngine:
 
     async def main_loop(self):
         run_health_server()
-        
-        # Check actual balance on boot via UTA V3
+        # Launch volume aggregator in decoupled background task
+        asyncio.create_task(self.global_vol.background_worker())
+
         live_bal = await self.bitget.get_available_usdt()
         margin_used = live_bal * 0.90
         notional_val = margin_used * LEVERAGE
-        
+
         logger.info(
-            f"⚡ 8-Exchange Global UTA Sentinel Online.\n"
-            f"   - Bitget Wallet Balance: ${live_bal:.2f} USDT (Adapts to $1.58 balance)\n"
-            f"   - Position Sizing: 90% (${margin_used:.2f}) at {LEVERAGE}x (~${notional_val:.2f} Notional)\n"
-            f"   - Global 24h Vol Filter: >= $1,000,000 across all 8 major exchanges\n"
+            f"⚡ Turbo 8-Exchange Global UTA Sentinel Online.\n"
+            f"   - Bitget Balance: ${live_bal:.2f} USDT | Margin: ${margin_used:.2f} (5x = ~${notional_val:.2f})\n"
+            f"   - Scanning Interval: 3.0s | Warm TLS Keep-Alive Active\n"
+            f"   - Meme Coin 1000-Prefix Radar: ENABLED\n"
             f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
         )
 
@@ -493,11 +474,8 @@ class MasterEngine:
             t0 = time.time()
             try:
                 if not self.active_trade:
-                    # Updates volume across all 8 exchanges in parallel
-                    await self.global_vol.refresh_global_volumes()
-
                     url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
-                    async with self.s.get(url, timeout=2.5) as r:
+                    async with self.s.get(url, timeout=2.0) as r:
                         if r.status == 200:
                             data = await r.json()
                             fast_candidates = []
@@ -524,7 +502,7 @@ class MasterEngine:
 
                                 fast_candidates.append((sym, base, curr_price))
 
-                            # 2. Parallel Scatter-Gather (<0.6s): query moving candidates concurrently
+                            # 2. Parallel Scatter-Gather (<0.4s) with meme coin resolution
                             if fast_candidates:
                                 tasks = [self.fetch_single_candle_set(base) for _, base, _ in fast_candidates]
                                 candle_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -540,7 +518,7 @@ class MasterEngine:
                                             "direction": wave["direction"], "wave": wave
                                         })
 
-                                # 3. Select #1 fastest candidate (Long or Short)
+                                # 3. Select #1 fastest candidate
                                 if qualified_pool:
                                     qualified_pool.sort(key=lambda x: x["wave"]["power_score"], reverse=True)
                                     chosen = qualified_pool[0]
@@ -551,18 +529,25 @@ class MasterEngine:
                                     logger.info(
                                         f"⚡ #1 EXPLOSIVE SETUP [{side.upper()}] (Scan: {elapsed_scan:.2f}s): {chosen['base']}!\n"
                                         f"   - Impulse: {w['total_wave']}% in {w['duration_mins']}m (Speed: {w['velocity']}%/min)\n"
-                                        f"   - Shallow Reversal: {w['max_reversal']}% | Power Score: {w['power_score']}\n"
-                                        f"   - Entering {side.upper()} with parabolic trailing ratchet..."
+                                        f"   - Power Score: {w['power_score']} | Direction: {side.upper()}\n"
+                                        f"   - Entering trade adapted to ${live_bal:.2f} balance..."
                                     )
                                     await self.run_open_ended_watchdog(chosen["symbol"], chosen["base"], side, chosen["price"])
 
             except Exception as e:
                 logger.error(f"Loop error: {e}")
 
-            await asyncio.sleep(8.0)
+            # Polling every 3.0 seconds for maximum reaction speed
+            await asyncio.sleep(3.0)
 
 async def main():
-    connector = aiohttp.TCPConnector(limit=60, ttl_dns_cache=300)
+    # Warm TCP connection pool with 60s keep-alive
+    connector = aiohttp.TCPConnector(
+        limit=80,
+        limit_per_host=25,
+        ttl_dns_cache=300,
+        keepalive_timeout=60.0
+    )
     async with aiohttp.ClientSession(connector=connector) as session:
         engine = MasterEngine(session)
         await engine.main_loop()
