@@ -4,15 +4,16 @@ bot.py
 ======
 Coiled Spring Ignition | Bitget UTA V3 | Render Free Tier.
 
-This revision adds (see FIX/IMPROVE markers below):
-  1. market_math version guard — fails fast on stale module (no more AttributeError)
-  2. Orphan-position adoption on startup — prevents abandoned live trades
+Fixes applied in this revision:
+  1. market_math version guard — fail-fast on stale module (no AttributeError loops)
+  2. Orphan-position adoption on startup — no more abandoned live trades on redeploy
   3. Streak seeded from env vars — survives Render ephemeral FS
   4. Parallel candle fetches in scanners — ~2x faster pulses
   5. Lightweight ticker endpoint for position PnL
   6. Split refresh loops (contracts vs universe)
   7. Bitget rate-limit (30011) retry
-  8. Dynamic stock-token detection from contract metadata
+  8. Dynamic stock/RWA detection — string-safe (_flag_true) + sanity guard
+  9. Position extraction handles both list and dict-wrapped response shapes
 
 Runtime tuning tips:
     - Too few candidates: loosen BOX_RANGE_MAX_PCT in market_math.py (0.55 -> 0.70)
@@ -58,10 +59,10 @@ STREAK_FILE = "streak.json"
 PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 31
 
-# FIX: version guard. Increment __version__ in market_math.py with every edit.
+# Must match market_math.__version__ exactly; bump both together.
 _EXPECTED_MM_VERSION = "2026.11.06"
 
-# Static fallback list; dynamic detection in refresh_contracts() extends this.
+# Static fallback; dynamic detection in refresh_contracts() extends this.
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
     "GOOGLUSDT", "TSLAUSDT", "NVDAUSDT", "AVGOUSDT", "ORCLUSDT",
@@ -170,9 +171,8 @@ async def _request(session, method, path, *, query=None, body=None,
                     log.error("Non-JSON [%s %s] %s: %s",
                               method, path, resp.status, text[:160])
                     return {"code": "JSON_ERROR", "msg": text[:160]}
-                # FIX: Bitget rate-limit is HTTP 200 with code "30011"
                 if str(data.get("code", "")) == "30011":
-                    log.debug("Rate limit hit [%s %s], retrying...", method, path)
+                    log.debug("Rate limit [%s %s] — retrying", method, path)
                     await asyncio.sleep((2 ** attempt) + 1)
                     continue
                 return data
@@ -218,9 +218,44 @@ _streak = {
 }
 
 
-# ---------------------------------------------------------------------------
-# FIX: env helpers — None sentinel so unset env does NOT override file values
-# ---------------------------------------------------------------------------
+# =============================================================================
+# DEFENSIVE API HELPERS
+# =============================================================================
+def _extract_positions(d):
+    """
+    Bitget /v3/position/current-position returns 'data' as either:
+      - list when 'symbol' is supplied
+      - dict {"list": [...], "total": N} when it isn't
+    Return a plain list in both cases.
+    """
+    payload = d.get("data")
+    if isinstance(payload, dict):
+        return (payload.get("list")
+                or payload.get("rows")
+                or payload.get("positions")
+                or [])
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def _flag_true(v):
+    """
+    Bitget may return booleans as strings ("false", "true").
+    bool("false") is True in Python — never coerce blindly.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes")
+    if isinstance(v, (int, float)):
+        return v != 0
+    return False
+
+
+# =============================================================================
+# STREAK PERSISTENCE
+# =============================================================================
 def _env_int_or_none(name: str) -> Optional[int]:
     v = os.getenv(name)
     if v is None or v.strip() == "":
@@ -249,7 +284,6 @@ def _load_streak():
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         pass
 
-    # FIX: env vars override file only when explicitly set
     v = _env_int_or_none("STREAK_WINS")
     if v is not None:
         _streak["wins"] = v
@@ -273,7 +307,7 @@ def _save_streak():
 
 
 # =============================================================================
-# ONE-WAY MODE (single_hold)
+# ONE-WAY MODE
 # =============================================================================
 async def enforce_one_way(session):
     res = await _request(
@@ -283,6 +317,7 @@ async def enforce_one_way(session):
     if res.get("code") == "00000":
         log.info("One-way mode enforced (single_hold).")
     else:
+        # Unified Account mode rejects this endpoint — that's expected.
         log.warning("set-position-mode response: %s", res.get("msg"))
 
 
@@ -297,18 +332,17 @@ async def refresh_contracts(session):
     if d.get("code") != "00000":
         log.warning("Contract refresh failed: %s", d.get("msg"))
         return
+
     new_cache = {}
     for c in d.get("data", []) or []:
         sym = c.get("symbol", "")
         if not sym or not sym.endswith("USDT"):
             continue
         try:
-            # FIX: dynamic stock-token detection via contract metadata
-            sym_type = (c.get("symbolType") or c.get("type") or "").lower()
             is_stock = (
                 sym in _STOCK_TOKENS
-                or bool(c.get("isRwa"))
-                or sym_type in ("stock", "rwa", "equity")
+                or _flag_true(c.get("isRwa"))
+                or _flag_true(c.get("isStock"))
             )
             new_cache[sym] = {
                 "volumePlace": int(float(c.get("volumePlace") or 0)),
@@ -319,9 +353,23 @@ async def refresh_contracts(session):
             }
         except (TypeError, ValueError):
             continue
+
+    # Sanity guard: if detection flags everything, fall back to static list.
+    if new_cache:
+        stock_n = sum(1 for v in new_cache.values() if v["is_stock"])
+        if stock_n == len(new_cache):
+            log.error(
+                "ALL %d contracts flagged stock — RWA detection over-firing. "
+                "Falling back to static _STOCK_TOKENS only.", stock_n,
+            )
+            for sym, v in new_cache.items():
+                v["is_stock"] = sym in _STOCK_TOKENS
+
     _contracts.clear()
     _contracts.update(new_cache)
-    log.info("Contracts cached: %d symbols", len(_contracts))
+    stock_n = sum(1 for v in _contracts.values() if v["is_stock"])
+    log.info("Contracts cached: %d symbols (%d flagged stock)",
+             len(_contracts), stock_n)
 
 
 # =============================================================================
@@ -499,7 +547,6 @@ async def refresh_universe(session):
         contract = _contracts.get(s)
         if not contract:
             continue
-        # FIX: use cached dynamic stock flag
         if contract.get("is_stock"):
             excluded_stock += 1
             continue
@@ -613,7 +660,9 @@ async def get_position(session, symbol):
     )
     if d.get("code") != "00000":
         return None
-    for p in d.get("data") or []:
+    for p in _extract_positions(d):
+        if not isinstance(p, dict):
+            continue
         size = 0.0
         for k in ("total", "size", "available"):
             try:
@@ -625,7 +674,9 @@ async def get_position(session, symbol):
                 break
         if size > 0:
             try:
-                entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
+                entry = float(
+                    p.get("entryPrice") or p.get("averageOpenPrice") or 0
+                )
             except (TypeError, ValueError):
                 entry = 0.0
             return {"total": size, "entryPrice": entry,
@@ -633,8 +684,8 @@ async def get_position(session, symbol):
     return None
 
 
-# FIX: adopt any live position left over from a crash / redeploy.
 async def adopt_orphan_positions(session):
+    """On startup, pick up any live position left over from a crash/redeploy."""
     global _active_pos
     d = await _request(
         session, "GET", "/api/v3/position/current-position",
@@ -643,7 +694,10 @@ async def adopt_orphan_positions(session):
     if d.get("code") != "00000":
         log.warning("Orphan scan failed: %s", d.get("msg"))
         return
-    for p in d.get("data") or []:
+
+    for p in _extract_positions(d):
+        if not isinstance(p, dict):
+            continue
         try:
             total_raw = float(p.get("total") or p.get("size") or 0)
         except (TypeError, ValueError):
@@ -654,7 +708,9 @@ async def adopt_orphan_positions(session):
         if not sym:
             continue
         try:
-            entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
+            entry = float(
+                p.get("entryPrice") or p.get("averageOpenPrice") or 0
+            )
         except (TypeError, ValueError):
             entry = 0.0
         side = (p.get("posSide") or p.get("holdSide") or "").lower()
@@ -663,13 +719,12 @@ async def adopt_orphan_positions(session):
         elif side in ("short", "sell"):
             direction = "SHORT"
         else:
-            # One-way fallback: sign of total
             direction = "LONG" if total_raw > 0 else "SHORT"
+
         _active_pos = {
             "symbol": sym, "direction": direction, "entry": entry,
-            # Wide sentinel box: FAKEOUT_SCRATCH is skipped via 'adopted' flag
             "box_high": entry * 1e6 if entry > 0 else 1e6,
-            "box_low": entry * 1e-6 if entry > 0 else 1e-6,
+            "box_low":  entry * 1e-6 if entry > 0 else 1e-6,
             "opened_at": time.time(), "peak_net": -999.0,
             "paper": False, "adopted": True,
         }
@@ -727,7 +782,8 @@ async def close_live_position(session, pos, reason):
     qty_str = f"{live['total']:.{vp}f}"
     close_side = "sell" if pos["direction"] == "LONG" else "buy"
 
-    oid = await place_market_order(session, symbol, close_side, qty_str, reduce_only=True)
+    oid = await place_market_order(session, symbol, close_side,
+                                   qty_str, reduce_only=True)
     if oid:
         log.info("CLOSE OK | %s | %s | size=%s", symbol, reason, qty_str)
         return True
@@ -781,7 +837,7 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
         return False
     bids, asks, mid = depth
 
-    # 1) Spread sanity
+    # 1) Spread
     spread = mm.evaluate_spread(bids, asks)
     if not spread["is_ok"]:
         log.debug("REJECT spread | %s %s | %.3f%%",
@@ -793,7 +849,8 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
     if not frag["is_fragile"]:
         if _last_logged_rejection.get(symbol) != candle_ts:
             log.info(
-                "REJECT fragility | %s %s | ratio=%.2f | d_bid=%.0f d_ask=%.0f | spread=%.3f%%",
+                "REJECT fragility | %s %s | ratio=%.2f | "
+                "d_bid=%.0f d_ask=%.0f | spread=%.3f%%",
                 symbol, direction, frag["depth_ratio"],
                 frag["d_bid"], frag["d_ask"], spread["spread_pct"],
             )
@@ -807,7 +864,7 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
         frag["depth_ratio"], spread["spread_pct"], frag["d_bid"], frag["d_ask"],
     )
 
-    # 3) Paper mode
+    # 3) Paper
     if not _streak["live_activated"]:
         _paper_pos = {
             "symbol": symbol, "direction": direction, "entry": live_close,
@@ -815,10 +872,11 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
             "opened_at": time.time(), "peak_net": -999.0, "paper": True,
         }
         log.info("PAPER OPEN | %s %s @ %.6f | streak W=%d/%d",
-                 symbol, direction, live_close, _streak["wins"], PAPER_WINS_REQUIRED)
+                 symbol, direction, live_close,
+                 _streak["wins"], PAPER_WINS_REQUIRED)
         return True
 
-    # 4) Live mode
+    # 4) Live
     contract = _contracts.get(symbol)
     if not contract:
         log.warning("No contract rules for %s", symbol)
@@ -837,7 +895,8 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
         return False
 
     side = "buy" if direction == "LONG" else "sell"
-    oid = await place_market_order(session, symbol, side, qty_str, reduce_only=False)
+    oid = await place_market_order(session, symbol, side, qty_str,
+                                   reduce_only=False)
     if not oid:
         return False
 
@@ -862,7 +921,6 @@ async def scan_universe_batch(session):
     n = len(_universe)
     now = time.time()
 
-    # FIX: collect a batch of symbols to fetch in parallel
     batch = []
     for _ in range(min(UNIVERSE_BATCH, n)):
         sym = _universe[_universe_idx % n]
@@ -884,8 +942,7 @@ async def scan_universe_batch(session):
     for symbol, candles in zip(batch, results):
         if isinstance(candles, Exception) or not candles or len(candles) < 2:
             continue
-        closed = candles[:-1]
-        live = candles[-1]
+        closed, live = candles[:-1], candles[-1]
 
         box = mm.calculate_compression_box(closed)
         if not box["is_compressed"]:
@@ -924,7 +981,6 @@ async def scan_hot_list(session):
     for s in expired:
         _hot_list.pop(s, None)
 
-    # FIX: parallel candle fetch on hot list too
     batch = []
     for symbol, box in list(_hot_list.items()):
         if len(batch) >= HOT_LIST_BATCH:
@@ -959,7 +1015,6 @@ async def scan_hot_list(session):
 # =============================================================================
 # WATCHDOG
 # =============================================================================
-# FIX: use lightweight ticker endpoint instead of full candle fetch
 async def _latest_close(session, symbol):
     d = await _request(
         session, "GET", "/api/v2/mix/market/ticker",
@@ -1001,7 +1056,7 @@ async def manage_live_position(session):
         current_price=current, direction=pos["direction"],
         peak_net=pos["peak_net"], elapsed_seconds=elapsed,
         box_high=pos["box_high"], box_low=pos["box_low"],
-        skip_fakeout=pos.get("adopted", False),  # FIX
+        skip_fakeout=pos.get("adopted", False),
     )
     pos["peak_net"] = state["updated_peak_net"]
 
@@ -1049,7 +1104,6 @@ async def manage_paper_position(session):
 # =============================================================================
 # BACKGROUND REFRESH
 # =============================================================================
-# FIX: split contracts vs universe cadences
 async def contracts_refresh_loop(session):
     while True:
         await asyncio.sleep(CONTRACTS_REFRESH_SEC)
@@ -1092,7 +1146,7 @@ def _heartbeat():
 async def main():
     _start_keepalive()
 
-    # FIX: fail fast on stale market_math before touching the network
+    # Fail fast on stale market_math before touching the network.
     actual_ver = getattr(mm, "__version__", "UNKNOWN")
     if actual_ver != _EXPECTED_MM_VERSION:
         log.critical(
@@ -1121,14 +1175,13 @@ async def main():
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=30)
 
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+    async with aiohttp.ClientSession(connector=connector,
+                                     timeout=timeout) as session:
         await asyncio.gather(
             enforce_one_way(session),
             refresh_contracts(session),
         )
         await refresh_universe(session)
-
-        # FIX: adopt any orphaned live position before the main loop starts
         await adopt_orphan_positions(session)
 
         asyncio.create_task(contracts_refresh_loop(session))
