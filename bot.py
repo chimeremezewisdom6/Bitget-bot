@@ -2,21 +2,20 @@
 """
 bot.py
 ======
-Coiled Spring Ignition | Bitget UTA V3 | Render Free Tier.
+Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
 
-Fixes applied in this revision:
-  1. market_math version guard — fail-fast on stale module
-  2. Orphan-position adoption on startup
-  3. Streak seeded from env vars — survives Render ephemeral FS
-  4. Parallel candle fetches in scanners — ~2x faster pulses
-  5. Lightweight ticker endpoint for position PnL
-  6. Split refresh loops (contracts vs universe)
-  7. Bitget rate-limit (30011) retry
-  8. Static stock-token filtering (removed unreliable isRwa detection)
-  9. Position extraction handles both list and dict-wrapped response shapes
- 10. UTA V3 position mode: /api/v3/account/set-hold-mode + settings pre-check
- 11. Volume normalized to elapsed candle time (partial-candle fix)
- 12. Funnel counters in heartbeat — see exactly where signals die
+Pivot from Coiled Spring compression to Cross-Sectional Relative Weakness.
+
+Pipeline every PULSE_SEC (4s):
+  - if position open   -> manage_*_position (4s watchdog)
+  - else                -> scan_candidates() over the last-ranked top 10
+
+Background tasks:
+  - refresh_universe every 5 min  (aggregate 8-exchange 24h volume)
+  - rank_candidates every 5 min   (16 x 1m candles per universe symbol,
+                                   compute pct_15m, keep 10 most negative
+                                   within the [-5.5%, -1.8%] sweet-spot)
+  - refresh_contracts every 15 min (contract rules: volumePlace, minQty)
 """
 
 import asyncio
@@ -46,20 +45,17 @@ PULSE_SEC = 4.0
 UNIVERSE_REFRESH_SEC = 300
 CONTRACTS_REFRESH_SEC = 900
 UNIVERSE_MIN_VOL_USD = 1_000_000.0
-UNIVERSE_BATCH = 6
-HOT_LIST_BATCH = 6
-HOT_LIST_MAX = 25
-HOT_LIST_TTL_SEC = 300.0
+TOP_CANDIDATE_COUNT = 10
+RANKER_BATCH = 15
+RANKER_BATCH_SLEEP = 0.10
 HEARTBEAT_SEC = 60.0
 SYMBOL_COOLDOWN_SEC = 60.0
 STREAK_FILE = "streak.json"
 PAPER_WINS_REQUIRED = 8
-CANDLE_COUNT = 31
+CANDLE_COUNT = 16
 
-# Must match market_math.__version__ exactly; bump both together.
-_EXPECTED_MM_VERSION = "2026.11.07"
+_EXPECTED_MM_VERSION = "2026.11.09"
 
-# Static fallback; extend manually if Bitget adds new tokenized equities.
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
     "GOOGLUSDT", "TSLAUSDT", "NVDAUSDT", "AVGOUSDT", "ORCLUSDT",
@@ -73,7 +69,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-5s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
-log = logging.getLogger("coil")
+log = logging.getLogger("weak")
 
 
 # =============================================================================
@@ -93,7 +89,7 @@ PASSPHRASE = _env("BITGET_API_PASSPHRASE", "PASSPHRASE")
 
 
 # =============================================================================
-# KEEP-ALIVE SERVER
+# KEEP-ALIVE
 # =============================================================================
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -118,7 +114,7 @@ def _start_keepalive() -> None:
 
 
 # =============================================================================
-# BITGET UTA V3 AUTHENTICATOR
+# BITGET UTA V3 SIGNED CLIENT
 # =============================================================================
 def _sign(timestamp: str, method: str, request_path: str, body: str) -> str:
     msg = timestamp + method.upper() + request_path + body
@@ -169,7 +165,6 @@ async def _request(session, method, path, *, query=None, body=None,
                               method, path, resp.status, text[:160])
                     return {"code": "JSON_ERROR", "msg": text[:160]}
                 if str(data.get("code", "")) == "30011":
-                    log.debug("Rate limit [%s %s] — retrying", method, path)
                     await asyncio.sleep((2 ** attempt) + 1)
                     continue
                 return data
@@ -184,7 +179,7 @@ async def _get_public_json(session, url, timeout=10.0):
     try:
         async with session.get(
             url,
-            headers={"User-Agent": "coil-bot/1.0"},
+            headers={"User-Agent": "weak-bot/1.0"},
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as resp:
             if resp.status != 200:
@@ -200,26 +195,21 @@ async def _get_public_json(session, url, timeout=10.0):
 # =============================================================================
 _contracts: Dict[str, dict] = {}
 _universe = []
-_universe_idx = 0
-_hot_list: Dict[str, dict] = {}
+_hot_list = _top_candidates = []  # alias for clarity: _top_candidates is used
+_last_rank_ts = 0.0
 _cooldown_until: Dict[str, float] = {}
-_last_logged_rejection: Dict[str, int] = {}
 _active_pos = None
 _paper_pos = None
 _last_heartbeat = 0.0
-_streak = {
-    "wins": 0,
-    "losses": 0,
-    "live_activated": False,
-    "trades": 0,
-}
+_streak = {"wins": 0, "losses": 0, "live_activated": False, "trades": 0}
 
-# Funnel counters, reset every heartbeat
 _diag = {
+    "range_rej": 0,
+    "accel_rej": 0,
     "vol_rej": 0,
-    "disp_rej": 0,
+    "breakdown_rej": 0,
     "chase_rej": 0,
-    "too_early": 0,
+    "early_rej": 0,
     "spread_rej": 0,
     "frag_rej": 0,
     "entered": 0,
@@ -227,15 +217,9 @@ _diag = {
 
 
 # =============================================================================
-# DEFENSIVE API HELPERS
+# HELPERS
 # =============================================================================
 def _extract_positions(d):
-    """
-    Bitget /v3/position/current-position returns 'data' as either:
-      - list when 'symbol' is supplied
-      - dict {"list": [...], "total": N} when it isn't
-    Return a plain list in both cases.
-    """
     payload = d.get("data")
     if isinstance(payload, dict):
         return (payload.get("list")
@@ -247,9 +231,6 @@ def _extract_positions(d):
     return []
 
 
-# =============================================================================
-# STREAK PERSISTENCE
-# =============================================================================
 def _env_int_or_none(name: str) -> Optional[int]:
     v = os.getenv(name)
     if v is None or v.strip() == "":
@@ -267,6 +248,9 @@ def _env_bool_or_none(name: str) -> Optional[bool]:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+# =============================================================================
+# STREAK PERSISTENCE
+# =============================================================================
 def _load_streak():
     try:
         with open(STREAK_FILE, "r") as f:
@@ -300,58 +284,62 @@ def _save_streak():
         log.error("Failed to persist streak: %s", exc)
 
 
+def _record_result(net_pnl, exit_reason):
+    _streak["trades"] += 1
+    if exit_reason == "BREAKEVEN_SHIELD":
+        pass
+    elif net_pnl > 0:
+        _streak["wins"] += 1
+        _streak["losses"] = 0
+    elif net_pnl < 0:
+        _streak["losses"] += 1
+        _streak["wins"] = 0
+
+    if not _streak["live_activated"] and _streak["wins"] >= PAPER_WINS_REQUIRED:
+        _streak["live_activated"] = True
+        log.info("*** PAPER GAUNTLET PASSED — LIVE TRADING UNLOCKED ***")
+
+    _save_streak()
+    log.info(
+        "STREAK | W=%d L=%d live=%s trades=%d | net=%.3f%% | %s",
+        _streak["wins"], _streak["losses"], _streak["live_activated"],
+        _streak["trades"], net_pnl, exit_reason,
+    )
+
+
 # =============================================================================
-# UTA V3 POSITION MODE (one-way)
+# UTA V3 POSITION MODE
 # =============================================================================
 async def enforce_one_way(session):
-    """
-    Ensure the UTA account is in one-way mode using the V3 endpoint.
-
-    Step 1 — read current settings (GET /api/v3/account/settings).
-    Step 2 — skip POST if already one_way_mode.
-    Step 3 — otherwise POST /api/v3/account/set-hold-mode.
-    Any failure is logged (INFO/WARNING) and never fatal.
-    """
     settings = await _request(session, "GET", "/api/v3/account/settings")
     if settings.get("code") == "00000":
         data = settings.get("data") or {}
         current = data.get("holdMode") if isinstance(data, dict) else None
         if current == "one_way_mode":
-            log.info("Account already in one-way mode — no change needed.")
+            log.info("Account already in one-way mode.")
             return
         if current:
             log.info("Current holdMode=%s — switching to one_way_mode.", current)
     else:
-        log.warning(
-            "Could not read account settings (%s) — attempting hold-mode set anyway.",
-            settings.get("msg"),
-        )
+        log.warning("Could not read account settings (%s).",
+                    settings.get("msg"))
 
     res = await _request(
         session, "POST", "/api/v3/account/set-hold-mode",
         body={"holdMode": "one_way_mode"},
     )
-
     if res.get("code") == "00000":
-        log.info("One-way mode enforced (set-hold-mode → one_way_mode).")
+        log.info("One-way mode enforced.")
         return
 
     msg = str(res.get("msg") or "")
-    code = str(res.get("code") or "")
     lower = msg.lower()
-    if ("position" in lower or "order" in lower
-            or ("hold" in lower and "mode" in lower)):
-        log.info(
-            "Could not switch to one-way mode (positions/orders may be open): "
-            "code=%s msg=%s — continuing without change.",
-            code, msg,
-        )
+    if "position" in lower or "order" in lower:
+        log.info("Could not switch to one-way mode (open positions/orders): %s",
+                 msg)
     else:
-        log.warning(
-            "set-hold-mode rejected: code=%s msg=%s — continuing; "
-            "verify manually in Bitget UI.",
-            code, msg,
-        )
+        log.warning("set-hold-mode rejected: code=%s msg=%s",
+                    res.get("code"), msg)
 
 
 # =============================================================================
@@ -365,28 +353,25 @@ async def refresh_contracts(session):
     if d.get("code") != "00000":
         log.warning("Contract refresh failed: %s", d.get("msg"))
         return
-
     new_cache = {}
     for c in d.get("data", []) or []:
         sym = c.get("symbol", "")
         if not sym or not sym.endswith("USDT"):
             continue
         try:
-            is_stock = sym in _STOCK_TOKENS
             new_cache[sym] = {
                 "volumePlace": int(float(c.get("volumePlace") or 0)),
                 "pricePlace": int(float(c.get("pricePlace") or 0)),
                 "minOrderVolume": float(c.get("minTradeNum") or 0),
                 "minNotional": float(c.get("minTradeUSDT") or 5.0),
-                "is_stock": is_stock,
+                "is_stock": sym in _STOCK_TOKENS,
             }
         except (TypeError, ValueError):
             continue
-
     _contracts.clear()
     _contracts.update(new_cache)
     stock_n = sum(1 for v in _contracts.values() if v["is_stock"])
-    log.info("Contracts cached: %d symbols (%d flagged stock)",
+    log.info("Contracts cached: %d symbols (%d stock)",
              len(_contracts), stock_n)
 
 
@@ -577,25 +562,17 @@ async def refresh_universe(session):
     _universe.clear()
     _universe.extend(filtered)
     log.info(
-        "Universe refreshed: %d symbols (>= $%.1fM, %d/8 exchanges) | "
-        "excluded: %d stock, %d low-vol",
+        "Universe: %d symbols (>= $%.1fM, %d/8 exchanges) | excluded: %d stock, %d low-vol",
         len(_universe), UNIVERSE_MIN_VOL_USD / 1e6, ok,
         excluded_stock, excluded_vol,
     )
 
 
 # =============================================================================
-# MARKET DATA
+# CANDLES / DEPTH
 # =============================================================================
 def _normalize_candle(row):
     return [row[0], row[1], row[2], row[3], row[4], row[5]]
-
-
-def _candle_ts(candle):
-    try:
-        return int(candle[0])
-    except (IndexError, TypeError, ValueError):
-        return 0
 
 
 async def fetch_candles(session, symbol, limit=CANDLE_COUNT):
@@ -692,9 +669,7 @@ async def get_position(session, symbol):
                 break
         if size > 0:
             try:
-                entry = float(
-                    p.get("entryPrice") or p.get("averageOpenPrice") or 0
-                )
+                entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
             except (TypeError, ValueError):
                 entry = 0.0
             return {"total": size, "entryPrice": entry,
@@ -703,7 +678,6 @@ async def get_position(session, symbol):
 
 
 async def adopt_orphan_positions(session):
-    """On startup, pick up any live position left over from a crash/redeploy."""
     global _active_pos
     d = await _request(
         session, "GET", "/api/v3/position/current-position",
@@ -712,7 +686,6 @@ async def adopt_orphan_positions(session):
     if d.get("code") != "00000":
         log.warning("Orphan scan failed: %s", d.get("msg"))
         return
-
     for p in _extract_positions(d):
         if not isinstance(p, dict):
             continue
@@ -726,9 +699,7 @@ async def adopt_orphan_positions(session):
         if not sym:
             continue
         try:
-            entry = float(
-                p.get("entryPrice") or p.get("averageOpenPrice") or 0
-            )
+            entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
         except (TypeError, ValueError):
             entry = 0.0
         side = (p.get("posSide") or p.get("holdSide") or "").lower()
@@ -737,13 +708,13 @@ async def adopt_orphan_positions(session):
         elif side in ("short", "sell"):
             direction = "SHORT"
         else:
-            direction = "LONG" if total_raw > 0 else "SHORT"
+            direction = "SHORT" if total_raw > 0 else "LONG"
 
         _active_pos = {
             "symbol": sym, "direction": direction, "entry": entry,
-            "box_high": entry * 1e6 if entry > 0 else 1e6,
-            "box_low":  entry * 1e-6 if entry > 0 else 1e-6,
-            "opened_at": time.time(), "peak_net": -999.0,
+            "breakdown_level": 0.0,  # skip invalidation for adopted
+            "opened_at": time.time(),
+            "peak_net": -999.0, "peak_gross": -999.0,
             "paper": False, "adopted": True,
         }
         log.warning(
@@ -754,23 +725,43 @@ async def adopt_orphan_positions(session):
 
 
 # =============================================================================
-# ORDER EXECUTION
+# ORDER PLACEMENT (UTA V3 + tradeSide)
 # =============================================================================
-async def place_market_order(session, symbol, side, qty_str, reduce_only=False):
+async def place_short_order(session, symbol, qty_str):
     body = {
         "category": PRODUCT_TYPE,
         "symbol": symbol,
-        "side": side,
+        "side": "sell",
         "orderType": "market",
+        "tradeSide": "open",
         "qty": qty_str,
-        "reduceOnly": "yes" if reduce_only else "no",
+        "reduceOnly": "no",
     }
     res = await _request(session, "POST", "/api/v3/trade/place-order", body=body)
     if res.get("code") == "00000":
         oid = (res.get("data") or {}).get("orderId")
-        log.info("ORDER OK | %s %s %s | id=%s", symbol, side, qty_str, oid)
+        log.info("SHORT OPEN OK | %s qty=%s | id=%s", symbol, qty_str, oid)
         return oid
-    log.error("ORDER FAIL | %s %s | %s", symbol, side, res.get("msg"))
+    log.error("SHORT OPEN FAIL | %s | %s", symbol, res.get("msg"))
+    return None
+
+
+async def place_close_order(session, symbol, qty_str):
+    body = {
+        "category": PRODUCT_TYPE,
+        "symbol": symbol,
+        "side": "buy",
+        "orderType": "market",
+        "tradeSide": "close",
+        "qty": qty_str,
+        "reduceOnly": "yes",
+    }
+    res = await _request(session, "POST", "/api/v3/trade/place-order", body=body)
+    if res.get("code") == "00000":
+        oid = (res.get("data") or {}).get("orderId")
+        log.info("SHORT CLOSE OK | %s qty=%s | id=%s", symbol, qty_str, oid)
+        return oid
+    log.error("SHORT CLOSE FAIL | %s | %s", symbol, res.get("msg"))
     return None
 
 
@@ -793,15 +784,10 @@ async def close_live_position(session, pos, reason):
     if not live or live["total"] <= 0:
         log.info("No live position for %s (already gone)", symbol)
         return True
-
     await cancel_open_orders(session, symbol)
-
     vp = _contracts.get(symbol, {}).get("volumePlace", 0)
     qty_str = f"{live['total']:.{vp}f}"
-    close_side = "sell" if pos["direction"] == "LONG" else "buy"
-
-    oid = await place_market_order(session, symbol, close_side,
-                                   qty_str, reduce_only=True)
+    oid = await place_close_order(session, symbol, qty_str)
     if oid:
         log.info("CLOSE OK | %s | %s | size=%s", symbol, reason, qty_str)
         return True
@@ -810,94 +796,162 @@ async def close_live_position(session, pos, reason):
 
 
 # =============================================================================
-# STREAK
+# RANKER
 # =============================================================================
-def _record_result(net_pnl, exit_reason):
-    _streak["trades"] += 1
-    if exit_reason == "BREAKEVEN_SHIELD":
-        pass
-    elif net_pnl > 0:
-        _streak["wins"] += 1
-        _streak["losses"] = 0
-    elif net_pnl < 0:
-        _streak["losses"] += 1
-        _streak["wins"] = 0
+async def rank_candidates(session):
+    """
+    Fetch 16×1m candles per universe symbol, compute 15m change,
+    keep TOP_CANDIDATE_COUNT most-negative within [-5.5%, -1.8%].
+    """
+    global _top_candidates, _last_rank_ts
 
-    if not _streak["live_activated"] and _streak["wins"] >= PAPER_WINS_REQUIRED:
-        _streak["live_activated"] = True
-        log.info("*** PAPER GAUNTLET PASSED — LIVE TRADING UNLOCKED ***")
+    symbols = list(_universe)
+    if not symbols:
+        log.info("Rank skipped: empty universe")
+        return
 
-    _save_streak()
-    log.info(
-        "STREAK | W=%d L=%d live=%s trades=%d | net=%.3f%% | %s",
-        _streak["wins"], _streak["losses"], _streak["live_activated"],
-        _streak["trades"], net_pnl, exit_reason,
-    )
+    results = {}
+    for i in range(0, len(symbols), RANKER_BATCH):
+        chunk = symbols[i:i + RANKER_BATCH]
+        tasks = [fetch_candles(session, s, limit=16) for s in chunk]
+        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for sym, c in zip(chunk, chunk_results):
+            if isinstance(c, list) and len(c) >= 16:
+                results[sym] = c[-16:]
+        await asyncio.sleep(RANKER_BATCH_SLEEP)
+
+    scored = []
+    for sym, candles in results.items():
+        try:
+            p_old = float(candles[0][4])
+            p_now = float(candles[-1][4])
+            if p_old <= 0:
+                continue
+            pct = (p_now - p_old) / p_old * 100.0
+            if pct < mm.PCT_15M_MIN_DROP or pct > mm.PCT_15M_MAX_DROP:
+                continue
+            scored.append({"symbol": sym, "pct_15m": pct})
+        except (IndexError, TypeError, ValueError):
+            continue
+
+    scored.sort(key=lambda x: x["pct_15m"])
+    _top_candidates = scored[:TOP_CANDIDATE_COUNT]
+    _last_rank_ts = time.time()
+
+    if _top_candidates:
+        log.info(
+            "Ranked top %d (of %d in range): %s",
+            len(_top_candidates), len(scored),
+            " ".join(f"{c['symbol']}={c['pct_15m']:.2f}%"
+                     for c in _top_candidates),
+        )
+    else:
+        log.info(
+            "Ranked: 0 candidates in sweet-spot range [%.1f%%, %.1f%%] "
+            "(%d symbols scanned)", mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP,
+            len(results),
+        )
 
 
 # =============================================================================
-# ENTRY PIPELINE
+# SCANNER
 # =============================================================================
-async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
+def _bump_diag(reason):
+    if reason == "RANGE":
+        _diag["range_rej"] += 1
+    elif reason == "ACCEL":
+        _diag["accel_rej"] += 1
+    elif reason == "VOLUME":
+        _diag["vol_rej"] += 1
+    elif reason == "BREAKDOWN":
+        _diag["breakdown_rej"] += 1
+    elif reason == "CHASE":
+        _diag["chase_rej"] += 1
+    elif reason == "EARLY":
+        _diag["early_rej"] += 1
+
+
+async def scan_candidates(session):
+    if not _top_candidates:
+        return
+    now = time.time()
+    for cand in _top_candidates:
+        symbol = cand["symbol"]
+        if now < _cooldown_until.get(symbol, 0):
+            continue
+
+        candles = await fetch_candles(session, symbol, limit=16)
+        if not candles or len(candles) < 16:
+            continue
+        candles = candles[-16:]
+
+        try:
+            p_old = float(candles[0][4])
+            p_now = float(candles[-1][4])
+            if p_old <= 0:
+                continue
+            pct_15m = (p_now - p_old) / p_old * 100.0
+        except (IndexError, TypeError, ValueError):
+            continue
+
+        result = mm.evaluate_sweet_spot(candles, pct_15m)
+        if not result["is_valid"]:
+            _bump_diag(result["reason"])
+            continue
+
+        depth = await fetch_depth(session, symbol)
+        if depth is None:
+            continue
+        bids, asks, mid = depth
+
+        spread = mm.evaluate_spread(bids, asks)
+        if not spread["is_ok"]:
+            _diag["spread_rej"] += 1
+            continue
+
+        frag = mm.evaluate_book_fragility(bids, asks, mid)
+        if not frag["is_fragile"]:
+            _diag["frag_rej"] += 1
+            log.info(
+                "REJECT frag | %s | ratio=%.2f d_bid=%.0f d_ask=%.0f | "
+                "pct15=%.2f%%",
+                symbol, frag["depth_ratio"], frag["d_bid"], frag["d_ask"],
+                pct_15m,
+            )
+            continue
+
+        log.info(
+            "SWEET SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
+            "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f low10=%.6f",
+            symbol, pct_15m, result["drop_3m"], result["drop_6m"],
+            result["vol_ratio"], frag["depth_ratio"], frag["d_bid"],
+            result["live_close"], result["low_10m"],
+        )
+
+        entered = await enter_short(
+            session, symbol, result["live_close"], result["low_10m"], pct_15m,
+        )
+        if entered:
+            return
+
+
+async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m):
     global _active_pos, _paper_pos
 
-    if time.time() < _cooldown_until.get(symbol, 0):
-        return False
-
-    try:
-        live_close = float(live_candle[4])
-    except (IndexError, TypeError, ValueError):
-        return False
-    candle_ts = _candle_ts(live_candle)
-
-    depth = await fetch_depth(session, symbol)
-    if depth is None:
-        return False
-    bids, asks, mid = depth
-
-    # 1) Spread
-    spread = mm.evaluate_spread(bids, asks)
-    if not spread["is_ok"]:
-        _diag["spread_rej"] += 1
-        log.debug("REJECT spread | %s %s | %.3f%%",
-                  symbol, direction, spread["spread_pct"])
-        return False
-
-    # 2) Fragility
-    frag = mm.evaluate_book_fragility(bids, asks, mid, direction)
-    if not frag["is_fragile"]:
-        _diag["frag_rej"] += 1
-        if _last_logged_rejection.get(symbol) != candle_ts:
-            log.info(
-                "REJECT fragility | %s %s | ratio=%.2f | "
-                "d_bid=%.0f d_ask=%.0f | spread=%.3f%%",
-                symbol, direction, frag["depth_ratio"],
-                frag["d_bid"], frag["d_ask"], spread["spread_pct"],
-            )
-            _last_logged_rejection[symbol] = candle_ts
-        return False
-
-    log.info(
-        "IGNITION PASS | %s %s | close=%.6f | box=[%.6f, %.6f] | "
-        "depth=%.2f | spread=%.3f%% | d_bid=%.0f d_ask=%.0f",
-        symbol, direction, live_close, box_low, box_high,
-        frag["depth_ratio"], spread["spread_pct"], frag["d_bid"], frag["d_ask"],
-    )
-
-    # 3) Paper
     if not _streak["live_activated"]:
         _diag["entered"] += 1
         _paper_pos = {
-            "symbol": symbol, "direction": direction, "entry": live_close,
-            "box_high": box_high, "box_low": box_low,
-            "opened_at": time.time(), "peak_net": -999.0, "paper": True,
+            "symbol": symbol, "direction": "SHORT",
+            "entry": entry_price, "breakdown_level": breakdown_level,
+            "pct_15m_at_entry": pct_15m,
+            "opened_at": time.time(),
+            "peak_net": -999.0, "peak_gross": -999.0,
+            "paper": True,
         }
-        log.info("PAPER OPEN | %s %s @ %.6f | streak W=%d/%d",
-                 symbol, direction, live_close,
-                 _streak["wins"], PAPER_WINS_REQUIRED)
+        log.info("PAPER OPEN | %s SHORT @ %.6f | W=%d/%d",
+                 symbol, entry_price, _streak["wins"], PAPER_WINS_REQUIRED)
         return True
 
-    # 4) Live
     contract = _contracts.get(symbol)
     if not contract:
         log.warning("No contract rules for %s", symbol)
@@ -905,135 +959,32 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
 
     balance = await get_usdt_balance(session)
     qty_str = mm.calculate_order_qty(
-        balance=balance, price=live_close, leverage=LEVERAGE,
+        balance=balance, price=entry_price, leverage=LEVERAGE,
         volume_place=contract["volumePlace"],
         min_order_volume=contract["minOrderVolume"],
         min_notional=contract["minNotional"],
     )
     if not qty_str:
         log.warning("Sizing rejected | %s | balance=%.4f | price=%.6f",
-                    symbol, balance, live_close)
+                    symbol, balance, entry_price)
         return False
 
-    side = "buy" if direction == "LONG" else "sell"
-    oid = await place_market_order(session, symbol, side, qty_str,
-                                   reduce_only=False)
+    oid = await place_short_order(session, symbol, qty_str)
     if not oid:
         return False
 
     _diag["entered"] += 1
     _active_pos = {
-        "symbol": symbol, "direction": direction, "entry": live_close,
-        "box_high": box_high, "box_low": box_low,
-        "opened_at": time.time(), "peak_net": -999.0,
+        "symbol": symbol, "direction": "SHORT",
+        "entry": entry_price, "breakdown_level": breakdown_level,
+        "pct_15m_at_entry": pct_15m,
+        "opened_at": time.time(),
+        "peak_net": -999.0, "peak_gross": -999.0,
         "paper": False, "order_id": oid,
     }
-    log.info("LIVE OPEN | %s %s @ %.6f | qty=%s",
-             symbol, direction, live_close, qty_str)
+    log.info("LIVE OPEN | %s SHORT @ %.6f | qty=%s",
+             symbol, entry_price, qty_str)
     return True
-
-
-# =============================================================================
-# SCANNERS
-# =============================================================================
-async def scan_universe_batch(session):
-    global _universe_idx
-    if not _universe:
-        return
-    n = len(_universe)
-    now = time.time()
-
-    batch = []
-    for _ in range(min(UNIVERSE_BATCH, n)):
-        sym = _universe[_universe_idx % n]
-        _universe_idx += 1
-        if now < _cooldown_until.get(sym, 0):
-            continue
-        if sym in _hot_list and _hot_list[sym]["expiry"] > now:
-            continue
-        batch.append(sym)
-
-    if not batch:
-        return
-
-    results = await asyncio.gather(
-        *[fetch_candles(session, s, limit=CANDLE_COUNT) for s in batch],
-        return_exceptions=True,
-    )
-
-    for symbol, candles in zip(batch, results):
-        if isinstance(candles, Exception) or not candles or len(candles) < 2:
-            continue
-        closed, live = candles[:-1], candles[-1]
-
-        box = mm.calculate_compression_box(closed)
-        if not box["is_compressed"]:
-            continue
-
-        trig = mm.evaluate_ignition_trigger(
-            live, box["box_high"], box["box_low"], box["base_volume"],
-        )
-        if not trig["is_ignition"]:
-            _bump_diag(trig.get("reason", "INVALID"))
-            _add_to_hot_list(symbol, box)
-            continue
-
-        entered = await try_enter(session, symbol, trig["direction"], live,
-                                  box["box_high"], box["box_low"])
-        if entered:
-            return
-
-
-def _add_to_hot_list(symbol, box):
-    if len(_hot_list) >= HOT_LIST_MAX and symbol not in _hot_list:
-        oldest = min(_hot_list.keys(), key=lambda s: _hot_list[s]["expiry"])
-        _hot_list.pop(oldest, None)
-    _hot_list[symbol] = {
-        "box_high": box["box_high"],
-        "box_low": box["box_low"],
-        "base_volume": box["base_volume"],
-        "expiry": time.time() + HOT_LIST_TTL_SEC,
-    }
-    log.debug("HOT+ | %s | range=%.3f%% | baseVol=%.2f",
-              symbol, box["box_range_pct"], box["base_volume"])
-
-
-async def scan_hot_list(session):
-    now = time.time()
-    expired = [s for s, v in _hot_list.items() if v["expiry"] < now]
-    for s in expired:
-        _hot_list.pop(s, None)
-
-    batch = []
-    for symbol, box in list(_hot_list.items()):
-        if len(batch) >= HOT_LIST_BATCH:
-            break
-        if now < _cooldown_until.get(symbol, 0):
-            continue
-        batch.append((symbol, box))
-
-    if not batch:
-        return
-
-    results = await asyncio.gather(
-        *[fetch_candles(session, s, limit=2) for s, _ in batch],
-        return_exceptions=True,
-    )
-
-    for (symbol, box), candles in zip(batch, results):
-        if isinstance(candles, Exception) or not candles:
-            continue
-        live = candles[-1]
-        trig = mm.evaluate_ignition_trigger(
-            live, box["box_high"], box["box_low"], box["base_volume"],
-        )
-        if not trig["is_ignition"]:
-            _bump_diag(trig.get("reason", "INVALID"))
-            continue
-        entered = await try_enter(session, symbol, trig["direction"], live,
-                                  box["box_high"], box["box_low"])
-        if entered:
-            return
 
 
 # =============================================================================
@@ -1077,12 +1028,14 @@ async def manage_live_position(session):
     elapsed = time.time() - pos["opened_at"]
     state = mm.evaluate_ratchet(
         entry_price=live["entryPrice"] or pos["entry"],
-        current_price=current, direction=pos["direction"],
-        peak_net=pos["peak_net"], elapsed_seconds=elapsed,
-        box_high=pos["box_high"], box_low=pos["box_low"],
-        skip_fakeout=pos.get("adopted", False),
+        current_price=current,
+        breakdown_level=pos["breakdown_level"],
+        peak_net=pos["peak_net"],
+        peak_gross=pos["peak_gross"],
+        elapsed_seconds=elapsed,
     )
     pos["peak_net"] = state["updated_peak_net"]
+    pos["peak_gross"] = state["updated_peak_gross"]
 
     if not state["should_exit"]:
         return
@@ -1106,18 +1059,20 @@ async def manage_paper_position(session):
     elapsed = time.time() - pos["opened_at"]
     state = mm.evaluate_ratchet(
         entry_price=pos["entry"], current_price=current,
-        direction=pos["direction"], peak_net=pos["peak_net"],
+        breakdown_level=pos["breakdown_level"],
+        peak_net=pos["peak_net"],
+        peak_gross=pos["peak_gross"],
         elapsed_seconds=elapsed,
-        box_high=pos["box_high"], box_low=pos["box_low"],
     )
     pos["peak_net"] = state["updated_peak_net"]
+    pos["peak_gross"] = state["updated_peak_gross"]
 
     if not state["should_exit"]:
         return
 
     log.info(
-        "PAPER EXIT | %s %s | %s | net=%.3f%% | peak=%.3f%%",
-        symbol, pos["direction"], state["exit_reason"],
+        "PAPER EXIT | %s SHORT | %s | gross=%.3f%% net=%.3f%% peak_net=%.3f%%",
+        symbol, state["exit_reason"], state["gross_pnl"],
         state["net_pnl"], state["updated_peak_net"],
     )
     _record_result(state["net_pnl"], state["exit_reason"])
@@ -1126,7 +1081,7 @@ async def manage_paper_position(session):
 
 
 # =============================================================================
-# BACKGROUND REFRESH
+# BACKGROUND LOOPS
 # =============================================================================
 async def contracts_refresh_loop(session):
     while True:
@@ -1137,43 +1092,36 @@ async def contracts_refresh_loop(session):
             log.warning("Contract refresh error: %s", exc)
 
 
-async def universe_refresh_loop(session):
+async def ranker_loop(session):
     while True:
         await asyncio.sleep(UNIVERSE_REFRESH_SEC)
         try:
             await refresh_universe(session)
         except Exception as exc:
             log.warning("Universe refresh error: %s", exc)
+        try:
+            await rank_candidates(session)
+        except Exception as exc:
+            log.warning("Rank error: %s", exc)
 
 
 # =============================================================================
-# HEARTBEAT + FUNNEL
+# HEARTBEAT
 # =============================================================================
-def _bump_diag(reason):
-    if reason == "VOLUME":
-        _diag["vol_rej"] += 1
-    elif reason == "DISPLACEMENT":
-        _diag["disp_rej"] += 1
-    elif reason == "CHASE":
-        _diag["chase_rej"] += 1
-    elif reason == "TOO_EARLY":
-        _diag["too_early"] += 1
-
-
 def _heartbeat():
     global _last_heartbeat
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
         return
     _last_heartbeat = time.time()
     log.info(
-        "HEARTBEAT | universe=%d hot=%d active=%s paper=%s | "
-        "funnel: vol=%d disp=%d chase=%d early=%d spread=%d frag=%d enter=%d | "
-        "streak W=%d L=%d live=%s trades=%d",
-        len(_universe), len(_hot_list),
+        "HEARTBEAT | universe=%d ranked=%d active=%s paper=%s | "
+        "funnel: range=%d accel=%d vol=%d bd=%d chase=%d early=%d "
+        "spr=%d frag=%d enter=%d | streak W=%d L=%d live=%s trades=%d",
+        len(_universe), len(_top_candidates),
         _active_pos is not None, _paper_pos is not None,
-        _diag["vol_rej"], _diag["disp_rej"], _diag["chase_rej"],
-        _diag["too_early"], _diag["spread_rej"], _diag["frag_rej"],
-        _diag["entered"],
+        _diag["range_rej"], _diag["accel_rej"], _diag["vol_rej"],
+        _diag["breakdown_rej"], _diag["chase_rej"], _diag["early_rej"],
+        _diag["spread_rej"], _diag["frag_rej"], _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"],
     )
@@ -1187,29 +1135,33 @@ def _heartbeat():
 async def main():
     _start_keepalive()
 
-    actual_ver = getattr(mm, "__version__", "UNKNOWN")
-    if actual_ver != _EXPECTED_MM_VERSION:
+    if getattr(mm, "__version__", "UNKNOWN") != _EXPECTED_MM_VERSION:
         log.critical(
             "market_math.py version mismatch: expected %s, got %s. "
             "Clear Render build cache & redeploy.",
-            _EXPECTED_MM_VERSION, actual_ver,
+            _EXPECTED_MM_VERSION, getattr(mm, "__version__", "UNKNOWN"),
         )
         raise SystemExit(1)
 
-    for _name in ("BOX_RANGE_MAX_PCT", "DEPTH_FRAGILITY_MIN",
-                  "MAX_SPREAD_PCT", "MIN_SIDE_DEPTH_USD"):
+    for _name in ("PCT_15M_MIN_DROP", "PCT_15M_MAX_DROP",
+                  "VOLUME_EXPANSION_MIN", "BREAKDOWN_BUFFER_PCT",
+                  "ANTI_CHASE_MAX_PCT", "MIN_SIDE_DEPTH_USD",
+                  "FRAGILITY_RATIO_MIN", "MAX_SPREAD_PCT"):
         if not hasattr(mm, _name):
-            log.critical("market_math.py missing %s — stale module.", _name)
+            log.critical("market_math.py missing %s — stale.", _name)
             raise SystemExit(1)
 
     _load_streak()
     log.info(
         "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "box<=%.2f%% | frag>=%.2f | spread<=%.2f%% | minSideDepth=$%.0f",
+        "pct15<=%.1f%% | accel>%.2fx | vol>=%.1fx | "
+        "break<%.2f%% | chase<=%.2f%% | frag>=%.2f | minBid=$%.0f",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
-        mm.BOX_RANGE_MAX_PCT, mm.DEPTH_FRAGILITY_MIN,
-        mm.MAX_SPREAD_PCT, mm.MIN_SIDE_DEPTH_USD,
+        mm.PCT_15M_MAX_DROP, mm.ACCELERATION_MIN_RATIO,
+        mm.VOLUME_EXPANSION_MIN, mm.BREAKDOWN_BUFFER_PCT,
+        mm.ANTI_CHASE_MAX_PCT, mm.FRAGILITY_RATIO_MIN,
+        mm.MIN_SIDE_DEPTH_USD,
     )
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
@@ -1222,12 +1174,14 @@ async def main():
             refresh_contracts(session),
         )
         await refresh_universe(session)
+        await rank_candidates(session)
         await adopt_orphan_positions(session)
 
         asyncio.create_task(contracts_refresh_loop(session))
-        asyncio.create_task(universe_refresh_loop(session))
+        asyncio.create_task(ranker_loop(session))
 
-        log.info("Main loop started | universe=%d", len(_universe))
+        log.info("Main loop started | universe=%d ranked=%d",
+                 len(_universe), len(_top_candidates))
 
         while True:
             loop_start = time.time()
@@ -1238,9 +1192,7 @@ async def main():
                 elif _paper_pos is not None:
                     await manage_paper_position(session)
                 else:
-                    await scan_hot_list(session)
-                    if _active_pos is None and _paper_pos is None:
-                        await scan_universe_batch(session)
+                    await scan_candidates(session)
             except Exception as exc:
                 log.error("Loop error: %s", exc, exc_info=True)
 
