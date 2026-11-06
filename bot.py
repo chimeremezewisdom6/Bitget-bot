@@ -5,21 +5,16 @@ bot.py
 Coiled Spring Ignition | Bitget UTA V3 | Render Free Tier.
 
 Fixes applied in this revision:
-  1. market_math version guard — fail-fast on stale module (no AttributeError loops)
-  2. Orphan-position adoption on startup — no more abandoned live trades on redeploy
+  1. market_math version guard — fail-fast on stale module
+  2. Orphan-position adoption on startup
   3. Streak seeded from env vars — survives Render ephemeral FS
   4. Parallel candle fetches in scanners — ~2x faster pulses
   5. Lightweight ticker endpoint for position PnL
   6. Split refresh loops (contracts vs universe)
   7. Bitget rate-limit (30011) retry
-  8. Dynamic stock/RWA detection — string-safe (_flag_true) + sanity guard
+  8. Static stock-token filtering (removed unreliable isRwa detection)
   9. Position extraction handles both list and dict-wrapped response shapes
-
-Runtime tuning tips:
-    - Too few candidates: loosen BOX_RANGE_MAX_PCT in market_math.py (0.55 -> 0.70)
-    - Too many candidates: tighten BOX_RANGE_MAX_PCT (0.55 -> 0.45)
-    - Fragility dominates logs: lower DEPTH_FRAGILITY_MIN (1.35 -> 1.20)
-    - Wide-spread entries: tighten MAX_SPREAD_PCT (0.15 -> 0.10)
+ 10. UTA V3 position mode: /api/v3/account/set-hold-mode + settings pre-check
 """
 
 import asyncio
@@ -62,7 +57,7 @@ CANDLE_COUNT = 31
 # Must match market_math.__version__ exactly; bump both together.
 _EXPECTED_MM_VERSION = "2026.11.06"
 
-# Static fallback; dynamic detection in refresh_contracts() extends this.
+# Static fallback; extend manually if Bitget adds new tokenized equities.
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
     "GOOGLUSDT", "TSLAUSDT", "NVDAUSDT", "AVGOUSDT", "ORCLUSDT",
@@ -239,20 +234,6 @@ def _extract_positions(d):
     return []
 
 
-def _flag_true(v):
-    """
-    Bitget may return booleans as strings ("false", "true").
-    bool("false") is True in Python — never coerce blindly.
-    """
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, str):
-        return v.strip().lower() in ("true", "1", "yes")
-    if isinstance(v, (int, float)):
-        return v != 0
-    return False
-
-
 # =============================================================================
 # STREAK PERSISTENCE
 # =============================================================================
@@ -307,18 +288,64 @@ def _save_streak():
 
 
 # =============================================================================
-# ONE-WAY MODE
+# UTA V3 POSITION MODE (one-way)
 # =============================================================================
 async def enforce_one_way(session):
-    res = await _request(
-        session, "POST", "/api/v2/mix/account/set-position-mode",
-        body={"productType": PRODUCT_TYPE, "posMode": "single_hold"},
-    )
-    if res.get("code") == "00000":
-        log.info("One-way mode enforced (single_hold).")
+    """
+    Ensure the UTA account is in one-way mode using the V3 endpoint.
+
+    Step 1 — read current settings (GET /api/v3/account/settings).
+    Step 2 — skip POST if already one_way_mode.
+    Step 3 — otherwise POST /api/v3/account/set-hold-mode.
+    Any failure is logged (INFO/WARNING) and never fatal.
+    """
+    # --- Step 1: inspect current hold mode ---------------------------------
+    settings = await _request(session, "GET", "/api/v3/account/settings")
+    if settings.get("code") == "00000":
+        data = settings.get("data") or {}
+        current = data.get("holdMode") if isinstance(data, dict) else None
+        if current == "one_way_mode":
+            log.info("Account already in one-way mode — no change needed.")
+            return
+        if current:
+            log.info("Current holdMode=%s — switching to one_way_mode.", current)
     else:
-        # Unified Account mode rejects this endpoint — that's expected.
-        log.warning("set-position-mode response: %s", res.get("msg"))
+        # Settings read failed; proceed to POST as a best-effort attempt.
+        log.warning(
+            "Could not read account settings (%s) — attempting hold-mode set anyway.",
+            settings.get("msg"),
+        )
+
+    # --- Step 2: set one-way mode -----------------------------------------
+    res = await _request(
+        session, "POST", "/api/v3/account/set-hold-mode",
+        body={"holdMode": "one_way_mode"},
+    )
+
+    if res.get("code") == "00000":
+        log.info("One-way mode enforced (set-hold-mode → one_way_mode).")
+        return
+
+    # Non-fatal outcomes — log clearly but do not crash the bot.
+    msg = str(res.get("msg") or "")
+    code = str(res.get("code") or "")
+    lower = msg.lower()
+    if (
+        "position" in lower
+        or "order" in lower
+        or "hold" in lower and "mode" in lower
+    ):
+        log.info(
+            "Could not switch to one-way mode (positions/orders may be open): "
+            "code=%s msg=%s — continuing without change.",
+            code, msg,
+        )
+    else:
+        log.warning(
+            "set-hold-mode rejected: code=%s msg=%s — continuing; "
+            "verify manually in Bitget UI.",
+            code, msg,
+        )
 
 
 # =============================================================================
@@ -339,11 +366,9 @@ async def refresh_contracts(session):
         if not sym or not sym.endswith("USDT"):
             continue
         try:
-            is_stock = (
-                sym in _STOCK_TOKENS
-                or _flag_true(c.get("isRwa"))
-                or _flag_true(c.get("isStock"))
-            )
+            # Static list only. Bitget's isRwa/isStock fields do not reliably
+            # mean "tokenized equity" — they fire on hundreds of crypto pairs.
+            is_stock = sym in _STOCK_TOKENS
             new_cache[sym] = {
                 "volumePlace": int(float(c.get("volumePlace") or 0)),
                 "pricePlace": int(float(c.get("pricePlace") or 0)),
@@ -353,17 +378,6 @@ async def refresh_contracts(session):
             }
         except (TypeError, ValueError):
             continue
-
-    # Sanity guard: if detection flags everything, fall back to static list.
-    if new_cache:
-        stock_n = sum(1 for v in new_cache.values() if v["is_stock"])
-        if stock_n == len(new_cache):
-            log.error(
-                "ALL %d contracts flagged stock — RWA detection over-firing. "
-                "Falling back to static _STOCK_TOKENS only.", stock_n,
-            )
-            for sym, v in new_cache.items():
-                v["is_stock"] = sym in _STOCK_TOKENS
 
     _contracts.clear()
     _contracts.update(new_cache)
