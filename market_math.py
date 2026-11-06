@@ -1,39 +1,51 @@
 """
 market_math.py
 ==============
-Pure mathematical engine for the Coiled Spring Ignition strategy.
-Zero network I/O. Standard library only.
+Cross-Sectional Relative Weakness & Accelerated Breakdown Engine.
+Pure math engine. Zero network I/O. Standard library only.
 
-Candle format:
-    [timestamp, open, high, low, close, base_volume]
-       [0]     [1]    [2]   [3]    [4]     [5]
+Candle format (each candle): [ts, open, high, low, close, baseVol]
+Callers pass exactly 16 candles; last one is the live/partial candle.
 
 Bump __version__ on every change. bot.py refuses to start on mismatch.
 """
 
 import time
 
-__version__ = "2026.11.07"
+__version__ = "2026.11.09"
 
+# ---- Fees --------------------------------------------------------------
 FEE_ROUND_TRIP_PCT = 0.22
-BOX_RANGE_MAX_PCT = 0.55
-VOLUME_EXPANSION_MIN = 3.0
-DISPLACEMENT_MIN_PCT = 0.10
-ANTI_CHASE_MAX_PCT = 0.60
-DEPTH_FRAGILITY_MIN = 1.15        # was 1.35 — relax the final gate
+
+# ---- 15-minute relative weakness window (SHORT sweet spot range) ------
+PCT_15M_MIN_DROP = -5.5   # most extreme drop we still accept
+PCT_15M_MAX_DROP = -1.8   # must be at least this weak
+
+# ---- Sweet spot filters ------------------------------------------------
+ACCELERATION_MIN_RATIO = 1.0   # rate_3m / rate_6m must exceed this
+VOLUME_EXPANSION_MIN = 2.5     # effective live vol vs avg_15m vol
+BREAKDOWN_BUFFER_PCT = 0.10    # must break below low_10m by at least this
+ANTI_CHASE_MAX_PCT = 0.60      # must not be further than this below low_10m
+
+# Volume normalization (partial candle handling)
+_VOL_MAX_EXTRAPOLATION = 3.0
+_MIN_ELAPSED_SEC = 20.0
+
+# ---- Order book fragility (SHORT view) --------------------------------
 DEPTH_BAND_PCT = 0.01
-MIN_SIDE_DEPTH_USD = 100.0
+MIN_SIDE_DEPTH_USD = 8000.0
+FRAGILITY_RATIO_MIN = 1.60
+
+# ---- Spread ------------------------------------------------------------
 MAX_SPREAD_PCT = 0.15
-FAKEOUT_WINDOW_SEC = 40.0
+
+# ---- Ratchet / risk ----------------------------------------------------
 BREAKEVEN_TRIGGER_PCT = 0.50
 RATCHET_TRIGGER_PCT = 1.20
 RATCHET_KEEP_RATIO = 0.60
-STAGNATION_WINDOW_SEC = 40.0
-STAGNATION_PEAK_FLOOR = 0.30
-
-# Volume normalization tuning
-_MIN_ELAPSED_SEC = 10.0           # need this much candle history to evaluate
-_MAX_EXTRAPOLATION = 4.0          # cap partial->full projection at 4x
+INVALIDATION_BUFFER_PCT = 0.35
+STAGNATION_WINDOW_SEC = 180.0
+STAGNATION_GROSS_TARGET = 0.25
 
 
 def _f(x, default=0.0):
@@ -43,119 +55,124 @@ def _f(x, default=0.0):
         return default
 
 
-def calculate_compression_box(candles):
-    invalid = {
-        "box_high": 0.0,
-        "box_low": 0.0,
-        "box_range_pct": 999.0,
-        "base_volume": 0.0,
-        "is_compressed": False,
-    }
-    if not candles or len(candles) < 2:
-        return invalid
-
-    highs, lows, vols = [], [], []
-    for c in candles:
-        try:
-            highs.append(float(c[2]))
-            lows.append(float(c[3]))
-            vols.append(float(c[5]))
-        except (IndexError, TypeError, ValueError):
-            return invalid
-
-    if not highs or not lows:
-        return invalid
-
-    box_high = max(highs)
-    box_low = min(lows)
-    if box_low <= 0:
-        return invalid
-
-    box_range_pct = (box_high - box_low) / box_low * 100.0
-    base_volume = sum(vols) / len(vols)
-
-    return {
-        "box_high": box_high,
-        "box_low": box_low,
-        "box_range_pct": box_range_pct,
-        "base_volume": base_volume,
-        "is_compressed": (box_range_pct <= BOX_RANGE_MAX_PCT) and (base_volume > 0),
-    }
-
-
-def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume,
-                              now_ms=None):
+# =========================================================================
+# SWEET SPOT
+# =========================================================================
+def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     """
-    Volume is normalized against elapsed candle time so partial candles are
-    not unfairly rejected. Result now carries a 'reason' field so the caller
-    can build a funnel counter.
+    SHORT-side sweet spot validator.
+    Returns dict with is_valid + reason (RANGE / ACCEL / VOLUME /
+    BREAKDOWN / CHASE / EARLY / OK).
     """
     result = {
-        "is_ignition": False,
-        "direction": None,
-        "vol_ratio": 0.0,
-        "chase_pct": 0.0,
+        "is_valid": False,
         "reason": "INVALID",
+        "pct_15m": pct_15m,
+        "drop_3m": 0.0,
+        "drop_6m": 0.0,
+        "vol_ratio": 0.0,
+        "low_10m": 0.0,
+        "live_close": 0.0,
     }
-    if not live_candle or base_volume <= 0 or box_high <= 0 or box_low <= 0:
+    if not candles or len(candles) < 16:
         return result
+    candles = candles[-16:]  # defensive: exactly the last 16
 
     try:
-        live_high = float(live_candle[2])
-        live_low = float(live_candle[3])
-        live_close = float(live_candle[4])
-        live_vol = float(live_candle[5])
-        candle_open_ms = int(live_candle[0])
+        live_close = float(candles[-1][4])
+        candle_ts = int(candles[-1][0])
+        live_vol = float(candles[-1][5])
     except (IndexError, TypeError, ValueError):
         return result
 
+    result["live_close"] = live_close
     if live_close <= 0:
+        return result
+
+    # ---- 1) 15m drop must be inside the sweet spot window -------------
+    if not (PCT_15M_MIN_DROP <= pct_15m <= PCT_15M_MAX_DROP):
+        result["reason"] = "RANGE"
+        return result
+
+    # ---- 2) Acceleration: rate_3m > rate_6m, both drops positive ------
+    try:
+        close_9m_ago = float(candles[-10][4])
+        close_3m_ago = float(candles[-4][4])
+    except (IndexError, TypeError, ValueError):
+        return result
+    if close_9m_ago <= 0 or close_3m_ago <= 0:
+        return result
+
+    drop_6m = (close_9m_ago - close_3m_ago) / close_9m_ago * 100.0
+    drop_3m = (close_3m_ago - live_close) / close_3m_ago * 100.0
+    result["drop_6m"] = drop_6m
+    result["drop_3m"] = drop_3m
+
+    if drop_6m <= 0.0 or drop_3m <= 0.0:
+        result["reason"] = "ACCEL"
+        return result
+
+    rate_3m = drop_3m / 3.0
+    rate_6m = drop_6m / 6.0
+    if rate_3m <= rate_6m * ACCELERATION_MIN_RATIO:
+        result["reason"] = "ACCEL"
+        return result
+
+    # ---- 3) Volume expansion vs 15m average ---------------------------
+    try:
+        avg_vol_15m = sum(float(c[5]) for c in candles[-16:-1]) / 15.0
+    except (IndexError, TypeError, ValueError):
+        return result
+    if avg_vol_15m <= 0:
+        result["reason"] = "VOLUME"
         return result
 
     if now_ms is None:
         now_ms = int(time.time() * 1000)
-    elapsed_s = max(1.0, (now_ms - candle_open_ms) / 1000.0)
+    elapsed_s = max(1.0, (now_ms - candle_ts) / 1000.0)
     if elapsed_s < _MIN_ELAPSED_SEC:
-        result["reason"] = "TOO_EARLY"
+        result["reason"] = "EARLY"
         return result
 
-    # 1.0x at full candle (60s), up to _MAX_EXTRAPOLATION near the open.
-    multiplier = min(60.0 / elapsed_s, _MAX_EXTRAPOLATION)
-    vol_ratio = (live_vol / base_volume) * multiplier
+    multiplier = min(60.0 / elapsed_s, _VOL_MAX_EXTRAPOLATION)
+    effective_vol = live_vol * multiplier
+    vol_ratio = effective_vol / avg_vol_15m
     result["vol_ratio"] = vol_ratio
 
     if vol_ratio < VOLUME_EXPANSION_MIN:
         result["reason"] = "VOLUME"
         return result
 
-    long_disp = box_high * (1.0 + DISPLACEMENT_MIN_PCT / 100.0)
-    if live_high > long_disp:
-        chase = (live_close - box_high) / box_high * 100.0
-        result["chase_pct"] = chase
-        if chase <= ANTI_CHASE_MAX_PCT:
-            result["is_ignition"] = True
-            result["direction"] = "LONG"
-            result["reason"] = "OK"
-        else:
-            result["reason"] = "CHASE"
+    # ---- 4) Breakdown of the 10-minute low ----------------------------
+    try:
+        lows = [float(c[3]) for c in candles[-11:-1]]
+    except (IndexError, TypeError, ValueError):
+        return result
+    if not lows:
+        return result
+    low_10m = min(lows)
+    result["low_10m"] = low_10m
+    if low_10m <= 0:
         return result
 
-    short_disp = box_low * (1.0 - DISPLACEMENT_MIN_PCT / 100.0)
-    if live_low < short_disp:
-        chase = (box_low - live_close) / box_low * 100.0
-        result["chase_pct"] = chase
-        if chase <= ANTI_CHASE_MAX_PCT:
-            result["is_ignition"] = True
-            result["direction"] = "SHORT"
-            result["reason"] = "OK"
-        else:
-            result["reason"] = "CHASE"
+    # Must be at least BREAKDOWN_BUFFER_PCT below low_10m
+    if live_close >= low_10m * (1.0 - BREAKDOWN_BUFFER_PCT / 100.0):
+        result["reason"] = "BREAKDOWN"
         return result
 
-    result["reason"] = "DISPLACEMENT"
+    # Anti-chase: must not be more than ANTI_CHASE_MAX_PCT below low_10m
+    if live_close < low_10m * (1.0 - ANTI_CHASE_MAX_PCT / 100.0):
+        result["reason"] = "CHASE"
+        return result
+
+    result["is_valid"] = True
+    result["reason"] = "OK"
     return result
 
 
+# =========================================================================
+# ORDER BOOK
+# =========================================================================
 def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
     result = {"is_ok": False, "spread_pct": 999.0, "mid": 0.0}
     if not bids or not asks:
@@ -175,9 +192,15 @@ def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
     return result
 
 
-def evaluate_book_fragility(bids, asks, mid_price, direction,
+def evaluate_book_fragility(bids, asks, mid_price,
                             band_pct=DEPTH_BAND_PCT,
                             min_side_depth=MIN_SIDE_DEPTH_USD):
+    """
+    SHORT-side fragility:
+      - require d_bid >= min_side_depth (enough liquidity on our close side)
+      - require d_ask / d_bid >= FRAGILITY_RATIO_MIN (ask wall dominates,
+        buyers absent -> continuation down expected)
+    """
     result = {"is_fragile": False, "depth_ratio": 0.0,
               "d_bid": 0.0, "d_ask": 0.0}
     if mid_price <= 0 or not bids or not asks:
@@ -200,24 +223,20 @@ def evaluate_book_fragility(bids, asks, mid_price, direction,
     result["d_bid"] = d_bid
     result["d_ask"] = d_ask
 
-    if direction == "LONG":
-        if d_ask < min_side_depth:
-            return result
-        ratio = (d_bid / d_ask) if d_ask > 0 else 999.0
-        result["depth_ratio"] = ratio
-        result["is_fragile"] = ratio >= DEPTH_FRAGILITY_MIN
-    elif direction == "SHORT":
-        if d_bid < min_side_depth:
-            return result
-        ratio = (d_ask / d_bid) if d_bid > 0 else 999.0
-        result["depth_ratio"] = ratio
-        result["is_fragile"] = ratio >= DEPTH_FRAGILITY_MIN
+    if d_bid < min_side_depth:
+        return result
 
+    ratio = (d_ask / d_bid) if d_bid > 0 else 0.0
+    result["depth_ratio"] = ratio
+    result["is_fragile"] = ratio >= FRAGILITY_RATIO_MIN
     return result
 
 
-def calculate_order_qty(balance, price, leverage, volume_place, min_order_volume,
-                        min_notional=5.0):
+# =========================================================================
+# SIZING
+# =========================================================================
+def calculate_order_qty(balance, price, leverage, volume_place,
+                        min_order_volume, min_notional=5.0):
     if balance <= 0 or price <= 0 or leverage <= 0:
         return None
     notional = balance * 0.90 * leverage
@@ -234,56 +253,65 @@ def calculate_order_qty(balance, price, leverage, volume_place, min_order_volume
     return f"{qty:.{vp}f}"
 
 
-def evaluate_ratchet(entry_price, current_price, direction, peak_net,
-                     elapsed_seconds, box_high, box_low,
-                     skip_fakeout=False):
+# =========================================================================
+# RATCHET (SHORT)
+# =========================================================================
+def evaluate_ratchet(entry_price, current_price, breakdown_level,
+                     peak_net, peak_gross, elapsed_seconds):
+    """
+    SHORT ratchet. breakdown_level = the 10m-low that was broken at entry;
+    if price climbs back above (1 + INVALIDATION_BUFFER_PCT/100) * that
+    level, the breakdown is invalidated and we exit.
+
+    peak_gross tracks gross (pre-fee) high-water — used only by stagnation.
+    """
     result = {
         "should_exit": False,
         "exit_reason": "HOLD",
         "net_pnl": 0.0,
         "gross_pnl": 0.0,
         "updated_peak_net": peak_net,
+        "updated_peak_gross": peak_gross,
     }
-    if entry_price <= 0 or current_price <= 0 or box_high <= 0 or box_low <= 0:
+    if entry_price <= 0 or current_price <= 0:
         return result
 
-    if direction == "LONG":
-        gross = (current_price - entry_price) / entry_price * 100.0
-    else:
-        gross = (entry_price - current_price) / entry_price * 100.0
-
+    # SHORT: profit when current < entry
+    gross = (entry_price - current_price) / entry_price * 100.0
     net = gross - FEE_ROUND_TRIP_PCT
-    peak = peak_net if peak_net > net else net
+    new_peak_net = peak_net if peak_net > net else net
+    new_peak_gross = peak_gross if peak_gross > gross else gross
 
     result["gross_pnl"] = gross
     result["net_pnl"] = net
-    result["updated_peak_net"] = peak
+    result["updated_peak_net"] = new_peak_net
+    result["updated_peak_gross"] = new_peak_gross
 
-    if not skip_fakeout and elapsed_seconds <= FAKEOUT_WINDOW_SEC:
-        if direction == "LONG" and current_price <= box_high:
+    # Invalidation: price climbed back above breakdown level by +0.35%
+    if breakdown_level > 0:
+        if current_price > breakdown_level * (1.0 + INVALIDATION_BUFFER_PCT / 100.0):
             result["should_exit"] = True
-            result["exit_reason"] = "FAKEOUT_SCRATCH"
-            return result
-        if direction == "SHORT" and current_price >= box_low:
-            result["should_exit"] = True
-            result["exit_reason"] = "FAKEOUT_SCRATCH"
+            result["exit_reason"] = "INVALIDATION_STOP"
             return result
 
-    if peak >= RATCHET_TRIGGER_PCT:
-        floor = peak * RATCHET_KEEP_RATIO
+    # Breakeven shield
+    if new_peak_net >= BREAKEVEN_TRIGGER_PCT and net <= 0.0:
+        result["should_exit"] = True
+        result["exit_reason"] = "BREAKEVEN_SHIELD"
+        return result
+
+    # Ratchet
+    if new_peak_net >= RATCHET_TRIGGER_PCT:
+        floor = RATCHET_KEEP_RATIO * new_peak_net
         if net <= floor:
             result["should_exit"] = True
             result["exit_reason"] = "RATCHET_BANK"
             return result
 
-    if peak >= BREAKEVEN_TRIGGER_PCT and net <= 0.0:
-        result["should_exit"] = True
-        result["exit_reason"] = "BREAKEVEN_SHIELD"
-        return result
-
+    # Stagnation cut
     if (elapsed_seconds >= STAGNATION_WINDOW_SEC
-            and peak < STAGNATION_PEAK_FLOOR
-            and net < 0.0):
+            and new_peak_gross < STAGNATION_GROSS_TARGET
+            and gross < 0.0):
         result["should_exit"] = True
         result["exit_reason"] = "STAGNATION_CUT"
         return result
