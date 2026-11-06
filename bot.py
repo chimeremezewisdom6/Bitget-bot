@@ -4,7 +4,10 @@ bot.py
 ======
 Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
 
-v2026.11.15: 5-filter architecture, wider ranker pool (30 candidates).
+v2026.11.17: dual-path scanner.
+  - Deep movers (15m drop < -8%) route to PANIC path (6 checks).
+  - Shallow movers route to normal path (10 checks).
+  - Ranker interleaves deep+shallow so neither starves the other.
 """
 
 import asyncio
@@ -33,7 +36,7 @@ PULSE_SEC = 4.0
 UNIVERSE_REFRESH_SEC = 300
 CONTRACTS_REFRESH_SEC = 900
 UNIVERSE_MIN_VOL_USD = 1_000_000.0
-TOP_CANDIDATE_COUNT = 30
+TOP_CANDIDATE_COUNT = 40
 RANKER_BATCH = 15
 RANKER_BATCH_SLEEP = 0.10
 
@@ -54,7 +57,7 @@ MAX_CRASH_EVENTS = 30
 PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 16
 
-_EXPECTED_MM_VERSION = "2026.11.15"
+_EXPECTED_MM_VERSION = "2026.11.17"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -206,11 +209,12 @@ _crash_events = []
 
 _diag = {
     "mom_rng": 0, "mom_aw": 0, "mom_ab": 0, "mom_as": 0,
-    "mom_vol": 0, "mom_early": 0,
+    "mom_vol": 0, "mom_early": 0, "mom_notdrop": 0, "mom_nolow": 0,
     "pos_break": 0, "pos_chase": 0,
     "mac_high": 0,
     "book_thin": 0, "book_whale": 0, "book_ratio": 0,
     "spr": 0,
+    "panic_ent": 0, "stale_mv": 0,
     "candle_fail": 0, "hourly_fail": 0, "depth_fail": 0,
     "entered": 0,
 }
@@ -256,7 +260,6 @@ def _load_streak():
         _streak["trades"] = int(d.get("trades", 0))
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         pass
-
     v = _env_int_or_none("STREAK_WINS")
     if v is not None:
         _streak["wins"] = v
@@ -289,11 +292,9 @@ def _record_result(net_pnl, exit_reason):
     elif net_pnl < 0:
         _streak["losses"] += 1
         _streak["wins"] = 0
-
     if not _streak["live_activated"] and _streak["wins"] >= PAPER_WINS_REQUIRED:
         _streak["live_activated"] = True
         log.info("*** PAPER GAUNTLET PASSED — LIVE TRADING UNLOCKED ***")
-
     _save_streak()
     log.info(
         "STREAK | W=%d L=%d live=%s trades=%d | net=%.3f%% | %s",
@@ -353,9 +354,7 @@ async def enforce_one_way(session):
         if current:
             log.info("Current holdMode=%s — switching to one_way_mode.", current)
     else:
-        log.warning("Could not read account settings (%s).",
-                    settings.get("msg"))
-
+        log.warning("Could not read account settings (%s).", settings.get("msg"))
     res = await _request(
         session, "POST", "/api/v3/account/set-hold-mode",
         body={"holdMode": "one_way_mode"},
@@ -363,7 +362,6 @@ async def enforce_one_way(session):
     if res.get("code") == "00000":
         log.info("One-way mode enforced.")
         return
-
     msg = str(res.get("msg") or "")
     lower = msg.lower()
     if "position" in lower or "order" in lower:
@@ -838,6 +836,7 @@ async def close_live_position(session, pos, reason):
 
 
 async def rank_candidates(session):
+    """Interleave deep and shallow movers."""
     global _top_candidates
 
     symbols = list(_universe)
@@ -870,17 +869,27 @@ async def rank_candidates(session):
             continue
 
     scored.sort(key=lambda x: x["pct_15m"])
-    _top_candidates = scored[:TOP_CANDIDATE_COUNT]
+
+    deep = [x for x in scored if x["pct_15m"] < mm.DEEP_MOVER_THRESHOLD]
+    shallow = [x for x in scored if x["pct_15m"] >= mm.DEEP_MOVER_THRESHOLD]
+
+    half = TOP_CANDIDATE_COUNT // 2
+    combined = deep[:half] + shallow[:half]
+    if len(combined) < TOP_CANDIDATE_COUNT:
+        overflow = deep[half:] + shallow[half:]
+        combined.extend(overflow[:TOP_CANDIDATE_COUNT - len(combined)])
+
+    _top_candidates = combined
 
     if _top_candidates:
         log.info(
-            "Ranked top %d (of %d in range): %s",
-            len(_top_candidates), len(scored),
+            "Ranked %d (deep=%d shallow=%d) of %d movers: %s",
+            len(_top_candidates), len(deep), len(shallow), len(scored),
             " ".join(f"{c['symbol']}={c['pct_15m']:.2f}%"
-                     for c in _top_candidates),
+                     for c in _top_candidates[:10]),
         )
     else:
-        log.info("Ranked: 0 in range [%.1f%%, %.1f%%] of %d scanned",
+        log.info("Ranked: 0 movers in range [%.1f%%, %.1f%%] of %d scanned",
                  mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP, len(results))
 
 
@@ -897,6 +906,19 @@ def _bump_momentum(reason):
         _diag["mom_vol"] += 1
     elif reason == "EARLY":
         _diag["mom_early"] += 1
+    elif reason == "NOT_DROPPING":
+        _diag["mom_notdrop"] += 1
+    elif reason == "NO_FRESH_LOW":
+        _diag["mom_nolow"] += 1
+
+
+def _bump_book(reason, panic_mode=False):
+    if reason == "THIN_BID":
+        _diag["book_thin"] += 1
+    elif reason == "WHALE_BID":
+        _diag["book_whale"] += 1
+    else:
+        _diag["book_ratio"] += 1
 
 
 async def scan_candidates(session):
@@ -923,93 +945,161 @@ async def scan_candidates(session):
         except (IndexError, TypeError, ValueError):
             continue
 
-        mom = mm.evaluate_momentum(candles, pct_15m)
-        if not mom["is_valid"]:
-            _bump_momentum(mom["reason"])
-            continue
+        # ============================================================
+        # ROUTING
+        # ============================================================
+        if pct_15m < mm.DEEP_MOVER_THRESHOLD:
+            # PANIC PATH
+            hourly = await fetch_hourly_candles(session, symbol)
+            if not hourly:
+                _diag["hourly_fail"] += 1
+                continue
 
-        pos = mm.evaluate_position(mom["live_close"], mom["low_10m"])
-        if not pos["is_valid"]:
-            if pos["reason"] == "CHASE":
-                _diag["pos_chase"] += 1
-            else:
-                _diag["pos_break"] += 1
-            continue
+            panic = mm.evaluate_panic_context(hourly, p_now)
+            if not panic["is_fresh"]:
+                _diag["stale_mv"] += 1
+                continue
 
-        hourly = await fetch_hourly_candles(session, symbol)
-        if not hourly:
-            _diag["hourly_fail"] += 1
-            continue
-        mac = mm.evaluate_macro(hourly, mom["live_close"])
-        if not mac["is_aligned"]:
-            _diag["mac_high"] += 1
+            mom = mm.evaluate_momentum_panic(candles, pct_15m)
+            if not mom["is_valid"]:
+                _bump_momentum(mom["reason"])
+                continue
+
+            depth = await fetch_depth(session, symbol)
+            if depth is None:
+                _diag["depth_fail"] += 1
+                continue
+            bids, asks, mid = depth
+
+            book = mm.evaluate_book(bids, asks, mid, panic_mode=True)
+            if not book["is_valid"]:
+                _bump_book(book["reason"], panic_mode=True)
+                log.info(
+                    "REJECT book | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f "
+                    "| pct15=%.2f%% [PANIC]",
+                    symbol, book["reason"], book["depth_ratio"],
+                    book["d_bid"], book["d_ask"], pct_15m,
+                )
+                continue
+
+            spread = mm.evaluate_spread(bids, asks)
+            if not spread["is_ok"]:
+                _diag["spr"] += 1
+                continue
+
             log.info(
-                "REJECT macro | %s | above_1h=%.2f%% above_4h=%.2f%% "
-                "| pct15=%.2f%%",
-                symbol, mac["pct_above_1h"], mac["pct_above_4h"], pct_15m,
+                "PANIC SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
+                "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f | "
+                "peak_drop=%.1f%% age=%.2fh",
+                symbol, pct_15m, mom["drop_3m"], mom["drop_6m"],
+                mom["vol_ratio"], book["depth_ratio"], book["d_bid"],
+                p_now, panic["drop_pct"], panic["hours_since_peak"],
             )
-            continue
 
-        depth = await fetch_depth(session, symbol)
-        if depth is None:
-            _diag["depth_fail"] += 1
-            continue
-        bids, asks, mid = depth
+            # Panic invalidation: 0.8% above entry (wider than normal 0.2%)
+            panic_breakdown = p_now * 1.008
+            entered = await enter_short(
+                session, symbol, p_now, panic_breakdown, pct_15m,
+                is_panic=True,
+            )
+            if entered:
+                return
 
-        book = mm.evaluate_book(bids, asks, mid)
-        if not book["is_valid"]:
-            reason = book["reason"]
-            if reason == "THIN_BID":
-                _diag["book_thin"] += 1
-            elif reason == "WHALE_BID":
-                _diag["book_whale"] += 1
-            else:
-                _diag["book_ratio"] += 1
+        else:
+            # NORMAL PATH
+            mom = mm.evaluate_momentum(candles, pct_15m)
+            if not mom["is_valid"]:
+                _bump_momentum(mom["reason"])
+                continue
+
+            pos = mm.evaluate_position(mom["live_close"], mom["low_10m"])
+            if not pos["is_valid"]:
+                if pos["reason"] == "CHASE":
+                    _diag["pos_chase"] += 1
+                else:
+                    _diag["pos_break"] += 1
+                continue
+
+            hourly = await fetch_hourly_candles(session, symbol)
+            if not hourly:
+                _diag["hourly_fail"] += 1
+                continue
+
+            mac = mm.evaluate_macro(hourly, mom["live_close"])
+            if not mac["is_aligned"]:
+                _diag["mac_high"] += 1
+                log.info(
+                    "REJECT macro | %s | above_1h=%.2f%% above_4h=%.2f%% "
+                    "| pct15=%.2f%%",
+                    symbol, mac["pct_above_1h"], mac["pct_above_4h"], pct_15m,
+                )
+                continue
+
+            panic = mm.evaluate_panic_context(hourly, mom["live_close"])
+
+            depth = await fetch_depth(session, symbol)
+            if depth is None:
+                _diag["depth_fail"] += 1
+                continue
+            bids, asks, mid = depth
+
+            book = mm.evaluate_book(bids, asks, mid, panic_mode=panic["is_fresh"])
+            if not book["is_valid"]:
+                _bump_book(book["reason"], panic_mode=panic["is_fresh"])
+                log.info(
+                    "REJECT book | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f "
+                    "| pct15=%.2f%%%s",
+                    symbol, book["reason"], book["depth_ratio"],
+                    book["d_bid"], book["d_ask"], pct_15m,
+                    " [PANIC-OVR]" if book["panic_override"] else "",
+                )
+                continue
+
+            spread = mm.evaluate_spread(bids, asks)
+            if not spread["is_ok"]:
+                _diag["spr"] += 1
+                continue
+
+            if panic["is_fresh"]:
+                _diag["panic_ent"] += 1
+
             log.info(
-                "REJECT book | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f | "
-                "pct15=%.2f%%",
-                symbol, reason, book["depth_ratio"],
-                book["d_bid"], book["d_ask"], pct_15m,
+                "SWEET SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
+                "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f low10=%.6f "
+                "| macro=%s | panic=%s (%.1f%% / %.2fh)",
+                symbol, pct_15m, mom["drop_3m"], mom["drop_6m"],
+                mom["vol_ratio"], book["depth_ratio"], book["d_bid"],
+                mom["live_close"], mom["low_10m"], mac["which"],
+                "FRESH" if panic["is_fresh"] else ("OLD" if panic["is_panic"] else "NO"),
+                panic["drop_pct"], panic["hours_since_peak"],
             )
-            continue
 
-        spread = mm.evaluate_spread(bids, asks)
-        if not spread["is_ok"]:
-            _diag["spr"] += 1
-            continue
-
-        log.info(
-            "SWEET SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
-            "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f low10=%.6f "
-            "| macro=%s (+%.2f%%/%.2f%%)",
-            symbol, pct_15m, mom["drop_3m"], mom["drop_6m"],
-            mom["vol_ratio"], book["depth_ratio"], book["d_bid"],
-            mom["live_close"], mom["low_10m"],
-            mac["which"], mac["pct_above_1h"], mac["pct_above_4h"],
-        )
-
-        entered = await enter_short(
-            session, symbol, mom["live_close"], mom["low_10m"], pct_15m,
-        )
-        if entered:
-            return
+            entered = await enter_short(
+                session, symbol, mom["live_close"], mom["low_10m"], pct_15m,
+                is_panic=panic["is_fresh"],
+            )
+            if entered:
+                return
 
 
-async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m):
+async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m,
+                      is_panic=False):
     global _active_pos, _paper_pos
+
+    tag = "[PANIC]" if is_panic else ""
 
     if not _streak["live_activated"]:
         _diag["entered"] += 1
         _paper_pos = {
             "symbol": symbol, "direction": "SHORT",
             "entry": entry_price, "breakdown_level": breakdown_level,
-            "pct_15m_at_entry": pct_15m,
+            "pct_15m_at_entry": pct_15m, "is_panic": is_panic,
             "opened_at": time.time(),
             "peak_net": -999.0, "peak_gross": -999.0,
             "paper": True,
         }
-        log.info("PAPER OPEN | %s SHORT @ %.6f | W=%d/%d",
-                 symbol, entry_price, _streak["wins"], PAPER_WINS_REQUIRED)
+        log.info("PAPER OPEN%s | %s SHORT @ %.6f | W=%d/%d",
+                 tag, symbol, entry_price, _streak["wins"], PAPER_WINS_REQUIRED)
         return True
 
     contract = _contracts.get(symbol)
@@ -1037,13 +1127,13 @@ async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m):
     _active_pos = {
         "symbol": symbol, "direction": "SHORT",
         "entry": entry_price, "breakdown_level": breakdown_level,
-        "pct_15m_at_entry": pct_15m,
+        "pct_15m_at_entry": pct_15m, "is_panic": is_panic,
         "opened_at": time.time(),
         "peak_net": -999.0, "peak_gross": -999.0,
         "paper": False, "order_id": oid,
     }
-    log.info("LIVE OPEN | %s SHORT @ %.6f | qty=%s",
-             symbol, entry_price, qty_str)
+    log.info("LIVE OPEN%s | %s SHORT @ %.6f | qty=%s",
+             tag, symbol, entry_price, qty_str)
     return True
 
 
@@ -1087,8 +1177,7 @@ async def manage_live_position(session):
         entry_price=live["entryPrice"] or pos["entry"],
         current_price=current,
         breakdown_level=pos["breakdown_level"],
-        peak_net=pos["peak_net"],
-        peak_gross=pos["peak_gross"],
+        peak_net=pos["peak_net"], peak_gross=pos["peak_gross"],
         elapsed_seconds=elapsed,
     )
     pos["peak_net"] = state["updated_peak_net"]
@@ -1117,8 +1206,7 @@ async def manage_paper_position(session):
     state = mm.evaluate_ratchet(
         entry_price=pos["entry"], current_price=current,
         breakdown_level=pos["breakdown_level"],
-        peak_net=pos["peak_net"],
-        peak_gross=pos["peak_gross"],
+        peak_net=pos["peak_net"], peak_gross=pos["peak_gross"],
         elapsed_seconds=elapsed,
     )
     pos["peak_net"] = state["updated_peak_net"]
@@ -1127,9 +1215,10 @@ async def manage_paper_position(session):
     if not state["should_exit"]:
         return
 
+    tag = "[PANIC]" if pos.get("is_panic") else ""
     log.info(
-        "PAPER EXIT | %s SHORT | %s | gross=%.3f%% net=%.3f%% peak_net=%.3f%%",
-        symbol, state["exit_reason"], state["gross_pnl"],
+        "PAPER EXIT%s | %s SHORT | %s | gross=%.3f%% net=%.3f%% peak_net=%.3f%%",
+        tag, symbol, state["exit_reason"], state["gross_pnl"],
         state["net_pnl"], state["updated_peak_net"],
     )
     _record_result(state["net_pnl"], state["exit_reason"])
@@ -1152,10 +1241,8 @@ async def _build_fingerprint(session, symbol, current_price, high_4h,
         return None
     if close_9m_ago <= 0 or close_3m_ago <= 0 or avg_vol <= 0:
         return None
-
     drop_6m = (close_9m_ago - close_3m_ago) / close_9m_ago * 100.0
     drop_3m = (close_3m_ago - current_price) / close_3m_ago * 100.0
-
     now_ms = int(time.time() * 1000)
     elapsed_s = max(1.0, (now_ms - live_ts) / 1000.0)
     multiplier = min(60.0 / elapsed_s, 3.0)
@@ -1191,19 +1278,15 @@ async def _build_fingerprint(session, symbol, current_price, high_4h,
 
 async def _process_observer_symbol(session, symbol, hourly):
     global _observer_state
-
     metrics = mm.compute_crash_metrics(hourly)
     current_price = metrics["current_price"]
     high_4h = metrics["high_4h"]
     high_4h_ts_ms = metrics["high_4h_ts_ms"]
     high_1h = metrics["high_1h"]
-
     if current_price <= 0 or high_4h <= 0 or high_4h_ts_ms <= 0:
         return
-
     now_ms = int(time.time() * 1000)
     prev = _observer_state.get(symbol)
-
     if prev is None:
         state = _ObsState(
             high_4h=high_4h, high_4h_ts=high_4h_ts_ms, high_1h=high_1h,
@@ -1211,28 +1294,22 @@ async def _process_observer_symbol(session, symbol, hourly):
         )
     else:
         state = prev._replace(
-            high_4h=high_4h,
-            high_4h_ts=high_4h_ts_ms,
-            high_1h=high_1h,
+            high_4h=high_4h, high_4h_ts=high_4h_ts_ms, high_1h=high_1h,
         )
     _observer_state[symbol] = state
     _obs_diag["observed"] += 1
-
     drop_pct = mm.drop_pct_from_high(high_4h, current_price)
     if drop_pct < OBSERVER_CRASH_THRESHOLD_PCT:
         return
-
     if now_ms - state.last_crash_ts < OBSERVER_COOLDOWN_MS:
         if drop_pct < state.last_crash_drop + OBSERVER_ESCALATION_PCT:
             return
-
     fp = await _build_fingerprint(
         session, symbol, current_price, high_4h, high_4h_ts_ms,
     )
     if fp is None:
         _obs_diag["capture_fail"] += 1
         return
-
     _observer_state[symbol] = state._replace(
         last_crash_ts=now_ms, last_crash_drop=drop_pct,
     )
@@ -1244,7 +1321,6 @@ async def run_observer_pass(session):
     symbols = list(_universe)
     if not symbols:
         return
-
     for i in range(0, len(symbols), OBSERVER_BATCH):
         chunk = symbols[i:i + OBSERVER_BATCH]
         tasks = [fetch_hourly_candles(session, s) for s in chunk]
@@ -1298,9 +1374,10 @@ def _heartbeat():
     _last_heartbeat = time.time()
     log.info(
         "HEARTBEAT | uni=%d ranked=%d active=%s paper=%s obs=%d crs=%d | "
-        "funnel5: M[rng=%d aw=%d ab=%d as=%d vol=%d er=%d] "
+        "funnel: M[rng=%d aw=%d ab=%d as=%d vol=%d er=%d nd=%d nl=%d] "
         "P[brk=%d chs=%d] Mac=%d "
         "B[thin=%d whl=%d rat=%d] Spr=%d | "
+        "panic_ent=%d stale_mv=%d | "
         "cf=%d hf=%d df=%d ent=%d | "
         "streak W=%d L=%d live=%s tr=%d",
         len(_universe), len(_top_candidates),
@@ -1308,9 +1385,11 @@ def _heartbeat():
         _obs_diag["observed"], _obs_diag["crashes"],
         _diag["mom_rng"], _diag["mom_aw"], _diag["mom_ab"],
         _diag["mom_as"], _diag["mom_vol"], _diag["mom_early"],
+        _diag["mom_notdrop"], _diag["mom_nolow"],
         _diag["pos_break"], _diag["pos_chase"], _diag["mac_high"],
         _diag["book_thin"], _diag["book_whale"], _diag["book_ratio"],
         _diag["spr"],
+        _diag["panic_ent"], _diag["stale_mv"],
         _diag["candle_fail"], _diag["hourly_fail"], _diag["depth_fail"],
         _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
@@ -1333,11 +1412,10 @@ async def main():
         )
         raise SystemExit(1)
 
-    for _name in ("PCT_15M_MIN_DROP", "PCT_15M_MAX_DROP",
-                  "DROP3_MIN_PCT", "DROP6_MIN_PCT",
-                  "VOLUME_EXPANSION_MIN", "MAX_BID_DEPTH_USD",
-                  "FRAGILITY_RATIO_MIN", "MACRO_1H_MAX_PCT",
-                  "MACRO_4H_MAX_PCT", "MIN_SIDE_DEPTH_USD"):
+    for _name in ("DEEP_MOVER_THRESHOLD", "PANIC_DROP_MIN_PCT",
+                  "PANIC_FRESH_HOURS", "PANIC_DROP3_MIN",
+                  "PANIC_VOL_MIN", "PANIC_SIDE_DEPTH_MIN",
+                  "PANIC_WHALE_BID_MAX", "FRAGILITY_RATIO_MIN"):
         if not hasattr(mm, _name):
             log.critical("market_math.py missing %s — stale.", _name)
             raise SystemExit(1)
@@ -1347,18 +1425,20 @@ async def main():
 
     log.info(
         "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "5-gate | MOM:pct15[%.1f,%.1f] d3>=%.2f%% d6>=%.2f%% vol>=%.1fx | "
-        "POS:brk<=%.2f%% chs<=%.2f%% | "
-        "MAC<=%.1f%%(1h) or <=%.1f%%(4h) | "
-        "BOOK:ratio>=%.2f $%.0f-$%.0f | SPR<=%.2f%% | top=%d",
+        "DUAL-PATH | "
+        "NORMAL: pct15[-30,-1] anti-chase<=%.2f%% macro<=%.1f%%/%.1f%% "
+        "book>=%.2f | "
+        "PANIC(pct15<%.1f%%): fresh<=%.1fh drop3>=%.2f%% vol>=%.1fx "
+        "book=[$%.0f-$%.0f] | "
+        "top=%d",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
-        mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP,
-        mm.DROP3_MIN_PCT, mm.DROP6_MIN_PCT, mm.VOLUME_EXPANSION_MIN,
-        mm.BREAKDOWN_BUFFER_PCT, mm.ANTI_CHASE_MAX_PCT,
-        mm.MACRO_1H_MAX_PCT, mm.MACRO_4H_MAX_PCT,
-        mm.FRAGILITY_RATIO_MIN, mm.MIN_SIDE_DEPTH_USD,
-        mm.MAX_BID_DEPTH_USD, mm.MAX_SPREAD_PCT, TOP_CANDIDATE_COUNT,
+        mm.ANTI_CHASE_MAX_PCT, mm.MACRO_1H_MAX_PCT, mm.MACRO_4H_MAX_PCT,
+        mm.FRAGILITY_RATIO_MIN,
+        mm.DEEP_MOVER_THRESHOLD, mm.PANIC_FRESH_HOURS,
+        mm.PANIC_DROP3_MIN, mm.PANIC_VOL_MIN,
+        mm.PANIC_SIDE_DEPTH_MIN, mm.PANIC_WHALE_BID_MAX,
+        TOP_CANDIDATE_COUNT,
     )
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
