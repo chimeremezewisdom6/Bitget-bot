@@ -15,6 +15,8 @@ Fixes applied in this revision:
   8. Static stock-token filtering (removed unreliable isRwa detection)
   9. Position extraction handles both list and dict-wrapped response shapes
  10. UTA V3 position mode: /api/v3/account/set-hold-mode + settings pre-check
+ 11. Volume normalized to elapsed candle time (partial-candle fix)
+ 12. Funnel counters in heartbeat — see exactly where signals die
 """
 
 import asyncio
@@ -55,7 +57,7 @@ PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 31
 
 # Must match market_math.__version__ exactly; bump both together.
-_EXPECTED_MM_VERSION = "2026.11.06"
+_EXPECTED_MM_VERSION = "2026.11.07"
 
 # Static fallback; extend manually if Bitget adds new tokenized equities.
 _STOCK_TOKENS = {
@@ -212,6 +214,17 @@ _streak = {
     "trades": 0,
 }
 
+# Funnel counters, reset every heartbeat
+_diag = {
+    "vol_rej": 0,
+    "disp_rej": 0,
+    "chase_rej": 0,
+    "too_early": 0,
+    "spread_rej": 0,
+    "frag_rej": 0,
+    "entered": 0,
+}
+
 
 # =============================================================================
 # DEFENSIVE API HELPERS
@@ -299,7 +312,6 @@ async def enforce_one_way(session):
     Step 3 — otherwise POST /api/v3/account/set-hold-mode.
     Any failure is logged (INFO/WARNING) and never fatal.
     """
-    # --- Step 1: inspect current hold mode ---------------------------------
     settings = await _request(session, "GET", "/api/v3/account/settings")
     if settings.get("code") == "00000":
         data = settings.get("data") or {}
@@ -310,13 +322,11 @@ async def enforce_one_way(session):
         if current:
             log.info("Current holdMode=%s — switching to one_way_mode.", current)
     else:
-        # Settings read failed; proceed to POST as a best-effort attempt.
         log.warning(
             "Could not read account settings (%s) — attempting hold-mode set anyway.",
             settings.get("msg"),
         )
 
-    # --- Step 2: set one-way mode -----------------------------------------
     res = await _request(
         session, "POST", "/api/v3/account/set-hold-mode",
         body={"holdMode": "one_way_mode"},
@@ -326,15 +336,11 @@ async def enforce_one_way(session):
         log.info("One-way mode enforced (set-hold-mode → one_way_mode).")
         return
 
-    # Non-fatal outcomes — log clearly but do not crash the bot.
     msg = str(res.get("msg") or "")
     code = str(res.get("code") or "")
     lower = msg.lower()
-    if (
-        "position" in lower
-        or "order" in lower
-        or "hold" in lower and "mode" in lower
-    ):
+    if ("position" in lower or "order" in lower
+            or ("hold" in lower and "mode" in lower)):
         log.info(
             "Could not switch to one-way mode (positions/orders may be open): "
             "code=%s msg=%s — continuing without change.",
@@ -366,8 +372,6 @@ async def refresh_contracts(session):
         if not sym or not sym.endswith("USDT"):
             continue
         try:
-            # Static list only. Bitget's isRwa/isStock fields do not reliably
-            # mean "tokenized equity" — they fire on hundreds of crypto pairs.
             is_stock = sym in _STOCK_TOKENS
             new_cache[sym] = {
                 "volumePlace": int(float(c.get("volumePlace") or 0)),
@@ -746,7 +750,7 @@ async def adopt_orphan_positions(session):
             "ADOPTED orphan | %s %s | entry=%.6f | size=%.8f",
             sym, direction, entry, abs(total_raw),
         )
-        return  # one position at a time
+        return
 
 
 # =============================================================================
@@ -854,6 +858,7 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
     # 1) Spread
     spread = mm.evaluate_spread(bids, asks)
     if not spread["is_ok"]:
+        _diag["spread_rej"] += 1
         log.debug("REJECT spread | %s %s | %.3f%%",
                   symbol, direction, spread["spread_pct"])
         return False
@@ -861,6 +866,7 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
     # 2) Fragility
     frag = mm.evaluate_book_fragility(bids, asks, mid, direction)
     if not frag["is_fragile"]:
+        _diag["frag_rej"] += 1
         if _last_logged_rejection.get(symbol) != candle_ts:
             log.info(
                 "REJECT fragility | %s %s | ratio=%.2f | "
@@ -880,6 +886,7 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
 
     # 3) Paper
     if not _streak["live_activated"]:
+        _diag["entered"] += 1
         _paper_pos = {
             "symbol": symbol, "direction": direction, "entry": live_close,
             "box_high": box_high, "box_low": box_low,
@@ -914,6 +921,7 @@ async def try_enter(session, symbol, direction, live_candle, box_high, box_low):
     if not oid:
         return False
 
+    _diag["entered"] += 1
     _active_pos = {
         "symbol": symbol, "direction": direction, "entry": live_close,
         "box_high": box_high, "box_low": box_low,
@@ -966,6 +974,7 @@ async def scan_universe_batch(session):
             live, box["box_high"], box["box_low"], box["base_volume"],
         )
         if not trig["is_ignition"]:
+            _bump_diag(trig.get("reason", "INVALID"))
             _add_to_hot_list(symbol, box)
             continue
 
@@ -1019,6 +1028,7 @@ async def scan_hot_list(session):
             live, box["box_high"], box["box_low"], box["base_volume"],
         )
         if not trig["is_ignition"]:
+            _bump_diag(trig.get("reason", "INVALID"))
             continue
         entered = await try_enter(session, symbol, trig["direction"], live,
                                   box["box_high"], box["box_low"])
@@ -1137,8 +1147,19 @@ async def universe_refresh_loop(session):
 
 
 # =============================================================================
-# HEARTBEAT
+# HEARTBEAT + FUNNEL
 # =============================================================================
+def _bump_diag(reason):
+    if reason == "VOLUME":
+        _diag["vol_rej"] += 1
+    elif reason == "DISPLACEMENT":
+        _diag["disp_rej"] += 1
+    elif reason == "CHASE":
+        _diag["chase_rej"] += 1
+    elif reason == "TOO_EARLY":
+        _diag["too_early"] += 1
+
+
 def _heartbeat():
     global _last_heartbeat
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
@@ -1146,12 +1167,18 @@ def _heartbeat():
     _last_heartbeat = time.time()
     log.info(
         "HEARTBEAT | universe=%d hot=%d active=%s paper=%s | "
-        "streak W=%d L=%d live=%s | trades=%d",
+        "funnel: vol=%d disp=%d chase=%d early=%d spread=%d frag=%d enter=%d | "
+        "streak W=%d L=%d live=%s trades=%d",
         len(_universe), len(_hot_list),
         _active_pos is not None, _paper_pos is not None,
+        _diag["vol_rej"], _diag["disp_rej"], _diag["chase_rej"],
+        _diag["too_early"], _diag["spread_rej"], _diag["frag_rej"],
+        _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"],
     )
+    for k in _diag:
+        _diag[k] = 0
 
 
 # =============================================================================
@@ -1160,7 +1187,6 @@ def _heartbeat():
 async def main():
     _start_keepalive()
 
-    # Fail fast on stale market_math before touching the network.
     actual_ver = getattr(mm, "__version__", "UNKNOWN")
     if actual_ver != _EXPECTED_MM_VERSION:
         log.critical(
