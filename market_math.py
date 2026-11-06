@@ -12,20 +12,21 @@ Bump __version__ on every change. bot.py refuses to start on mismatch.
 
 import time
 
-__version__ = "2026.11.09"
+__version__ = "2026.11.10"
 
 # ---- Fees --------------------------------------------------------------
 FEE_ROUND_TRIP_PCT = 0.22
 
 # ---- 15-minute relative weakness window (SHORT sweet spot range) ------
-PCT_15M_MIN_DROP = -5.5   # most extreme drop we still accept
-PCT_15M_MAX_DROP = -1.8   # must be at least this weak
+PCT_15M_MIN_DROP = -7.0   # was -5.5 — allow deeper dumps
+PCT_15M_MAX_DROP = -1.5   # was -1.8 — allow shallower dumps
 
 # ---- Sweet spot filters ------------------------------------------------
-ACCELERATION_MIN_RATIO = 1.0   # rate_3m / rate_6m must exceed this
-VOLUME_EXPANSION_MIN = 2.5     # effective live vol vs avg_15m vol
-BREAKDOWN_BUFFER_PCT = 0.10    # must break below low_10m by at least this
-ANTI_CHASE_MAX_PCT = 0.60      # must not be further than this below low_10m
+ACCELERATION_MIN_RATIO = 1.0   # recent pace vs prior-6m pace
+ACCEL_DROP_3M_MIN = 0.25       # NEW: recent 3m drop must exceed this
+VOLUME_EXPANSION_MIN = 2.0     # was 2.5
+BREAKDOWN_BUFFER_PCT = 0.05    # was 0.10
+ANTI_CHASE_MAX_PCT = 0.60      # unchanged (user spec)
 
 # Volume normalization (partial candle handling)
 _VOL_MAX_EXTRAPOLATION = 3.0
@@ -33,8 +34,8 @@ _MIN_ELAPSED_SEC = 20.0
 
 # ---- Order book fragility (SHORT view) --------------------------------
 DEPTH_BAND_PCT = 0.01
-MIN_SIDE_DEPTH_USD = 8000.0
-FRAGILITY_RATIO_MIN = 1.60
+MIN_SIDE_DEPTH_USD = 5000.0    # was 8000
+FRAGILITY_RATIO_MIN = 1.40     # was 1.60
 
 # ---- Spread ------------------------------------------------------------
 MAX_SPREAD_PCT = 0.15
@@ -61,8 +62,9 @@ def _f(x, default=0.0):
 def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     """
     SHORT-side sweet spot validator.
-    Returns dict with is_valid + reason (RANGE / ACCEL / VOLUME /
-    BREAKDOWN / CHASE / EARLY / OK).
+    Returns dict with is_valid + reason:
+      RANGE / ACCEL_WEAK / ACCEL_SLOW / VOLUME /
+      BREAKDOWN / CHASE / EARLY / OK
     """
     result = {
         "is_valid": False,
@@ -76,7 +78,7 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     }
     if not candles or len(candles) < 16:
         return result
-    candles = candles[-16:]  # defensive: exactly the last 16
+    candles = candles[-16:]
 
     try:
         live_close = float(candles[-1][4])
@@ -89,12 +91,12 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     if live_close <= 0:
         return result
 
-    # ---- 1) 15m drop must be inside the sweet spot window -------------
+    # ---- 1) 15m drop inside sweet spot window -------------------------
     if not (PCT_15M_MIN_DROP <= pct_15m <= PCT_15M_MAX_DROP):
         result["reason"] = "RANGE"
         return result
 
-    # ---- 2) Acceleration: rate_3m > rate_6m, both drops positive ------
+    # ---- 2) Acceleration (fresh breakdown after possible bounce) ------
     try:
         close_9m_ago = float(candles[-10][4])
         close_3m_ago = float(candles[-4][4])
@@ -103,22 +105,27 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     if close_9m_ago <= 0 or close_3m_ago <= 0:
         return result
 
+    # Positive = drop
     drop_6m = (close_9m_ago - close_3m_ago) / close_9m_ago * 100.0
     drop_3m = (close_3m_ago - live_close) / close_3m_ago * 100.0
     result["drop_6m"] = drop_6m
     result["drop_3m"] = drop_3m
 
-    if drop_6m <= 0.0 or drop_3m <= 0.0:
-        result["reason"] = "ACCEL"
+    # Recent 3m must be a real drop, not a dead-cat drift
+    if drop_3m < ACCEL_DROP_3M_MIN:
+        result["reason"] = "ACCEL_WEAK"
         return result
 
+    # Recent per-minute pace must be >= prior-6m per-minute pace * ratio
+    # BUT: if prior 6m was a bounce (drop_6m < 0), any positive recent drop
+    # passes — that is the classic "failed rally then breakdown" pattern
     rate_3m = drop_3m / 3.0
     rate_6m = drop_6m / 6.0
-    if rate_3m <= rate_6m * ACCELERATION_MIN_RATIO:
-        result["reason"] = "ACCEL"
+    if rate_6m > 0.0 and rate_3m < rate_6m * ACCELERATION_MIN_RATIO:
+        result["reason"] = "ACCEL_SLOW"
         return result
 
-    # ---- 3) Volume expansion vs 15m average ---------------------------
+    # ---- 3) Volume expansion vs 15m average --------------------------
     try:
         avg_vol_15m = sum(float(c[5]) for c in candles[-16:-1]) / 15.0
     except (IndexError, TypeError, ValueError):
@@ -143,7 +150,7 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
         result["reason"] = "VOLUME"
         return result
 
-    # ---- 4) Breakdown of the 10-minute low ----------------------------
+    # ---- 4) Breakdown of the 10-minute low ---------------------------
     try:
         lows = [float(c[3]) for c in candles[-11:-1]]
     except (IndexError, TypeError, ValueError):
@@ -155,12 +162,10 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     if low_10m <= 0:
         return result
 
-    # Must be at least BREAKDOWN_BUFFER_PCT below low_10m
     if live_close >= low_10m * (1.0 - BREAKDOWN_BUFFER_PCT / 100.0):
         result["reason"] = "BREAKDOWN"
         return result
 
-    # Anti-chase: must not be more than ANTI_CHASE_MAX_PCT below low_10m
     if live_close < low_10m * (1.0 - ANTI_CHASE_MAX_PCT / 100.0):
         result["reason"] = "CHASE"
         return result
@@ -195,12 +200,6 @@ def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
 def evaluate_book_fragility(bids, asks, mid_price,
                             band_pct=DEPTH_BAND_PCT,
                             min_side_depth=MIN_SIDE_DEPTH_USD):
-    """
-    SHORT-side fragility:
-      - require d_bid >= min_side_depth (enough liquidity on our close side)
-      - require d_ask / d_bid >= FRAGILITY_RATIO_MIN (ask wall dominates,
-        buyers absent -> continuation down expected)
-    """
     result = {"is_fragile": False, "depth_ratio": 0.0,
               "d_bid": 0.0, "d_ask": 0.0}
     if mid_price <= 0 or not bids or not asks:
@@ -258,13 +257,6 @@ def calculate_order_qty(balance, price, leverage, volume_place,
 # =========================================================================
 def evaluate_ratchet(entry_price, current_price, breakdown_level,
                      peak_net, peak_gross, elapsed_seconds):
-    """
-    SHORT ratchet. breakdown_level = the 10m-low that was broken at entry;
-    if price climbs back above (1 + INVALIDATION_BUFFER_PCT/100) * that
-    level, the breakdown is invalidated and we exit.
-
-    peak_gross tracks gross (pre-fee) high-water — used only by stagnation.
-    """
     result = {
         "should_exit": False,
         "exit_reason": "HOLD",
@@ -276,7 +268,6 @@ def evaluate_ratchet(entry_price, current_price, breakdown_level,
     if entry_price <= 0 or current_price <= 0:
         return result
 
-    # SHORT: profit when current < entry
     gross = (entry_price - current_price) / entry_price * 100.0
     net = gross - FEE_ROUND_TRIP_PCT
     new_peak_net = peak_net if peak_net > net else net
@@ -287,20 +278,17 @@ def evaluate_ratchet(entry_price, current_price, breakdown_level,
     result["updated_peak_net"] = new_peak_net
     result["updated_peak_gross"] = new_peak_gross
 
-    # Invalidation: price climbed back above breakdown level by +0.35%
     if breakdown_level > 0:
         if current_price > breakdown_level * (1.0 + INVALIDATION_BUFFER_PCT / 100.0):
             result["should_exit"] = True
             result["exit_reason"] = "INVALIDATION_STOP"
             return result
 
-    # Breakeven shield
     if new_peak_net >= BREAKEVEN_TRIGGER_PCT and net <= 0.0:
         result["should_exit"] = True
         result["exit_reason"] = "BREAKEVEN_SHIELD"
         return result
 
-    # Ratchet
     if new_peak_net >= RATCHET_TRIGGER_PCT:
         floor = RATCHET_KEEP_RATIO * new_peak_net
         if net <= floor:
@@ -308,7 +296,6 @@ def evaluate_ratchet(entry_price, current_price, breakdown_level,
             result["exit_reason"] = "RATCHET_BANK"
             return result
 
-    # Stagnation cut
     if (elapsed_seconds >= STAGNATION_WINDOW_SEC
             and new_peak_gross < STAGNATION_GROSS_TARGET
             and gross < 0.0):
