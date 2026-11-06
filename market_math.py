@@ -5,15 +5,15 @@ Cross-Sectional Relative Weakness & Accelerated Breakdown Engine.
 
 Bump __version__ on every change. bot.py refuses to start on mismatch.
 
-v2026.11.13 upgrades:
-  - ACCEL_DROP_3M_MIN raised 0.25% -> 1.50% (from 12-crash fingerprint study)
-  - New MACRO_ALIGN_MAX_PCT = 1.5 — reject SHORTs inside relief bounces
-  - compute_crash_metrics now returns actual high timestamp (fixes "in 0m")
+v2026.11.14 (no functional change vs 11.13; version sync for cache bust):
+  - ACCEL_DROP_3M_MIN = 1.50% (from 12-crash fingerprint study)
+  - MACRO_ALIGN_MAX_PCT = 1.5% — reject SHORTs inside relief bounces
+  - compute_crash_metrics returns actual high timestamp (fixes "in 0m")
 """
 
 import time
 
-__version__ = "2026.11.13"
+__version__ = "2026.11.14"
 
 FEE_ROUND_TRIP_PCT = 0.22
 
@@ -21,13 +21,13 @@ PCT_15M_MIN_DROP = -7.0
 PCT_15M_MAX_DROP = -1.5
 
 DROP6_MIN_PCT = 0.15
-ACCEL_DROP_3M_MIN = 1.50            # was 0.25 — matches real collapses
+ACCEL_DROP_3M_MIN = 1.50
 ACCELERATION_MIN_RATIO = 1.0
 VOLUME_EXPANSION_MIN = 3.0
 BREAKDOWN_BUFFER_PCT = 0.05
 ANTI_CHASE_MAX_PCT = 0.60
 
-MACRO_ALIGN_MAX_PCT = 1.5           # NEW — price must be <= low_4h * 1.015
+MACRO_ALIGN_MAX_PCT = 1.5
 
 _VOL_MAX_EXTRAPOLATION = 3.0
 _MIN_ELAPSED_SEC = 20.0
@@ -93,7 +93,6 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     result["drop_6m"] = drop_6m
     result["drop_3m"] = drop_3m
 
-    # Raised gate: real collapses show drop3 >= 1.5% at ignition
     if drop_3m < ACCEL_DROP_3M_MIN:
         result["reason"] = "ACCEL_WEAK"
         return result
@@ -157,12 +156,6 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
 
 def evaluate_macro_alignment(hourly_candles, current_price,
                              max_pct_above_low=MACRO_ALIGN_MAX_PCT):
-    """
-    Reject SHORTs inside a relief bounce.
-
-    Reference low = min(low_1h, low_4h) = low_4h (wider window dominates).
-    Reject when current_price is more than max_pct_above_low above it.
-    """
     result = {
         "is_aligned": False, "reason": "INVALID",
         "low_1h": 0.0, "low_4h": 0.0, "ref_low": 0.0,
@@ -325,10 +318,6 @@ def evaluate_ratchet(entry_price, current_price, breakdown_level,
 
 
 def compute_crash_metrics(hourly_candles):
-    """
-    FIX: also returns the actual timestamp of the 4h-high candle, so the
-    observer reports real elapsed minutes since the peak — not "0m".
-    """
     out = {
         "high_1h": 0.0, "high_4h": 0.0, "low_4h": 0.0,
         "current_price": 0.0, "high_4h_ts_ms": 0,
