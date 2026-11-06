@@ -4,29 +4,33 @@ market_math.py
 Cross-Sectional Relative Weakness & Accelerated Breakdown Engine.
 Pure math engine. Zero network I/O. Standard library only.
 
-Candle format (each candle): [ts, open, high, low, close, baseVol]
-Callers pass exactly 16 candles; last one is the live/partial candle.
-
 Bump __version__ on every change. bot.py refuses to start on mismatch.
+
+Tactical upgrades (from AKE +1.63% win vs JCT -0.86% loss):
+  1. Strict monotonicity: drop_6m > 0.15% (rejects JCT-style bounces)
+  2. Volume expansion: >= 3.0x (was 2.0x)
+  3. Fragility: ratio >= 1.80 AND d_bid <= $30,000 (whale-wall shield)
+  4. Invalidation stop: +0.20% above breakdown (was +0.35%)
 """
 
 import time
 
-__version__ = "2026.11.10"
+__version__ = "2026.11.11"
 
 # ---- Fees --------------------------------------------------------------
 FEE_ROUND_TRIP_PCT = 0.22
 
-# ---- 15-minute relative weakness window (SHORT sweet spot range) ------
-PCT_15M_MIN_DROP = -7.0   # was -5.5 — allow deeper dumps
-PCT_15M_MAX_DROP = -1.5   # was -1.8 — allow shallower dumps
+# ---- 15-minute sweet spot window --------------------------------------
+PCT_15M_MIN_DROP = -7.0
+PCT_15M_MAX_DROP = -1.5
 
-# ---- Sweet spot filters ------------------------------------------------
-ACCELERATION_MIN_RATIO = 1.0   # recent pace vs prior-6m pace
-ACCEL_DROP_3M_MIN = 0.25       # NEW: recent 3m drop must exceed this
-VOLUME_EXPANSION_MIN = 2.0     # was 2.5
-BREAKDOWN_BUFFER_PCT = 0.05    # was 0.10
-ANTI_CHASE_MAX_PCT = 0.60      # unchanged (user spec)
+# ---- Tactical filters (updated from real logs) ------------------------
+DROP6_MIN_PCT = 0.15              # NEW: clean waterfall required
+ACCEL_DROP_3M_MIN = 0.25          # recent 3m must be a real drop
+ACCELERATION_MIN_RATIO = 1.0      # recent pace >= prior-6m pace
+VOLUME_EXPANSION_MIN = 3.0        # was 2.0 — AKE had 5.16x, JCT only 2.38x
+BREAKDOWN_BUFFER_PCT = 0.05
+ANTI_CHASE_MAX_PCT = 0.60
 
 # Volume normalization (partial candle handling)
 _VOL_MAX_EXTRAPOLATION = 3.0
@@ -34,8 +38,9 @@ _MIN_ELAPSED_SEC = 20.0
 
 # ---- Order book fragility (SHORT view) --------------------------------
 DEPTH_BAND_PCT = 0.01
-MIN_SIDE_DEPTH_USD = 5000.0    # was 8000
-FRAGILITY_RATIO_MIN = 1.40     # was 1.60
+MIN_SIDE_DEPTH_USD = 5000.0       # thin-side floor
+MAX_BID_DEPTH_USD = 30000.0       # NEW: whale absorption shield (JCT had $71,786)
+FRAGILITY_RATIO_MIN = 1.80        # was 1.40 — AKE had 2.06, JCT 1.53
 
 # ---- Spread ------------------------------------------------------------
 MAX_SPREAD_PCT = 0.15
@@ -44,7 +49,7 @@ MAX_SPREAD_PCT = 0.15
 BREAKEVEN_TRIGGER_PCT = 0.50
 RATCHET_TRIGGER_PCT = 1.20
 RATCHET_KEEP_RATIO = 0.60
-INVALIDATION_BUFFER_PCT = 0.35
+INVALIDATION_BUFFER_PCT = 0.20    # was 0.35 — tighter micro-scratch
 STAGNATION_WINDOW_SEC = 180.0
 STAGNATION_GROSS_TARGET = 0.25
 
@@ -57,24 +62,19 @@ def _f(x, default=0.0):
 
 
 # =========================================================================
-# SWEET SPOT
+# SWEET SPOT (SHORT)
 # =========================================================================
 def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     """
-    SHORT-side sweet spot validator.
-    Returns dict with is_valid + reason:
-      RANGE / ACCEL_WEAK / ACCEL_SLOW / VOLUME /
+    SHORT-side sweet spot validator. Returns:
+      RANGE / ACCEL_WEAK / ACCEL_BOUNCE / ACCEL_SLOW / VOLUME /
       BREAKDOWN / CHASE / EARLY / OK
     """
     result = {
-        "is_valid": False,
-        "reason": "INVALID",
+        "is_valid": False, "reason": "INVALID",
         "pct_15m": pct_15m,
-        "drop_3m": 0.0,
-        "drop_6m": 0.0,
-        "vol_ratio": 0.0,
-        "low_10m": 0.0,
-        "live_close": 0.0,
+        "drop_3m": 0.0, "drop_6m": 0.0, "vol_ratio": 0.0,
+        "low_10m": 0.0, "live_close": 0.0,
     }
     if not candles or len(candles) < 16:
         return result
@@ -91,12 +91,12 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     if live_close <= 0:
         return result
 
-    # ---- 1) 15m drop inside sweet spot window -------------------------
+    # 1) 15m drop inside sweet spot window
     if not (PCT_15M_MIN_DROP <= pct_15m <= PCT_15M_MAX_DROP):
         result["reason"] = "RANGE"
         return result
 
-    # ---- 2) Acceleration (fresh breakdown after possible bounce) ------
+    # 2) Acceleration — compute drop_3m and drop_6m first
     try:
         close_9m_ago = float(candles[-10][4])
         close_3m_ago = float(candles[-4][4])
@@ -105,27 +105,30 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     if close_9m_ago <= 0 or close_3m_ago <= 0:
         return result
 
-    # Positive = drop
     drop_6m = (close_9m_ago - close_3m_ago) / close_9m_ago * 100.0
     drop_3m = (close_3m_ago - live_close) / close_3m_ago * 100.0
     result["drop_6m"] = drop_6m
     result["drop_3m"] = drop_3m
 
-    # Recent 3m must be a real drop, not a dead-cat drift
+    # 2a) Recent 3m must be a real drop
     if drop_3m < ACCEL_DROP_3M_MIN:
         result["reason"] = "ACCEL_WEAK"
         return result
 
-    # Recent per-minute pace must be >= prior-6m per-minute pace * ratio
-    # BUT: if prior 6m was a bounce (drop_6m < 0), any positive recent drop
-    # passes — that is the classic "failed rally then breakdown" pattern
+    # 2b) NEW strict monotonicity: middle 6m must be a clean drop.
+    #     JCT had drop_6m = -0.09% (bounce). We reject that hard.
+    if drop_6m <= DROP6_MIN_PCT:
+        result["reason"] = "ACCEL_BOUNCE"
+        return result
+
+    # 2c) Recent pace >= prior-6m pace (both positive at this point)
     rate_3m = drop_3m / 3.0
     rate_6m = drop_6m / 6.0
-    if rate_6m > 0.0 and rate_3m < rate_6m * ACCELERATION_MIN_RATIO:
+    if rate_3m < rate_6m * ACCELERATION_MIN_RATIO:
         result["reason"] = "ACCEL_SLOW"
         return result
 
-    # ---- 3) Volume expansion vs 15m average --------------------------
+    # 3) Volume expansion vs 15m avg
     try:
         avg_vol_15m = sum(float(c[5]) for c in candles[-16:-1]) / 15.0
     except (IndexError, TypeError, ValueError):
@@ -150,7 +153,7 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
         result["reason"] = "VOLUME"
         return result
 
-    # ---- 4) Breakdown of the 10-minute low ---------------------------
+    # 4) Breakdown of 10-min low
     try:
         lows = [float(c[3]) for c in candles[-11:-1]]
     except (IndexError, TypeError, ValueError):
@@ -199,9 +202,17 @@ def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
 
 def evaluate_book_fragility(bids, asks, mid_price,
                             band_pct=DEPTH_BAND_PCT,
-                            min_side_depth=MIN_SIDE_DEPTH_USD):
-    result = {"is_fragile": False, "depth_ratio": 0.0,
-              "d_bid": 0.0, "d_ask": 0.0}
+                            min_side_depth=MIN_SIDE_DEPTH_USD,
+                            max_bid_depth=MAX_BID_DEPTH_USD):
+    """
+    SHORT-side fragility with whale-wall shield.
+    Rejects on:
+      - THIN_BID:  d_bid < min_side_depth  (illiquid phantom)
+      - WHALE_BID: d_bid > max_bid_depth   (buyer absorption wall — JCT case)
+      - LOW_RATIO: d_ask/d_bid < FRAGILITY_RATIO_MIN
+    """
+    result = {"is_fragile": False, "reason": "INVALID",
+              "depth_ratio": 0.0, "d_bid": 0.0, "d_ask": 0.0}
     if mid_price <= 0 or not bids or not asks:
         return result
 
@@ -223,11 +234,20 @@ def evaluate_book_fragility(bids, asks, mid_price,
     result["d_ask"] = d_ask
 
     if d_bid < min_side_depth:
+        result["reason"] = "THIN_BID"
+        return result
+
+    if d_bid > max_bid_depth:
+        result["reason"] = "WHALE_BID"
         return result
 
     ratio = (d_ask / d_bid) if d_bid > 0 else 0.0
     result["depth_ratio"] = ratio
-    result["is_fragile"] = ratio >= FRAGILITY_RATIO_MIN
+    if ratio >= FRAGILITY_RATIO_MIN:
+        result["is_fragile"] = True
+        result["reason"] = "OK"
+    else:
+        result["reason"] = "LOW_RATIO"
     return result
 
 
@@ -258,10 +278,8 @@ def calculate_order_qty(balance, price, leverage, volume_place,
 def evaluate_ratchet(entry_price, current_price, breakdown_level,
                      peak_net, peak_gross, elapsed_seconds):
     result = {
-        "should_exit": False,
-        "exit_reason": "HOLD",
-        "net_pnl": 0.0,
-        "gross_pnl": 0.0,
+        "should_exit": False, "exit_reason": "HOLD",
+        "net_pnl": 0.0, "gross_pnl": 0.0,
         "updated_peak_net": peak_net,
         "updated_peak_gross": peak_gross,
     }
@@ -278,6 +296,7 @@ def evaluate_ratchet(entry_price, current_price, breakdown_level,
     result["updated_peak_net"] = new_peak_net
     result["updated_peak_gross"] = new_peak_gross
 
+    # Tighter invalidation (was 0.35%, now 0.20%)
     if breakdown_level > 0:
         if current_price > breakdown_level * (1.0 + INVALIDATION_BUFFER_PCT / 100.0):
             result["should_exit"] = True
@@ -304,3 +323,31 @@ def evaluate_ratchet(entry_price, current_price, breakdown_level,
         return result
 
     return result
+
+
+# =========================================================================
+# OBSERVER — fingerprint math (does not touch network)
+# =========================================================================
+def compute_crash_metrics(hourly_candles):
+    """
+    From 5 x 1H candles (last in-progress), return:
+      high_1h, high_4h, low_4h, current_price
+    """
+    out = {"high_1h": 0.0, "high_4h": 0.0, "low_4h": 0.0, "current_price": 0.0}
+    if not hourly_candles or len(hourly_candles) < 4:
+        return out
+    try:
+        out["current_price"] = float(hourly_candles[-1][4])
+        out["high_1h"] = float(hourly_candles[-1][2])
+        last4 = hourly_candles[-4:]
+        out["high_4h"] = max(float(c[2]) for c in last4)
+        out["low_4h"] = min(float(c[3]) for c in last4)
+    except (IndexError, TypeError, ValueError):
+        pass
+    return out
+
+
+def drop_pct_from_high(high, current):
+    if high <= 0 or current <= 0 or current >= high:
+        return 0.0
+    return (high - current) / high * 100.0
