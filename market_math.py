@@ -7,7 +7,11 @@ Zero network I/O. Standard library only.
 Candle format:
     [timestamp, open, high, low, close, base_volume]
        [0]     [1]    [2]   [3]    [4]     [5]
+
+Bump __version__ on every change. bot.py refuses to start on mismatch.
 """
+
+__version__ = "2026.11.06"
 
 FEE_ROUND_TRIP_PCT = 0.22
 BOX_RANGE_MAX_PCT = 0.55
@@ -198,7 +202,13 @@ def calculate_order_qty(balance, price, leverage, volume_place, min_order_volume
 
 
 def evaluate_ratchet(entry_price, current_price, direction, peak_net,
-                     elapsed_seconds, box_high, box_low):
+                     elapsed_seconds, box_high, box_low,
+                     skip_fakeout=False):
+    """
+    skip_fakeout: adopted-orphan positions pass True so the fakeout-scratch
+                  logic doesn't immediately close a trade we don't have
+                  a real box for.
+    """
     result = {
         "should_exit": False,
         "exit_reason": "HOLD",
@@ -221,7 +231,7 @@ def evaluate_ratchet(entry_price, current_price, direction, peak_net,
     result["net_pnl"] = net
     result["updated_peak_net"] = peak
 
-    if elapsed_seconds <= FAKEOUT_WINDOW_SEC:
+    if not skip_fakeout and elapsed_seconds <= FAKEOUT_WINDOW_SEC:
         if direction == "LONG" and current_price <= box_high:
             result["should_exit"] = True
             result["exit_reason"] = "FAKEOUT_SCRATCH"
