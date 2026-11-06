@@ -11,14 +11,16 @@ Candle format:
 Bump __version__ on every change. bot.py refuses to start on mismatch.
 """
 
-__version__ = "2026.11.06"
+import time
+
+__version__ = "2026.11.07"
 
 FEE_ROUND_TRIP_PCT = 0.22
 BOX_RANGE_MAX_PCT = 0.55
 VOLUME_EXPANSION_MIN = 3.0
 DISPLACEMENT_MIN_PCT = 0.10
 ANTI_CHASE_MAX_PCT = 0.60
-DEPTH_FRAGILITY_MIN = 1.35
+DEPTH_FRAGILITY_MIN = 1.15        # was 1.35 — relax the final gate
 DEPTH_BAND_PCT = 0.01
 MIN_SIDE_DEPTH_USD = 100.0
 MAX_SPREAD_PCT = 0.15
@@ -28,6 +30,10 @@ RATCHET_TRIGGER_PCT = 1.20
 RATCHET_KEEP_RATIO = 0.60
 STAGNATION_WINDOW_SEC = 40.0
 STAGNATION_PEAK_FLOOR = 0.30
+
+# Volume normalization tuning
+_MIN_ELAPSED_SEC = 10.0           # need this much candle history to evaluate
+_MAX_EXTRAPOLATION = 4.0          # cap partial->full projection at 4x
 
 
 def _f(x, default=0.0):
@@ -77,12 +83,19 @@ def calculate_compression_box(candles):
     }
 
 
-def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
+def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume,
+                              now_ms=None):
+    """
+    Volume is normalized against elapsed candle time so partial candles are
+    not unfairly rejected. Result now carries a 'reason' field so the caller
+    can build a funnel counter.
+    """
     result = {
         "is_ignition": False,
         "direction": None,
         "vol_ratio": 0.0,
         "chase_pct": 0.0,
+        "reason": "INVALID",
     }
     if not live_candle or base_volume <= 0 or box_high <= 0 or box_low <= 0:
         return result
@@ -92,15 +105,27 @@ def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
         live_low = float(live_candle[3])
         live_close = float(live_candle[4])
         live_vol = float(live_candle[5])
+        candle_open_ms = int(live_candle[0])
     except (IndexError, TypeError, ValueError):
         return result
 
     if live_close <= 0:
         return result
 
-    vol_ratio = live_vol / base_volume
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    elapsed_s = max(1.0, (now_ms - candle_open_ms) / 1000.0)
+    if elapsed_s < _MIN_ELAPSED_SEC:
+        result["reason"] = "TOO_EARLY"
+        return result
+
+    # 1.0x at full candle (60s), up to _MAX_EXTRAPOLATION near the open.
+    multiplier = min(60.0 / elapsed_s, _MAX_EXTRAPOLATION)
+    vol_ratio = (live_vol / base_volume) * multiplier
     result["vol_ratio"] = vol_ratio
+
     if vol_ratio < VOLUME_EXPANSION_MIN:
+        result["reason"] = "VOLUME"
         return result
 
     long_disp = box_high * (1.0 + DISPLACEMENT_MIN_PCT / 100.0)
@@ -110,6 +135,9 @@ def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
         if chase <= ANTI_CHASE_MAX_PCT:
             result["is_ignition"] = True
             result["direction"] = "LONG"
+            result["reason"] = "OK"
+        else:
+            result["reason"] = "CHASE"
         return result
 
     short_disp = box_low * (1.0 - DISPLACEMENT_MIN_PCT / 100.0)
@@ -119,8 +147,12 @@ def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
         if chase <= ANTI_CHASE_MAX_PCT:
             result["is_ignition"] = True
             result["direction"] = "SHORT"
+            result["reason"] = "OK"
+        else:
+            result["reason"] = "CHASE"
         return result
 
+    result["reason"] = "DISPLACEMENT"
     return result
 
 
@@ -146,7 +178,8 @@ def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
 def evaluate_book_fragility(bids, asks, mid_price, direction,
                             band_pct=DEPTH_BAND_PCT,
                             min_side_depth=MIN_SIDE_DEPTH_USD):
-    result = {"is_fragile": False, "depth_ratio": 0.0, "d_bid": 0.0, "d_ask": 0.0}
+    result = {"is_fragile": False, "depth_ratio": 0.0,
+              "d_bid": 0.0, "d_ask": 0.0}
     if mid_price <= 0 or not bids or not asks:
         return result
 
@@ -204,11 +237,6 @@ def calculate_order_qty(balance, price, leverage, volume_place, min_order_volume
 def evaluate_ratchet(entry_price, current_price, direction, peak_net,
                      elapsed_seconds, box_high, box_low,
                      skip_fakeout=False):
-    """
-    skip_fakeout: adopted-orphan positions pass True so the fakeout-scratch
-                  logic doesn't immediately close a trade we don't have
-                  a real box for.
-    """
     result = {
         "should_exit": False,
         "exit_reason": "HOLD",
