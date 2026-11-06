@@ -3,42 +3,47 @@ market_math.py
 ==============
 Cross-Sectional Relative Weakness & Accelerated Breakdown Engine.
 
-Bump __version__ on every change. bot.py refuses to start on mismatch.
-
-v2026.11.14 (no functional change vs 11.13; version sync for cache bust):
-  - ACCEL_DROP_3M_MIN = 1.50% (from 12-crash fingerprint study)
-  - MACRO_ALIGN_MAX_PCT = 1.5% — reject SHORTs inside relief bounces
-  - compute_crash_metrics returns actual high timestamp (fixes "in 0m")
+v2026.11.15: restructured 13 filters -> 5 combined gates.
+  - MOMENTUM merges: rng + aw + ab + as + vol
+  - POSITION merges: bd + chs
+  - MACRO v2: pass if near 1h-low OR 4h-low (catches fresh breakdowns)
+  - BOOK merges: fr + fthin + fwhl (ratio >= 1.40, $2K-$150K)
 """
 
 import time
 
-__version__ = "2026.11.14"
+__version__ = "2026.11.15"
 
 FEE_ROUND_TRIP_PCT = 0.22
 
-PCT_15M_MIN_DROP = -7.0
-PCT_15M_MAX_DROP = -1.5
-
-DROP6_MIN_PCT = 0.15
-ACCEL_DROP_3M_MIN = 1.50
-ACCELERATION_MIN_RATIO = 1.0
-VOLUME_EXPANSION_MIN = 3.0
-BREAKDOWN_BUFFER_PCT = 0.05
-ANTI_CHASE_MAX_PCT = 0.60
-
-MACRO_ALIGN_MAX_PCT = 1.5
-
+# ---- MOMENTUM ----
+PCT_15M_MIN_DROP = -8.0            # widened from -7.0
+PCT_15M_MAX_DROP = -1.0            # widened from -1.5
+DROP3_MIN_PCT = 0.60               # was 1.50 — the big loosening
+DROP6_MIN_PCT = -0.30              # allow small bounce (was 0.15 strict)
+ACCELERATION_MIN_RATIO = 0.7       # allow moderate slowing (was 1.0)
+VOLUME_EXPANSION_MIN = 1.8         # was 3.0
 _VOL_MAX_EXTRAPOLATION = 3.0
 _MIN_ELAPSED_SEC = 20.0
 
+# ---- POSITION ----
+BREAKDOWN_BUFFER_PCT = 0.05        # must break below 10m low by 0.05%
+ANTI_CHASE_MAX_PCT = 1.00          # not more than 1.0% past breakdown (was 0.60)
+
+# ---- MACRO (v2) ----
+MACRO_1H_MAX_PCT = 3.0             # OR: close <= low_1h * 1.03
+MACRO_4H_MAX_PCT = 4.0             # OR: close <= low_4h * 1.04
+
+# ---- BOOK ----
 DEPTH_BAND_PCT = 0.01
-MIN_SIDE_DEPTH_USD = 5000.0
-MAX_BID_DEPTH_USD = 100000.0
-FRAGILITY_RATIO_MIN = 1.80
+MIN_SIDE_DEPTH_USD = 2000.0        # was 5000 — small alt books allowed
+MAX_BID_DEPTH_USD = 150000.0       # was 100K — absorbed walls allowed
+FRAGILITY_RATIO_MIN = 1.40         # was 1.80
 
-MAX_SPREAD_PCT = 0.15
+# ---- SPREAD ----
+MAX_SPREAD_PCT = 0.20              # was 0.15
 
+# ---- Ratchet / risk ----
 BREAKEVEN_TRIGGER_PCT = 0.50
 RATCHET_TRIGGER_PCT = 1.20
 RATCHET_KEEP_RATIO = 0.60
@@ -54,12 +59,19 @@ def _f(x, default=0.0):
         return default
 
 
-def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
+# =========================================================================
+# GATE 1: MOMENTUM (was rng + aw + ab + as + vol)
+# =========================================================================
+def evaluate_momentum(candles, pct_15m, now_ms=None):
+    """
+    Combined momentum gate. Returns:
+      RANGE / ACCEL_WEAK / ACCEL_BOUNCE / ACCEL_SLOW / VOLUME / EARLY / OK
+    """
     result = {
         "is_valid": False, "reason": "INVALID",
         "pct_15m": pct_15m,
         "drop_3m": 0.0, "drop_6m": 0.0, "vol_ratio": 0.0,
-        "low_10m": 0.0, "live_close": 0.0,
+        "live_close": 0.0, "low_10m": 0.0,
     }
     if not candles or len(candles) < 16:
         return result
@@ -71,7 +83,6 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
         live_vol = float(candles[-1][5])
     except (IndexError, TypeError, ValueError):
         return result
-
     result["live_close"] = live_close
     if live_close <= 0:
         return result
@@ -93,17 +104,17 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
     result["drop_6m"] = drop_6m
     result["drop_3m"] = drop_3m
 
-    if drop_3m < ACCEL_DROP_3M_MIN:
+    if drop_3m < DROP3_MIN_PCT:
         result["reason"] = "ACCEL_WEAK"
         return result
 
-    if drop_6m <= DROP6_MIN_PCT:
+    if drop_6m < DROP6_MIN_PCT:
         result["reason"] = "ACCEL_BOUNCE"
         return result
 
     rate_3m = drop_3m / 3.0
     rate_6m = drop_6m / 6.0
-    if rate_3m < rate_6m * ACCELERATION_MIN_RATIO:
+    if rate_6m > 0.0 and rate_3m < rate_6m * ACCELERATION_MIN_RATIO:
         result["reason"] = "ACCEL_SLOW"
         return result
 
@@ -130,36 +141,61 @@ def evaluate_sweet_spot(candles, pct_15m, now_ms=None):
         result["reason"] = "VOLUME"
         return result
 
+    # Store low_10m here for gate 2 to reuse
     try:
         lows = [float(c[3]) for c in candles[-11:-1]]
+        if lows:
+            result["low_10m"] = min(lows)
     except (IndexError, TypeError, ValueError):
-        return result
-    if not lows:
-        return result
-    low_10m = min(lows)
-    result["low_10m"] = low_10m
-    if low_10m <= 0:
-        return result
-
-    if live_close >= low_10m * (1.0 - BREAKDOWN_BUFFER_PCT / 100.0):
-        result["reason"] = "BREAKDOWN"
-        return result
-
-    if live_close < low_10m * (1.0 - ANTI_CHASE_MAX_PCT / 100.0):
-        result["reason"] = "CHASE"
-        return result
+        pass
 
     result["is_valid"] = True
     result["reason"] = "OK"
     return result
 
 
-def evaluate_macro_alignment(hourly_candles, current_price,
-                             max_pct_above_low=MACRO_ALIGN_MAX_PCT):
+# =========================================================================
+# GATE 2: POSITION (was bd + chs)
+# =========================================================================
+def evaluate_position(live_close, low_10m):
+    """
+    Breakout OR chase check.
+    """
+    result = {"is_valid": False, "reason": "INVALID",
+              "chase_pct": 0.0}
+    if live_close <= 0 or low_10m <= 0:
+        return result
+
+    # Must break below 10m low
+    if live_close >= low_10m * (1.0 - BREAKDOWN_BUFFER_PCT / 100.0):
+        result["reason"] = "NO_BREAKDOWN"
+        return result
+
+    # Must not be too far past
+    if live_close < low_10m * (1.0 - ANTI_CHASE_MAX_PCT / 100.0):
+        result["reason"] = "CHASE"
+        result["chase_pct"] = (low_10m - live_close) / low_10m * 100.0
+        return result
+
+    result["chase_pct"] = (low_10m - live_close) / low_10m * 100.0
+    result["is_valid"] = True
+    result["reason"] = "OK"
+    return result
+
+
+# =========================================================================
+# GATE 3: MACRO (v2 — 1h OR 4h low)
+# =========================================================================
+def evaluate_macro(hourly_candles, current_price):
+    """
+    Pass if price within MACRO_1H_MAX_PCT of 1h low
+    OR within MACRO_4H_MAX_PCT of 4h low.
+    """
     result = {
         "is_aligned": False, "reason": "INVALID",
-        "low_1h": 0.0, "low_4h": 0.0, "ref_low": 0.0,
-        "pct_above_ref": 0.0,
+        "low_1h": 0.0, "low_4h": 0.0,
+        "pct_above_1h": 0.0, "pct_above_4h": 0.0,
+        "which": "",
     }
     if not hourly_candles or len(hourly_candles) < 4 or current_price <= 0:
         return result
@@ -175,44 +211,35 @@ def evaluate_macro_alignment(hourly_candles, current_price,
 
     result["low_1h"] = low_1h
     result["low_4h"] = low_4h
-    ref_low = min(low_1h, low_4h)
-    result["ref_low"] = ref_low
+    result["pct_above_1h"] = (current_price - low_1h) / low_1h * 100.0
+    result["pct_above_4h"] = (current_price - low_4h) / low_4h * 100.0
 
-    pct_above = (current_price - ref_low) / ref_low * 100.0
-    result["pct_above_ref"] = pct_above
-
-    if pct_above <= max_pct_above_low:
+    if result["pct_above_1h"] <= MACRO_1H_MAX_PCT:
         result["is_aligned"] = True
         result["reason"] = "OK"
-    else:
-        result["reason"] = "TOO_HIGH_ABOVE_LOW"
+        result["which"] = "1H"
+        return result
+    if result["pct_above_4h"] <= MACRO_4H_MAX_PCT:
+        result["is_aligned"] = True
+        result["reason"] = "OK"
+        result["which"] = "4H"
+        return result
+
+    result["reason"] = "TOO_HIGH"
     return result
 
 
-def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
-    result = {"is_ok": False, "spread_pct": 999.0, "mid": 0.0}
-    if not bids or not asks:
-        return result
-    try:
-        best_bid = float(bids[0][0])
-        best_ask = float(asks[0][0])
-    except (IndexError, TypeError, ValueError):
-        return result
-    if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
-        return result
-    mid = (best_bid + best_ask) / 2.0
-    spread_pct = (best_ask - best_bid) / mid * 100.0
-    result["spread_pct"] = spread_pct
-    result["mid"] = mid
-    result["is_ok"] = spread_pct <= max_spread_pct
-    return result
-
-
-def evaluate_book_fragility(bids, asks, mid_price,
-                            band_pct=DEPTH_BAND_PCT,
-                            min_side_depth=MIN_SIDE_DEPTH_USD,
-                            max_bid_depth=MAX_BID_DEPTH_USD):
-    result = {"is_fragile": False, "reason": "INVALID",
+# =========================================================================
+# GATE 4: BOOK (was fr + fthin + fwhl)
+# =========================================================================
+def evaluate_book(bids, asks, mid_price,
+                  band_pct=DEPTH_BAND_PCT,
+                  min_side_depth=MIN_SIDE_DEPTH_USD,
+                  max_bid_depth=MAX_BID_DEPTH_USD):
+    """
+    Combined book gate: ratio + thin-bid + whale-bid.
+    """
+    result = {"is_valid": False, "reason": "INVALID",
               "depth_ratio": 0.0, "d_bid": 0.0, "d_ask": 0.0}
     if mid_price <= 0 or not bids or not asks:
         return result
@@ -242,14 +269,40 @@ def evaluate_book_fragility(bids, asks, mid_price,
     if d_bid > max_bid_depth:
         result["reason"] = "WHALE_BID"
         return result
-    if ratio >= FRAGILITY_RATIO_MIN:
-        result["is_fragile"] = True
-        result["reason"] = "OK"
-    else:
+    if ratio < FRAGILITY_RATIO_MIN:
         result["reason"] = "LOW_RATIO"
+        return result
+
+    result["is_valid"] = True
+    result["reason"] = "OK"
     return result
 
 
+# =========================================================================
+# GATE 5: SPREAD
+# =========================================================================
+def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
+    result = {"is_ok": False, "spread_pct": 999.0, "mid": 0.0}
+    if not bids or not asks:
+        return result
+    try:
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
+    except (IndexError, TypeError, ValueError):
+        return result
+    if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
+        return result
+    mid = (best_bid + best_ask) / 2.0
+    spread_pct = (best_ask - best_bid) / mid * 100.0
+    result["spread_pct"] = spread_pct
+    result["mid"] = mid
+    result["is_ok"] = spread_pct <= max_spread_pct
+    return result
+
+
+# =========================================================================
+# SIZING / RATCHET (unchanged)
+# =========================================================================
 def calculate_order_qty(balance, price, leverage, volume_place,
                         min_order_volume, min_notional=5.0):
     if balance <= 0 or price <= 0 or leverage <= 0:
@@ -317,6 +370,9 @@ def evaluate_ratchet(entry_price, current_price, breakdown_level,
     return result
 
 
+# =========================================================================
+# OBSERVER helpers (unchanged)
+# =========================================================================
 def compute_crash_metrics(hourly_candles):
     out = {
         "high_1h": 0.0, "high_4h": 0.0, "low_4h": 0.0,
