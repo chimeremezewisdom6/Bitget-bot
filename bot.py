@@ -1,736 +1,1050 @@
-# bot.py
-import os
-import json
-import time
-import hmac
+#!/usr/bin/env python3
+"""
+bot.py
+======
+Coiled Spring Breakout | Bitget UTA V3 | Render Free Tier.
+
+Architecture:
+    - Daemonized keep-alive HTTP server on :10000
+    - Bitget UTA V3 signed HTTP client (HMAC-SHA256 / Base64)
+    - Background 8-exchange 24h volume cache refreshed every 300 s
+    - Rotating, rate-limited candidate scanner
+    - 4-second watchdog applying the asymmetric risk ladder
+    - Persistent paper-gauntlet streak (streak.json) gates live capital
+
+Dependencies: aiohttp>=3.9.0 and the Python standard library only.
+"""
+
+import asyncio
 import base64
 import hashlib
-import asyncio
+import hmac
+import json
 import logging
+import os
 import threading
-from collections import deque
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List, Optional, Tuple
+
 import aiohttp
 
-from market_math import MarketMath
+import market_math as mm
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("ProfitRatchetSentinel")
-
-API_KEY = (os.getenv("API_KEY") or os.getenv("BITGET_API_KEY", "")).strip()
-SECRET_KEY = (os.getenv("SECRET_KEY") or os.getenv("BITGET_API_SECRET", "")).strip()
-PASSPHRASE = (os.getenv("PASSPHRASE") or os.getenv("BITGET_API_PASSPHRASE", "")).strip()
-PORT = int(os.getenv("PORT", 10000))
-
-# ----------------- RISK & EXECUTION PARAMETERS -----------------
+# =============================================================================
+# CONFIG
+# =============================================================================
+API_BASE = "https://api.bitget.com"
+PORT = 10000
+PRODUCT_TYPE = "USDT-FUTURES"
 LEVERAGE = 5
-FEE_AND_SLIPPAGE = 0.22         # 0.12% fees + 0.10% real market-order slippage
-HARD_STOP_GROSS = -0.50         # Snappy emergency stop
-GLOBAL_MIN_VOL_USD = 1_000_000.0
-REQUIRED_STREAK = 8
-STATE_FILE = "streak.json"
+MIN_NOTIONAL = 5.0
+MARGIN_USE_RATIO = 0.90
 
-def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception: pass
-    return {"streak": 0, "unlocked": False, "total_trades": 0}
+BOX_CANDLES = 30
+PULSE_SEC = 4
+UNIVERSE_REFRESH_SEC = 300
+UNIVERSE_MIN_VOL_USD = 1_000_000.0
 
-def save_state(s: dict):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(s, f)
-    except Exception: pass
+SCAN_BATCH = 12
+SCAN_MIN_INTERVAL_SEC = 60.0
 
-state = load_state()
+STREAK_FILE = "streak.json"
+PAPER_WINS_REQUIRED = 8
 
-# ----------------- KEEP-ALIVE SERVER -----------------
-class HealthHandler(BaseHTTPRequestHandler):
+DEFAULT_HEADERS = {"User-Agent": "coil-bot/1.0"}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-5s | %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+log = logging.getLogger("coil")
+
+
+# =============================================================================
+# CREDENTIALS
+# =============================================================================
+def _env(*names: str) -> str:
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v.strip()
+    raise RuntimeError(f"Missing required environment variable: {names}")
+
+
+API_KEY = _env("BITGET_API_KEY", "API_KEY")
+SECRET_KEY = _env("BITGET_API_SECRET", "SECRET_KEY")
+PASSPHRASE = _env("BITGET_API_PASSPHRASE", "PASSPHRASE")
+
+
+# =============================================================================
+# KEEP-ALIVE HTTP SERVER
+# =============================================================================
+class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps({
-            "status": "ONLINE",
-            "account_mode": "BITGET_UNIFIED_TRADING_ACCOUNT_V3",
-            "mode": "LIVE" if state["unlocked"] else "PAPER_GAUNTLET",
-            "streak": f"{state['streak']}/{REQUIRED_STREAK}",
-            "trades": state["total_trades"],
-            "profit_ratchet": "40_PERCENT_GIVEBACK_MAX"
-        }).encode("utf-8"))
-    def log_message(self, *args): pass
-
-def run_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
-# ----------------- BITGET UNIFIED TRADING ACCOUNT (UTA V3) CLIENT -----------------
-class BitgetUTAClient:
-    def __init__(self, session: aiohttp.ClientSession):
-        self.s = session
-        self.base_url = "https://api.bitget.com"
-
-    def _sign(self, timestamp: str, method: str, path: str, body: str = "") -> str:
-        message = timestamp + method.upper() + path + body
-        sig = hmac.new(SECRET_KEY.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).digest()
-        return base64.b64encode(sig).decode("utf-8")
-
-    def _headers(self, method: str, path: str, body: str = "") -> dict:
-        ts = str(int(time.time() * 1000))
-        return {
-            "ACCESS-KEY": API_KEY,
-            "ACCESS-SIGN": self._sign(ts, method, path, body),
-            "ACCESS-PASSPHRASE": PASSPHRASE,
-            "ACCESS-TIMESTAMP": ts,
-            "Content-Type": "application/json",
-            "locale": "en-US"
-        }
-
-    async def get_available_usdt(self) -> float:
-        if not API_KEY or not SECRET_KEY or not PASSPHRASE:
-            return 1.58
-
-        path_v3 = "/api/v3/account/assets"
-        try:
-            h = self._headers("GET", path_v3)
-            async with self.s.get(self.base_url + path_v3, headers=h, timeout=2.5) as r:
-                res = await r.json()
-                if res.get("code") == "00000":
-                    for item in res.get("data", []):
-                        if item.get("coin") == "USDT" or item.get("marginCoin") == "USDT":
-                            val = float(item.get("available", 0.0) or item.get("equity", 0.0))
-                            if val > 0:
-                                return val
-        except Exception: pass
-
-        path_all = "/api/v2/account/all-account-balance"
-        try:
-            h = self._headers("GET", path_all)
-            async with self.s.get(self.base_url + path_all, headers=h, timeout=2.5) as r:
-                res = await r.json()
-                if res.get("code") == "00000":
-                    for acc in res.get("data", []):
-                        for coin_info in acc.get("assets", []):
-                            if coin_info.get("coin") == "USDT":
-                                val = float(coin_info.get("available", 0.0) or coin_info.get("balance", 0.0))
-                                if val > 0:
-                                    return val
-        except Exception: pass
-
-        return 1.58
-
-    def calculate_order_qty(self, current_price: float, balance_usdt: float) -> str:
-        if current_price <= 0: return "1"
-        usable_margin = max(1.10, balance_usdt * 0.90)
-        notional_value = usable_margin * LEVERAGE
-
-        if notional_value < 5.10:
-            notional_value = 5.20
-
-        raw_size = notional_value / current_price
-
-        if current_price >= 1000:
-            return f"{raw_size:.4f}"
-        elif current_price >= 1:
-            return f"{raw_size:.2f}"
-        elif current_price >= 0.01:
-            return f"{raw_size:.1f}"
+        if self.path == "/" or self.path.startswith("/health"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
         else:
-            return str(int(raw_size))
+            self.send_response(404)
+            self.end_headers()
 
-    async def open_order_uta(self, symbol: str, side: str, qty_str: str) -> bool:
-        lev_path = "/api/v3/account/set-leverage"
-        lev_body = json.dumps({"category": "USDT-FUTURES", "symbol": symbol, "leverage": str(LEVERAGE)})
+    def log_message(self, *args):
+        pass
+
+
+def _start_keepalive() -> None:
+    server = HTTPServer(("0.0.0.0", PORT), _HealthHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    log.info("Keep-alive HTTP server listening on :%d", PORT)
+
+
+# =============================================================================
+# BITGET SIGNING + HTTP
+# =============================================================================
+def _sign(timestamp: str, method: str, path: str, query: str, body: str) -> str:
+    msg = timestamp + method.upper() + path
+    if query:
+        msg += "?" + query
+    msg += body
+    digest = hmac.new(
+        SECRET_KEY.encode("utf-8"),
+        msg.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    return base64.b64encode(digest).decode("utf-8")
+
+
+async def _request(
+    session: aiohttp.ClientSession,
+    method: str,
+    path: str,
+    *,
+    query: Optional[Dict[str, str]] = None,
+    body: Optional[Dict[str, Any]] = None,
+    signed: bool = True,
+    retries: int = 4,
+) -> Dict[str, Any]:
+    query = query or {}
+    qs = "&".join(f"{k}={v}" for k, v in query.items())
+    body_str = ""
+    if method.upper() == "POST" and body:
+        body_str = json.dumps(body, separators=(",", ":"))
+
+    for attempt in range(retries):
+        ts = str(int(time.time() * 1000))
+        headers = {"Content-Type": "application/json", "locale": "en-US"}
+        if signed:
+            headers.update({
+                "ACCESS-KEY": API_KEY,
+                "ACCESS-SIGN": _sign(ts, method, path, qs, body_str),
+                "ACCESS-TIMESTAMP": ts,
+                "ACCESS-PASSPHRASE": PASSPHRASE,
+            })
+
+        url = API_BASE + path + (f"?{qs}" if qs else "")
         try:
-            h = self._headers("POST", lev_path, lev_body)
-            await self.s.post(self.base_url + lev_path, data=lev_body, headers=h, timeout=1.5)
-        except Exception: pass
+            async with session.request(
+                method,
+                url,
+                headers=headers,
+                data=body_str if body_str else None,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                text = await resp.text()
+                if resp.status == 429:
+                    await asyncio.sleep((2 ** attempt) + 1)
+                    continue
+                if resp.status >= 500:
+                    await asyncio.sleep((2 ** attempt) + 1)
+                    continue
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    log.error("Non-JSON response [%s %s] status=%s body=%s",
+                              method, path, resp.status, text[:160])
+                    return {"code": "JSON_ERROR", "msg": text[:160]}
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log.warning("Network error [%s %s]: %s", method, path, exc)
+            await asyncio.sleep((2 ** attempt) + 1)
 
-        path = "/api/v3/trade/place-order"
-        payload = json.dumps({
-            "category": "USDT-FUTURES", "symbol": symbol, "side": side,
-            "orderType": "market", "qty": qty_str, "reduceOnly": "no"
-        })
+    return {"code": "RETRY_EXHAUSTED", "msg": "max retries exceeded"}
+
+
+async def _get_json(session: aiohttp.ClientSession, url: str,
+                    timeout: float = 10.0) -> Any:
+    """Unauthenticated GET helper for third-party exchange tickers."""
+    try:
+        async with session.get(
+            url,
+            headers=DEFAULT_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json()
+    except Exception as exc:
+        log.debug("External fetch fail %s: %s", url, exc)
+        return None
+
+
+# =============================================================================
+# STATE
+# =============================================================================
+_contracts: Dict[str, Dict[str, Any]] = {}
+_universe: List[str] = []
+_last_scan: Dict[str, float] = {}
+_scan_idx = 0
+_streak: Dict[str, Any] = {
+    "wins": 0,
+    "losses": 0,
+    "live_activated": False,
+    "trades": 0,
+}
+
+
+def _load_streak() -> None:
+    try:
+        with open(STREAK_FILE, "r") as f:
+            data = json.load(f)
+        _streak["wins"] = int(data.get("wins", 0))
+        _streak["losses"] = int(data.get("losses", 0))
+        _streak["live_activated"] = bool(data.get("live_activated", False))
+        _streak["trades"] = int(data.get("trades", 0))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+
+def _save_streak() -> None:
+    try:
+        with open(STREAK_FILE, "w") as f:
+            json.dump(_streak, f)
+    except OSError as exc:
+        log.error("Failed to persist streak: %s", exc)
+
+
+def _record_paper_trade(net_pct: float) -> None:
+    _streak["trades"] += 1
+    if net_pct > 0:
+        _streak["wins"] += 1
+        _streak["losses"] = 0
+    elif net_pct < 0:
+        _streak["losses"] += 1
+        _streak["wins"] = 0
+    # net_pct == 0.0 (breakeven) preserves the streak
+
+    if not _streak["live_activated"] and _streak["wins"] >= PAPER_WINS_REQUIRED:
+        _streak["live_activated"] = True
+        log.info("*** PAPER GAUNTLET PASSED — LIVE CAPITAL ACTIVATED ***")
+
+    _save_streak()
+    log.info(
+        "PAPER | net=%.3f%% | wins=%d losses=%d live=%s trades=%d",
+        net_pct, _streak["wins"], _streak["losses"],
+        _streak["live_activated"], _streak["trades"],
+    )
+
+
+# =============================================================================
+# ONE-WAY POSITION MODE (startup)
+# =============================================================================
+async def enforce_one_way(session: aiohttp.ClientSession) -> None:
+    res = await _request(
+        session, "POST", "/api/v3/account/set-hold-mode",
+        body={"holdMode": "one_way_mode"},
+    )
+    if res.get("code") == "00000":
+        log.info("One-way mode confirmed via V3 set-hold-mode.")
+        return
+
+    log.warning("V3 set-hold-mode failed (%s) — trying V2 fallback",
+                res.get("msg"))
+    for mode in ("single_hold", "one_way_mode"):
+        res = await _request(
+            session, "POST", "/api/v2/mix/account/set-position-mode",
+            body={"productType": PRODUCT_TYPE, "posMode": mode},
+        )
+        if res.get("code") == "00000":
+            log.info("One-way mode set via V2 fallback (posMode=%s).", mode)
+            return
+        log.warning("V2 posMode=%s failed: %s", mode, res.get("msg"))
+
+    log.warning("Could not enforce one-way mode — continuing anyway "
+                "(may cause Error 40774).")
+
+
+# =============================================================================
+# CONTRACT RULES CACHE
+# =============================================================================
+async def refresh_contracts(session: aiohttp.ClientSession) -> None:
+    data = await _request(
+        session, "GET", "/api/v2/mix/market/contracts",
+        query={"productType": PRODUCT_TYPE},
+        signed=False,
+    )
+    if data.get("code") != "00000":
+        log.warning("Contract refresh failed: %s", data.get("msg"))
+        return
+
+    new_cache: Dict[str, Dict[str, Any]] = {}
+    for c in data.get("data", []):
+        sym = c.get("symbol", "")
+        if not sym or not sym.endswith("USDT"):
+            continue
         try:
-            h = self._headers("POST", path, payload)
-            async with self.s.post(self.base_url + path, data=payload, headers=h, timeout=2.0) as r:
-                res = await r.json()
-                return res.get("code") == "00000"
-        except Exception:
-            return False
+            new_cache[sym] = {
+                "volumePlace": int(float(c.get("volumePlace") or 0)),
+                "pricePlace": int(float(c.get("pricePlace") or 0)),
+                "sizeMultiplier": float(c.get("sizeMultiplier") or 0),
+                "minOrderVolume": float(c.get("minTradeNum") or 0),
+                "minNotional": float(c.get("minTradeUSDT") or 5.0),
+                "maxLever": int(float(c.get("maxLever") or 1)),
+            }
+        except (TypeError, ValueError):
+            continue
 
-    async def safe_close_position_uta(self, symbol: str, open_side: str) -> bool:
-        pos_path = f"/api/v3/position/current-position?category=USDT-FUTURES&symbol={symbol}"
-        actual_qty = "0"
-        try:
-            h = self._headers("GET", pos_path)
-            async with self.s.get(self.base_url + pos_path, headers=h, timeout=1.5) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    for p in d.get("data", []):
-                        total_pos = float(p.get("total", 0.0) or p.get("qty", 0.0))
-                        if total_pos > 0:
-                            actual_qty = str(total_pos)
-                            break
-        except Exception: pass
+    _contracts.clear()
+    _contracts.update(new_cache)
+    log.info("Contract cache refreshed: %d USDT symbols", len(_contracts))
 
-        if float(actual_qty) <= 0:
-            return True
 
-        close_side = "sell" if open_side == "buy" else "buy"
-        order_path = "/api/v3/trade/place-order"
-        order_payload = json.dumps({
-            "category": "USDT-FUTURES", "symbol": symbol, "side": close_side,
-            "orderType": "market", "qty": actual_qty, "reduceOnly": "yes"
-        })
+# =============================================================================
+# 8-EXCHANGE VOLUME AGGREGATION
+# =============================================================================
+def _norm_symbol(sym: str) -> str:
+    """Normalise exchange-specific symbols to the canonical BTCUSDT form."""
+    s = (sym or "").upper().replace("-", "").replace("_", "").replace("/", "")
+    if s.startswith("XBT"):
+        s = "BTC" + s[3:]
+    if s.endswith("USDTM"):
+        s = s[:-1]
+    if s.endswith("SWAP"):
+        s = s[:-4]
+    if s.endswith("PERP"):
+        s = s[:-4]
+    return s
 
-        for _ in range(3):
+
+async def _vol_bitget(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(
+        session,
+        API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
+    )
+    if not isinstance(d, dict) or d.get("code") != "00000":
+        return out
+    for t in d.get("data", []):
+        sym = t.get("symbol", "")
+        if sym.endswith("USDT"):
             try:
-                h = self._headers("POST", order_path, order_payload)
-                async with self.s.post(self.base_url + order_path, data=order_payload, headers=h, timeout=1.5) as r:
-                    res = await r.json()
-                    if res.get("code") == "00000":
-                        logger.info(f"🔒 Position closed on Bitget UTA ({actual_qty} contracts): {symbol}")
-                        return True
-            except Exception: pass
-            await asyncio.sleep(0.3)
+                out[sym] = out.get(sym, 0.0) + float(t.get("usdtVolume") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _vol_binance(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(session, "https://fapi.binance.com/fapi/v1/ticker/24hr")
+    if not isinstance(d, list):
+        return out
+    for t in d:
+        sym = _norm_symbol(t.get("symbol", ""))
+        if sym.endswith("USDT"):
+            try:
+                out[sym] = out.get(sym, 0.0) + float(t.get("quoteVolume") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _vol_bybit(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(
+        session, "https://api.bybit.com/v5/market/tickers?category=linear",
+    )
+    if not isinstance(d, dict) or d.get("retCode") != 0:
+        return out
+    for t in d.get("result", {}).get("list", []):
+        sym = _norm_symbol(t.get("symbol", ""))
+        if sym.endswith("USDT"):
+            try:
+                out[sym] = out.get(sym, 0.0) + float(t.get("turnover24h") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _vol_okx(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(
+        session, "https://www.okx.com/api/v5/market/tickers?instType=SWAP",
+    )
+    if not isinstance(d, dict) or d.get("code") != "0":
+        return out
+    for t in d.get("data", []):
+        inst = t.get("instId", "")
+        if "USDT-SWAP" not in inst:
+            continue
+        sym = _norm_symbol(inst)
+        try:
+            base_vol = float(t.get("volCcy24h") or 0)
+            last = float(t.get("last") or 0)
+            usd = base_vol * last
+            out[sym] = out.get(sym, 0.0) + usd
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+async def _vol_gate(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(
+        session, "https://api.gateio.ws/api/v4/futures/usdt/tickers",
+    )
+    if not isinstance(d, list):
+        return out
+    for t in d:
+        sym = _norm_symbol(t.get("contract", ""))
+        if sym.endswith("USDT"):
+            try:
+                out[sym] = out.get(sym, 0.0) + float(t.get("volume_24h_quote") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _vol_kucoin(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(
+        session, "https://api-futures.kucoin.com/api/v1/contracts/active",
+    )
+    if not isinstance(d, dict) or d.get("code") != "200000":
+        return out
+    for t in d.get("data", []):
+        sym = _norm_symbol(t.get("symbol", ""))
+        if sym.endswith("USDT"):
+            try:
+                out[sym] = out.get(sym, 0.0) + float(t.get("turnoverOf24h") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _vol_mexc(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(
+        session, "https://contract.mexc.com/api/v1/contract/ticker",
+    )
+    if not isinstance(d, dict) or not d.get("success"):
+        return out
+    for t in d.get("data", []):
+        sym = _norm_symbol(t.get("symbol", ""))
+        if sym.endswith("USDT"):
+            try:
+                out[sym] = out.get(sym, 0.0) + float(t.get("amount24") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _vol_htx(session: aiohttp.ClientSession) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    d = await _get_json(
+        session,
+        "https://api.hbdm.com/linear-swap-ex/market/tickers?business_type=swap",
+    )
+    if not isinstance(d, dict) or d.get("status") != "ok":
+        return out
+    for t in d.get("data", []):
+        sym = _norm_symbol(t.get("contract_code", ""))
+        if sym.endswith("USDT"):
+            try:
+                out[sym] = out.get(sym, 0.0) + float(t.get("trade_turnover") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def refresh_universe(session: aiohttp.ClientSession) -> None:
+    tasks = [
+        _vol_bitget(session),
+        _vol_binance(session),
+        _vol_bybit(session),
+        _vol_okx(session),
+        _vol_gate(session),
+        _vol_kucoin(session),
+        _vol_mexc(session),
+        _vol_htx(session),
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    agg: Dict[str, float] = {}
+    exchanges_ok = 0
+    for r in results:
+        if isinstance(r, dict) and r:
+            exchanges_ok += 1
+            for sym, vol in r.items():
+                agg[sym] = agg.get(sym, 0.0) + vol
+
+    tradeable = set(_contracts.keys())
+    filtered = [
+        s for s, v in agg.items()
+        if s in tradeable and v >= UNIVERSE_MIN_VOL_USD
+    ]
+    filtered.sort(key=lambda s: agg[s], reverse=True)
+
+    _universe.clear()
+    _universe.extend(filtered)
+    log.info("Universe refreshed: %d symbols (>= $%.1fM across %d/8 exchanges)",
+             len(_universe), UNIVERSE_MIN_VOL_USD / 1e6, exchanges_ok)
+
+
+# =============================================================================
+# ACCOUNT / POSITION
+# =============================================================================
+async def get_usdt_available(session: aiohttp.ClientSession) -> float:
+    d = await _request(session, "GET", "/api/v3/account/assets")
+    if d.get("code") == "00000":
+        for a in d.get("data", {}).get("assets", []) or []:
+            if a.get("coin") == "USDT":
+                try:
+                    return float(a.get("available") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
+
+    d2 = await _request(session, "GET", "/api/v2/account/all-account-balance")
+    if d2.get("code") == "00000":
+        for a in d2.get("data", []) or []:
+            if a.get("coin") == "USDT":
+                try:
+                    return float(a.get("available") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+    return 0.0
+
+
+async def get_position(session: aiohttp.ClientSession,
+                       symbol: str) -> Optional[Dict[str, Any]]:
+    d = await _request(
+        session, "GET", "/api/v3/position/current-position",
+        query={"category": PRODUCT_TYPE, "symbol": symbol},
+    )
+    if d.get("code") != "00000":
+        return None
+    for p in d.get("data") or []:
+        try:
+            total = float(p.get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0.0
+        if total > 0:
+            try:
+                entry = float(p.get("entryPrice") or 0)
+            except (TypeError, ValueError):
+                entry = 0.0
+            try:
+                upnl = float(p.get("unrealizedPnl") or 0)
+            except (TypeError, ValueError):
+                upnl = 0.0
+            return {
+                "total": total,
+                "posSide": p.get("posSide", ""),
+                "entryPrice": entry,
+                "unrealizedPnl": upnl,
+            }
+    return None
+
+
+# =============================================================================
+# MARKET DATA
+# =============================================================================
+async def fetch_candles_bitget(session: aiohttp.ClientSession,
+                               symbol: str) -> Optional[List[List[str]]]:
+    d = await _request(
+        session, "GET", "/api/v2/mix/market/candles",
+        query={
+            "symbol": symbol,
+            "productType": PRODUCT_TYPE,
+            "granularity": "1m",
+            "limit": str(BOX_CANDLES + 1),
+        },
+        signed=False,
+    )
+    if d.get("code") != "00000":
+        return None
+    candles = d.get("data")
+    if not isinstance(candles, list) or len(candles) < BOX_CANDLES + 1:
+        return None
+    return candles
+
+
+async def fetch_candles_binance(session: aiohttp.ClientSession,
+                                symbol: str) -> Optional[List[List[str]]]:
+    try:
+        async with session.get(
+            "https://fapi.binance.com/fapi/v1/klines",
+            params={"symbol": symbol, "interval": "1m", "limit": BOX_CANDLES + 1},
+            headers=DEFAULT_HEADERS,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    except Exception as exc:
+        log.debug("Binance candles fail %s: %s", symbol, exc)
+        return None
+
+    if not isinstance(data, list) or len(data) < BOX_CANDLES + 1:
+        return None
+
+    out: List[List[str]] = []
+    for k in data:
+        try:
+            out.append([
+                str(k[0]),       # ts
+                k[1],            # open
+                k[2],            # high
+                k[3],            # low
+                k[4],            # close
+                k[5],            # base volume
+                k[7],            # quote volume
+            ])
+        except (IndexError, TypeError):
+            return None
+    return out
+
+
+async def fetch_candles(session: aiohttp.ClientSession,
+                        symbol: str) -> Optional[List[List[str]]]:
+    c = await fetch_candles_bitget(session, symbol)
+    if c:
+        return c
+    return await fetch_candles_binance(session, symbol)
+
+
+async def fetch_depth(session: aiohttp.ClientSession, symbol: str
+                      ) -> Optional[Tuple[List[List[str]], List[List[str]], float]]:
+    d = await _request(
+        session, "GET", "/api/v2/mix/market/merge-depth",
+        query={"symbol": symbol, "productType": PRODUCT_TYPE, "limit": "20"},
+        signed=False,
+    )
+    if d.get("code") != "00000":
+        return None
+    data = d.get("data", {}) or {}
+    bids = data.get("bids") or []
+    asks = data.get("asks") or []
+    if not bids or not asks:
+        return None
+    try:
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if best_bid <= 0 or best_ask <= 0:
+        return None
+    mid = (best_bid + best_ask) / 2.0
+    return bids, asks, mid
+
+
+# =============================================================================
+# ORDER EXECUTION
+# =============================================================================
+async def place_order(session: aiohttp.ClientSession,
+                      symbol: str, side: str, qty_str: str,
+                      reduce_only: bool = False) -> Optional[str]:
+    body: Dict[str, Any] = {
+        "category": PRODUCT_TYPE,
+        "symbol": symbol,
+        "qty": qty_str,
+        "side": side,
+        "orderType": "market",
+        "reduceOnly": "yes" if reduce_only else "no",
+    }
+    if not reduce_only:
+        body["tradeSide"] = "open"
+
+    res = await _request(session, "POST", "/api/v3/trade/place-order", body=body)
+    if res.get("code") == "00000":
+        oid = (res.get("data") or {}).get("orderId")
+        log.info("ORDER OK | %s %s %s | id=%s",
+                 symbol, side, qty_str, oid)
+        return oid
+    log.error("ORDER FAIL | %s %s | %s", symbol, side, res.get("msg"))
+    return None
+
+
+async def cancel_open_orders(session: aiohttp.ClientSession, symbol: str) -> None:
+    """Best-effort cancellation before close (market orders should be a no-op)."""
+    try:
+        await _request(
+            session, "POST", "/api/v3/trade/cancel-all-orders",
+            body={"category": PRODUCT_TYPE, "symbol": symbol},
+        )
+    except Exception as exc:
+        log.debug("cancel-all-orders fail %s: %s", symbol, exc)
+
+
+async def open_position(session: aiohttp.ClientSession,
+                        signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    symbol = signal["symbol"]
+    contract = _contracts.get(symbol)
+    if not contract:
+        log.warning("Missing contract rules for %s", symbol)
+        return None
+
+    balance = await get_usdt_available(session)
+    if balance <= 0:
+        log.warning("No USDT balance available for %s", symbol)
+        return None
+
+    price = signal["live_close"]
+    sizing = mm.calculate_order_qty(
+        balance=balance,
+        price=price,
+        leverage=LEVERAGE,
+        volume_place=contract["volumePlace"],
+        min_order_volume=contract["minOrderVolume"],
+        min_notional=MIN_NOTIONAL,
+        margin_use_ratio=MARGIN_USE_RATIO,
+    )
+    if not sizing["valid"]:
+        log.warning("Sizing rejected | %s | reason=%s | notional=%.4f",
+                    symbol, sizing["reason"], sizing["notional"])
+        return None
+
+    side = "buy" if signal["direction"] == "long" else "sell"
+    oid = await place_order(session, symbol, side, sizing["qty_str"],
+                            reduce_only=False)
+    if not oid:
+        return None
+
+    log.info("OPEN | %s %s @ %.6f | qty=%s | notional=%.4f USDT",
+             symbol, signal["direction"].upper(), price,
+             sizing["qty_str"], sizing["notional"])
+
+    return {
+        "symbol": symbol,
+        "direction": signal["direction"],
+        "entry": price,
+        "qty_str": sizing["qty_str"],
+        "qty_float": sizing["qty_float"],
+        "box_high": signal["box_high"],
+        "box_low": signal["box_low"],
+        "opened_at": time.time(),
+        "peak_net": -999.0,
+        "paper": False,
+        "order_id": oid,
+    }
+
+
+async def close_position(session: aiohttp.ClientSession,
+                         pos: Dict[str, Any], reason: str) -> bool:
+    symbol = pos["symbol"]
+    live = await get_position(session, symbol)
+    if not live or live["total"] <= 0:
+        log.info("No live position for %s (already closed)", symbol)
+        return True
+
+    await cancel_open_orders(session, symbol)
+
+    vp = _contracts.get(symbol, {}).get("volumePlace", 0)
+    qty_str = f"{live['total']:.{vp}f}"
+    close_side = "sell" if pos["direction"] == "long" else "buy"
+
+    oid = await place_order(session, symbol, close_side, qty_str,
+                            reduce_only=True)
+    if oid:
+        log.info("CLOSE OK | %s | reason=%s | size=%s",
+                 symbol, reason, qty_str)
+        return True
+
+    log.error("CLOSE FAIL | %s | reason=%s", symbol, reason)
+    return False
+
+
+# =============================================================================
+# SIGNAL SCANNING
+# =============================================================================
+def _should_scan(symbol: str, min_interval: float = SCAN_MIN_INTERVAL_SEC) -> bool:
+    now = time.time()
+    if now - _last_scan.get(symbol, 0.0) < min_interval:
+        return False
+    _last_scan[symbol] = now
+    return True
+
+
+async def scan_symbol(session: aiohttp.ClientSession,
+                      symbol: str) -> Optional[Dict[str, Any]]:
+    candles = await fetch_candles(session, symbol)
+    if not candles:
+        return None
+
+    box = candles[:-1]
+    live = candles[-1]
+
+    comp = mm.calculate_box_compression(box)
+    if not comp["is_compressed"]:
+        return None
+
+    trig = mm.check_ignite_trigger(
+        candles,
+        comp["box_high"],
+        comp["box_low"],
+        comp["base_volume"],
+    )
+    if not trig["is_valid"]:
+        return None
+
+    depth = await fetch_depth(session, symbol)
+    if depth is None:
+        return None
+    bids, asks, mid = depth
+    imb = mm.calculate_depth_imbalance(bids, asks, mid)
+
+    direction = trig["direction"]
+    if direction == "long":
+        if not imb["favorable"]:
+            return None
+    else:  # short
+        if imb["ratio"] <= 0:
+            return None
+        if (1.0 / imb["ratio"]) < 1.5:
+            return None
+
+    try:
+        live_close = float(live[4])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "box_high": comp["box_high"],
+        "box_low": comp["box_low"],
+        "box_range_pct": comp["box_range_pct"],
+        "base_volume": comp["base_volume"],
+        "live_close": live_close,
+        "volume_ratio": trig["volume_ratio"],
+        "breakout_price": trig["breakout_price"],
+        "chase_pct": trig["chase_distance_pct"],
+        "depth_ratio": imb["ratio"],
+        "ts": time.time(),
+    }
+
+
+async def scan_batch(session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
+    """Rotate through the universe in small batches, honouring rate limits."""
+    global _scan_idx
+    if not _universe:
+        return None
+
+    n = len(_universe)
+    batch: List[str] = []
+    for _ in range(min(SCAN_BATCH, n)):
+        batch.append(_universe[_scan_idx % n])
+        _scan_idx += 1
+
+    for symbol in batch:
+        if not _should_scan(symbol):
+            continue
+        try:
+            signal = await scan_symbol(session, symbol)
+            if signal:
+                return signal
+        except Exception as exc:
+            log.debug("scan_symbol error %s: %s", symbol, exc)
+    return None
+
+
+# =============================================================================
+# WATCHDOG (4-SECOND PULSE)
+# =============================================================================
+async def manage_position(session: aiohttp.ClientSession,
+                          pos: Dict[str, Any]) -> bool:
+    """
+    Returns True if the position was closed (or no longer exists),
+    False if it should remain open.
+    """
+    symbol = pos["symbol"]
+
+    if pos["paper"]:
+        candles = await fetch_candles(session, symbol)
+        if not candles:
+            return False
+        try:
+            current = float(candles[-1][4])
+        except (TypeError, ValueError, IndexError):
+            return False
+        entry = pos["entry"]
+    else:
+        live = await get_position(session, symbol)
+        if not live or live["total"] <= 0:
+            log.info("Live position for %s is gone", symbol)
+            return True
+        entry = live["entryPrice"] if live["entryPrice"] > 0 else pos["entry"]
+        candles = await fetch_candles(session, symbol)
+        current = entry
+        if candles:
+            try:
+                current = float(candles[-1][4])
+            except (TypeError, ValueError, IndexError):
+                current = entry
+
+    if current <= 0 or entry <= 0:
         return False
 
-# ----------------- PARALLEL 8-EXCHANGE ORDER BOOK PROBE -----------------
-class EightExchangeDepthProbe:
-    def __init__(self, session: aiohttp.ClientSession):
-        self.s = session
-
-    async def _binance(self, base: str):
-        try:
-            url = f"https://fapi.binance.com/fapi/v1/depth?symbol={base}USDT&limit=20"
-            async with self.s.get(url, timeout=0.8) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    return ("binance", d.get("bids", []), d.get("asks", []))
-        except Exception: pass
-        return None
-
-    async def _bybit(self, base: str):
-        try:
-            url = f"https://api.bybit.com/v5/market/orderbook?category=linear&symbol={base}USDT&limit=20"
-            async with self.s.get(url, timeout=0.8) as r:
-                if r.status == 200:
-                    d = (await r.json()).get("result", {})
-                    return ("bybit", d.get("b", []), d.get("a", []))
-        except Exception: pass
-        return None
-
-    async def _okx(self, base: str):
-        try:
-            url = f"https://www.okx.com/api/v5/market/books?instId={base}-USDT-SWAP&sz=20"
-            async with self.s.get(url, timeout=0.8) as r:
-                if r.status == 200:
-                    d = (await r.json()).get("data", [{}])[0]
-                    bids = [[x[0], x[1]] for x in d.get("bids", []) if len(x) >= 2]
-                    asks = [[x[0], x[1]] for x in d.get("asks", []) if len(x) >= 2]
-                    return ("okx", bids, asks)
-        except Exception: pass
-        return None
-
-    async def _gate(self, base: str):
-        try:
-            url = f"https://api.gateio.ws/api/v4/futures/usdt/order_book?contract={base}_USDT&limit=20"
-            async with self.s.get(url, timeout=0.8) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    bids = [[x["p"], x["s"]] for x in d.get("bids", []) if "p" in x and "s" in x]
-                    asks = [[x["p"], x["s"]] for x in d.get("asks", []) if "p" in x and "s" in x]
-                    return ("gate", bids, asks)
-        except Exception: pass
-        return None
-
-    async def _mexc(self, base: str):
-        try:
-            url = f"https://contract.mexc.com/api/v1/contract/depth/{base}_USDT?limit=20"
-            async with self.s.get(url, timeout=0.8) as r:
-                if r.status == 200:
-                    d = (await r.json()).get("data", {})
-                    return ("mexc", d.get("bids", []), d.get("asks", []))
-        except Exception: pass
-        return None
-
-    async def _kucoin(self, base: str):
-        try:
-            url = f"https://api-futures.kucoin.com/api/v1/level2/depth20?symbol={base}USDTM"
-            async with self.s.get(url, timeout=0.8) as r:
-                if r.status == 200:
-                    d = (await r.json()).get("data", {})
-                    return ("kucoin", d.get("bids", []), d.get("asks", []))
-        except Exception: pass
-        return None
-
-    async def _bingx(self, base: str):
-        try:
-            url = f"https://open-api.bingx.com/openApi/swap/v2/quote/depth?symbol={base}-USDT&limit=20"
-            async with self.s.get(url, timeout=0.8) as r:
-                if r.status == 200:
-                    d = (await r.json()).get("data", {})
-                    return ("bingx", d.get("bids", []), d.get("asks", []))
-        except Exception: pass
-        return None
-
-    async def _hyperliquid(self, base: str):
-        try:
-            url = "https://api.hyperliquid.xyz/info"
-            payload = {"type": "l2Book", "coin": base}
-            async with self.s.post(url, json=payload, timeout=0.8) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    levels = d.get("levels", [[], []])
-                    bids = [[x["px"], x["sz"]] for x in levels[0] if "px" in x and "sz" in x]
-                    asks = [[x["px"], x["sz"]] for x in levels[1] if "px" in x and "sz" in x]
-                    return ("hyperliquid", bids, asks)
-        except Exception: pass
-        return None
-
-    async def get_depths_all_8(self, base: str) -> list:
-        tasks = [
-            self._binance(base), self._okx(base), self._bybit(base), self._gate(base),
-            self._mexc(base), self._kucoin(base), self._bingx(base), self._hyperliquid(base)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [r for r in results if isinstance(r, tuple) and r is not None]
-
-# ----------------- BACKGROUND GLOBAL VOLUME AGGREGATOR -----------------
-class GlobalVolumeEngine:
-    def __init__(self, session: aiohttp.ClientSession):
-        self.s = session
-        self.global_volume_cache = {}
-        self.qualifying_count = 0
-
-    async def background_worker(self):
-        while True:
-            try:
-                totals = {}
-                t_start = time.time()
-
-                async def _binance():
-                    try:
-                        async with self.s.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=2.5) as r:
-                            if r.status == 200:
-                                for item in await r.json():
-                                    sym = item.get("symbol", "")
-                                    if sym.endswith("USDT"):
-                                        b = sym[:-4]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("quoteVolume", 0.0))
-                    except Exception: pass
-
-                async def _bybit():
-                    try:
-                        async with self.s.get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=2.5) as r:
-                            if r.status == 200:
-                                for item in (await r.json()).get("result", {}).get("list", []):
-                                    sym = item.get("symbol", "")
-                                    if sym.endswith("USDT"):
-                                        b = sym[:-4]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("turnover24h", 0.0))
-                    except Exception: pass
-
-                async def _okx():
-                    try:
-                        async with self.s.get("https://www.okx.com/api/v5/market/tickers?instType=SWAP", timeout=2.5) as r:
-                            if r.status == 200:
-                                for item in (await r.json()).get("data", []):
-                                    inst = item.get("instId", "")
-                                    if inst.endswith("-USDT-SWAP"):
-                                        b = inst.split("-")[0]
-                                        totals[b] = totals.get(b, 0.0) + (float(item.get("volCcy24h", 0.0)) * float(item.get("last", 0.0)))
-                    except Exception: pass
-
-                async def _gate():
-                    try:
-                        async with self.s.get("https://api.gateio.ws/api/v4/futures/usdt/tickers", timeout=2.5) as r:
-                            if r.status == 200:
-                                for item in await r.json():
-                                    contract = item.get("contract", "")
-                                    if contract.endswith("_USDT"):
-                                        b = contract[:-5]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("volume_24h_quote", 0.0))
-                    except Exception: pass
-
-                async def _mexc():
-                    try:
-                        async with self.s.get("https://contract.mexc.com/api/v1/contract/ticker", timeout=2.5) as r:
-                            if r.status == 200:
-                                for item in (await r.json()).get("data", []):
-                                    sym = item.get("symbol", "")
-                                    if sym.endswith("_USDT"):
-                                        b = sym[:-5]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("amount24", 0.0))
-                    except Exception: pass
-
-                async def _bingx():
-                    try:
-                        async with self.s.get("https://open-api.bingx.com/openApi/swap/v2/quote/ticker", timeout=2.5) as r:
-                            if r.status == 200:
-                                for item in (await r.json()).get("data", []):
-                                    sym = item.get("symbol", "")
-                                    if sym.endswith("-USDT"):
-                                        b = sym.split("-")[0]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("volume", 0.0))
-                    except Exception: pass
-
-                async def _kucoin():
-                    try:
-                        async with self.s.get("https://api-futures.kucoin.com/api/v1/contracts/active", timeout=2.5) as r:
-                            if r.status == 200:
-                                for item in (await r.json()).get("data", []):
-                                    sym = item.get("symbol", "")
-                                    if sym.endswith("USDTM"):
-                                        b = sym[:-5]
-                                        totals[b] = totals.get(b, 0.0) + float(item.get("turnoverOf24h", 0.0))
-                    except Exception: pass
-
-                await asyncio.gather(_binance(), _bybit(), _okx(), _gate(), _mexc(), _bingx(), _kucoin(), return_exceptions=True)
-
-                if totals:
-                    self.global_volume_cache = totals
-                    over_1m = sum(1 for v in totals.values() if v >= GLOBAL_MIN_VOL_USD)
-                    self.qualifying_count = over_1m
-                    logger.info(
-                        f"🌐 8-Exchange Volume Synced in {time.time() - t_start:.2f}s | "
-                        f"Mapped: {len(totals)} coins | Qualifying (>= $1M Global): {over_1m} coins"
-                    )
-            except Exception: pass
-            await asyncio.sleep(300)
-
-    def get_global_volume(self, base: str, bitget_vol: float) -> float:
-        return self.global_volume_cache.get(base, 0.0) + bitget_vol
-
-# ----------------- PARALLEL HIGH-WIN-RATE ENGINE -----------------
-class MasterEngine:
-    def __init__(self, session: aiohttp.ClientSession):
-        self.s = session
-        self.bitget = BitgetUTAClient(session)
-        self.depth_probe = EightExchangeDepthProbe(session)
-        self.global_vol = GlobalVolumeEngine(session)
-        self.price_history = {}
-        self.active_trade = None
-        self.sem = asyncio.Semaphore(25)
-
-    async def fetch_single_candle_set(self, sym: str, base: str) -> tuple:
-        async with self.sem:
-            url_bitget = f"https://api.bitget.com/api/v2/mix/market/candles?symbol={sym}&productType=usdt-futures&granularity=1m&limit=75"
-            try:
-                async with self.s.get(url_bitget, timeout=0.85) as r:
-                    if r.status == 200:
-                        res = await r.json()
-                        d = res.get("data", [])
-                        if isinstance(d, list) and len(d) >= 60:
-                            return (base, list(reversed(d)))
-            except Exception: pass
-
-            for variant in [base, f"1000{base}"]:
-                url_binance = f"https://fapi.binance.com/fapi/v1/klines?symbol={variant}USDT&interval=1m&limit=75"
-                try:
-                    async with self.s.get(url_binance, timeout=0.85) as r:
-                        if r.status == 200:
-                            d = await r.json()
-                            if isinstance(d, list) and len(d) >= 60:
-                                return (base, d)
-                except Exception: pass
-
-        return (base, [])
-
-    async def run_fast_scalp_watchdog(self, sym: str, base: str, direction: str, entry_price: float):
-        """
-        THE 40% GIVEBACK RATCHET WATCHDOG:
-        1. When losing: Stagnation cut in 40s (cuts losses fast).
-        2. When in net profit: Lets the trade breathe freely.
-        3. The 40% Rule: If price gives back 40% of its peak net profit, CLOSE IMMEDIATELY!
-        """
-        global state
-        self.active_trade = sym
-        state["total_trades"] += 1
-        save_state(state)
-
-        is_live = state["unlocked"] and bool(API_KEY and SECRET_KEY)
-
-        if is_live:
-            balance_usdt = await self.bitget.get_available_usdt()
-            qty_str = self.bitget.calculate_order_qty(entry_price, balance_usdt)
-            await self.bitget.open_order_uta(sym, side=direction, qty_str=qty_str)
-            logger.info(
-                f"⚡ LIVE {direction.upper()} OPENED: {qty_str} contracts @ ${entry_price:.4f} "
-                f"(Balance: ${balance_usdt:.2f} USDT | Margin: ~${(balance_usdt * 0.9):.2f} @ 5x)"
-            )
-
-        logger.info(
-            f"🚀 TRADE #{state['total_trades']} OPENED: {base} ({direction.upper()}) @ ${entry_price:.4f} | "
-            f"Mode: {'LIVE' if is_live else 'PAPER_GAUNTLET'} | Ratchet: 40% Max Giveback"
-        )
-
-        price_ticks = []
-        peak_gross = 0.0
-        peak_net = 0.0
-        trailing_floor_net = HARD_STOP_GROSS
-        breakeven_triggered = False
-        tick_count = 0
-
-        while True:
-            await asyncio.sleep(4.0)
-            tick_count += 1
-
-            url = f"https://api.bitget.com/api/v2/mix/market/ticker?symbol={sym}&productType=usdt-futures"
-            curr_price = 0.0
-            try:
-                async with self.s.get(url, timeout=0.8) as r:
-                    if r.status == 200:
-                        d = await r.json()
-                        curr_price = float(d.get("data", [{}])[0].get("lastPr", 0.0))
-            except Exception: pass
-
-            if curr_price <= 0: continue
-
-            price_ticks.append(curr_price)
-            if len(price_ticks) > 12:
-                price_ticks.pop(0)
-
-            if direction == "buy":
-                gross = ((curr_price - entry_price) / entry_price) * 100.0
-            else:
-                gross = ((entry_price - curr_price) / entry_price) * 100.0
-
-            net_move = gross - FEE_AND_SLIPPAGE
-            net_roe = net_move * LEVERAGE
-
-            if gross > peak_gross:
-                peak_gross = gross
-            if net_move > peak_net:
-                peak_net = net_move
-
-            # ----------------- 1. CUT LOSERS FAST (STAGNATION SHIELD) -----------------
-            # If after 40s (10 pulses) the trade has zero momentum and is negative, cut immediately!
-            if tick_count >= 10 and peak_gross <= 0.10 and gross < 0:
-                if is_live:
-                    await self.bitget.safe_close_position_uta(sym, direction)
-                logger.warning(f"🛑 STAGNATION CUT: {base} failed to move in 40s. Cut at Gross: {gross:.2f}%.")
-                state["streak"] = 0
-                state["unlocked"] = False
-                save_state(state)
-                break
-
-            # ----------------- 2. BREAKEVEN SHIELD -----------------
-            # Once in real net profit (+0.25% net), guarantee zero loss
-            if peak_net >= 0.25 and not breakeven_triggered:
-                breakeven_triggered = True
-                trailing_floor_net = 0.00
-                logger.info(f"🛡️ BREAKEVEN LOCKED on {base}! Floor set at 0.00% net (Zero loss guaranteed).")
-
-            # ----------------- 3. THE 40% PROFIT GIVEBACK RULE -----------------
-            # Once net profit reaches >= +0.50%, do not let the market eat more than 40% of it!
-            # If it gives back 40%, you keep the other 60%+ of the gain!
-            if peak_net >= 0.50:
-                dynamic_floor = peak_net * 0.60  # Keeps 60% of peak net profit
-                if dynamic_floor > trailing_floor_net:
-                    trailing_floor_net = dynamic_floor
-
-            # ----------------- 4. STRUCTURAL WAVE EXHAUSTION -----------------
-            # Evaluates structural waves over ~32 seconds (ignores 4s micro-noise)
-            is_wave_exhausted = MarketMath.audit_wave_exhaustion(price_ticks, direction)
-
-            if tick_count % 3 == 0:
-                logger.info(
-                    f"📊 4s Pulse #{tick_count} [{base} {direction.upper()}]: Net Move: {net_move:+.2f}% "
-                    f"(Peak Net: +{peak_net:.2f}%) | Net ROE (5x): {net_roe:+.2f}% | Floor: {trailing_floor_net:+.2f}%"
-                )
-
-            # ----------------- EXIT CONDITIONS -----------------
-            # A. 40% Giveback Floor Hit
-            if net_move <= trailing_floor_net:
-                if is_live:
-                    await self.bitget.safe_close_position_uta(sym, direction)
-
-                if net_move > 0.05:
-                    state["streak"] += 1
-                    logger.info(
-                        f"💰 40% RATCHET HARVEST! Banked Net: +{net_move:.2f}% | "
-                        f"Net ROE: +{net_roe:.2f}% (Peak Net was +{peak_net:.2f}%). Streak: {state['streak']}/{REQUIRED_STREAK}"
-                    )
-                elif breakeven_triggered:
-                    logger.info(f"🛡️ BREAKEVEN EXIT: Preserved capital at zero loss. Streak intact at {state['streak']}.")
-                else:
-                    logger.warning(f"🛑 STOPPED OUT! Net: {net_move:.2f}%. Streak reset to 0.")
-                    state["streak"] = 0
-                    state["unlocked"] = False
-
-                save_state(state)
-                break
-
-            # B. Structural Wave Reversal Exit
-            if peak_net >= 0.60 and is_wave_exhausted and net_move <= (peak_net * 0.75):
-                if is_live:
-                    await self.bitget.safe_close_position_uta(sym, direction)
-
-                state["streak"] += 1
-                logger.info(
-                    f"🏆 WAVE EXHAUSTION HARVEST! Banked Net: +{net_move:.2f}% | "
-                    f"Net ROE: +{net_roe:.2f}%. Streak: {state['streak']}/{REQUIRED_STREAK}"
-                )
-                save_state(state)
-                break
-
-        self.active_trade = None
-
-    async def main_loop(self):
-        run_health_server()
-        asyncio.create_task(self.global_vol.background_worker())
-
-        live_bal = await self.bitget.get_available_usdt()
-        margin_used = live_bal * 0.90
-        notional_val = margin_used * LEVERAGE
-
-        logger.info(
-            f"⚡ 80%+ Win-Rate Outlier Sentinel Online.\n"
-            f"   - 1-Hour Baseline: Average 1m Fluctuation >= 0.10% REQUIRED\n"
-            f"   - Sizing: ${live_bal:.2f} Balance | Margin: ${margin_used:.2f} (5x = ~${notional_val:.2f})\n"
-            f"   - Asymmetric Rules: Cut Losers in 40s | Give Winners Room to Breathe | 40% Max Giveback\n"
-            f"   - Streak: {state['streak']}/{REQUIRED_STREAK}"
-        )
-
-        cycle = 0
-        while True:
-            cycle += 1
-            now = time.time()
-            t0 = time.time()
-            try:
-                url = "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures"
-                async with self.s.get(url, timeout=2.0) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        wiggling_cohort = []
-                        total_tracked = 0
-
-                        for item in data.get("data", []):
-                            sym = item.get("symbol", "")
-                            if not sym.endswith("USDT"): continue
-
-                            base = sym[:-4]
-                            bitget_vol = float(item.get("usdtVolume", 0.0))
-                            curr_price = float(item.get("lastPr", 0.0))
-
-                            if curr_price <= 0: continue
-
-                            global_vol = self.global_vol.get_global_volume(base, bitget_vol)
-                            if global_vol < GLOBAL_MIN_VOL_USD:
-                                continue
-
-                            total_tracked += 1
-
-                            if base not in self.price_history:
-                                self.price_history[base] = deque(maxlen=60)
-                            self.price_history[base].append((now, curr_price))
-
-                            history = self.price_history[base]
-                            if len(history) >= 10:
-                                old_time, old_price = history[0]
-                                elapsed = now - old_time
-
-                                if elapsed >= 90:
-                                    pct_3m = ((curr_price - old_price) / old_price) * 100.0
-                                    speed_3m = abs(pct_3m)
-
-                                    if speed_3m >= 0.45:
-                                        wiggling_cohort.append({
-                                            "symbol": sym,
-                                            "base": base,
-                                            "price": curr_price,
-                                            "speed_3m": speed_3m,
-                                            "pct_3m": pct_3m
-                                        })
-
-                        wiggling_cohort.sort(key=lambda x: x["speed_3m"], reverse=True)
-                        top_candidates = wiggling_cohort[:15]
-
-                        if cycle % 5 == 0:
-                            global_count = self.global_vol.qualifying_count or total_tracked
-                            top_info = f"Top: {top_candidates[0]['base']} ({top_candidates[0]['pct_3m']:+.2f}%/3m)" if top_candidates else "None"
-                            logger.info(
-                                f"💓 Imbalance Radar: Tracking {total_tracked} pairs ({global_count} >= $1M) | "
-                                f"Active Movers: {len(top_candidates)} ({top_info}) | Streak: {state['streak']}/{REQUIRED_STREAK}"
-                            )
-
-                        if not self.active_trade and top_candidates:
-                            # 1. Parallel candle fetch (75 candles to verify 1h baseline)
-                            tasks = [self.fetch_single_candle_set(c["symbol"], c["base"]) for c in top_candidates]
-                            candle_results = await asyncio.gather(*tasks, return_exceptions=True)
-                            candle_map = {b: d for b, d in candle_results if isinstance(b, str) and isinstance(d, list)}
-
-                            snapback_pool = []
-                            for c in top_candidates:
-                                base = c["base"]
-                                candles = candle_map.get(base, [])
-                                snap = MarketMath.audit_reversal_candidate(candles, c["price"])
-                                if snap["qualified"]:
-                                    snapback_pool.append({
-                                        "symbol": c["symbol"],
-                                        "base": base,
-                                        "price": c["price"],
-                                        "direction": snap["direction"],
-                                        "snap": snap
-                                    })
-
-                            # 2. Parallel 8-Exchange Depth Check
-                            if snapback_pool:
-                                depth_tasks = [self.depth_probe.get_depths_all_8(c["base"]) for c in snapback_pool]
-                                depth_results = await asyncio.gather(*depth_tasks, return_exceptions=True)
-
-                                scored_candidates = []
-                                for candidate, depths in zip(snapback_pool, depth_results):
-                                    if not isinstance(depths, list): continue
-
-                                    imbalance = MarketMath.audit_cross_imbalance(depths, candidate["direction"])
-                                    if imbalance["has_imbalance"]:
-                                        scored_candidates.append({
-                                            "candidate": candidate,
-                                            "imbalance_ratio": imbalance["imbalance_ratio"],
-                                            "venues_count": imbalance["venues_count"]
-                                        })
-
-                                # 3. Strictly select the #1 LARGEST global order book wall
-                                if scored_candidates:
-                                    scored_candidates.sort(key=lambda x: x["imbalance_ratio"], reverse=True)
-                                    winner = scored_candidates[0]
-                                    chosen = winner["candidate"]
-                                    ratio = winner["imbalance_ratio"]
-                                    venues = winner["venues_count"]
-                                    side = chosen["direction"]
-
-                                    elapsed_scan = time.time() - t0
-                                    logger.info(
-                                        f"🎯 #1 LARGEST IMBALANCE CONFIRMED [{side.upper()}] (Scan: {elapsed_scan:.2f}s): {chosen['base']}!\n"
-                                        f"   - 1h Baseline Volatility: {chosen['snap']['avg_1h_fluctuation']}%/min (>= 0.10% filter passed)\n"
-                                        f"   - Global Wall Imbalance: {ratio}x across {venues}/8 exchanges (Strongest in Market)\n"
-                                        f"   - Outlier Move: {chosen['snap']['extreme_move']}% | Rebound: {chosen['snap']['rebound_pct']}%\n"
-                                        f"   - Entering trade with 40% Giveback Protection..."
-                                    )
-                                    asyncio.create_task(
-                                        self.run_fast_scalp_watchdog(chosen["symbol"], chosen["base"], side, chosen["price"])
-                                    )
-
-            except Exception as e:
-                logger.error(f"Loop error: {e}")
-
-            await asyncio.sleep(2.5)
-
-async def main():
-    connector = aiohttp.TCPConnector(
-        limit=80,
-        limit_per_host=25,
-        ttl_dns_cache=300,
-        keepalive_timeout=60.0
+    elapsed = time.time() - pos["opened_at"]
+    state = mm.evaluate_ratchet_state(
+        entry_price=entry,
+        current_price=current,
+        direction=pos["direction"],
+        peak_net=pos["peak_net"],
+        elapsed_seconds=elapsed,
+        box_high=pos["box_high"],
+        box_low=pos["box_low"],
     )
-    async with aiohttp.ClientSession(connector=connector) as session:
-        engine = MasterEngine(session)
-        await engine.main_loop()
+
+    pos["peak_net"] = state["peak_net"]
+    action = state["action"]
+
+    if action == "HOLD":
+        return False
+
+    if pos["paper"]:
+        log.info(
+            "PAPER EXIT | %s %s | action=%s | net=%.3f%% | peak=%.3f%%",
+            symbol, pos["direction"].upper(), action,
+            state["net_pct"], state["peak_net"],
+        )
+        _record_paper_trade(state["net_pct"])
+        return True
+
+    closed = await close_position(session, pos, action)
+    if closed:
+        log.info(
+            "LIVE EXIT | %s %s | action=%s | net=%.3f%% | peak=%.3f%%",
+            symbol, pos["direction"].upper(), action,
+            state["net_pct"], state["peak_net"],
+        )
+    return closed
+
+
+# =============================================================================
+# BACKGROUND REFRESH WORKER
+# =============================================================================
+async def background_refresh(session: aiohttp.ClientSession) -> None:
+    while True:
+        await asyncio.sleep(UNIVERSE_REFRESH_SEC)
+        try:
+            await refresh_contracts(session)
+            await refresh_universe(session)
+        except Exception as exc:
+            log.warning("Background refresh error: %s", exc)
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+async def main() -> None:
+    _start_keepalive()
+    _load_streak()
+    log.info(
+        "Streak loaded | wins=%d losses=%d live=%s trades=%d",
+        _streak["wins"], _streak["losses"],
+        _streak["live_activated"], _streak["trades"],
+    )
+
+    connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    async with aiohttp.ClientSession(
+        connector=connector, timeout=timeout, headers=DEFAULT_HEADERS,
+    ) as session:
+        await enforce_one_way(session)
+
+        # Prime the caches once, synchronously, before main loop starts.
+        await refresh_contracts(session)
+        await refresh_universe(session)
+
+        bg_task = asyncio.create_task(background_refresh(session))
+
+        if not _contracts:
+            log.warning("No contracts cached — universe will be empty until "
+                        "the background task succeeds.")
+        log.info("Main loop started | universe=%d", len(_universe))
+
+        open_positions: List[Dict[str, Any]] = []
+
+        while True:
+            loop_start = time.time()
+
+            # ----- 1) Manage open positions on every pulse -----
+            still_open: List[Dict[str, Any]] = []
+            for pos in open_positions:
+                try:
+                    closed = await manage_position(session, pos)
+                    if not closed:
+                        still_open.append(pos)
+                except Exception as exc:
+                    log.error("Manage error %s: %s", pos.get("symbol"), exc)
+                    still_open.append(pos)
+            open_positions = still_open
+
+            # ----- 2) Scan for new signals (single-slot concurrency) -----
+            if len(open_positions) < 1:
+                try:
+                    signal = await scan_batch(session)
+                except Exception as exc:
+                    log.error("scan_batch error: %s", exc)
+                    signal = None
+
+                if signal:
+                    log.info(
+                        "SIGNAL | %s %s | box=%.3f%% | vol=%.2fx | "
+                        "chase=%.3f%% | depth=%.2f",
+                        signal["symbol"], signal["direction"].upper(),
+                        signal["box_range_pct"], signal["volume_ratio"],
+                        signal["chase_pct"], signal["depth_ratio"],
+                    )
+
+                    if _streak["live_activated"]:
+                        new_pos = await open_position(session, signal)
+                        if new_pos:
+                            open_positions.append(new_pos)
+                    else:
+                        paper_pos: Dict[str, Any] = {
+                            "symbol": signal["symbol"],
+                            "direction": signal["direction"],
+                            "entry": signal["live_close"],
+                            "box_high": signal["box_high"],
+                            "box_low": signal["box_low"],
+                            "opened_at": time.time(),
+                            "peak_net": -999.0,
+                            "paper": True,
+                        }
+                        open_positions.append(paper_pos)
+                        log.info(
+                            "PAPER OPEN | %s %s @ %.6f | wins=%d/%d",
+                            paper_pos["symbol"], paper_pos["direction"].upper(),
+                            paper_pos["entry"],
+                            _streak["wins"], PAPER_WINS_REQUIRED,
+                        )
+
+            # ----- 3) Sleep to maintain the 4-second pulse -----
+            elapsed = time.time() - loop_start
+            await asyncio.sleep(max(0.0, PULSE_SEC - elapsed))
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("Shutdown requested.")
+    except Exception as exc:
+        log.critical("Fatal error: %s", exc, exc_info=True)
