@@ -2,15 +2,15 @@
 """
 bot.py
 ======
-Coiled Spring Breakout | Bitget UTA V3 | Render Free Tier.
+Coiled Spring Ignition | Bitget UTA V3 | Render Free Tier.
 
-Architecture:
-    - Daemonized keep-alive HTTP server on :10000
-    - Bitget UTA V3 signed HTTP client (HMAC-SHA256 / Base64)
-    - Background 8-exchange 24h volume cache refreshed every 300 s
-    - Rotating, rate-limited candidate scanner
-    - 4-second watchdog applying the asymmetric risk ladder
-    - Persistent paper-gauntlet streak (streak.json) gates live capital
+Pipeline:
+    - 8-exchange 24h volume aggregation (5-minute background refresh)
+    - Universe rotation scanning for compression boxes
+    - Hot-list ignition monitoring (every 4 s)
+    - Book fragility verification via depth snapshot
+    - Paper gauntlet gating live capital (8 consecutive net wins)
+    - 4-second watchdog applying the asymmetric ratchet ladder
 
 Dependencies: aiohttp>=3.9.0 and the Python standard library only.
 """
@@ -25,7 +25,6 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -38,21 +37,15 @@ API_BASE = "https://api.bitget.com"
 PORT = 10000
 PRODUCT_TYPE = "USDT-FUTURES"
 LEVERAGE = 5
-MIN_NOTIONAL = 5.0
-MARGIN_USE_RATIO = 0.90
-
-BOX_CANDLES = 30
-PULSE_SEC = 4
+PULSE_SEC = 4.0
 UNIVERSE_REFRESH_SEC = 300
 UNIVERSE_MIN_VOL_USD = 1_000_000.0
-
-SCAN_BATCH = 12
-SCAN_MIN_INTERVAL_SEC = 60.0
-
+UNIVERSE_BATCH = 6
+HOT_LIST_BATCH = 6
+HOT_LIST_TTL_SEC = 300.0
 STREAK_FILE = "streak.json"
 PAPER_WINS_REQUIRED = 8
-
-DEFAULT_HEADERS = {"User-Agent": "coil-bot/1.0"}
+CANDLE_COUNT = 31
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,14 +56,14 @@ log = logging.getLogger("coil")
 
 
 # =============================================================================
-# CREDENTIALS
+# CREDENTIALS (stripped)
 # =============================================================================
 def _env(*names: str) -> str:
     for n in names:
         v = os.getenv(n)
         if v:
             return v.strip()
-    raise RuntimeError(f"Missing required environment variable: {names}")
+    raise RuntimeError(f"Missing credential env var: {names}")
 
 
 API_KEY = _env("BITGET_API_KEY", "API_KEY")
@@ -79,7 +72,7 @@ PASSPHRASE = _env("BITGET_API_PASSPHRASE", "PASSPHRASE")
 
 
 # =============================================================================
-# KEEP-ALIVE HTTP SERVER
+# KEEP-ALIVE SERVER
 # =============================================================================
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -98,19 +91,16 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 def _start_keepalive() -> None:
     server = HTTPServer(("0.0.0.0", PORT), _HealthHandler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    log.info("Keep-alive HTTP server listening on :%d", PORT)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info("Keep-alive listening on :%d", PORT)
 
 
 # =============================================================================
-# BITGET SIGNING + HTTP
+# BITGET UTA V3 AUTHENTICATOR
 # =============================================================================
-def _sign(timestamp: str, method: str, path: str, query: str, body: str) -> str:
-    msg = timestamp + method.upper() + path
-    if query:
-        msg += "?" + query
-    msg += body
+def _sign(timestamp: str, method: str, request_path: str, body: str) -> str:
+    msg = timestamp + method.upper() + request_path + body
     digest = hmac.new(
         SECRET_KEY.encode("utf-8"),
         msg.encode("utf-8"),
@@ -119,18 +109,11 @@ def _sign(timestamp: str, method: str, path: str, query: str, body: str) -> str:
     return base64.b64encode(digest).decode("utf-8")
 
 
-async def _request(
-    session: aiohttp.ClientSession,
-    method: str,
-    path: str,
-    *,
-    query: Optional[Dict[str, str]] = None,
-    body: Optional[Dict[str, Any]] = None,
-    signed: bool = True,
-    retries: int = 4,
-) -> Dict[str, Any]:
+async def _request(session, method, path, *, query=None, body=None,
+                   signed=True, retries=4):
     query = query or {}
     qs = "&".join(f"{k}={v}" for k, v in query.items())
+    path_with_q = path + ("?" + qs if qs else "")
     body_str = ""
     if method.upper() == "POST" and body:
         body_str = json.dumps(body, separators=(",", ":"))
@@ -141,12 +124,12 @@ async def _request(
         if signed:
             headers.update({
                 "ACCESS-KEY": API_KEY,
-                "ACCESS-SIGN": _sign(ts, method, path, qs, body_str),
+                "ACCESS-SIGN": _sign(ts, method, path_with_q, body_str),
                 "ACCESS-TIMESTAMP": ts,
                 "ACCESS-PASSPHRASE": PASSPHRASE,
             })
 
-        url = API_BASE + path + (f"?{qs}" if qs else "")
+        url = API_BASE + path_with_q
         try:
             async with session.request(
                 method,
@@ -156,50 +139,47 @@ async def _request(
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 text = await resp.text()
-                if resp.status == 429:
-                    await asyncio.sleep((2 ** attempt) + 1)
-                    continue
-                if resp.status >= 500:
+                if resp.status == 429 or resp.status >= 500:
                     await asyncio.sleep((2 ** attempt) + 1)
                     continue
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
-                    log.error("Non-JSON response [%s %s] status=%s body=%s",
+                    log.error("Non-JSON [%s %s] %s: %s",
                               method, path, resp.status, text[:160])
                     return {"code": "JSON_ERROR", "msg": text[:160]}
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            log.warning("Network error [%s %s]: %s", method, path, exc)
+            log.warning("Net err [%s %s]: %s", method, path, exc)
             await asyncio.sleep((2 ** attempt) + 1)
 
-    return {"code": "RETRY_EXHAUSTED", "msg": "max retries exceeded"}
+    return {"code": "RETRY_EXHAUSTED", "msg": "max retries"}
 
 
-async def _get_json(session: aiohttp.ClientSession, url: str,
-                    timeout: float = 10.0) -> Any:
-    """Unauthenticated GET helper for third-party exchange tickers."""
+async def _get_public_json(session, url, timeout=10.0):
     try:
         async with session.get(
             url,
-            headers=DEFAULT_HEADERS,
+            headers={"User-Agent": "coil-bot/1.0"},
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
     except Exception as exc:
-        log.debug("External fetch fail %s: %s", url, exc)
+        log.debug("Public fetch fail %s: %s", url, exc)
         return None
 
 
 # =============================================================================
 # STATE
 # =============================================================================
-_contracts: Dict[str, Dict[str, Any]] = {}
-_universe: List[str] = []
-_last_scan: Dict[str, float] = {}
-_scan_idx = 0
-_streak: Dict[str, Any] = {
+_contracts = {}     # symbol -> {volumePlace, pricePlace, minOrderVolume, minNotional}
+_universe = []      # list of symbols meeting 24h volume threshold
+_universe_idx = 0
+_hot_list = {}      # symbol -> {box_high, box_low, base_volume, expiry}
+_active_pos = None  # live position dict
+_paper_pos = None   # paper position dict
+_streak = {
     "wins": 0,
     "losses": 0,
     "live_activated": False,
@@ -207,19 +187,19 @@ _streak: Dict[str, Any] = {
 }
 
 
-def _load_streak() -> None:
+def _load_streak():
     try:
         with open(STREAK_FILE, "r") as f:
-            data = json.load(f)
-        _streak["wins"] = int(data.get("wins", 0))
-        _streak["losses"] = int(data.get("losses", 0))
-        _streak["live_activated"] = bool(data.get("live_activated", False))
-        _streak["trades"] = int(data.get("trades", 0))
+            d = json.load(f)
+        _streak["wins"] = int(d.get("wins", 0))
+        _streak["losses"] = int(d.get("losses", 0))
+        _streak["live_activated"] = bool(d.get("live_activated", False))
+        _streak["trades"] = int(d.get("trades", 0))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
 
 
-def _save_streak() -> None:
+def _save_streak():
     try:
         with open(STREAK_FILE, "w") as f:
             json.dump(_streak, f)
@@ -227,71 +207,33 @@ def _save_streak() -> None:
         log.error("Failed to persist streak: %s", exc)
 
 
-def _record_paper_trade(net_pct: float) -> None:
-    _streak["trades"] += 1
-    if net_pct > 0:
-        _streak["wins"] += 1
-        _streak["losses"] = 0
-    elif net_pct < 0:
-        _streak["losses"] += 1
-        _streak["wins"] = 0
-    # net_pct == 0.0 (breakeven) preserves the streak
-
-    if not _streak["live_activated"] and _streak["wins"] >= PAPER_WINS_REQUIRED:
-        _streak["live_activated"] = True
-        log.info("*** PAPER GAUNTLET PASSED — LIVE CAPITAL ACTIVATED ***")
-
-    _save_streak()
-    log.info(
-        "PAPER | net=%.3f%% | wins=%d losses=%d live=%s trades=%d",
-        net_pct, _streak["wins"], _streak["losses"],
-        _streak["live_activated"], _streak["trades"],
-    )
-
-
 # =============================================================================
-# ONE-WAY POSITION MODE (startup)
+# ONE-WAY MODE (single_hold) — V2 endpoint per spec, once on boot
 # =============================================================================
-async def enforce_one_way(session: aiohttp.ClientSession) -> None:
+async def enforce_one_way(session):
     res = await _request(
-        session, "POST", "/api/v3/account/set-hold-mode",
-        body={"holdMode": "one_way_mode"},
+        session, "POST", "/api/v2/mix/account/set-position-mode",
+        body={"productType": PRODUCT_TYPE, "posMode": "single_hold"},
     )
     if res.get("code") == "00000":
-        log.info("One-way mode confirmed via V3 set-hold-mode.")
+        log.info("One-way mode enforced (single_hold).")
         return
-
-    log.warning("V3 set-hold-mode failed (%s) — trying V2 fallback",
-                res.get("msg"))
-    for mode in ("single_hold", "one_way_mode"):
-        res = await _request(
-            session, "POST", "/api/v2/mix/account/set-position-mode",
-            body={"productType": PRODUCT_TYPE, "posMode": mode},
-        )
-        if res.get("code") == "00000":
-            log.info("One-way mode set via V2 fallback (posMode=%s).", mode)
-            return
-        log.warning("V2 posMode=%s failed: %s", mode, res.get("msg"))
-
-    log.warning("Could not enforce one-way mode — continuing anyway "
-                "(may cause Error 40774).")
+    log.warning("set-position-mode (single_hold) response: %s", res.get("msg"))
 
 
 # =============================================================================
-# CONTRACT RULES CACHE
+# CONTRACT RULES CACHE (V2 metadata, required by V3 orders)
 # =============================================================================
-async def refresh_contracts(session: aiohttp.ClientSession) -> None:
-    data = await _request(
+async def refresh_contracts(session):
+    d = await _request(
         session, "GET", "/api/v2/mix/market/contracts",
-        query={"productType": PRODUCT_TYPE},
-        signed=False,
+        query={"productType": PRODUCT_TYPE}, signed=False,
     )
-    if data.get("code") != "00000":
-        log.warning("Contract refresh failed: %s", data.get("msg"))
+    if d.get("code") != "00000":
+        log.warning("Contract refresh failed: %s", d.get("msg"))
         return
-
-    new_cache: Dict[str, Dict[str, Any]] = {}
-    for c in data.get("data", []):
+    new_cache = {}
+    for c in d.get("data", []) or []:
         sym = c.get("symbol", "")
         if not sym or not sym.endswith("USDT"):
             continue
@@ -299,24 +241,20 @@ async def refresh_contracts(session: aiohttp.ClientSession) -> None:
             new_cache[sym] = {
                 "volumePlace": int(float(c.get("volumePlace") or 0)),
                 "pricePlace": int(float(c.get("pricePlace") or 0)),
-                "sizeMultiplier": float(c.get("sizeMultiplier") or 0),
                 "minOrderVolume": float(c.get("minTradeNum") or 0),
                 "minNotional": float(c.get("minTradeUSDT") or 5.0),
-                "maxLever": int(float(c.get("maxLever") or 1)),
             }
         except (TypeError, ValueError):
             continue
-
     _contracts.clear()
     _contracts.update(new_cache)
-    log.info("Contract cache refreshed: %d USDT symbols", len(_contracts))
+    log.info("Contracts cached: %d symbols", len(_contracts))
 
 
 # =============================================================================
-# 8-EXCHANGE VOLUME AGGREGATION
+# UNIVERSE (8-exchange aggregation)
 # =============================================================================
-def _norm_symbol(sym: str) -> str:
-    """Normalise exchange-specific symbols to the canonical BTCUSDT form."""
+def _norm(sym):
     s = (sym or "").upper().replace("-", "").replace("_", "").replace("/", "")
     if s.startswith("XBT"):
         s = "BTC" + s[3:]
@@ -329,15 +267,14 @@ def _norm_symbol(sym: str) -> str:
     return s
 
 
-async def _vol_bitget(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(
-        session,
-        API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
+async def _vol_bitget(session):
+    out = {}
+    d = await _get_public_json(
+        session, API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
     )
     if not isinstance(d, dict) or d.get("code") != "00000":
         return out
-    for t in d.get("data", []):
+    for t in d.get("data", []) or []:
         sym = t.get("symbol", "")
         if sym.endswith("USDT"):
             try:
@@ -347,13 +284,15 @@ async def _vol_bitget(session: aiohttp.ClientSession) -> Dict[str, float]:
     return out
 
 
-async def _vol_binance(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(session, "https://fapi.binance.com/fapi/v1/ticker/24hr")
+async def _vol_binance(session):
+    out = {}
+    d = await _get_public_json(
+        session, "https://fapi.binance.com/fapi/v1/ticker/24hr",
+    )
     if not isinstance(d, list):
         return out
     for t in d:
-        sym = _norm_symbol(t.get("symbol", ""))
+        sym = _norm(t.get("symbol", ""))
         if sym.endswith("USDT"):
             try:
                 out[sym] = out.get(sym, 0.0) + float(t.get("quoteVolume") or 0)
@@ -362,15 +301,15 @@ async def _vol_binance(session: aiohttp.ClientSession) -> Dict[str, float]:
     return out
 
 
-async def _vol_bybit(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(
+async def _vol_bybit(session):
+    out = {}
+    d = await _get_public_json(
         session, "https://api.bybit.com/v5/market/tickers?category=linear",
     )
     if not isinstance(d, dict) or d.get("retCode") != 0:
         return out
-    for t in d.get("result", {}).get("list", []):
-        sym = _norm_symbol(t.get("symbol", ""))
+    for t in d.get("result", {}).get("list", []) or []:
+        sym = _norm(t.get("symbol", ""))
         if sym.endswith("USDT"):
             try:
                 out[sym] = out.get(sym, 0.0) + float(t.get("turnover24h") or 0)
@@ -379,37 +318,34 @@ async def _vol_bybit(session: aiohttp.ClientSession) -> Dict[str, float]:
     return out
 
 
-async def _vol_okx(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(
+async def _vol_okx(session):
+    out = {}
+    d = await _get_public_json(
         session, "https://www.okx.com/api/v5/market/tickers?instType=SWAP",
     )
     if not isinstance(d, dict) or d.get("code") != "0":
         return out
-    for t in d.get("data", []):
+    for t in d.get("data", []) or []:
         inst = t.get("instId", "")
         if "USDT-SWAP" not in inst:
             continue
-        sym = _norm_symbol(inst)
+        sym = _norm(inst)
         try:
-            base_vol = float(t.get("volCcy24h") or 0)
-            last = float(t.get("last") or 0)
-            usd = base_vol * last
-            out[sym] = out.get(sym, 0.0) + usd
+            out[sym] = out.get(sym, 0.0) + float(t.get("volCcy24h") or 0) * float(t.get("last") or 0)
         except (TypeError, ValueError):
             pass
     return out
 
 
-async def _vol_gate(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(
+async def _vol_gate(session):
+    out = {}
+    d = await _get_public_json(
         session, "https://api.gateio.ws/api/v4/futures/usdt/tickers",
     )
     if not isinstance(d, list):
         return out
     for t in d:
-        sym = _norm_symbol(t.get("contract", ""))
+        sym = _norm(t.get("contract", ""))
         if sym.endswith("USDT"):
             try:
                 out[sym] = out.get(sym, 0.0) + float(t.get("volume_24h_quote") or 0)
@@ -418,15 +354,15 @@ async def _vol_gate(session: aiohttp.ClientSession) -> Dict[str, float]:
     return out
 
 
-async def _vol_kucoin(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(
+async def _vol_kucoin(session):
+    out = {}
+    d = await _get_public_json(
         session, "https://api-futures.kucoin.com/api/v1/contracts/active",
     )
     if not isinstance(d, dict) or d.get("code") != "200000":
         return out
-    for t in d.get("data", []):
-        sym = _norm_symbol(t.get("symbol", ""))
+    for t in d.get("data", []) or []:
+        sym = _norm(t.get("symbol", ""))
         if sym.endswith("USDT"):
             try:
                 out[sym] = out.get(sym, 0.0) + float(t.get("turnoverOf24h") or 0)
@@ -435,15 +371,15 @@ async def _vol_kucoin(session: aiohttp.ClientSession) -> Dict[str, float]:
     return out
 
 
-async def _vol_mexc(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(
+async def _vol_mexc(session):
+    out = {}
+    d = await _get_public_json(
         session, "https://contract.mexc.com/api/v1/contract/ticker",
     )
     if not isinstance(d, dict) or not d.get("success"):
         return out
-    for t in d.get("data", []):
-        sym = _norm_symbol(t.get("symbol", ""))
+    for t in d.get("data", []) or []:
+        sym = _norm(t.get("symbol", ""))
         if sym.endswith("USDT"):
             try:
                 out[sym] = out.get(sym, 0.0) + float(t.get("amount24") or 0)
@@ -452,16 +388,15 @@ async def _vol_mexc(session: aiohttp.ClientSession) -> Dict[str, float]:
     return out
 
 
-async def _vol_htx(session: aiohttp.ClientSession) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    d = await _get_json(
-        session,
-        "https://api.hbdm.com/linear-swap-ex/market/tickers?business_type=swap",
+async def _vol_htx(session):
+    out = {}
+    d = await _get_public_json(
+        session, "https://api.hbdm.com/linear-swap-ex/market/tickers?business_type=swap",
     )
     if not isinstance(d, dict) or d.get("status") != "ok":
         return out
-    for t in d.get("data", []):
-        sym = _norm_symbol(t.get("contract_code", ""))
+    for t in d.get("data", []) or []:
+        sym = _norm(t.get("contract_code", ""))
         if sym.endswith("USDT"):
             try:
                 out[sym] = out.get(sym, 0.0) + float(t.get("trade_turnover") or 0)
@@ -470,8 +405,8 @@ async def _vol_htx(session: aiohttp.ClientSession) -> Dict[str, float]:
     return out
 
 
-async def refresh_universe(session: aiohttp.ClientSession) -> None:
-    tasks = [
+async def refresh_universe(session):
+    results = await asyncio.gather(
         _vol_bitget(session),
         _vol_binance(session),
         _vol_bybit(session),
@@ -480,155 +415,61 @@ async def refresh_universe(session: aiohttp.ClientSession) -> None:
         _vol_kucoin(session),
         _vol_mexc(session),
         _vol_htx(session),
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    agg: Dict[str, float] = {}
-    exchanges_ok = 0
+        return_exceptions=True,
+    )
+    agg = {}
+    ok = 0
     for r in results:
         if isinstance(r, dict) and r:
-            exchanges_ok += 1
+            ok += 1
             for sym, vol in r.items():
                 agg[sym] = agg.get(sym, 0.0) + vol
 
     tradeable = set(_contracts.keys())
-    filtered = [
-        s for s, v in agg.items()
-        if s in tradeable and v >= UNIVERSE_MIN_VOL_USD
-    ]
+    filtered = [s for s, v in agg.items()
+                if s in tradeable and v >= UNIVERSE_MIN_VOL_USD]
     filtered.sort(key=lambda s: agg[s], reverse=True)
 
     _universe.clear()
     _universe.extend(filtered)
-    log.info("Universe refreshed: %d symbols (>= $%.1fM across %d/8 exchanges)",
-             len(_universe), UNIVERSE_MIN_VOL_USD / 1e6, exchanges_ok)
-
-
-# =============================================================================
-# ACCOUNT / POSITION
-# =============================================================================
-async def get_usdt_available(session: aiohttp.ClientSession) -> float:
-    d = await _request(session, "GET", "/api/v3/account/assets")
-    if d.get("code") == "00000":
-        for a in d.get("data", {}).get("assets", []) or []:
-            if a.get("coin") == "USDT":
-                try:
-                    return float(a.get("available") or 0)
-                except (TypeError, ValueError):
-                    return 0.0
-        return 0.0
-
-    d2 = await _request(session, "GET", "/api/v2/account/all-account-balance")
-    if d2.get("code") == "00000":
-        for a in d2.get("data", []) or []:
-            if a.get("coin") == "USDT":
-                try:
-                    return float(a.get("available") or 0)
-                except (TypeError, ValueError):
-                    return 0.0
-    return 0.0
-
-
-async def get_position(session: aiohttp.ClientSession,
-                       symbol: str) -> Optional[Dict[str, Any]]:
-    d = await _request(
-        session, "GET", "/api/v3/position/current-position",
-        query={"category": PRODUCT_TYPE, "symbol": symbol},
-    )
-    if d.get("code") != "00000":
-        return None
-    for p in d.get("data") or []:
-        try:
-            total = float(p.get("total") or 0)
-        except (TypeError, ValueError):
-            total = 0.0
-        if total > 0:
-            try:
-                entry = float(p.get("entryPrice") or 0)
-            except (TypeError, ValueError):
-                entry = 0.0
-            try:
-                upnl = float(p.get("unrealizedPnl") or 0)
-            except (TypeError, ValueError):
-                upnl = 0.0
-            return {
-                "total": total,
-                "posSide": p.get("posSide", ""),
-                "entryPrice": entry,
-                "unrealizedPnl": upnl,
-            }
-    return None
+    log.info("Universe refreshed: %d symbols (>= $%.1fM, %d/8 exchanges)",
+             len(_universe), UNIVERSE_MIN_VOL_USD / 1e6, ok)
 
 
 # =============================================================================
 # MARKET DATA
 # =============================================================================
-async def fetch_candles_bitget(session: aiohttp.ClientSession,
-                               symbol: str) -> Optional[List[List[str]]]:
+def _normalize_candle(row):
+    """Bitget: [ts, o, h, l, c, baseVol, quoteVol] -> [ts, o, h, l, c, baseVol]"""
+    return [row[0], row[1], row[2], row[3], row[4], row[5]]
+
+
+async def fetch_candles(session, symbol, limit=CANDLE_COUNT):
     d = await _request(
         session, "GET", "/api/v2/mix/market/candles",
         query={
             "symbol": symbol,
             "productType": PRODUCT_TYPE,
             "granularity": "1m",
-            "limit": str(BOX_CANDLES + 1),
+            "limit": str(limit),
         },
         signed=False,
     )
     if d.get("code") != "00000":
         return None
-    candles = d.get("data")
-    if not isinstance(candles, list) or len(candles) < BOX_CANDLES + 1:
+    raw = d.get("data")
+    if not isinstance(raw, list) or len(raw) < 2:
         return None
-    return candles
-
-
-async def fetch_candles_binance(session: aiohttp.ClientSession,
-                                symbol: str) -> Optional[List[List[str]]]:
-    try:
-        async with session.get(
-            "https://fapi.binance.com/fapi/v1/klines",
-            params={"symbol": symbol, "interval": "1m", "limit": BOX_CANDLES + 1},
-            headers=DEFAULT_HEADERS,
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-    except Exception as exc:
-        log.debug("Binance candles fail %s: %s", symbol, exc)
-        return None
-
-    if not isinstance(data, list) or len(data) < BOX_CANDLES + 1:
-        return None
-
-    out: List[List[str]] = []
-    for k in data:
+    out = []
+    for r in raw:
         try:
-            out.append([
-                str(k[0]),       # ts
-                k[1],            # open
-                k[2],            # high
-                k[3],            # low
-                k[4],            # close
-                k[5],            # base volume
-                k[7],            # quote volume
-            ])
+            out.append(_normalize_candle(r))
         except (IndexError, TypeError):
             return None
     return out
 
 
-async def fetch_candles(session: aiohttp.ClientSession,
-                        symbol: str) -> Optional[List[List[str]]]:
-    c = await fetch_candles_bitget(session, symbol)
-    if c:
-        return c
-    return await fetch_candles_binance(session, symbol)
-
-
-async def fetch_depth(session: aiohttp.ClientSession, symbol: str
-                      ) -> Optional[Tuple[List[List[str]], List[List[str]], float]]:
+async def fetch_depth(session, symbol):
     d = await _request(
         session, "GET", "/api/v2/mix/market/merge-depth",
         query={"symbol": symbol, "productType": PRODUCT_TYPE, "limit": "20"},
@@ -644,7 +485,7 @@ async def fetch_depth(session: aiohttp.ClientSession, symbol: str
     try:
         best_bid = float(bids[0][0])
         best_ask = float(asks[0][0])
-    except (TypeError, ValueError, IndexError):
+    except (IndexError, TypeError, ValueError):
         return None
     if best_bid <= 0 or best_ask <= 0:
         return None
@@ -653,255 +494,351 @@ async def fetch_depth(session: aiohttp.ClientSession, symbol: str
 
 
 # =============================================================================
+# ACCOUNT
+# =============================================================================
+async def get_usdt_balance(session):
+    d = await _request(session, "GET", "/api/v3/account/assets")
+    if d.get("code") == "00000":
+        data = d.get("data") or {}
+        assets = data.get("assets") if isinstance(data, dict) else None
+        if isinstance(assets, list):
+            for a in assets:
+                if a.get("coin") == "USDT":
+                    try:
+                        return float(a.get("available") or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+    d2 = await _request(session, "GET", "/api/v2/account/all-account-balance")
+    if d2.get("code") == "00000":
+        for a in d2.get("data", []) or []:
+            if a.get("coin") == "USDT":
+                try:
+                    return float(a.get("available") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+    return 0.0
+
+
+async def get_position(session, symbol):
+    d = await _request(
+        session, "GET", "/api/v3/position/current-position",
+        query={"category": PRODUCT_TYPE, "symbol": symbol},
+    )
+    if d.get("code") != "00000":
+        return None
+    for p in d.get("data") or []:
+        size = None
+        for k in ("total", "size", "available"):
+            try:
+                v = float(p.get(k) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            if v > 0:
+                size = v
+                break
+        if size and size > 0:
+            try:
+                entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
+            except (TypeError, ValueError):
+                entry = 0.0
+            return {"total": size, "entryPrice": entry,
+                    "posSide": p.get("posSide", "")}
+    return None
+
+
+# =============================================================================
 # ORDER EXECUTION
 # =============================================================================
-async def place_order(session: aiohttp.ClientSession,
-                      symbol: str, side: str, qty_str: str,
-                      reduce_only: bool = False) -> Optional[str]:
-    body: Dict[str, Any] = {
+async def place_market_order(session, symbol, side, qty_str, reduce_only=False):
+    body = {
         "category": PRODUCT_TYPE,
         "symbol": symbol,
-        "qty": qty_str,
         "side": side,
         "orderType": "market",
+        "qty": qty_str,
         "reduceOnly": "yes" if reduce_only else "no",
     }
-    if not reduce_only:
-        body["tradeSide"] = "open"
-
     res = await _request(session, "POST", "/api/v3/trade/place-order", body=body)
     if res.get("code") == "00000":
         oid = (res.get("data") or {}).get("orderId")
-        log.info("ORDER OK | %s %s %s | id=%s",
-                 symbol, side, qty_str, oid)
+        log.info("ORDER OK | %s %s %s | id=%s", symbol, side, qty_str, oid)
         return oid
     log.error("ORDER FAIL | %s %s | %s", symbol, side, res.get("msg"))
     return None
 
 
-async def cancel_open_orders(session: aiohttp.ClientSession, symbol: str) -> None:
-    """Best-effort cancellation before close (market orders should be a no-op)."""
-    try:
-        await _request(
-            session, "POST", "/api/v3/trade/cancel-all-orders",
-            body={"category": PRODUCT_TYPE, "symbol": symbol},
-        )
-    except Exception as exc:
-        log.debug("cancel-all-orders fail %s: %s", symbol, exc)
-
-
-async def open_position(session: aiohttp.ClientSession,
-                        signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    symbol = signal["symbol"]
-    contract = _contracts.get(symbol)
-    if not contract:
-        log.warning("Missing contract rules for %s", symbol)
-        return None
-
-    balance = await get_usdt_available(session)
-    if balance <= 0:
-        log.warning("No USDT balance available for %s", symbol)
-        return None
-
-    price = signal["live_close"]
-    sizing = mm.calculate_order_qty(
-        balance=balance,
-        price=price,
-        leverage=LEVERAGE,
-        volume_place=contract["volumePlace"],
-        min_order_volume=contract["minOrderVolume"],
-        min_notional=MIN_NOTIONAL,
-        margin_use_ratio=MARGIN_USE_RATIO,
+async def cancel_open_orders(session, symbol):
+    """Best-effort cancel-all-orders before close. V3 then V2 fallback."""
+    res = await _request(
+        session, "POST", "/api/v3/trade/cancel-all-orders",
+        body={"category": PRODUCT_TYPE, "symbol": symbol},
     )
-    if not sizing["valid"]:
-        log.warning("Sizing rejected | %s | reason=%s | notional=%.4f",
-                    symbol, sizing["reason"], sizing["notional"])
-        return None
-
-    side = "buy" if signal["direction"] == "long" else "sell"
-    oid = await place_order(session, symbol, side, sizing["qty_str"],
-                            reduce_only=False)
-    if not oid:
-        return None
-
-    log.info("OPEN | %s %s @ %.6f | qty=%s | notional=%.4f USDT",
-             symbol, signal["direction"].upper(), price,
-             sizing["qty_str"], sizing["notional"])
-
-    return {
-        "symbol": symbol,
-        "direction": signal["direction"],
-        "entry": price,
-        "qty_str": sizing["qty_str"],
-        "qty_float": sizing["qty_float"],
-        "box_high": signal["box_high"],
-        "box_low": signal["box_low"],
-        "opened_at": time.time(),
-        "peak_net": -999.0,
-        "paper": False,
-        "order_id": oid,
-    }
+    if res.get("code") == "00000":
+        return
+    await _request(
+        session, "POST", "/api/v2/mix/order/cancel-all-orders",
+        body={"productType": PRODUCT_TYPE, "symbol": symbol,
+              "marginCoin": "USDT"},
+    )
 
 
-async def close_position(session: aiohttp.ClientSession,
-                         pos: Dict[str, Any], reason: str) -> bool:
+async def close_live_position(session, pos, reason):
     symbol = pos["symbol"]
     live = await get_position(session, symbol)
     if not live or live["total"] <= 0:
-        log.info("No live position for %s (already closed)", symbol)
+        log.info("No live position for %s (already gone)", symbol)
         return True
 
     await cancel_open_orders(session, symbol)
 
     vp = _contracts.get(symbol, {}).get("volumePlace", 0)
     qty_str = f"{live['total']:.{vp}f}"
-    close_side = "sell" if pos["direction"] == "long" else "buy"
+    close_side = "sell" if pos["direction"] == "LONG" else "buy"
 
-    oid = await place_order(session, symbol, close_side, qty_str,
-                            reduce_only=True)
+    oid = await place_market_order(session, symbol, close_side, qty_str,
+                                   reduce_only=True)
     if oid:
-        log.info("CLOSE OK | %s | reason=%s | size=%s",
-                 symbol, reason, qty_str)
+        log.info("CLOSE OK | %s | %s | size=%s", symbol, reason, qty_str)
         return True
-
-    log.error("CLOSE FAIL | %s | reason=%s", symbol, reason)
+    log.error("CLOSE FAIL | %s | %s", symbol, reason)
     return False
 
 
 # =============================================================================
-# SIGNAL SCANNING
+# STREAK / PAPER GAUNTLET
 # =============================================================================
-def _should_scan(symbol: str, min_interval: float = SCAN_MIN_INTERVAL_SEC) -> bool:
-    now = time.time()
-    if now - _last_scan.get(symbol, 0.0) < min_interval:
-        return False
-    _last_scan[symbol] = now
-    return True
+def _record_result(net_pnl, exit_reason):
+    _streak["trades"] += 1
+    if exit_reason == "BREAKEVEN_SHIELD":
+        pass  # breakeven preserves the streak
+    elif net_pnl > 0:
+        _streak["wins"] += 1
+        _streak["losses"] = 0
+    elif net_pnl < 0:
+        _streak["losses"] += 1
+        _streak["wins"] = 0
+    # net_pnl == 0.0 with non-breakeven reason: neutral, preserve
+
+    if not _streak["live_activated"] and _streak["wins"] >= PAPER_WINS_REQUIRED:
+        _streak["live_activated"] = True
+        log.info("*** PAPER GAUNTLET PASSED — LIVE TRADING UNLOCKED ***")
+
+    _save_streak()
+    log.info("STREAK | wins=%d losses=%d live=%s trades=%d | net=%.3f%% | %s",
+             _streak["wins"], _streak["losses"],
+             _streak["live_activated"], _streak["trades"],
+             net_pnl, exit_reason)
 
 
-async def scan_symbol(session: aiohttp.ClientSession,
-                      symbol: str) -> Optional[Dict[str, Any]]:
-    candles = await fetch_candles(session, symbol)
-    if not candles:
-        return None
-
-    box = candles[:-1]
-    live = candles[-1]
-
-    comp = mm.calculate_box_compression(box)
-    if not comp["is_compressed"]:
-        return None
-
-    trig = mm.check_ignite_trigger(
-        candles,
-        comp["box_high"],
-        comp["box_low"],
-        comp["base_volume"],
-    )
-    if not trig["is_valid"]:
-        return None
+# =============================================================================
+# ENTRY PIPELINE
+# =============================================================================
+async def try_enter(session, symbol, direction, live_close, box_high, box_low):
+    """
+    Order-book fragility check + entry (live or paper).
+    Returns True if an entry was created.
+    """
+    global _active_pos, _paper_pos
 
     depth = await fetch_depth(session, symbol)
     if depth is None:
-        return None
+        return False
     bids, asks, mid = depth
-    imb = mm.calculate_depth_imbalance(bids, asks, mid)
+    frag = mm.evaluate_book_fragility(bids, asks, mid, direction)
+    if not frag["is_fragile"]:
+        log.info("SIGNAL rejected (fragility) | %s %s | ratio=%.2f",
+                 symbol, direction, frag["depth_ratio"])
+        return False
 
-    direction = trig["direction"]
-    if direction == "long":
-        if not imb["favorable"]:
-            return None
-    else:  # short
-        if imb["ratio"] <= 0:
-            return None
-        if (1.0 / imb["ratio"]) < 1.5:
-            return None
+    log.info(
+        "IGNITION | %s %s | close=%.6f | box=[%.6f, %.6f] | depth=%.2f "
+        "| d_bid=%.2f d_ask=%.2f",
+        symbol, direction, live_close, box_low, box_high,
+        frag["depth_ratio"], frag["d_bid"], frag["d_ask"],
+    )
 
-    try:
-        live_close = float(live[4])
-    except (TypeError, ValueError, IndexError):
-        return None
+    if not _streak["live_activated"]:
+        _paper_pos = {
+            "symbol": symbol,
+            "direction": direction,
+            "entry": live_close,
+            "box_high": box_high,
+            "box_low": box_low,
+            "opened_at": time.time(),
+            "peak_net": -999.0,
+            "paper": True,
+        }
+        log.info("PAPER OPEN | %s %s @ %.6f | wins=%d/%d",
+                 symbol, direction, live_close,
+                 _streak["wins"], PAPER_WINS_REQUIRED)
+        return True
 
-    return {
+    contract = _contracts.get(symbol)
+    if not contract:
+        log.warning("No contract rules for %s", symbol)
+        return False
+
+    balance = await get_usdt_balance(session)
+    qty_str = mm.calculate_order_qty(
+        balance=balance,
+        price=live_close,
+        leverage=LEVERAGE,
+        volume_place=contract["volumePlace"],
+        min_order_volume=contract["minOrderVolume"],
+        min_notional=contract["minNotional"],
+    )
+    if not qty_str:
+        log.warning("Sizing rejected | %s | balance=%.4f | price=%.6f",
+                    symbol, balance, live_close)
+        return False
+
+    side = "buy" if direction == "LONG" else "sell"
+    oid = await place_market_order(session, symbol, side, qty_str,
+                                   reduce_only=False)
+    if not oid:
+        return False
+
+    _active_pos = {
         "symbol": symbol,
         "direction": direction,
-        "box_high": comp["box_high"],
-        "box_low": comp["box_low"],
-        "box_range_pct": comp["box_range_pct"],
-        "base_volume": comp["base_volume"],
-        "live_close": live_close,
-        "volume_ratio": trig["volume_ratio"],
-        "breakout_price": trig["breakout_price"],
-        "chase_pct": trig["chase_distance_pct"],
-        "depth_ratio": imb["ratio"],
-        "ts": time.time(),
+        "entry": live_close,
+        "box_high": box_high,
+        "box_low": box_low,
+        "opened_at": time.time(),
+        "peak_net": -999.0,
+        "paper": False,
+        "order_id": oid,
     }
+    log.info("LIVE OPEN | %s %s @ %.6f | qty=%s",
+             symbol, direction, live_close, qty_str)
+    return True
 
 
-async def scan_batch(session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
-    """Rotate through the universe in small batches, honouring rate limits."""
-    global _scan_idx
+# =============================================================================
+# SCANNERS
+# =============================================================================
+async def scan_universe_batch(session):
+    """Rotate through universe, look for fresh compression boxes."""
+    global _universe_idx
     if not _universe:
-        return None
-
+        return
     n = len(_universe)
-    batch: List[str] = []
-    for _ in range(min(SCAN_BATCH, n)):
-        batch.append(_universe[_scan_idx % n])
-        _scan_idx += 1
+    for _ in range(min(UNIVERSE_BATCH, n)):
+        symbol = _universe[_universe_idx % n]
+        _universe_idx += 1
 
-    for symbol in batch:
-        if not _should_scan(symbol):
-            continue
         try:
-            signal = await scan_symbol(session, symbol)
-            if signal:
-                return signal
+            candles = await fetch_candles(session, symbol, limit=CANDLE_COUNT)
         except Exception as exc:
-            log.debug("scan_symbol error %s: %s", symbol, exc)
-    return None
+            log.debug("candles fail %s: %s", symbol, exc)
+            continue
+        if not candles or len(candles) < 2:
+            continue
+
+        closed = candles[:-1]
+        live = candles[-1]
+
+        box = mm.calculate_compression_box(closed[-30:])
+        if not box["is_compressed"]:
+            continue
+
+        # Add to hot list for ongoing ignition monitoring
+        _hot_list[symbol] = {
+            "box_high": box["box_high"],
+            "box_low": box["box_low"],
+            "base_volume": box["base_volume"],
+            "expiry": time.time() + HOT_LIST_TTL_SEC,
+        }
+        log.info("COMPRESSION | %s | range=%.3f%% | baseVol=%.2f",
+                 symbol, box["box_range_pct"], box["base_volume"])
+
+        trig = mm.evaluate_ignition_trigger(
+            live, box["box_high"], box["box_low"], box["base_volume"],
+        )
+        if not trig["is_ignition"]:
+            continue
+
+        try:
+            live_close = float(live[4])
+        except (IndexError, TypeError, ValueError):
+            continue
+
+        entered = await try_enter(session, symbol, trig["direction"],
+                                  live_close, box["box_high"], box["box_low"])
+        if entered:
+            return
+
+
+async def scan_hot_list(session):
+    """Poll compressed symbols for ignition using fresh candles."""
+    now = time.time()
+    expired = [s for s, v in _hot_list.items() if v["expiry"] < now]
+    for s in expired:
+        _hot_list.pop(s, None)
+
+    count = 0
+    for symbol, box in list(_hot_list.items()):
+        if count >= HOT_LIST_BATCH:
+            break
+        count += 1
+
+        try:
+            candles = await fetch_candles(session, symbol, limit=2)
+        except Exception as exc:
+            log.debug("hot candles fail %s: %s", symbol, exc)
+            continue
+        if not candles:
+            continue
+
+        live = candles[-1]
+        trig = mm.evaluate_ignition_trigger(
+            live, box["box_high"], box["box_low"], box["base_volume"],
+        )
+        if not trig["is_ignition"]:
+            continue
+
+        try:
+            live_close = float(live[4])
+        except (IndexError, TypeError, ValueError):
+            continue
+
+        entered = await try_enter(session, symbol, trig["direction"],
+                                  live_close, box["box_high"], box["box_low"])
+        if entered:
+            return
 
 
 # =============================================================================
 # WATCHDOG (4-SECOND PULSE)
 # =============================================================================
-async def manage_position(session: aiohttp.ClientSession,
-                          pos: Dict[str, Any]) -> bool:
-    """
-    Returns True if the position was closed (or no longer exists),
-    False if it should remain open.
-    """
+async def _latest_close(session, symbol):
+    candles = await fetch_candles(session, symbol, limit=2)
+    if not candles:
+        return None
+    try:
+        return float(candles[-1][4])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+async def manage_live_position(session):
+    global _active_pos
+    pos = _active_pos
     symbol = pos["symbol"]
 
-    if pos["paper"]:
-        candles = await fetch_candles(session, symbol)
-        if not candles:
-            return False
-        try:
-            current = float(candles[-1][4])
-        except (TypeError, ValueError, IndexError):
-            return False
-        entry = pos["entry"]
-    else:
-        live = await get_position(session, symbol)
-        if not live or live["total"] <= 0:
-            log.info("Live position for %s is gone", symbol)
-            return True
-        entry = live["entryPrice"] if live["entryPrice"] > 0 else pos["entry"]
-        candles = await fetch_candles(session, symbol)
-        current = entry
-        if candles:
-            try:
-                current = float(candles[-1][4])
-            except (TypeError, ValueError, IndexError):
-                current = entry
+    live = await get_position(session, symbol)
+    if live is None or live["total"] <= 0:
+        log.info("Live position %s vanished externally", symbol)
+        _active_pos = None
+        return
 
-    if current <= 0 or entry <= 0:
-        return False
+    current = await _latest_close(session, symbol)
+    if current is None or current <= 0:
+        return
 
     elapsed = time.time() - pos["opened_at"]
-    state = mm.evaluate_ratchet_state(
-        entry_price=entry,
+    state = mm.evaluate_ratchet(
+        entry_price=live["entryPrice"] or pos["entry"],
         current_price=current,
         direction=pos["direction"],
         peak_net=pos["peak_net"],
@@ -909,36 +846,54 @@ async def manage_position(session: aiohttp.ClientSession,
         box_high=pos["box_high"],
         box_low=pos["box_low"],
     )
+    pos["peak_net"] = state["updated_peak_net"]
 
-    pos["peak_net"] = state["peak_net"]
-    action = state["action"]
+    if not state["should_exit"]:
+        return
 
-    if action == "HOLD":
-        return False
-
-    if pos["paper"]:
-        log.info(
-            "PAPER EXIT | %s %s | action=%s | net=%.3f%% | peak=%.3f%%",
-            symbol, pos["direction"].upper(), action,
-            state["net_pct"], state["peak_net"],
-        )
-        _record_paper_trade(state["net_pct"])
-        return True
-
-    closed = await close_position(session, pos, action)
+    closed = await close_live_position(session, pos, state["exit_reason"])
     if closed:
-        log.info(
-            "LIVE EXIT | %s %s | action=%s | net=%.3f%% | peak=%.3f%%",
-            symbol, pos["direction"].upper(), action,
-            state["net_pct"], state["peak_net"],
-        )
-    return closed
+        _record_result(state["net_pnl"], state["exit_reason"])
+        _active_pos = None
+
+
+async def manage_paper_position(session):
+    global _paper_pos
+    pos = _paper_pos
+    symbol = pos["symbol"]
+
+    current = await _latest_close(session, symbol)
+    if current is None or current <= 0:
+        return
+
+    elapsed = time.time() - pos["opened_at"]
+    state = mm.evaluate_ratchet(
+        entry_price=pos["entry"],
+        current_price=current,
+        direction=pos["direction"],
+        peak_net=pos["peak_net"],
+        elapsed_seconds=elapsed,
+        box_high=pos["box_high"],
+        box_low=pos["box_low"],
+    )
+    pos["peak_net"] = state["updated_peak_net"]
+
+    if not state["should_exit"]:
+        return
+
+    log.info(
+        "PAPER EXIT | %s %s | reason=%s | net=%.3f%% | peak=%.3f%%",
+        symbol, pos["direction"], state["exit_reason"],
+        state["net_pnl"], state["updated_peak_net"],
+    )
+    _record_result(state["net_pnl"], state["exit_reason"])
+    _paper_pos = None
 
 
 # =============================================================================
-# BACKGROUND REFRESH WORKER
+# BACKGROUND WORKER
 # =============================================================================
-async def background_refresh(session: aiohttp.ClientSession) -> None:
+async def background_refresh(session):
     while True:
         await asyncio.sleep(UNIVERSE_REFRESH_SEC)
         try:
@@ -951,7 +906,7 @@ async def background_refresh(session: aiohttp.ClientSession) -> None:
 # =============================================================================
 # MAIN
 # =============================================================================
-async def main() -> None:
+async def main():
     _start_keepalive()
     _load_streak()
     log.info(
@@ -963,80 +918,31 @@ async def main() -> None:
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=30)
 
-    async with aiohttp.ClientSession(
-        connector=connector, timeout=timeout, headers=DEFAULT_HEADERS,
-    ) as session:
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         await enforce_one_way(session)
-
-        # Prime the caches once, synchronously, before main loop starts.
         await refresh_contracts(session)
         await refresh_universe(session)
 
-        bg_task = asyncio.create_task(background_refresh(session))
+        asyncio.create_task(background_refresh(session))
 
-        if not _contracts:
-            log.warning("No contracts cached — universe will be empty until "
-                        "the background task succeeds.")
         log.info("Main loop started | universe=%d", len(_universe))
-
-        open_positions: List[Dict[str, Any]] = []
 
         while True:
             loop_start = time.time()
 
-            # ----- 1) Manage open positions on every pulse -----
-            still_open: List[Dict[str, Any]] = []
-            for pos in open_positions:
-                try:
-                    closed = await manage_position(session, pos)
-                    if not closed:
-                        still_open.append(pos)
-                except Exception as exc:
-                    log.error("Manage error %s: %s", pos.get("symbol"), exc)
-                    still_open.append(pos)
-            open_positions = still_open
+            try:
+                if _active_pos is not None:
+                    await manage_live_position(session)
+                elif _paper_pos is not None:
+                    await manage_paper_position(session)
+                else:
+                    # Prefer hot list (compressed symbols awaiting ignition)
+                    await scan_hot_list(session)
+                    if _active_pos is None and _paper_pos is None:
+                        await scan_universe_batch(session)
+            except Exception as exc:
+                log.error("Loop error: %s", exc)
 
-            # ----- 2) Scan for new signals (single-slot concurrency) -----
-            if len(open_positions) < 1:
-                try:
-                    signal = await scan_batch(session)
-                except Exception as exc:
-                    log.error("scan_batch error: %s", exc)
-                    signal = None
-
-                if signal:
-                    log.info(
-                        "SIGNAL | %s %s | box=%.3f%% | vol=%.2fx | "
-                        "chase=%.3f%% | depth=%.2f",
-                        signal["symbol"], signal["direction"].upper(),
-                        signal["box_range_pct"], signal["volume_ratio"],
-                        signal["chase_pct"], signal["depth_ratio"],
-                    )
-
-                    if _streak["live_activated"]:
-                        new_pos = await open_position(session, signal)
-                        if new_pos:
-                            open_positions.append(new_pos)
-                    else:
-                        paper_pos: Dict[str, Any] = {
-                            "symbol": signal["symbol"],
-                            "direction": signal["direction"],
-                            "entry": signal["live_close"],
-                            "box_high": signal["box_high"],
-                            "box_low": signal["box_low"],
-                            "opened_at": time.time(),
-                            "peak_net": -999.0,
-                            "paper": True,
-                        }
-                        open_positions.append(paper_pos)
-                        log.info(
-                            "PAPER OPEN | %s %s @ %.6f | wins=%d/%d",
-                            paper_pos["symbol"], paper_pos["direction"].upper(),
-                            paper_pos["entry"],
-                            _streak["wins"], PAPER_WINS_REQUIRED,
-                        )
-
-            # ----- 3) Sleep to maintain the 4-second pulse -----
             elapsed = time.time() - loop_start
             await asyncio.sleep(max(0.0, PULSE_SEC - elapsed))
 
@@ -1047,4 +953,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log.info("Shutdown requested.")
     except Exception as exc:
-        log.critical("Fatal error: %s", exc, exc_info=True)
+        log.critical("Fatal: %s", exc, exc_info=True)
