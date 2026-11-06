@@ -4,13 +4,10 @@ bot.py
 ======
 Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
 
-Bump _EXPECTED_MM_VERSION when market_math.py changes.
-
-Layers:
-  MAIN LOOP (4s):       manage position OR scan top candidates
-  RANKER LOOP (5m):     refresh universe + rank top-10 weakest
-  OBSERVER LOOP (5m):   detect 10%+ crashes, capture fingerprints
-  CONTRACTS LOOP (15m): refresh contract rules
+v2026.11.13:
+  - Macro alignment gate (reject JCT-style relief-bounce shorts)
+  - Observer elapsed-time fix (uses actual high timestamp)
+  - ACCEL_DROP_3M_MIN raised to 1.50% via market_math
 """
 
 import asyncio
@@ -62,26 +59,19 @@ MAX_CRASH_EVENTS = 30
 PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 16
 
-_EXPECTED_MM_VERSION = "2026.11.12"
+_EXPECTED_MM_VERSION = "2026.11.13"
 
-# Expanded: leveraged-ETF stock tokens with huge synthetic liquidity
 _STOCK_TOKENS = {
-    # Individual equities
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
     "GOOGLUSDT", "TSLAUSDT", "NVDAUSDT", "AVGOUSDT", "ORCLUSDT",
     "PLTRUSDT", "COINUSDT", "MSTRUSDT", "HOODUSDT", "OPENAIUSDT",
     "LLYUSDT", "MELIUSDT", "METUSDT",
-    # Index ETFs
     "SPYUSDT", "QQQUSDT", "IWMUSDT",
-    # Leveraged 3x bull
     "TQQQUSDT", "SPXLUSDT", "TNAUSDT", "FNGUUSDT", "TSLLUSDT",
     "LABUUSDT", "YINNUSDT",
-    # Leveraged 3x bear (these are what looked like crypto crashes)
     "SQQQUSDT", "SOXSUSDT", "SPXSUSDT", "SDOWUSDT", "TZAUSDT",
     "FNGDUSDT", "TSLSUSDT", "LABDUSDT", "YANGUSDT",
-    # Volatility
     "UVXYUSDT", "VXXUSDT", "UVIXUSDT",
-    # Tech / semis
     "XLKUSDT", "SOXLUSDT", "SMHUSDT",
 }
 
@@ -221,6 +211,7 @@ _crash_events = []
 _diag = {
     "range_rej": 0, "accel_weak": 0, "accel_bounce": 0, "accel_slow": 0,
     "vol_rej": 0, "breakdown_rej": 0, "chase_rej": 0, "early_rej": 0,
+    "macro_align_rej": 0,
     "spread_rej": 0, "frag_thin": 0, "frag_whale": 0, "frag_ratio": 0,
     "candle_fail": 0, "depth_fail": 0, "entered": 0,
 }
@@ -923,9 +914,23 @@ async def scan_candidates(session):
         except (IndexError, TypeError, ValueError):
             continue
 
+        # Fast 1m-only filter first
         result = mm.evaluate_sweet_spot(candles, pct_15m)
         if not result["is_valid"]:
             _bump_diag(result["reason"])
+            continue
+
+        # NEW: macro alignment check via hourly candles
+        hourly = await fetch_hourly_candles(session, symbol)
+        align = mm.evaluate_macro_alignment(hourly, result["live_close"])
+        if not align["is_aligned"]:
+            _diag["macro_align_rej"] += 1
+            log.info(
+                "REJECT macro | %s | %s pct_above_low=%.2f%% (ref=%.8f) "
+                "| close=%.8f | pct15=%.2f%%",
+                symbol, align["reason"], align["pct_above_ref"],
+                align["ref_low"], result["live_close"], pct_15m,
+            )
             continue
 
         depth = await fetch_depth(session, symbol)
@@ -957,10 +962,11 @@ async def scan_candidates(session):
 
         log.info(
             "SWEET SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
-            "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f low10=%.6f",
+            "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f low10=%.6f "
+            "| align=%.2f%% above_low",
             symbol, pct_15m, result["drop_3m"], result["drop_6m"],
             result["vol_ratio"], frag["depth_ratio"], frag["d_bid"],
-            result["live_close"], result["low_10m"],
+            result["live_close"], result["low_10m"], align["pct_above_ref"],
         )
 
         entered = await enter_short(
@@ -1113,8 +1119,7 @@ async def manage_paper_position(session):
 
 
 async def _build_fingerprint(session, symbol, current_price, high_4h,
-                             high_4h_ts):
-    """Fetch candles + depth, assemble enriched fingerprint."""
+                             high_4h_ts_ms):
     candles = await fetch_candles(session, symbol, limit=16)
     if not candles or len(candles) < 16:
         return None
@@ -1144,9 +1149,10 @@ async def _build_fingerprint(session, symbol, current_price, high_4h,
     frag = mm.evaluate_book_fragility(bids, asks, mid)
 
     total_drop_pct = (high_4h - current_price) / high_4h * 100.0
-    time_to_10pct = (now_ms - high_4h_ts) / 60000.0
-    if time_to_10pct < 0:
-        time_to_10pct = 0.0
+
+    # FIX: real elapsed minutes since the actual 4h-high candle,
+    # floor at 1.0 minute so we never log "in 0m"
+    time_to_10pct = max(1.0, (now_ms - high_4h_ts_ms) / 60000.0)
 
     return {
         "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1173,9 +1179,10 @@ async def _process_observer_symbol(session, symbol, hourly):
     metrics = mm.compute_crash_metrics(hourly)
     current_price = metrics["current_price"]
     high_4h = metrics["high_4h"]
+    high_4h_ts_ms = metrics["high_4h_ts_ms"]
     high_1h = metrics["high_1h"]
 
-    if current_price <= 0 or high_4h <= 0:
+    if current_price <= 0 or high_4h <= 0 or high_4h_ts_ms <= 0:
         return
 
     now_ms = int(time.time() * 1000)
@@ -1183,21 +1190,20 @@ async def _process_observer_symbol(session, symbol, hourly):
 
     if prev is None:
         state = _ObsState(
-            high_4h=high_4h, high_4h_ts=now_ms, high_1h=high_1h,
+            high_4h=high_4h, high_4h_ts=high_4h_ts_ms, high_1h=high_1h,
             last_crash_ts=0, last_crash_drop=0.0,
         )
     else:
-        state = _ObsState(
-            high_4h=max(prev.high_4h, high_4h),
-            high_4h_ts=(now_ms if high_4h > prev.high_4h else prev.high_4h_ts),
-            high_1h=max(prev.high_1h, high_1h),
-            last_crash_ts=prev.last_crash_ts,
-            last_crash_drop=prev.last_crash_drop,
+        # FIX: always use fresh candle-derived high + its real timestamp
+        state = prev._replace(
+            high_4h=high_4h,
+            high_4h_ts=high_4h_ts_ms,
+            high_1h=high_1h,
         )
     _observer_state[symbol] = state
     _obs_diag["observed"] += 1
 
-    drop_pct = mm.drop_pct_from_high(state.high_4h, current_price)
+    drop_pct = mm.drop_pct_from_high(high_4h, current_price)
     if drop_pct < OBSERVER_CRASH_THRESHOLD_PCT:
         return
 
@@ -1206,7 +1212,7 @@ async def _process_observer_symbol(session, symbol, hourly):
             return
 
     fp = await _build_fingerprint(
-        session, symbol, current_price, state.high_4h, state.high_4h_ts,
+        session, symbol, current_price, high_4h, high_4h_ts_ms,
     )
     if fp is None:
         _obs_diag["capture_fail"] += 1
@@ -1278,15 +1284,16 @@ def _heartbeat():
     log.info(
         "HEARTBEAT | uni=%d ranked=%d active=%s paper=%s obs=%d crs=%d | "
         "funnel: rng=%d aw=%d ab=%d as=%d vol=%d bd=%d chs=%d early=%d "
-        "spr=%d fthin=%d fwhl=%d fr=%d cf=%d df=%d ent=%d | "
+        "mac=%d spr=%d fthin=%d fwhl=%d fr=%d cf=%d df=%d ent=%d | "
         "streak W=%d L=%d live=%s tr=%d",
         len(_universe), len(_top_candidates),
         _active_pos is not None, _paper_pos is not None,
         _obs_diag["observed"], _obs_diag["crashes"],
         _diag["range_rej"], _diag["accel_weak"], _diag["accel_bounce"],
         _diag["accel_slow"], _diag["vol_rej"], _diag["breakdown_rej"],
-        _diag["chase_rej"], _diag["early_rej"], _diag["spread_rej"],
-        _diag["frag_thin"], _diag["frag_whale"], _diag["frag_ratio"],
+        _diag["chase_rej"], _diag["early_rej"], _diag["macro_align_rej"],
+        _diag["spread_rej"], _diag["frag_thin"], _diag["frag_whale"],
+        _diag["frag_ratio"],
         _diag["candle_fail"], _diag["depth_fail"], _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"],
@@ -1310,7 +1317,8 @@ async def main():
 
     for _name in ("PCT_15M_MIN_DROP", "PCT_15M_MAX_DROP",
                   "DROP6_MIN_PCT", "VOLUME_EXPANSION_MIN",
-                  "MAX_BID_DEPTH_USD", "FRAGILITY_RATIO_MIN"):
+                  "MAX_BID_DEPTH_USD", "FRAGILITY_RATIO_MIN",
+                  "ACCEL_DROP_3M_MIN", "MACRO_ALIGN_MAX_PCT"):
         if not hasattr(mm, _name):
             log.critical("market_math.py missing %s — stale.", _name)
             raise SystemExit(1)
@@ -1320,17 +1328,18 @@ async def main():
 
     log.info(
         "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "pct15[%.1f,%.1f] | drop6>%.2f%% | vol>=%.1fx | bd<%.2f%% | "
-        "chase<=%.2f%% | frag: %.2f<=ratio & $%.0f<=bid<=$%.0f | "
-        "inv=+%.2f%% | obs:>=%.1f%% in 5m",
+        "pct15[%.1f,%.1f] | drop6>%.2f%% | drop3>=%.2f%% | vol>=%.1fx | "
+        "bd<%.2f%% | chase<=%.2f%% | "
+        "frag: %.2f<=ratio & $%.0f<=bid<=$%.0f | "
+        "macro:<=%.2f%% above 4h-low | inv=+%.2f%% | obs:>=%.1f%% in 5m",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
         mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP,
-        mm.DROP6_MIN_PCT, mm.VOLUME_EXPANSION_MIN,
+        mm.DROP6_MIN_PCT, mm.ACCEL_DROP_3M_MIN, mm.VOLUME_EXPANSION_MIN,
         mm.BREAKDOWN_BUFFER_PCT, mm.ANTI_CHASE_MAX_PCT,
         mm.FRAGILITY_RATIO_MIN, mm.MIN_SIDE_DEPTH_USD,
-        mm.MAX_BID_DEPTH_USD, mm.INVALIDATION_BUFFER_PCT,
-        OBSERVER_CRASH_THRESHOLD_PCT,
+        mm.MAX_BID_DEPTH_USD, mm.MACRO_ALIGN_MAX_PCT,
+        mm.INVALIDATION_BUFFER_PCT, OBSERVER_CRASH_THRESHOLD_PCT,
     )
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
