@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-bot.py
-======
-Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
+bot.py — Momentum Learning Engine | Bitget UTA V3 | Render Free Tier.
 
-v2026.11.17: dual-path scanner.
-  - Deep movers (15m drop < -8%) route to PANIC path (6 checks).
-  - Shallow movers route to normal path (10 checks).
-  - Ranker interleaves deep+shallow so neither starves the other.
+v2026.11.20
+  Phase 1 (first 2h): OBSERVE every coin spike, measure reversal quietness.
+  Phase 2 (after):    TRADE only coins with proven asymmetry >= 4:1.
+  Exit: momentum death or symmetric reversal. No stop loss. No profit target.
+  Report: copy-pasteable profile summary every 15 min.
 """
 
 import asyncio
@@ -32,32 +31,23 @@ PORT = 10000
 PRODUCT_TYPE = "USDT-FUTURES"
 LEVERAGE = 5
 PULSE_SEC = 4.0
+VELOCITY_SWEEP_SEC = 10.0
+VELOCITY_HISTORY_KEEP_SEC = 600.0
 
 UNIVERSE_REFRESH_SEC = 300
 CONTRACTS_REFRESH_SEC = 900
 UNIVERSE_MIN_VOL_USD = 1_000_000.0
-TOP_CANDIDATE_COUNT = 40
-RANKER_BATCH = 15
-RANKER_BATCH_SLEEP = 0.10
 
-OBSERVER_INTERVAL_SEC = 300
-OBSERVER_INITIAL_DELAY_SEC = 150
-OBSERVER_BATCH = 15
-OBSERVER_BATCH_SLEEP = 0.10
-OBSERVER_CRASH_THRESHOLD_PCT = 10.0
-OBSERVER_COOLDOWN_MS = 30 * 60 * 1000
-OBSERVER_ESCALATION_PCT = 3.0
-OBSERVER_STALE_MINUTES = 90.0
-
+LEARNING_PHASE_SEC = 7200.0
+REPORT_INTERVAL_SEC = 900.0
 HEARTBEAT_SEC = 60.0
-SYMBOL_COOLDOWN_SEC = 60.0
-STREAK_FILE = "streak.json"
-LEARNINGS_FILE = "learnings.json"
-MAX_CRASH_EVENTS = 30
+SYMBOL_COOLDOWN_SEC = 120.0
 PAPER_WINS_REQUIRED = 8
-CANDLE_COUNT = 16
 
-_EXPECTED_MM_VERSION = "2026.11.17"
+STREAK_FILE = "streak.json"
+PROFILES_FILE = "momentum_profiles.json"
+
+_EXPECTED_MM_VERSION = "2026.11.20"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -78,7 +68,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-5s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
-log = logging.getLogger("weak")
+log = logging.getLogger("momentum")
 
 
 def _env(*names: str) -> str:
@@ -94,6 +84,9 @@ SECRET_KEY = _env("BITGET_API_SECRET", "SECRET_KEY")
 PASSPHRASE = _env("BITGET_API_PASSPHRASE", "PASSPHRASE")
 
 
+# =============================================================================
+# KEEP-ALIVE
+# =============================================================================
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/health"):
@@ -116,6 +109,9 @@ def _start_keepalive() -> None:
     log.info("Keep-alive listening on :%d", PORT)
 
 
+# =============================================================================
+# BITGET API CLIENT
+# =============================================================================
 def _sign(timestamp: str, method: str, request_path: str, body: str) -> str:
     msg = timestamp + method.upper() + request_path + body
     digest = hmac.new(
@@ -145,7 +141,6 @@ async def _request(session, method, path, *, query=None, body=None,
                 "ACCESS-TIMESTAMP": ts,
                 "ACCESS-PASSPHRASE": PASSPHRASE,
             })
-
         url = API_BASE + path_with_q
         try:
             async with session.request(
@@ -161,8 +156,6 @@ async def _request(session, method, path, *, query=None, body=None,
                 try:
                     data = json.loads(text)
                 except json.JSONDecodeError:
-                    log.error("Non-JSON [%s %s] %s: %s",
-                              method, path, resp.status, text[:160])
                     return {"code": "JSON_ERROR", "msg": text[:160]}
                 if str(data.get("code", "")) == "30011":
                     await asyncio.sleep((2 ** attempt) + 1)
@@ -179,7 +172,7 @@ async def _get_public_json(session, url, timeout=10.0):
     try:
         async with session.get(
             url,
-            headers={"User-Agent": "weak-bot/1.0"},
+            headers={"User-Agent": "momentum-bot/1.0"},
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as resp:
             if resp.status != 200:
@@ -190,37 +183,46 @@ async def _get_public_json(session, url, timeout=10.0):
         return None
 
 
+# =============================================================================
+# STATE
+# =============================================================================
 _contracts: Dict[str, dict] = {}
 _universe = []
-_top_candidates = []
 _last_universe_exchange_count = 0
-_cooldown_until: Dict[str, float] = {}
+
+# Learning state
+_coin_profiles: Dict[str, dict] = {}
+_price_history: Dict[str, list] = {}
+_active_spikes: Dict[str, dict] = {}
+_learning_started_at = time.time()
+_trading_enabled = False
+
+# Trading state
 _active_pos = None
 _paper_pos = None
-_last_heartbeat = 0.0
+_cooldown_until: Dict[str, float] = {}
 _streak = {"wins": 0, "losses": 0, "live_activated": False, "trades": 0}
 
-_ObsState = namedtuple(
-    "_ObsState",
-    ["high_4h", "high_4h_ts", "high_1h", "last_crash_ts", "last_crash_drop"],
-)
-_observer_state: Dict[str, _ObsState] = {}
-_crash_events = []
+_last_heartbeat = 0.0
+_last_report = 0.0
 
 _diag = {
-    "mom_rng": 0, "mom_aw": 0, "mom_ab": 0, "mom_as": 0,
-    "mom_vol": 0, "mom_early": 0, "mom_notdrop": 0, "mom_nolow": 0,
-    "pos_break": 0, "pos_chase": 0,
-    "mac_high": 0,
-    "book_thin": 0, "book_whale": 0, "book_ratio": 0,
-    "spr": 0,
-    "panic_ent": 0, "stale_mv": 0,
-    "candle_fail": 0, "hourly_fail": 0, "depth_fail": 0,
-    "entered": 0,
+    "spikes_detected": 0,
+    "spikes_finalized": 0,
+    "sweep_fails": 0,
+    "tradable_skips_book": 0,
+    "tradable_skips_spread": 0,
+    "entries": 0,
+    "exit_momentum_dead": 0,
+    "exit_symmetric": 0,
+    "exit_hard": 0,
+    "exit_time": 0,
 }
-_obs_diag = {"observed": 0, "crashes": 0, "capture_fail": 0}
 
 
+# =============================================================================
+# HELPERS
+# =============================================================================
 def _extract_positions(d):
     payload = d.get("data")
     if isinstance(payload, dict):
@@ -250,6 +252,9 @@ def _env_bool_or_none(name: str) -> Optional[bool]:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+# =============================================================================
+# STREAK / PROFILES PERSISTENCE
+# =============================================================================
 def _load_streak():
     try:
         with open(STREAK_FILE, "r") as f:
@@ -279,14 +284,12 @@ def _save_streak():
         with open(STREAK_FILE, "w") as f:
             json.dump(_streak, f)
     except OSError as exc:
-        log.error("Failed to persist streak: %s", exc)
+        log.error("Streak save failed: %s", exc)
 
 
 def _record_result(net_pnl, exit_reason):
     _streak["trades"] += 1
-    if exit_reason == "BREAKEVEN_SHIELD":
-        pass
-    elif net_pnl > 0:
+    if net_pnl > 0:
         _streak["wins"] += 1
         _streak["losses"] = 0
     elif net_pnl < 0:
@@ -303,46 +306,169 @@ def _record_result(net_pnl, exit_reason):
     )
 
 
-def _load_learnings():
-    global _crash_events
+def _load_profiles():
+    global _coin_profiles, _learning_started_at
     try:
-        with open(LEARNINGS_FILE, "r") as f:
+        with open(PROFILES_FILE, "r") as f:
             data = json.load(f)
-        if isinstance(data, list):
-            _crash_events = data[-MAX_CRASH_EVENTS:]
-            log.info("Loaded %d crash fingerprints from %s",
-                     len(_crash_events), LEARNINGS_FILE)
+        if isinstance(data, dict):
+            _coin_profiles = data.get("coins", {}) or {}
+            _learning_started_at = float(data.get("learning_started_at",
+                                                   time.time()))
+            log.info("Loaded %d coin profiles from %s (learning started %.0fs ago)",
+                     len(_coin_profiles), PROFILES_FILE,
+                     time.time() - _learning_started_at)
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
-        _crash_events = []
+        _coin_profiles = {}
+        _learning_started_at = time.time()
 
 
-def _save_learnings():
-    tmp = LEARNINGS_FILE + ".tmp"
+def _save_profiles():
+    tmp = PROFILES_FILE + ".tmp"
     try:
         with open(tmp, "w") as f:
-            json.dump(_crash_events, f, indent=2)
-        os.replace(tmp, LEARNINGS_FILE)
+            json.dump({
+                "learning_started_at": _learning_started_at,
+                "last_updated": time.time(),
+                "coins": _coin_profiles,
+            }, f, indent=2)
+        os.replace(tmp, PROFILES_FILE)
     except OSError as exc:
-        log.error("Failed to save learnings: %s", exc)
+        log.error("Profiles save failed: %s", exc)
 
 
-def record_crash(fp):
-    _crash_events.append(fp)
-    while len(_crash_events) > MAX_CRASH_EVENTS:
-        _crash_events.pop(0)
-    _save_learnings()
-    tag = " [STALE]" if fp["time_to_10pct_minutes"] >= OBSERVER_STALE_MINUTES else ""
+# =============================================================================
+# SPIKE WINDOW TRACKING
+# =============================================================================
+def _new_spike_window(price, vel, ts):
+    return {
+        "start_ts": ts,
+        "start_price": price,
+        "peak_velocity": vel["velocity_multiple"],
+        "peak_price": price,
+        "peak_ts": ts,
+        "peak_baseline": vel["baseline_pct_per_min"],
+        "max_reversal_velocity": 0.0,
+        "max_reversal_price": 0.0,
+        "settled_streak": 0,
+        "last_update_ts": ts,
+    }
+
+
+def _update_spike_window(window, price, vel, ts):
+    if vel["reason"] != "OK":
+        return window
+
+    # New peak?
+    if vel["direction"] < 0 and vel["velocity_multiple"] > window["peak_velocity"]:
+        window["peak_velocity"] = vel["velocity_multiple"]
+        window["peak_price"] = price
+        window["peak_ts"] = ts
+        window["peak_baseline"] = vel["baseline_pct_per_min"]
+        window["settled_streak"] = 0
+    # Reversal phase?
+    elif vel["direction"] > 0 and vel["velocity_multiple"] > window["max_reversal_velocity"]:
+        window["max_reversal_velocity"] = vel["velocity_multiple"]
+        window["max_reversal_price"] = price
+        # Reset settle streak since price is moving again
+        window["settled_streak"] = 0
+    # Settled?
+    elif vel["velocity_multiple"] < mm.SPIKE_SETTLED_RATIO:
+        window["settled_streak"] += 1
+    else:
+        window["settled_streak"] = 0
+
+    window["last_update_ts"] = ts
+    return window
+
+
+def _should_finalize(window, ts):
+    # Hard timeout
+    if ts - window["start_ts"] >= mm.SPIKE_WINDOW_SEC:
+        return True
+    # Settled (velocity back below 2x for N consecutive checks, min 60s after peak)
+    if (ts - window["peak_ts"] >= mm.SPIKE_MIN_SETTLE_AFTER_PEAK_SEC
+            and window["settled_streak"] >= mm.SPIKE_SETTLED_CONSECUTIVE):
+        return True
+    return False
+
+
+def _finalize_spike(symbol):
+    window = _active_spikes.pop(symbol, None)
+    if not window:
+        return
+
+    if window["peak_velocity"] < mm.SPIKE_VELOCITY_THRESHOLD:
+        return
+
+    reversal_vel = window["max_reversal_velocity"]
+    if reversal_vel <= 0.01:
+        reversal_vel = 0.01
+
+    asymmetry = window["peak_velocity"] / reversal_vel
+
+    giveback_pct = 0.0
+    if window["max_reversal_price"] > 0 and window["peak_price"] > 0:
+        giveback_pct = (
+            (window["max_reversal_price"] - window["peak_price"])
+            / window["peak_price"] * 100.0
+        )
+
+    event = {
+        "ts_utc": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(window["start_ts"])),
+        "peak_velocity_multiple": round(window["peak_velocity"], 2),
+        "peak_baseline_pct_per_min": round(window["peak_baseline"], 3),
+        "peak_price": window["peak_price"],
+        "spike_duration_sec": int(window["peak_ts"] - window["start_ts"]),
+        "reversal_velocity_multiple": round(reversal_vel, 2),
+        "reversal_giveback_pct": round(giveback_pct, 2),
+        "reversal_duration_sec": int(
+            window["last_update_ts"] - window["peak_ts"]),
+        "asymmetry": round(asymmetry, 2),
+        "verdict": mm.verdict_for(asymmetry),
+    }
+
+    profile = _coin_profiles.setdefault(symbol, {
+        "events": [], "median_asymmetry": 0.0, "verdict": "NO_DATA",
+    })
+    profile["events"].append(event)
+
+    asyms = sorted(e["asymmetry"] for e in profile["events"])
+    n = len(asyms)
+    if n % 2 == 1:
+        median = asyms[n // 2]
+    else:
+        median = (asyms[n // 2 - 1] + asyms[n // 2]) / 2.0
+    profile["median_asymmetry"] = round(median, 2)
+    profile["verdict"] = mm.verdict_for(median)
+
+    _diag["spikes_finalized"] += 1
+
     log.info(
-        "CRASH_FINGERPRINT | %s | drop=%.2f%% in %.0fm | vol=%.2fx | "
-        "ratio=%.2f | d_bid=$%.0f | drop3=%.2f%% | drop6=%.2f%% | "
-        "vel=%s | book=%s%s",
-        fp["symbol"], fp["total_drop_pct"], fp["time_to_10pct_minutes"],
-        fp["ignition_vol_multiple"], fp["ratio_real"],
-        fp["bid_depth_at_ignition"], fp["drop3m"], fp["drop6m"],
-        fp["velocity_class"], fp["book_state"], tag,
+        "SPIKE_DONE | %s | peak_vel=%.1fx | rev_vel=%.1fx | asym=%.2f "
+        "| verdict=%s | events=%d",
+        symbol, window["peak_velocity"], reversal_vel, asymmetry,
+        event["verdict"], len(profile["events"]),
     )
 
 
+def _is_tradable(symbol):
+    if not _trading_enabled:
+        return False
+    profile = _coin_profiles.get(symbol)
+    if not profile:
+        return False
+    if profile["verdict"] != "MOMENTUM":
+        return False
+    if len(profile["events"]) < 1:
+        return False
+    return True
+
+
+# =============================================================================
+# UNIVERSE / CONTRACTS
+# =============================================================================
 async def enforce_one_way(session):
     settings = await _request(session, "GET", "/api/v3/account/settings")
     if settings.get("code") == "00000":
@@ -351,24 +477,14 @@ async def enforce_one_way(session):
         if current == "one_way_mode":
             log.info("Account already in one-way mode.")
             return
-        if current:
-            log.info("Current holdMode=%s — switching to one_way_mode.", current)
-    else:
-        log.warning("Could not read account settings (%s).", settings.get("msg"))
     res = await _request(
         session, "POST", "/api/v3/account/set-hold-mode",
         body={"holdMode": "one_way_mode"},
     )
     if res.get("code") == "00000":
         log.info("One-way mode enforced.")
-        return
-    msg = str(res.get("msg") or "")
-    lower = msg.lower()
-    if "position" in lower or "order" in lower:
-        log.info("Could not switch to one-way mode (open positions/orders): %s", msg)
     else:
-        log.warning("set-hold-mode rejected: code=%s msg=%s",
-                    res.get("code"), msg)
+        log.warning("set-hold-mode rejected: %s", res.get("msg"))
 
 
 async def refresh_contracts(session):
@@ -396,9 +512,45 @@ async def refresh_contracts(session):
             continue
     _contracts.clear()
     _contracts.update(new_cache)
-    stock_n = sum(1 for v in _contracts.values() if v["is_stock"])
-    log.info("Contracts cached: %d symbols (%d stock)",
-             len(_contracts), stock_n)
+    log.info("Contracts cached: %d", len(_contracts))
+
+
+async def _prices_bitget(session):
+    out = {}
+    d = await _get_public_json(
+        session,
+        API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
+    )
+    if not isinstance(d, dict) or d.get("code") != "00000":
+        return out
+    for t in d.get("data", []) or []:
+        sym = t.get("symbol", "")
+        if sym.endswith("USDT"):
+            try:
+                p = t.get("lastPr") or t.get("last")
+                if p:
+                    out[sym] = float(p)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+async def _vol_bitget(session):
+    out = {}
+    d = await _get_public_json(
+        session,
+        API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
+    )
+    if not isinstance(d, dict) or d.get("code") != "00000":
+        return out
+    for t in d.get("data", []) or []:
+        sym = t.get("symbol", "")
+        if sym.endswith("USDT"):
+            try:
+                out[sym] = float(t.get("usdtVolume") or 0)
+            except (TypeError, ValueError):
+                pass
+    return out
 
 
 def _norm(sym):
@@ -412,23 +564,6 @@ def _norm(sym):
     if s.endswith("PERP"):
         s = s[:-4]
     return s
-
-
-async def _vol_bitget(session):
-    out = {}
-    d = await _get_public_json(
-        session, API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
-    )
-    if not isinstance(d, dict) or d.get("code") != "00000":
-        return out
-    for t in d.get("data", []) or []:
-        sym = t.get("symbol", "")
-        if sym.endswith("USDT"):
-            try:
-                out[sym] = out.get(sym, 0.0) + float(t.get("usdtVolume") or 0)
-            except (TypeError, ValueError):
-                pass
-    return out
 
 
 async def _vol_binance(session):
@@ -553,7 +688,6 @@ async def _vol_htx(session):
 
 async def refresh_universe(session):
     global _last_universe_exchange_count
-
     results = await asyncio.gather(
         _vol_bitget(session), _vol_binance(session), _vol_bybit(session),
         _vol_okx(session), _vol_gate(session), _vol_kucoin(session),
@@ -570,21 +704,17 @@ async def refresh_universe(session):
 
     if (_last_universe_exchange_count > 0
             and ok < _last_universe_exchange_count - 1):
-        log.warning(
-            "Universe refresh SKIPPED: %d/8 exchanges (previous %d) — "
-            "keeping %d-symbol universe",
-            ok, _last_universe_exchange_count, len(_universe),
-        )
+        log.warning("Universe refresh SKIPPED: %d/8 exchanges", ok)
         return
 
     filtered = []
     excluded_stock = 0
     excluded_vol = 0
     for s, v in agg.items():
-        contract = _contracts.get(s)
-        if not contract:
+        c = _contracts.get(s)
+        if not c:
             continue
-        if contract.get("is_stock"):
+        if c.get("is_stock"):
             excluded_stock += 1
             continue
         if v < UNIVERSE_MIN_VOL_USD:
@@ -596,63 +726,10 @@ async def refresh_universe(session):
     _universe.clear()
     _universe.extend(filtered)
     _last_universe_exchange_count = ok
-
-    log.info(
-        "Universe: %d symbols (>= $%.1fM, %d/8 exchanges) | "
-        "excluded: %d stock, %d low-vol",
-        len(_universe), UNIVERSE_MIN_VOL_USD / 1e6, ok,
-        excluded_stock, excluded_vol,
-    )
-
-
-def _normalize_candle(row):
-    return [row[0], row[1], row[2], row[3], row[4], row[5]]
-
-
-async def fetch_candles(session, symbol, limit=CANDLE_COUNT):
-    d = await _request(
-        session, "GET", "/api/v2/mix/market/candles",
-        query={
-            "symbol": symbol, "productType": PRODUCT_TYPE,
-            "granularity": "1m", "limit": str(limit),
-        },
-        signed=False,
-    )
-    if d.get("code") != "00000":
-        return None
-    raw = d.get("data")
-    if not isinstance(raw, list) or len(raw) < 2:
-        return None
-    out = []
-    for r in raw:
-        try:
-            out.append(_normalize_candle(r))
-        except (IndexError, TypeError):
-            return None
-    return out
-
-
-async def fetch_hourly_candles(session, symbol):
-    d = await _request(
-        session, "GET", "/api/v2/mix/market/candles",
-        query={
-            "symbol": symbol, "productType": PRODUCT_TYPE,
-            "granularity": "1H", "limit": "5",
-        },
-        signed=False,
-    )
-    if d.get("code") != "00000":
-        return None
-    raw = d.get("data")
-    if not isinstance(raw, list) or len(raw) < 4:
-        return None
-    out = []
-    for r in raw:
-        try:
-            out.append(_normalize_candle(r))
-        except (IndexError, TypeError):
-            return None
-    return out
+    log.info("Universe: %d symbols (>= $%.1fM, %d/8 exchanges) "
+             "| excluded: %d stock, %d low-vol",
+             len(_universe), UNIVERSE_MIN_VOL_USD / 1e6, ok,
+             excluded_stock, excluded_vol)
 
 
 async def fetch_depth(session, symbol):
@@ -738,7 +815,6 @@ async def adopt_orphan_positions(session):
         query={"category": PRODUCT_TYPE},
     )
     if d.get("code") != "00000":
-        log.warning("Orphan scan failed: %s", d.get("msg"))
         return
     for p in _extract_positions(d):
         if not isinstance(p, dict):
@@ -756,22 +832,17 @@ async def adopt_orphan_positions(session):
             entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
         except (TypeError, ValueError):
             entry = 0.0
-        side = (p.get("posSide") or p.get("holdSide") or "").lower()
-        if side in ("long", "buy"):
-            direction = "LONG"
-        elif side in ("short", "sell"):
-            direction = "SHORT"
-        else:
-            direction = "SHORT" if total_raw > 0 else "LONG"
         _active_pos = {
-            "symbol": sym, "direction": direction, "entry": entry,
-            "breakdown_level": 0.0,
+            "symbol": sym, "direction": "SHORT", "entry": entry,
             "opened_at": time.time(),
-            "peak_net": -999.0, "peak_gross": -999.0,
+            "peak_price": entry, "peak_net": -999.0,
+            "peak_gross": -999.0,
+            "price_history": [(time.time(), entry)],
+            "momentum_dead_streak": 0,
+            "reversal_streak": 0,
             "paper": False, "adopted": True,
         }
-        log.warning("ADOPTED orphan | %s %s | entry=%.6f | size=%.8f",
-                    sym, direction, entry, abs(total_raw))
+        log.warning("ADOPTED orphan | %s | entry=%.6f", sym, entry)
         return
 
 
@@ -822,7 +893,7 @@ async def close_live_position(session, pos, reason):
     symbol = pos["symbol"]
     live = await get_position(session, symbol)
     if not live or live["total"] <= 0:
-        log.info("No live position for %s (already gone)", symbol)
+        log.info("No live position for %s", symbol)
         return True
     await cancel_open_orders(session, symbol)
     vp = _contracts.get(symbol, {}).get("volumePlace", 0)
@@ -835,278 +906,64 @@ async def close_live_position(session, pos, reason):
     return False
 
 
-async def rank_candidates(session):
-    """Interleave deep and shallow movers."""
-    global _top_candidates
-
-    symbols = list(_universe)
-    if not symbols:
-        log.info("Rank skipped: empty universe")
-        return
-
-    results = {}
-    for i in range(0, len(symbols), RANKER_BATCH):
-        chunk = symbols[i:i + RANKER_BATCH]
-        tasks = [fetch_candles(session, s, limit=16) for s in chunk]
-        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-        for sym, c in zip(chunk, chunk_results):
-            if isinstance(c, list) and len(c) >= 16:
-                results[sym] = c[-16:]
-        await asyncio.sleep(RANKER_BATCH_SLEEP)
-
-    scored = []
-    for sym, candles in results.items():
-        try:
-            p_old = float(candles[0][4])
-            p_now = float(candles[-1][4])
-            if p_old <= 0:
-                continue
-            pct = (p_now - p_old) / p_old * 100.0
-            if pct < mm.PCT_15M_MIN_DROP or pct > mm.PCT_15M_MAX_DROP:
-                continue
-            scored.append({"symbol": sym, "pct_15m": pct})
-        except (IndexError, TypeError, ValueError):
-            continue
-
-    scored.sort(key=lambda x: x["pct_15m"])
-
-    deep = [x for x in scored if x["pct_15m"] < mm.DEEP_MOVER_THRESHOLD]
-    shallow = [x for x in scored if x["pct_15m"] >= mm.DEEP_MOVER_THRESHOLD]
-
-    half = TOP_CANDIDATE_COUNT // 2
-    combined = deep[:half] + shallow[:half]
-    if len(combined) < TOP_CANDIDATE_COUNT:
-        overflow = deep[half:] + shallow[half:]
-        combined.extend(overflow[:TOP_CANDIDATE_COUNT - len(combined)])
-
-    _top_candidates = combined
-
-    if _top_candidates:
-        log.info(
-            "Ranked %d (deep=%d shallow=%d) of %d movers: %s",
-            len(_top_candidates), len(deep), len(shallow), len(scored),
-            " ".join(f"{c['symbol']}={c['pct_15m']:.2f}%"
-                     for c in _top_candidates[:10]),
-        )
-    else:
-        log.info("Ranked: 0 movers in range [%.1f%%, %.1f%%] of %d scanned",
-                 mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP, len(results))
-
-
-def _bump_momentum(reason):
-    if reason == "RANGE":
-        _diag["mom_rng"] += 1
-    elif reason == "ACCEL_WEAK":
-        _diag["mom_aw"] += 1
-    elif reason == "ACCEL_BOUNCE":
-        _diag["mom_ab"] += 1
-    elif reason == "ACCEL_SLOW":
-        _diag["mom_as"] += 1
-    elif reason == "VOLUME":
-        _diag["mom_vol"] += 1
-    elif reason == "EARLY":
-        _diag["mom_early"] += 1
-    elif reason == "NOT_DROPPING":
-        _diag["mom_notdrop"] += 1
-    elif reason == "NO_FRESH_LOW":
-        _diag["mom_nolow"] += 1
-
-
-def _bump_book(reason, panic_mode=False):
-    if reason == "THIN_BID":
-        _diag["book_thin"] += 1
-    elif reason == "WHALE_BID":
-        _diag["book_whale"] += 1
-    else:
-        _diag["book_ratio"] += 1
-
-
-async def scan_candidates(session):
-    if not _top_candidates:
-        return
-    now = time.time()
-    for cand in _top_candidates:
-        symbol = cand["symbol"]
-        if now < _cooldown_until.get(symbol, 0):
-            continue
-
-        candles = await fetch_candles(session, symbol, limit=16)
-        if not candles or len(candles) < 16:
-            _diag["candle_fail"] += 1
-            continue
-        candles = candles[-16:]
-
-        try:
-            p_old = float(candles[0][4])
-            p_now = float(candles[-1][4])
-            if p_old <= 0:
-                continue
-            pct_15m = (p_now - p_old) / p_old * 100.0
-        except (IndexError, TypeError, ValueError):
-            continue
-
-        # ============================================================
-        # ROUTING
-        # ============================================================
-        if pct_15m < mm.DEEP_MOVER_THRESHOLD:
-            # PANIC PATH
-            hourly = await fetch_hourly_candles(session, symbol)
-            if not hourly:
-                _diag["hourly_fail"] += 1
-                continue
-
-            panic = mm.evaluate_panic_context(hourly, p_now)
-            if not panic["is_fresh"]:
-                _diag["stale_mv"] += 1
-                continue
-
-            mom = mm.evaluate_momentum_panic(candles, pct_15m)
-            if not mom["is_valid"]:
-                _bump_momentum(mom["reason"])
-                continue
-
-            depth = await fetch_depth(session, symbol)
-            if depth is None:
-                _diag["depth_fail"] += 1
-                continue
-            bids, asks, mid = depth
-
-            book = mm.evaluate_book(bids, asks, mid, panic_mode=True)
-            if not book["is_valid"]:
-                _bump_book(book["reason"], panic_mode=True)
-                log.info(
-                    "REJECT book | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f "
-                    "| pct15=%.2f%% [PANIC]",
-                    symbol, book["reason"], book["depth_ratio"],
-                    book["d_bid"], book["d_ask"], pct_15m,
-                )
-                continue
-
-            spread = mm.evaluate_spread(bids, asks)
-            if not spread["is_ok"]:
-                _diag["spr"] += 1
-                continue
-
-            log.info(
-                "PANIC SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
-                "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f | "
-                "peak_drop=%.1f%% age=%.2fh",
-                symbol, pct_15m, mom["drop_3m"], mom["drop_6m"],
-                mom["vol_ratio"], book["depth_ratio"], book["d_bid"],
-                p_now, panic["drop_pct"], panic["hours_since_peak"],
-            )
-
-            # Panic invalidation: 0.8% above entry (wider than normal 0.2%)
-            panic_breakdown = p_now * 1.008
-            entered = await enter_short(
-                session, symbol, p_now, panic_breakdown, pct_15m,
-                is_panic=True,
-            )
-            if entered:
-                return
-
-        else:
-            # NORMAL PATH
-            mom = mm.evaluate_momentum(candles, pct_15m)
-            if not mom["is_valid"]:
-                _bump_momentum(mom["reason"])
-                continue
-
-            pos = mm.evaluate_position(mom["live_close"], mom["low_10m"])
-            if not pos["is_valid"]:
-                if pos["reason"] == "CHASE":
-                    _diag["pos_chase"] += 1
-                else:
-                    _diag["pos_break"] += 1
-                continue
-
-            hourly = await fetch_hourly_candles(session, symbol)
-            if not hourly:
-                _diag["hourly_fail"] += 1
-                continue
-
-            mac = mm.evaluate_macro(hourly, mom["live_close"])
-            if not mac["is_aligned"]:
-                _diag["mac_high"] += 1
-                log.info(
-                    "REJECT macro | %s | above_1h=%.2f%% above_4h=%.2f%% "
-                    "| pct15=%.2f%%",
-                    symbol, mac["pct_above_1h"], mac["pct_above_4h"], pct_15m,
-                )
-                continue
-
-            panic = mm.evaluate_panic_context(hourly, mom["live_close"])
-
-            depth = await fetch_depth(session, symbol)
-            if depth is None:
-                _diag["depth_fail"] += 1
-                continue
-            bids, asks, mid = depth
-
-            book = mm.evaluate_book(bids, asks, mid, panic_mode=panic["is_fresh"])
-            if not book["is_valid"]:
-                _bump_book(book["reason"], panic_mode=panic["is_fresh"])
-                log.info(
-                    "REJECT book | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f "
-                    "| pct15=%.2f%%%s",
-                    symbol, book["reason"], book["depth_ratio"],
-                    book["d_bid"], book["d_ask"], pct_15m,
-                    " [PANIC-OVR]" if book["panic_override"] else "",
-                )
-                continue
-
-            spread = mm.evaluate_spread(bids, asks)
-            if not spread["is_ok"]:
-                _diag["spr"] += 1
-                continue
-
-            if panic["is_fresh"]:
-                _diag["panic_ent"] += 1
-
-            log.info(
-                "SWEET SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
-                "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f low10=%.6f "
-                "| macro=%s | panic=%s (%.1f%% / %.2fh)",
-                symbol, pct_15m, mom["drop_3m"], mom["drop_6m"],
-                mom["vol_ratio"], book["depth_ratio"], book["d_bid"],
-                mom["live_close"], mom["low_10m"], mac["which"],
-                "FRESH" if panic["is_fresh"] else ("OLD" if panic["is_panic"] else "NO"),
-                panic["drop_pct"], panic["hours_since_peak"],
-            )
-
-            entered = await enter_short(
-                session, symbol, mom["live_close"], mom["low_10m"], pct_15m,
-                is_panic=panic["is_fresh"],
-            )
-            if entered:
-                return
-
-
-async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m,
-                      is_panic=False):
+# =============================================================================
+# ENTRY
+# =============================================================================
+async def try_enter_momentum(session, symbol, entry_price, vel):
     global _active_pos, _paper_pos
 
-    tag = "[PANIC]" if is_panic else ""
+    if time.time() < _cooldown_until.get(symbol, 0):
+        return False
+
+    depth = await fetch_depth(session, symbol)
+    if depth is None:
+        _diag["tradable_skips_book"] += 1
+        return False
+    bids, asks, mid = depth
+
+    book = mm.evaluate_book(bids, asks, mid)
+    if not book["is_valid"]:
+        _diag["tradable_skips_book"] += 1
+        log.info("SKIP book | %s | %s ratio=%.2f d_bid=%.0f",
+                 symbol, book["reason"], book["depth_ratio"], book["d_bid"])
+        return False
+
+    spread = mm.evaluate_spread(bids, asks)
+    if not spread["is_ok"]:
+        _diag["tradable_skips_spread"] += 1
+        return False
+
+    profile = _coin_profiles.get(symbol, {})
+    asym = profile.get("median_asymmetry", 0.0)
+
+    log.info(
+        "MOMENTUM ENTRY | %s | vel=%.1fx | baseline=%.2f%%/m | asym=%.2f "
+        "| peak_v=%.1fx | price=%.6f",
+        symbol, vel["velocity_multiple"], vel["baseline_pct_per_min"],
+        asym, profile.get("events", [{}])[-1].get("peak_velocity_multiple", 0.0),
+        entry_price,
+    )
 
     if not _streak["live_activated"]:
-        _diag["entered"] += 1
+        _diag["entries"] += 1
         _paper_pos = {
             "symbol": symbol, "direction": "SHORT",
-            "entry": entry_price, "breakdown_level": breakdown_level,
-            "pct_15m_at_entry": pct_15m, "is_panic": is_panic,
+            "entry": entry_price,
             "opened_at": time.time(),
+            "peak_price": entry_price,
             "peak_net": -999.0, "peak_gross": -999.0,
+            "price_history": [(time.time(), entry_price)],
+            "momentum_dead_streak": 0,
+            "reversal_streak": 0,
             "paper": True,
         }
-        log.info("PAPER OPEN%s | %s SHORT @ %.6f | W=%d/%d",
-                 tag, symbol, entry_price, _streak["wins"], PAPER_WINS_REQUIRED)
+        log.info("PAPER OPEN | %s SHORT @ %.6f | W=%d/%d",
+                 symbol, entry_price, _streak["wins"], PAPER_WINS_REQUIRED)
         return True
 
     contract = _contracts.get(symbol)
     if not contract:
-        log.warning("No contract rules for %s", symbol)
         return False
-
     balance = await get_usdt_balance(session)
     qty_str = mm.calculate_order_qty(
         balance=balance, price=entry_price, leverage=LEVERAGE,
@@ -1115,28 +972,126 @@ async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m,
         min_notional=contract["minNotional"],
     )
     if not qty_str:
-        log.warning("Sizing rejected | %s | balance=%.4f | price=%.6f",
-                    symbol, balance, entry_price)
+        log.warning("Sizing rejected | %s | balance=%.4f", symbol, balance)
         return False
 
     oid = await place_short_order(session, symbol, qty_str)
     if not oid:
         return False
 
-    _diag["entered"] += 1
+    _diag["entries"] += 1
     _active_pos = {
         "symbol": symbol, "direction": "SHORT",
-        "entry": entry_price, "breakdown_level": breakdown_level,
-        "pct_15m_at_entry": pct_15m, "is_panic": is_panic,
+        "entry": entry_price,
         "opened_at": time.time(),
+        "peak_price": entry_price,
         "peak_net": -999.0, "peak_gross": -999.0,
+        "price_history": [(time.time(), entry_price)],
+        "momentum_dead_streak": 0,
+        "reversal_streak": 0,
         "paper": False, "order_id": oid,
     }
-    log.info("LIVE OPEN%s | %s SHORT @ %.6f | qty=%s",
-             tag, symbol, entry_price, qty_str)
+    log.info("LIVE OPEN | %s SHORT @ %.6f | qty=%s",
+             symbol, entry_price, qty_str)
     return True
 
 
+# =============================================================================
+# VELOCITY SWEEPER — THE CORE LOOP
+# =============================================================================
+async def velocity_sweeper_loop(session):
+    global _trading_enabled, _learning_started_at
+
+    while True:
+        try:
+            ts = time.time()
+
+            # Enable trading after learning phase
+            if not _trading_enabled:
+                if ts - _learning_started_at >= LEARNING_PHASE_SEC:
+                    _trading_enabled = True
+                    log.info(
+                        "*** LEARNING COMPLETE — TRADING ENABLED *** "
+                        "(%d coin profiles, %d spike events)",
+                        len(_coin_profiles),
+                        sum(len(p.get("events", []))
+                            for p in _coin_profiles.values()),
+                    )
+
+            prices = await _prices_bitget(session)
+            if not prices:
+                _diag["sweep_fails"] += 1
+                await asyncio.sleep(VELOCITY_SWEEP_SEC)
+                continue
+
+            cutoff = ts - VELOCITY_HISTORY_KEEP_SEC
+
+            # Update price histories
+            for sym, price in prices.items():
+                if sym not in _price_history:
+                    _price_history[sym] = []
+                _price_history[sym].append((ts, price))
+                _price_history[sym] = [
+                    (t, p) for t, p in _price_history[sym] if t >= cutoff
+                ]
+
+            # Compute velocity + detect spikes
+            for sym in list(_price_history.keys()):
+                history = _price_history[sym]
+                if len(history) < mm.MIN_SAMPLES_FOR_VELOCITY:
+                    continue
+
+                vel = mm.compute_ticker_velocity(history, ts)
+                current_price = history[-1][1]
+
+                if mm.is_spike(vel):
+                    if sym not in _active_spikes:
+                        _active_spikes[sym] = _new_spike_window(
+                            current_price, vel, ts
+                        )
+                        _diag["spikes_detected"] += 1
+                        log.info(
+                            "SPIKE_START | %s | vel=%.1fx | baseline=%.2f%%/m "
+                            "| price=%.6f",
+                            sym, vel["velocity_multiple"],
+                            vel["baseline_pct_per_min"], current_price,
+                        )
+                    else:
+                        _active_spikes[sym] = _update_spike_window(
+                            _active_spikes[sym], current_price, vel, ts
+                        )
+
+                    # Try to enter (if tradable and no position)
+                    if (_is_tradable(sym)
+                            and _active_pos is None
+                            and _paper_pos is None):
+                        await try_enter_momentum(
+                            session, sym, current_price, vel
+                        )
+                elif sym in _active_spikes:
+                    _active_spikes[sym] = _update_spike_window(
+                        _active_spikes[sym], current_price, vel, ts
+                    )
+
+            # Finalize expired/settled spikes
+            for sym in list(_active_spikes.keys()):
+                if _should_finalize(_active_spikes[sym], ts):
+                    _finalize_spike(sym)
+
+            # Persist periodically
+            if int(ts) % 60 < VELOCITY_SWEEP_SEC:
+                _save_profiles()
+
+        except Exception as exc:
+            log.warning("Sweeper error: %s", exc)
+            _diag["sweep_fails"] += 1
+
+        await asyncio.sleep(VELOCITY_SWEEP_SEC)
+
+
+# =============================================================================
+# POSITION MANAGEMENT — VELOCITY-BASED EXIT
+# =============================================================================
 async def _latest_close(session, symbol):
     d = await _request(
         session, "GET", "/api/v2/mix/market/ticker",
@@ -1156,14 +1111,67 @@ async def _latest_close(session, symbol):
         return None
 
 
+def _update_position_and_check_exit(pos, current_price, ts):
+    entry = pos["entry"]
+    pos["price_history"].append((ts, current_price))
+    cutoff = ts - mm.VELOCITY_HISTORY_SEC
+    pos["price_history"] = [
+        (t, p) for t, p in pos["price_history"] if t >= cutoff
+    ]
+
+    if current_price < pos["peak_price"]:
+        pos["peak_price"] = current_price
+
+    gross = (entry - current_price) / entry * 100.0
+    net = gross - mm.FEE_ROUND_TRIP_PCT
+    if net > pos["peak_net"]:
+        pos["peak_net"] = net
+    if gross > pos["peak_gross"]:
+        pos["peak_gross"] = gross
+
+    elapsed = ts - pos["opened_at"]
+
+    # Hard safety
+    if net <= -mm.HARD_STOP_PCT:
+        return "HARD_STOP", net
+
+    # Time cap
+    if elapsed >= mm.MAX_HOLD_SEC:
+        return "TIME_EXIT", net
+
+    # Velocity checks (only after min hold)
+    if elapsed >= mm.MIN_HOLD_FOR_EXIT_CHECK_SEC:
+        vel = mm.compute_ticker_velocity(pos["price_history"], ts)
+
+        # Momentum death
+        if mm.check_momentum_death(vel):
+            pos["momentum_dead_streak"] += 1
+            if pos["momentum_dead_streak"] >= mm.MOMENTUM_DEATH_CONSECUTIVE:
+                return "MOMENTUM_DEAD", net
+        else:
+            pos["momentum_dead_streak"] = 0
+
+        # Symmetric reversal
+        if mm.check_symmetric_reversal(vel):
+            pos["reversal_streak"] += 1
+            if pos["reversal_streak"] >= mm.SYMMETRIC_REVERSAL_CONSECUTIVE:
+                return "SYMMETRIC_REVERSAL", net
+        else:
+            pos["reversal_streak"] = 0
+
+    return None, net
+
+
 async def manage_live_position(session):
     global _active_pos
+    if _active_pos is None:
+        return
     pos = _active_pos
     symbol = pos["symbol"]
 
     live = await get_position(session, symbol)
     if live is None or live["total"] <= 0:
-        log.info("Live position %s vanished externally", symbol)
+        log.info("Position %s vanished", symbol)
         _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
         _active_pos = None
         return
@@ -1172,29 +1180,34 @@ async def manage_live_position(session):
     if current is None or current <= 0:
         return
 
-    elapsed = time.time() - pos["opened_at"]
-    state = mm.evaluate_ratchet(
-        entry_price=live["entryPrice"] or pos["entry"],
-        current_price=current,
-        breakdown_level=pos["breakdown_level"],
-        peak_net=pos["peak_net"], peak_gross=pos["peak_gross"],
-        elapsed_seconds=elapsed,
-    )
-    pos["peak_net"] = state["updated_peak_net"]
-    pos["peak_gross"] = state["updated_peak_gross"]
-
-    if not state["should_exit"]:
+    reason, net = _update_position_and_check_exit(pos, current, time.time())
+    if not reason:
         return
 
-    closed = await close_live_position(session, pos, state["exit_reason"])
+    log.info(
+        "EXIT SIGNAL | %s | %s | net=%.2f%% | peak_net=%.2f%%",
+        symbol, reason, net, pos["peak_net"],
+    )
+    if reason == "MOMENTUM_DEAD":
+        _diag["exit_momentum_dead"] += 1
+    elif reason == "SYMMETRIC_REVERSAL":
+        _diag["exit_symmetric"] += 1
+    elif reason == "HARD_STOP":
+        _diag["exit_hard"] += 1
+    elif reason == "TIME_EXIT":
+        _diag["exit_time"] += 1
+
+    closed = await close_live_position(session, pos, reason)
     if closed:
-        _record_result(state["net_pnl"], state["exit_reason"])
+        _record_result(net, reason)
         _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
         _active_pos = None
 
 
 async def manage_paper_position(session):
     global _paper_pos
+    if _paper_pos is None:
+        return
     pos = _paper_pos
     symbol = pos["symbol"]
 
@@ -1202,139 +1215,121 @@ async def manage_paper_position(session):
     if current is None or current <= 0:
         return
 
-    elapsed = time.time() - pos["opened_at"]
-    state = mm.evaluate_ratchet(
-        entry_price=pos["entry"], current_price=current,
-        breakdown_level=pos["breakdown_level"],
-        peak_net=pos["peak_net"], peak_gross=pos["peak_gross"],
-        elapsed_seconds=elapsed,
-    )
-    pos["peak_net"] = state["updated_peak_net"]
-    pos["peak_gross"] = state["updated_peak_gross"]
-
-    if not state["should_exit"]:
+    reason, net = _update_position_and_check_exit(pos, current, time.time())
+    if not reason:
         return
 
-    tag = "[PANIC]" if pos.get("is_panic") else ""
     log.info(
-        "PAPER EXIT%s | %s SHORT | %s | gross=%.3f%% net=%.3f%% peak_net=%.3f%%",
-        tag, symbol, state["exit_reason"], state["gross_pnl"],
-        state["net_pnl"], state["updated_peak_net"],
+        "PAPER EXIT | %s | %s | gross=%.2f%% net=%.2f%% peak_net=%.2f%%",
+        symbol, reason, pos["peak_gross"], net, pos["peak_net"],
     )
-    _record_result(state["net_pnl"], state["exit_reason"])
+    if reason == "MOMENTUM_DEAD":
+        _diag["exit_momentum_dead"] += 1
+    elif reason == "SYMMETRIC_REVERSAL":
+        _diag["exit_symmetric"] += 1
+    elif reason == "HARD_STOP":
+        _diag["exit_hard"] += 1
+    elif reason == "TIME_EXIT":
+        _diag["exit_time"] += 1
+
+    _record_result(net, reason)
     _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
     _paper_pos = None
 
 
-async def _build_fingerprint(session, symbol, current_price, high_4h,
-                             high_4h_ts_ms):
-    candles = await fetch_candles(session, symbol, limit=16)
-    if not candles or len(candles) < 16:
-        return None
-    try:
-        close_9m_ago = float(candles[-10][4])
-        close_3m_ago = float(candles[-4][4])
-        live_vol = float(candles[-1][5])
-        live_ts = int(candles[-1][0])
-        avg_vol = sum(float(c[5]) for c in candles[-16:-1]) / 15.0
-    except (IndexError, TypeError, ValueError):
-        return None
-    if close_9m_ago <= 0 or close_3m_ago <= 0 or avg_vol <= 0:
-        return None
-    drop_6m = (close_9m_ago - close_3m_ago) / close_9m_ago * 100.0
-    drop_3m = (close_3m_ago - current_price) / close_3m_ago * 100.0
-    now_ms = int(time.time() * 1000)
-    elapsed_s = max(1.0, (now_ms - live_ts) / 1000.0)
-    multiplier = min(60.0 / elapsed_s, 3.0)
-    vol_ratio = (live_vol * multiplier / avg_vol) if avg_vol > 0 else 0.0
+# =============================================================================
+# REPORT LOOP — COPY-PASTEABLE
+# =============================================================================
+def _report_profiles():
+    now = time.time()
+    runtime = now - _learning_started_at
+    phase = "LEARNING" if not _trading_enabled else "TRADING"
 
-    depth = await fetch_depth(session, symbol)
-    if depth is None:
-        return None
-    bids, asks, mid = depth
-    book = mm.evaluate_book(bids, asks, mid)
+    momentum_coins = []
+    noise_coins = []
+    middle_coins = []
+    no_data = 0
 
-    total_drop_pct = (high_4h - current_price) / high_4h * 100.0
-    time_to_10pct = max(1.0, (now_ms - high_4h_ts_ms) / 60000.0)
+    for sym, profile in _coin_profiles.items():
+        verdict = profile.get("verdict", "NO_DATA")
+        events = profile.get("events", [])
+        if not events:
+            no_data += 1
+            continue
+        if verdict == "MOMENTUM":
+            momentum_coins.append((sym, profile))
+        elif verdict == "NOISE":
+            noise_coins.append((sym, profile))
+        else:
+            middle_coins.append((sym, profile))
 
-    return {
-        "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "symbol": symbol,
-        "total_drop_pct": round(total_drop_pct, 3),
-        "time_to_10pct_minutes": round(time_to_10pct, 1),
-        "velocity_class": mm.classify_velocity(time_to_10pct),
-        "ignition_vol_multiple": round(vol_ratio, 2),
-        "pre_crash_ratio": round(book["depth_ratio"], 2),
-        "ratio_real": round(book["depth_ratio"], 2),
-        "book_state": book["reason"],
-        "bid_depth_at_ignition": round(book["d_bid"], 0),
-        "ask_depth_at_ignition": round(book["d_ask"], 0),
-        "drop3m": round(drop_3m, 3),
-        "drop6m": round(drop_6m, 3),
-        "current_price": current_price,
-        "high_4h": round(high_4h, 8),
-    }
+    momentum_coins.sort(key=lambda x: -x[1]["median_asymmetry"])
+    noise_coins.sort(key=lambda x: x[1]["median_asymmetry"])
 
+    total_events = sum(len(p.get("events", []))
+                       for p in _coin_profiles.values())
 
-async def _process_observer_symbol(session, symbol, hourly):
-    global _observer_state
-    metrics = mm.compute_crash_metrics(hourly)
-    current_price = metrics["current_price"]
-    high_4h = metrics["high_4h"]
-    high_4h_ts_ms = metrics["high_4h_ts_ms"]
-    high_1h = metrics["high_1h"]
-    if current_price <= 0 or high_4h <= 0 or high_4h_ts_ms <= 0:
-        return
-    now_ms = int(time.time() * 1000)
-    prev = _observer_state.get(symbol)
-    if prev is None:
-        state = _ObsState(
-            high_4h=high_4h, high_4h_ts=high_4h_ts_ms, high_1h=high_1h,
-            last_crash_ts=0, last_crash_drop=0.0,
-        )
-    else:
-        state = prev._replace(
-            high_4h=high_4h, high_4h_ts=high_4h_ts_ms, high_1h=high_1h,
-        )
-    _observer_state[symbol] = state
-    _obs_diag["observed"] += 1
-    drop_pct = mm.drop_pct_from_high(high_4h, current_price)
-    if drop_pct < OBSERVER_CRASH_THRESHOLD_PCT:
-        return
-    if now_ms - state.last_crash_ts < OBSERVER_COOLDOWN_MS:
-        if drop_pct < state.last_crash_drop + OBSERVER_ESCALATION_PCT:
-            return
-    fp = await _build_fingerprint(
-        session, symbol, current_price, high_4h, high_4h_ts_ms,
-    )
-    if fp is None:
-        _obs_diag["capture_fail"] += 1
-        return
-    _observer_state[symbol] = state._replace(
-        last_crash_ts=now_ms, last_crash_drop=drop_pct,
-    )
-    record_crash(fp)
-    _obs_diag["crashes"] += 1
+    log.info("========== MOMENTUM LEARNING REPORT ==========")
+    log.info("Phase: %s | Runtime: %.1fh | Events: %d | Coins: %d",
+             phase, runtime / 3600.0, total_events, len(_coin_profiles))
+    log.info("MOMENTUM: %d | MIDDLE: %d | NOISE: %d | NO_DATA: %d",
+             len(momentum_coins), len(middle_coins),
+             len(noise_coins), no_data)
+
+    if momentum_coins:
+        log.info("--- MOMENTUM COINS (tradable) ---")
+        for sym, prof in momentum_coins[:15]:
+            last = prof["events"][-1]
+            log.info(
+                "MOMENTUM | %s | n=%d | asym=%.2f | peak_v=%.1fx "
+                "| rev_v=%.1fx | baseline=%.2f%%/m | giveback=%.1f%% "
+                "| spike_dur=%ds",
+                sym, len(prof["events"]), prof["median_asymmetry"],
+                last["peak_velocity_multiple"],
+                last["reversal_velocity_multiple"],
+                last["peak_baseline_pct_per_min"],
+                last["reversal_giveback_pct"],
+                last["spike_duration_sec"],
+            )
+
+    if noise_coins:
+        log.info("--- NOISE COINS (do not trade) ---")
+        for sym, prof in noise_coins[:10]:
+            last = prof["events"][-1]
+            log.info(
+                "NOISE | %s | n=%d | asym=%.2f | peak_v=%.1fx | rev_v=%.1fx",
+                sym, len(prof["events"]), prof["median_asymmetry"],
+                last["peak_velocity_multiple"],
+                last["reversal_velocity_multiple"],
+            )
+
+    if _active_spikes:
+        log.info("--- WATCHING (spike in progress) ---")
+        for sym, w in list(_active_spikes.items())[:10]:
+            age = time.time() - w["start_ts"]
+            log.info(
+                "WATCH | %s | peak_v=%.1fx | rev_v=%.1fx | age=%.0fs",
+                sym, w["peak_velocity"], w["max_reversal_velocity"], age,
+            )
+
+    log.info("========== END REPORT ==========")
 
 
-async def run_observer_pass(session):
-    symbols = list(_universe)
-    if not symbols:
-        return
-    for i in range(0, len(symbols), OBSERVER_BATCH):
-        chunk = symbols[i:i + OBSERVER_BATCH]
-        tasks = [fetch_hourly_candles(session, s) for s in chunk]
-        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-        for sym, hourly in zip(chunk, chunk_results):
-            if isinstance(hourly, Exception) or not hourly:
-                continue
-            try:
-                await _process_observer_symbol(session, sym, hourly)
-            except Exception as exc:
-                log.debug("observer per-symbol error %s: %s", sym, exc)
-        await asyncio.sleep(OBSERVER_BATCH_SLEEP)
+async def report_loop():
+    global _last_report
+    while True:
+        try:
+            if time.time() - _last_report >= REPORT_INTERVAL_SEC:
+                _last_report = time.time()
+                _report_profiles()
+        except Exception as exc:
+            log.warning("Report error: %s", exc)
+        await asyncio.sleep(30.0)
 
 
+# =============================================================================
+# BACKGROUND LOOPS
+# =============================================================================
 async def contracts_refresh_loop(session):
     while True:
         await asyncio.sleep(CONTRACTS_REFRESH_SEC)
@@ -1344,27 +1339,13 @@ async def contracts_refresh_loop(session):
             log.warning("Contract refresh error: %s", exc)
 
 
-async def ranker_loop(session):
+async def universe_refresh_loop(session):
     while True:
         try:
             await refresh_universe(session)
         except Exception as exc:
             log.warning("Universe refresh error: %s", exc)
-        try:
-            await rank_candidates(session)
-        except Exception as exc:
-            log.warning("Rank error: %s", exc)
         await asyncio.sleep(UNIVERSE_REFRESH_SEC)
-
-
-async def observer_loop(session):
-    await asyncio.sleep(OBSERVER_INITIAL_DELAY_SEC)
-    while True:
-        try:
-            await run_observer_pass(session)
-        except Exception as exc:
-            log.warning("Observer error: %s", exc)
-        await asyncio.sleep(OBSERVER_INTERVAL_SEC)
 
 
 def _heartbeat():
@@ -1372,73 +1353,52 @@ def _heartbeat():
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
         return
     _last_heartbeat = time.time()
+    total_events = sum(len(p.get("events", []))
+                       for p in _coin_profiles.values())
     log.info(
-        "HEARTBEAT | uni=%d ranked=%d active=%s paper=%s obs=%d crs=%d | "
-        "funnel: M[rng=%d aw=%d ab=%d as=%d vol=%d er=%d nd=%d nl=%d] "
-        "P[brk=%d chs=%d] Mac=%d "
-        "B[thin=%d whl=%d rat=%d] Spr=%d | "
-        "panic_ent=%d stale_mv=%d | "
-        "cf=%d hf=%d df=%d ent=%d | "
-        "streak W=%d L=%d live=%s tr=%d",
-        len(_universe), len(_top_candidates),
-        _active_pos is not None, _paper_pos is not None,
-        _obs_diag["observed"], _obs_diag["crashes"],
-        _diag["mom_rng"], _diag["mom_aw"], _diag["mom_ab"],
-        _diag["mom_as"], _diag["mom_vol"], _diag["mom_early"],
-        _diag["mom_notdrop"], _diag["mom_nolow"],
-        _diag["pos_break"], _diag["pos_chase"], _diag["mac_high"],
-        _diag["book_thin"], _diag["book_whale"], _diag["book_ratio"],
-        _diag["spr"],
-        _diag["panic_ent"], _diag["stale_mv"],
-        _diag["candle_fail"], _diag["hourly_fail"], _diag["depth_fail"],
-        _diag["entered"],
-        _streak["wins"], _streak["losses"], _streak["live_activated"],
-        _streak["trades"],
+        "HEARTBEAT | phase=%s | uni=%d profiles=%d events=%d watching=%d "
+        "| pos=%s | diag[det=%d fin=%d book=%d spr=%d ent=%d "
+        "dead=%d sym=%d hard=%d time=%d] | streak W=%d L=%d tr=%d",
+        "TRADING" if _trading_enabled else "LEARNING",
+        len(_universe), len(_coin_profiles), total_events,
+        len(_active_spikes),
+        "open" if (_active_pos or _paper_pos) else "none",
+        _diag["spikes_detected"], _diag["spikes_finalized"],
+        _diag["tradable_skips_book"], _diag["tradable_skips_spread"],
+        _diag["entries"],
+        _diag["exit_momentum_dead"], _diag["exit_symmetric"],
+        _diag["exit_hard"], _diag["exit_time"],
+        _streak["wins"], _streak["losses"], _streak["trades"],
     )
-    for k in _diag:
-        _diag[k] = 0
-    for k in _obs_diag:
-        _obs_diag[k] = 0
 
 
+# =============================================================================
+# MAIN
+# =============================================================================
 async def main():
     _start_keepalive()
 
     if getattr(mm, "__version__", "UNKNOWN") != _EXPECTED_MM_VERSION:
         log.critical(
-            "market_math.py version mismatch: expected %s, got %s. "
-            "Clear Render build cache & redeploy.",
+            "market_math.py version mismatch: expected %s, got %s.",
             _EXPECTED_MM_VERSION, getattr(mm, "__version__", "UNKNOWN"),
         )
         raise SystemExit(1)
 
-    for _name in ("DEEP_MOVER_THRESHOLD", "PANIC_DROP_MIN_PCT",
-                  "PANIC_FRESH_HOURS", "PANIC_DROP3_MIN",
-                  "PANIC_VOL_MIN", "PANIC_SIDE_DEPTH_MIN",
-                  "PANIC_WHALE_BID_MAX", "FRAGILITY_RATIO_MIN"):
-        if not hasattr(mm, _name):
-            log.critical("market_math.py missing %s — stale.", _name)
-            raise SystemExit(1)
-
     _load_streak()
-    _load_learnings()
+    _load_profiles()
 
     log.info(
         "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "DUAL-PATH | "
-        "NORMAL: pct15[-30,-1] anti-chase<=%.2f%% macro<=%.1f%%/%.1f%% "
-        "book>=%.2f | "
-        "PANIC(pct15<%.1f%%): fresh<=%.1fh drop3>=%.2f%% vol>=%.1fx "
-        "book=[$%.0f-$%.0f] | "
-        "top=%d",
+        "spike>=%.1fx | asym>=%.2f | learn=%.0fh | "
+        "exit: dead<%.1fx*%d OR rev>%.1fx*%d OR hard<=-%.1f%% OR time>%.0fs",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
-        mm.ANTI_CHASE_MAX_PCT, mm.MACRO_1H_MAX_PCT, mm.MACRO_4H_MAX_PCT,
-        mm.FRAGILITY_RATIO_MIN,
-        mm.DEEP_MOVER_THRESHOLD, mm.PANIC_FRESH_HOURS,
-        mm.PANIC_DROP3_MIN, mm.PANIC_VOL_MIN,
-        mm.PANIC_SIDE_DEPTH_MIN, mm.PANIC_WHALE_BID_MAX,
-        TOP_CANDIDATE_COUNT,
+        mm.SPIKE_VELOCITY_THRESHOLD, mm.MIN_ASYMMETRY_RATIO,
+        LEARNING_PHASE_SEC / 3600.0,
+        mm.MOMENTUM_DEATH_RATIO, mm.MOMENTUM_DEATH_CONSECUTIVE,
+        mm.SYMMETRIC_REVERSAL_MULTIPLE, mm.SYMMETRIC_REVERSAL_CONSECUTIVE,
+        mm.HARD_STOP_PCT, mm.MAX_HOLD_SEC,
     )
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
@@ -1451,15 +1411,14 @@ async def main():
             refresh_contracts(session),
         )
         await refresh_universe(session)
-        await rank_candidates(session)
         await adopt_orphan_positions(session)
 
         asyncio.create_task(contracts_refresh_loop(session))
-        asyncio.create_task(ranker_loop(session))
-        asyncio.create_task(observer_loop(session))
+        asyncio.create_task(universe_refresh_loop(session))
+        asyncio.create_task(velocity_sweeper_loop(session))
+        asyncio.create_task(report_loop())
 
-        log.info("Main loop started | universe=%d ranked=%d",
-                 len(_universe), len(_top_candidates))
+        log.info("Main loop started | universe=%d", len(_universe))
 
         while True:
             loop_start = time.time()
@@ -1468,8 +1427,6 @@ async def main():
                     await manage_live_position(session)
                 elif _paper_pos is not None:
                     await manage_paper_position(session)
-                else:
-                    await scan_candidates(session)
             except Exception as exc:
                 log.error("Loop error: %s", exc, exc_info=True)
 
@@ -1482,7 +1439,7 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log.info("Shutdown requested.")
+        log.info("Shutdown.")
     except SystemExit:
         raise
     except Exception as exc:
