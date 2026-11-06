@@ -4,11 +4,7 @@ bot.py
 ======
 Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
 
-v2026.11.14:
-  - FIX: universe flip-flop — don't shrink when 2+ exchanges miss a refresh
-  - IMPROVE: near-miss fragility counter (fnear) for tuning FRAGILITY_RATIO_MIN
-  - IMPROVE: [STALE] tag on fingerprints older than 90m
-  (Carried from 11.13: macro alignment gate + real elapsed-minutes for observer)
+v2026.11.15: 5-filter architecture, wider ranker pool (30 candidates).
 """
 
 import asyncio
@@ -28,9 +24,6 @@ import aiohttp
 
 import market_math as mm
 
-# =============================================================================
-# CONFIG
-# =============================================================================
 API_BASE = "https://api.bitget.com"
 PORT = 10000
 PRODUCT_TYPE = "USDT-FUTURES"
@@ -40,7 +33,7 @@ PULSE_SEC = 4.0
 UNIVERSE_REFRESH_SEC = 300
 CONTRACTS_REFRESH_SEC = 900
 UNIVERSE_MIN_VOL_USD = 1_000_000.0
-TOP_CANDIDATE_COUNT = 10
+TOP_CANDIDATE_COUNT = 30
 RANKER_BATCH = 15
 RANKER_BATCH_SLEEP = 0.10
 
@@ -61,7 +54,7 @@ MAX_CRASH_EVENTS = 30
 PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 16
 
-_EXPECTED_MM_VERSION = "2026.11.14"
+_EXPECTED_MM_VERSION = "2026.11.15"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -194,9 +187,6 @@ async def _get_public_json(session, url, timeout=10.0):
         return None
 
 
-# =============================================================================
-# STATE
-# =============================================================================
 _contracts: Dict[str, dict] = {}
 _universe = []
 _top_candidates = []
@@ -215,19 +205,18 @@ _observer_state: Dict[str, _ObsState] = {}
 _crash_events = []
 
 _diag = {
-    "range_rej": 0, "accel_weak": 0, "accel_bounce": 0, "accel_slow": 0,
-    "vol_rej": 0, "breakdown_rej": 0, "chase_rej": 0, "early_rej": 0,
-    "macro_align_rej": 0,
-    "spread_rej": 0, "frag_thin": 0, "frag_whale": 0,
-    "frag_ratio": 0, "frag_near": 0,
-    "candle_fail": 0, "depth_fail": 0, "entered": 0,
+    "mom_rng": 0, "mom_aw": 0, "mom_ab": 0, "mom_as": 0,
+    "mom_vol": 0, "mom_early": 0,
+    "pos_break": 0, "pos_chase": 0,
+    "mac_high": 0,
+    "book_thin": 0, "book_whale": 0, "book_ratio": 0,
+    "spr": 0,
+    "candle_fail": 0, "hourly_fail": 0, "depth_fail": 0,
+    "entered": 0,
 }
 _obs_diag = {"observed": 0, "crashes": 0, "capture_fail": 0}
 
 
-# =============================================================================
-# HELPERS
-# =============================================================================
 def _extract_positions(d):
     payload = d.get("data")
     if isinstance(payload, dict):
@@ -257,9 +246,6 @@ def _env_bool_or_none(name: str) -> Optional[bool]:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
-# =============================================================================
-# STREAK PERSISTENCE
-# =============================================================================
 def _load_streak():
     try:
         with open(STREAK_FILE, "r") as f:
@@ -316,9 +302,6 @@ def _record_result(net_pnl, exit_reason):
     )
 
 
-# =============================================================================
-# LEARNINGS
-# =============================================================================
 def _load_learnings():
     global _crash_events
     try:
@@ -359,9 +342,6 @@ def record_crash(fp):
     )
 
 
-# =============================================================================
-# UTA V3 POSITION MODE
-# =============================================================================
 async def enforce_one_way(session):
     settings = await _request(session, "GET", "/api/v3/account/settings")
     if settings.get("code") == "00000":
@@ -393,9 +373,6 @@ async def enforce_one_way(session):
                     res.get("code"), msg)
 
 
-# =============================================================================
-# CONTRACT RULES
-# =============================================================================
 async def refresh_contracts(session):
     d = await _request(
         session, "GET", "/api/v2/mix/market/contracts",
@@ -426,9 +403,6 @@ async def refresh_contracts(session):
              len(_contracts), stock_n)
 
 
-# =============================================================================
-# UNIVERSE (8-exchange aggregation with flip-flop guard)
-# =============================================================================
 def _norm(sym):
     s = (sym or "").upper().replace("-", "").replace("_", "").replace("/", "")
     if s.startswith("XBT"):
@@ -596,7 +570,6 @@ async def refresh_universe(session):
             for sym, vol in r.items():
                 agg[sym] = agg.get(sym, 0.0) + vol
 
-    # FIX: don't shrink universe when 2+ exchanges miss a refresh
     if (_last_universe_exchange_count > 0
             and ok < _last_universe_exchange_count - 1):
         log.warning(
@@ -634,9 +607,6 @@ async def refresh_universe(session):
     )
 
 
-# =============================================================================
-# CANDLES / DEPTH
-# =============================================================================
 def _normalize_candle(row):
     return [row[0], row[1], row[2], row[3], row[4], row[5]]
 
@@ -711,9 +681,6 @@ async def fetch_depth(session, symbol):
     return bids, asks, mid
 
 
-# =============================================================================
-# ACCOUNT / POSITION
-# =============================================================================
 async def get_usdt_balance(session):
     d = await _request(session, "GET", "/api/v3/account/assets")
     if d.get("code") == "00000":
@@ -810,9 +777,6 @@ async def adopt_orphan_positions(session):
         return
 
 
-# =============================================================================
-# ORDER PLACEMENT
-# =============================================================================
 async def place_short_order(session, symbol, qty_str):
     body = {
         "category": PRODUCT_TYPE, "symbol": symbol,
@@ -873,9 +837,6 @@ async def close_live_position(session, pos, reason):
     return False
 
 
-# =============================================================================
-# RANKER
-# =============================================================================
 async def rank_candidates(session):
     global _top_candidates
 
@@ -923,26 +884,19 @@ async def rank_candidates(session):
                  mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP, len(results))
 
 
-# =============================================================================
-# SCANNER
-# =============================================================================
-def _bump_diag(reason):
+def _bump_momentum(reason):
     if reason == "RANGE":
-        _diag["range_rej"] += 1
+        _diag["mom_rng"] += 1
     elif reason == "ACCEL_WEAK":
-        _diag["accel_weak"] += 1
+        _diag["mom_aw"] += 1
     elif reason == "ACCEL_BOUNCE":
-        _diag["accel_bounce"] += 1
+        _diag["mom_ab"] += 1
     elif reason == "ACCEL_SLOW":
-        _diag["accel_slow"] += 1
+        _diag["mom_as"] += 1
     elif reason == "VOLUME":
-        _diag["vol_rej"] += 1
-    elif reason == "BREAKDOWN":
-        _diag["breakdown_rej"] += 1
-    elif reason == "CHASE":
-        _diag["chase_rej"] += 1
+        _diag["mom_vol"] += 1
     elif reason == "EARLY":
-        _diag["early_rej"] += 1
+        _diag["mom_early"] += 1
 
 
 async def scan_candidates(session):
@@ -969,22 +923,30 @@ async def scan_candidates(session):
         except (IndexError, TypeError, ValueError):
             continue
 
-        # Fast 1m-only filter first
-        result = mm.evaluate_sweet_spot(candles, pct_15m)
-        if not result["is_valid"]:
-            _bump_diag(result["reason"])
+        mom = mm.evaluate_momentum(candles, pct_15m)
+        if not mom["is_valid"]:
+            _bump_momentum(mom["reason"])
             continue
 
-        # Macro alignment via hourly candles
+        pos = mm.evaluate_position(mom["live_close"], mom["low_10m"])
+        if not pos["is_valid"]:
+            if pos["reason"] == "CHASE":
+                _diag["pos_chase"] += 1
+            else:
+                _diag["pos_break"] += 1
+            continue
+
         hourly = await fetch_hourly_candles(session, symbol)
-        align = mm.evaluate_macro_alignment(hourly, result["live_close"])
-        if not align["is_aligned"]:
-            _diag["macro_align_rej"] += 1
+        if not hourly:
+            _diag["hourly_fail"] += 1
+            continue
+        mac = mm.evaluate_macro(hourly, mom["live_close"])
+        if not mac["is_aligned"]:
+            _diag["mac_high"] += 1
             log.info(
-                "REJECT macro | %s | %s pct_above_low=%.2f%% (ref=%.8f) "
-                "| close=%.8f | pct15=%.2f%%",
-                symbol, align["reason"], align["pct_above_ref"],
-                align["ref_low"], result["live_close"], pct_15m,
+                "REJECT macro | %s | above_1h=%.2f%% above_4h=%.2f%% "
+                "| pct15=%.2f%%",
+                symbol, mac["pct_above_1h"], mac["pct_above_4h"], pct_15m,
             )
             continue
 
@@ -994,41 +956,40 @@ async def scan_candidates(session):
             continue
         bids, asks, mid = depth
 
-        spread = mm.evaluate_spread(bids, asks)
-        if not spread["is_ok"]:
-            _diag["spread_rej"] += 1
+        book = mm.evaluate_book(bids, asks, mid)
+        if not book["is_valid"]:
+            reason = book["reason"]
+            if reason == "THIN_BID":
+                _diag["book_thin"] += 1
+            elif reason == "WHALE_BID":
+                _diag["book_whale"] += 1
+            else:
+                _diag["book_ratio"] += 1
+            log.info(
+                "REJECT book | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f | "
+                "pct15=%.2f%%",
+                symbol, reason, book["depth_ratio"],
+                book["d_bid"], book["d_ask"], pct_15m,
+            )
             continue
 
-        frag = mm.evaluate_book_fragility(bids, asks, mid)
-        if not frag["is_fragile"]:
-            reason = frag["reason"]
-            ratio = frag["depth_ratio"]
-            if reason == "THIN_BID":
-                _diag["frag_thin"] += 1
-            elif reason == "WHALE_BID":
-                _diag["frag_whale"] += 1
-            elif ratio >= 1.60:
-                _diag["frag_near"] += 1
-            else:
-                _diag["frag_ratio"] += 1
-            log.info(
-                "REJECT frag | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f | pct15=%.2f%%%s",
-                symbol, reason, ratio, frag["d_bid"], frag["d_ask"], pct_15m,
-                " [NEAR]" if (reason == "LOW_RATIO" and ratio >= 1.60) else "",
-            )
+        spread = mm.evaluate_spread(bids, asks)
+        if not spread["is_ok"]:
+            _diag["spr"] += 1
             continue
 
         log.info(
             "SWEET SPOT | %s | pct15=%.2f%% drop3=%.2f%% drop6=%.2f%% "
             "vol=%.2fx ratio=%.2f d_bid=%.0f | close=%.6f low10=%.6f "
-            "| align=%.2f%% above_low",
-            symbol, pct_15m, result["drop_3m"], result["drop_6m"],
-            result["vol_ratio"], frag["depth_ratio"], frag["d_bid"],
-            result["live_close"], result["low_10m"], align["pct_above_ref"],
+            "| macro=%s (+%.2f%%/%.2f%%)",
+            symbol, pct_15m, mom["drop_3m"], mom["drop_6m"],
+            mom["vol_ratio"], book["depth_ratio"], book["d_bid"],
+            mom["live_close"], mom["low_10m"],
+            mac["which"], mac["pct_above_1h"], mac["pct_above_4h"],
         )
 
         entered = await enter_short(
-            session, symbol, result["live_close"], result["low_10m"], pct_15m,
+            session, symbol, mom["live_close"], mom["low_10m"], pct_15m,
         )
         if entered:
             return
@@ -1086,9 +1047,6 @@ async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m):
     return True
 
 
-# =============================================================================
-# WATCHDOG
-# =============================================================================
 async def _latest_close(session, symbol):
     d = await _request(
         session, "GET", "/api/v2/mix/market/ticker",
@@ -1179,9 +1137,6 @@ async def manage_paper_position(session):
     _paper_pos = None
 
 
-# =============================================================================
-# OBSERVER
-# =============================================================================
 async def _build_fingerprint(session, symbol, current_price, high_4h,
                              high_4h_ts_ms):
     candles = await fetch_candles(session, symbol, limit=16)
@@ -1210,7 +1165,7 @@ async def _build_fingerprint(session, symbol, current_price, high_4h,
     if depth is None:
         return None
     bids, asks, mid = depth
-    frag = mm.evaluate_book_fragility(bids, asks, mid)
+    book = mm.evaluate_book(bids, asks, mid)
 
     total_drop_pct = (high_4h - current_price) / high_4h * 100.0
     time_to_10pct = max(1.0, (now_ms - high_4h_ts_ms) / 60000.0)
@@ -1222,11 +1177,11 @@ async def _build_fingerprint(session, symbol, current_price, high_4h,
         "time_to_10pct_minutes": round(time_to_10pct, 1),
         "velocity_class": mm.classify_velocity(time_to_10pct),
         "ignition_vol_multiple": round(vol_ratio, 2),
-        "pre_crash_ratio": round(frag["depth_ratio"], 2),
-        "ratio_real": round(frag["depth_ratio"], 2),
-        "book_state": frag["reason"],
-        "bid_depth_at_ignition": round(frag["d_bid"], 0),
-        "ask_depth_at_ignition": round(frag["d_ask"], 0),
+        "pre_crash_ratio": round(book["depth_ratio"], 2),
+        "ratio_real": round(book["depth_ratio"], 2),
+        "book_state": book["reason"],
+        "bid_depth_at_ignition": round(book["d_bid"], 0),
+        "ask_depth_at_ignition": round(book["d_ask"], 0),
         "drop3m": round(drop_3m, 3),
         "drop6m": round(drop_6m, 3),
         "current_price": current_price,
@@ -1304,9 +1259,6 @@ async def run_observer_pass(session):
         await asyncio.sleep(OBSERVER_BATCH_SLEEP)
 
 
-# =============================================================================
-# BACKGROUND LOOPS
-# =============================================================================
 async def contracts_refresh_loop(session):
     while True:
         await asyncio.sleep(CONTRACTS_REFRESH_SEC)
@@ -1339,9 +1291,6 @@ async def observer_loop(session):
         await asyncio.sleep(OBSERVER_INTERVAL_SEC)
 
 
-# =============================================================================
-# HEARTBEAT
-# =============================================================================
 def _heartbeat():
     global _last_heartbeat
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
@@ -1349,18 +1298,21 @@ def _heartbeat():
     _last_heartbeat = time.time()
     log.info(
         "HEARTBEAT | uni=%d ranked=%d active=%s paper=%s obs=%d crs=%d | "
-        "funnel: rng=%d aw=%d ab=%d as=%d vol=%d bd=%d chs=%d early=%d "
-        "mac=%d spr=%d fthin=%d fwhl=%d fr=%d fnear=%d cf=%d df=%d ent=%d | "
+        "funnel5: M[rng=%d aw=%d ab=%d as=%d vol=%d er=%d] "
+        "P[brk=%d chs=%d] Mac=%d "
+        "B[thin=%d whl=%d rat=%d] Spr=%d | "
+        "cf=%d hf=%d df=%d ent=%d | "
         "streak W=%d L=%d live=%s tr=%d",
         len(_universe), len(_top_candidates),
         _active_pos is not None, _paper_pos is not None,
         _obs_diag["observed"], _obs_diag["crashes"],
-        _diag["range_rej"], _diag["accel_weak"], _diag["accel_bounce"],
-        _diag["accel_slow"], _diag["vol_rej"], _diag["breakdown_rej"],
-        _diag["chase_rej"], _diag["early_rej"], _diag["macro_align_rej"],
-        _diag["spread_rej"], _diag["frag_thin"], _diag["frag_whale"],
-        _diag["frag_ratio"], _diag["frag_near"],
-        _diag["candle_fail"], _diag["depth_fail"], _diag["entered"],
+        _diag["mom_rng"], _diag["mom_aw"], _diag["mom_ab"],
+        _diag["mom_as"], _diag["mom_vol"], _diag["mom_early"],
+        _diag["pos_break"], _diag["pos_chase"], _diag["mac_high"],
+        _diag["book_thin"], _diag["book_whale"], _diag["book_ratio"],
+        _diag["spr"],
+        _diag["candle_fail"], _diag["hourly_fail"], _diag["depth_fail"],
+        _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"],
     )
@@ -1370,9 +1322,6 @@ def _heartbeat():
         _obs_diag[k] = 0
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
 async def main():
     _start_keepalive()
 
@@ -1385,9 +1334,10 @@ async def main():
         raise SystemExit(1)
 
     for _name in ("PCT_15M_MIN_DROP", "PCT_15M_MAX_DROP",
-                  "DROP6_MIN_PCT", "VOLUME_EXPANSION_MIN",
-                  "MAX_BID_DEPTH_USD", "FRAGILITY_RATIO_MIN",
-                  "ACCEL_DROP_3M_MIN", "MACRO_ALIGN_MAX_PCT"):
+                  "DROP3_MIN_PCT", "DROP6_MIN_PCT",
+                  "VOLUME_EXPANSION_MIN", "MAX_BID_DEPTH_USD",
+                  "FRAGILITY_RATIO_MIN", "MACRO_1H_MAX_PCT",
+                  "MACRO_4H_MAX_PCT", "MIN_SIDE_DEPTH_USD"):
         if not hasattr(mm, _name):
             log.critical("market_math.py missing %s — stale.", _name)
             raise SystemExit(1)
@@ -1397,18 +1347,18 @@ async def main():
 
     log.info(
         "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "pct15[%.1f,%.1f] | drop6>%.2f%% | drop3>=%.2f%% | vol>=%.1fx | "
-        "bd<%.2f%% | chase<=%.2f%% | "
-        "frag: %.2f<=ratio & $%.0f<=bid<=$%.0f | "
-        "macro:<=%.2f%% above 4h-low | inv=+%.2f%% | obs:>=%.1f%% in 5m",
+        "5-gate | MOM:pct15[%.1f,%.1f] d3>=%.2f%% d6>=%.2f%% vol>=%.1fx | "
+        "POS:brk<=%.2f%% chs<=%.2f%% | "
+        "MAC<=%.1f%%(1h) or <=%.1f%%(4h) | "
+        "BOOK:ratio>=%.2f $%.0f-$%.0f | SPR<=%.2f%% | top=%d",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
         mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP,
-        mm.DROP6_MIN_PCT, mm.ACCEL_DROP_3M_MIN, mm.VOLUME_EXPANSION_MIN,
+        mm.DROP3_MIN_PCT, mm.DROP6_MIN_PCT, mm.VOLUME_EXPANSION_MIN,
         mm.BREAKDOWN_BUFFER_PCT, mm.ANTI_CHASE_MAX_PCT,
+        mm.MACRO_1H_MAX_PCT, mm.MACRO_4H_MAX_PCT,
         mm.FRAGILITY_RATIO_MIN, mm.MIN_SIDE_DEPTH_USD,
-        mm.MAX_BID_DEPTH_USD, mm.MACRO_ALIGN_MAX_PCT,
-        mm.INVALIDATION_BUFFER_PCT, OBSERVER_CRASH_THRESHOLD_PCT,
+        mm.MAX_BID_DEPTH_USD, mm.MAX_SPREAD_PCT, TOP_CANDIDATE_COUNT,
     )
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
