@@ -4,14 +4,14 @@ bot.py
 ======
 Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
 
-Pipeline every PULSE_SEC (4s):
-  - if position open -> manage_*_position (4s watchdog)
-  - else             -> scan_candidates() over the last-ranked top 10
+Layers:
+  MAIN LOOP (4s):      manage open position OR scan top candidates
+  RANKER LOOP (5m):    refresh universe + rank top-10 weakest
+  OBSERVER LOOP (5m):  track 1h/4h highs across 600+ symbols,
+                       flag 10%+ crashes, capture fingerprints
+  CONTRACTS LOOP (15m): refresh contract rules
 
-Background:
-  - refresh_universe every 5 min
-  - rank_candidates every 5 min
-  - refresh_contracts every 15 min
+All observer data fits in <100 KB (well under 512 MB RAM ceiling).
 """
 
 import asyncio
@@ -23,6 +23,7 @@ import logging
 import os
 import threading
 import time
+from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, Optional
 
@@ -38,19 +39,31 @@ PORT = 10000
 PRODUCT_TYPE = "USDT-FUTURES"
 LEVERAGE = 5
 PULSE_SEC = 4.0
+
 UNIVERSE_REFRESH_SEC = 300
 CONTRACTS_REFRESH_SEC = 900
 UNIVERSE_MIN_VOL_USD = 1_000_000.0
 TOP_CANDIDATE_COUNT = 10
 RANKER_BATCH = 15
 RANKER_BATCH_SLEEP = 0.10
+
+OBSERVER_INTERVAL_SEC = 300
+OBSERVER_INITIAL_DELAY_SEC = 150
+OBSERVER_BATCH = 15
+OBSERVER_BATCH_SLEEP = 0.10
+OBSERVER_CRASH_THRESHOLD_PCT = 10.0
+OBSERVER_COOLDOWN_MS = 30 * 60 * 1000        # 30 min
+OBSERVER_ESCALATION_PCT = 3.0                # extra 3% drop = new event
+
 HEARTBEAT_SEC = 60.0
 SYMBOL_COOLDOWN_SEC = 60.0
 STREAK_FILE = "streak.json"
+LEARNINGS_FILE = "learnings.json"
+MAX_CRASH_EVENTS = 30
 PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 16
 
-_EXPECTED_MM_VERSION = "2026.11.10"
+_EXPECTED_MM_VERSION = "2026.11.11"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -192,27 +205,38 @@ async def _get_public_json(session, url, timeout=10.0):
 _contracts: Dict[str, dict] = {}
 _universe = []
 _top_candidates = []
-_last_rank_ts = 0.0
 _cooldown_until: Dict[str, float] = {}
 _active_pos = None
 _paper_pos = None
 _last_heartbeat = 0.0
 _streak = {"wins": 0, "losses": 0, "live_activated": False, "trades": 0}
 
+# Observer state — 5 fields per symbol, ~120 bytes each = ~72 KB for 600 syms
+_ObsState = namedtuple(
+    "_ObsState",
+    ["high_4h", "high_4h_ts", "high_1h", "last_crash_ts", "last_crash_drop"],
+)
+_observer_state: Dict[str, _ObsState] = {}
+_crash_events = []  # rolling buffer, max MAX_CRASH_EVENTS
+
 _diag = {
     "range_rej": 0,
     "accel_weak": 0,
+    "accel_bounce": 0,
     "accel_slow": 0,
     "vol_rej": 0,
     "breakdown_rej": 0,
     "chase_rej": 0,
     "early_rej": 0,
     "spread_rej": 0,
-    "frag_rej": 0,
+    "frag_thin": 0,
+    "frag_whale": 0,
+    "frag_ratio": 0,
     "candle_fail": 0,
     "depth_fail": 0,
     "entered": 0,
 }
+_obs_diag = {"observed": 0, "crashes": 0, "capture_fail": 0}
 
 
 # =============================================================================
@@ -303,6 +327,46 @@ def _record_result(net_pnl, exit_reason):
         "STREAK | W=%d L=%d live=%s trades=%d | net=%.3f%% | %s",
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"], net_pnl, exit_reason,
+    )
+
+
+# =============================================================================
+# LEARNINGS (learnings.json) — atomic write
+# =============================================================================
+def _load_learnings():
+    global _crash_events
+    try:
+        with open(LEARNINGS_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            _crash_events = data[-MAX_CRASH_EVENTS:]
+            log.info("Loaded %d crash fingerprints from %s",
+                     len(_crash_events), LEARNINGS_FILE)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        _crash_events = []
+
+
+def _save_learnings():
+    tmp = LEARNINGS_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(_crash_events, f, indent=2)
+        os.replace(tmp, LEARNINGS_FILE)
+    except OSError as exc:
+        log.error("Failed to save learnings: %s", exc)
+
+
+def record_crash(fp):
+    _crash_events.append(fp)
+    while len(_crash_events) > MAX_CRASH_EVENTS:
+        _crash_events.pop(0)
+    _save_learnings()
+    log.info(
+        "CRASH_FINGERPRINT | %s | drop=%.2f%% in %.0fm | vol=%.2fx | "
+        "ratio=%.2f | d_bid=$%.0f | drop3=%.2f%% | drop6=%.2f%%",
+        fp["symbol"], fp["total_drop_pct"], fp["time_to_10pct_minutes"],
+        fp["ignition_vol_multiple"], fp["pre_crash_ratio"],
+        fp["bid_depth_at_ignition"], fp["drop3m"], fp["drop6m"],
     )
 
 
@@ -568,7 +632,7 @@ async def refresh_universe(session):
 
 
 # =============================================================================
-# CANDLES / DEPTH
+# CANDLES / DEPTH / HOURLY
 # =============================================================================
 def _normalize_candle(row):
     return [row[0], row[1], row[2], row[3], row[4], row[5]]
@@ -587,6 +651,30 @@ async def fetch_candles(session, symbol, limit=CANDLE_COUNT):
         return None
     raw = d.get("data")
     if not isinstance(raw, list) or len(raw) < 2:
+        return None
+    out = []
+    for r in raw:
+        try:
+            out.append(_normalize_candle(r))
+        except (IndexError, TypeError):
+            return None
+    return out
+
+
+async def fetch_hourly_candles(session, symbol):
+    """Fetch last 5 x 1H candles — gives us rolling 4h history in one call."""
+    d = await _request(
+        session, "GET", "/api/v2/mix/market/candles",
+        query={
+            "symbol": symbol, "productType": PRODUCT_TYPE,
+            "granularity": "1H", "limit": "5",
+        },
+        signed=False,
+    )
+    if d.get("code") != "00000":
+        return None
+    raw = d.get("data")
+    if not isinstance(raw, list) or len(raw) < 4:
         return None
     out = []
     for r in raw:
@@ -708,7 +796,6 @@ async def adopt_orphan_positions(session):
             direction = "SHORT"
         else:
             direction = "SHORT" if total_raw > 0 else "LONG"
-
         _active_pos = {
             "symbol": sym, "direction": direction, "entry": entry,
             "breakdown_level": 0.0,
@@ -716,10 +803,8 @@ async def adopt_orphan_positions(session):
             "peak_net": -999.0, "peak_gross": -999.0,
             "paper": False, "adopted": True,
         }
-        log.warning(
-            "ADOPTED orphan | %s %s | entry=%.6f | size=%.8f",
-            sym, direction, entry, abs(total_raw),
-        )
+        log.warning("ADOPTED orphan | %s %s | entry=%.6f | size=%.8f",
+                    sym, direction, entry, abs(total_raw))
         return
 
 
@@ -795,10 +880,10 @@ async def close_live_position(session, pos, reason):
 
 
 # =============================================================================
-# RANKER
+# RANKER (top 10 weakest)
 # =============================================================================
 async def rank_candidates(session):
-    global _top_candidates, _last_rank_ts
+    global _top_candidates
 
     symbols = list(_universe)
     if not symbols:
@@ -831,7 +916,6 @@ async def rank_candidates(session):
 
     scored.sort(key=lambda x: x["pct_15m"])
     _top_candidates = scored[:TOP_CANDIDATE_COUNT]
-    _last_rank_ts = time.time()
 
     if _top_candidates:
         log.info(
@@ -842,20 +926,21 @@ async def rank_candidates(session):
         )
     else:
         log.info(
-            "Ranked: 0 candidates in sweet-spot range [%.1f%%, %.1f%%] "
-            "(%d symbols scanned)", mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP,
-            len(results),
+            "Ranked: 0 in range [%.1f%%, %.1f%%] of %d scanned",
+            mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP, len(results),
         )
 
 
 # =============================================================================
-# SCANNER
+# SCANNER (tactical)
 # =============================================================================
 def _bump_diag(reason):
     if reason == "RANGE":
         _diag["range_rej"] += 1
     elif reason == "ACCEL_WEAK":
         _diag["accel_weak"] += 1
+    elif reason == "ACCEL_BOUNCE":
+        _diag["accel_bounce"] += 1
     elif reason == "ACCEL_SLOW":
         _diag["accel_slow"] += 1
     elif reason == "VOLUME":
@@ -910,11 +995,17 @@ async def scan_candidates(session):
 
         frag = mm.evaluate_book_fragility(bids, asks, mid)
         if not frag["is_fragile"]:
-            _diag["frag_rej"] += 1
+            reason = frag["reason"]
+            if reason == "THIN_BID":
+                _diag["frag_thin"] += 1
+            elif reason == "WHALE_BID":
+                _diag["frag_whale"] += 1
+            else:
+                _diag["frag_ratio"] += 1
             log.info(
-                "REJECT frag | %s | ratio=%.2f d_bid=%.0f d_ask=%.0f | pct15=%.2f%%",
-                symbol, frag["depth_ratio"], frag["d_bid"], frag["d_ask"],
-                pct_15m,
+                "REJECT frag | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f | pct15=%.2f%%",
+                symbol, reason, frag["depth_ratio"],
+                frag["d_bid"], frag["d_ask"], pct_15m,
             )
             continue
 
@@ -1079,6 +1170,135 @@ async def manage_paper_position(session):
 
 
 # =============================================================================
+# OBSERVER — 10%+ crash detection & fingerprint capture
+# =============================================================================
+async def _build_fingerprint(session, symbol, current_price, high_4h,
+                             high_4h_ts):
+    """Fetch 1m candles + depth, assemble fingerprint. Returns dict or None."""
+    candles = await fetch_candles(session, symbol, limit=16)
+    if not candles or len(candles) < 16:
+        return None
+    try:
+        close_9m_ago = float(candles[-10][4])
+        close_3m_ago = float(candles[-4][4])
+        live_vol = float(candles[-1][5])
+        live_ts = int(candles[-1][0])
+        avg_vol = sum(float(c[5]) for c in candles[-16:-1]) / 15.0
+    except (IndexError, TypeError, ValueError):
+        return None
+    if close_9m_ago <= 0 or close_3m_ago <= 0 or avg_vol <= 0:
+        return None
+
+    drop_6m = (close_9m_ago - close_3m_ago) / close_9m_ago * 100.0
+    drop_3m = (close_3m_ago - current_price) / close_3m_ago * 100.0
+
+    now_ms = int(time.time() * 1000)
+    elapsed_s = max(1.0, (now_ms - live_ts) / 1000.0)
+    multiplier = min(60.0 / elapsed_s, 3.0)
+    vol_ratio = (live_vol * multiplier / avg_vol) if avg_vol > 0 else 0.0
+
+    depth = await fetch_depth(session, symbol)
+    if depth is None:
+        return None
+    bids, asks, mid = depth
+    frag = mm.evaluate_book_fragility(bids, asks, mid)
+
+    total_drop_pct = (high_4h - current_price) / high_4h * 100.0
+    time_to_10pct = (now_ms - high_4h_ts) / 60000.0
+    if time_to_10pct < 0:
+        time_to_10pct = 0.0
+
+    return {
+        "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "symbol": symbol,
+        "total_drop_pct": round(total_drop_pct, 3),
+        "time_to_10pct_minutes": round(time_to_10pct, 1),
+        "ignition_vol_multiple": round(vol_ratio, 2),
+        "pre_crash_ratio": round(frag["depth_ratio"], 2),
+        "bid_depth_at_ignition": round(frag["d_bid"], 0),
+        "ask_depth_at_ignition": round(frag["d_ask"], 0),
+        "drop3m": round(drop_3m, 3),
+        "drop6m": round(drop_6m, 3),
+        "current_price": current_price,
+        "high_4h": round(high_4h, 8),
+    }
+
+
+async def _process_observer_symbol(session, symbol, hourly):
+    """Update observer state, detect 10%+ drops, capture fingerprints."""
+    global _observer_state
+
+    metrics = mm.compute_crash_metrics(hourly)
+    current_price = metrics["current_price"]
+    high_4h = metrics["high_4h"]
+    high_1h = metrics["high_1h"]
+
+    if current_price <= 0 or high_4h <= 0:
+        return
+
+    now_ms = int(time.time() * 1000)
+    prev = _observer_state.get(symbol)
+
+    if prev is None:
+        # First observation — initialize from candles
+        state = _ObsState(
+            high_4h=high_4h, high_4h_ts=now_ms, high_1h=high_1h,
+            last_crash_ts=0, last_crash_drop=0.0,
+        )
+    else:
+        state = _ObsState(
+            high_4h=max(prev.high_4h, high_4h),
+            high_4h_ts=(now_ms if high_4h > prev.high_4h else prev.high_4h_ts),
+            high_1h=max(prev.high_1h, high_1h),
+            last_crash_ts=prev.last_crash_ts,
+            last_crash_drop=prev.last_crash_drop,
+        )
+    _observer_state[symbol] = state
+    _obs_diag["observed"] += 1
+
+    drop_pct = mm.drop_pct_from_high(state.high_4h, current_price)
+    if drop_pct < OBSERVER_CRASH_THRESHOLD_PCT:
+        return
+
+    # Cooldown: same symbol not re-logged unless drop escalated >3% further
+    if now_ms - state.last_crash_ts < OBSERVER_COOLDOWN_MS:
+        if drop_pct < state.last_crash_drop + OBSERVER_ESCALATION_PCT:
+            return
+
+    fp = await _build_fingerprint(
+        session, symbol, current_price, state.high_4h, state.high_4h_ts,
+    )
+    if fp is None:
+        _obs_diag["capture_fail"] += 1
+        return
+
+    _observer_state[symbol] = state._replace(
+        last_crash_ts=now_ms, last_crash_drop=drop_pct,
+    )
+    record_crash(fp)
+    _obs_diag["crashes"] += 1
+
+
+async def run_observer_pass(session):
+    symbols = list(_universe)
+    if not symbols:
+        return
+
+    for i in range(0, len(symbols), OBSERVER_BATCH):
+        chunk = symbols[i:i + OBSERVER_BATCH]
+        tasks = [fetch_hourly_candles(session, s) for s in chunk]
+        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for sym, hourly in zip(chunk, chunk_results):
+            if isinstance(hourly, Exception) or not hourly:
+                continue
+            try:
+                await _process_observer_symbol(session, sym, hourly)
+            except Exception as exc:
+                log.debug("observer per-symbol error %s: %s", sym, exc)
+        await asyncio.sleep(OBSERVER_BATCH_SLEEP)
+
+
+# =============================================================================
 # BACKGROUND LOOPS
 # =============================================================================
 async def contracts_refresh_loop(session):
@@ -1092,7 +1312,6 @@ async def contracts_refresh_loop(session):
 
 async def ranker_loop(session):
     while True:
-        await asyncio.sleep(UNIVERSE_REFRESH_SEC)
         try:
             await refresh_universe(session)
         except Exception as exc:
@@ -1101,6 +1320,18 @@ async def ranker_loop(session):
             await rank_candidates(session)
         except Exception as exc:
             log.warning("Rank error: %s", exc)
+        await asyncio.sleep(UNIVERSE_REFRESH_SEC)
+
+
+async def observer_loop(session):
+    # Stagger against ranker so they don't collide on API rate limits
+    await asyncio.sleep(OBSERVER_INITIAL_DELAY_SEC)
+    while True:
+        try:
+            await run_observer_pass(session)
+        except Exception as exc:
+            log.warning("Observer error: %s", exc)
+        await asyncio.sleep(OBSERVER_INTERVAL_SEC)
 
 
 # =============================================================================
@@ -1112,21 +1343,25 @@ def _heartbeat():
         return
     _last_heartbeat = time.time()
     log.info(
-        "HEARTBEAT | universe=%d ranked=%d active=%s paper=%s | "
-        "funnel: rng=%d aw=%d as=%d vol=%d bd=%d chs=%d early=%d "
-        "spr=%d frg=%d cf=%d df=%d ent=%d | "
-        "streak W=%d L=%d live=%s trades=%d",
+        "HEARTBEAT | uni=%d ranked=%d active=%s paper=%s obs=%d crs=%d | "
+        "funnel: rng=%d aw=%d ab=%d as=%d vol=%d bd=%d chs=%d early=%d "
+        "spr=%d fthin=%d fwhl=%d fr=%d cf=%d df=%d ent=%d | "
+        "streak W=%d L=%d live=%s tr=%d",
         len(_universe), len(_top_candidates),
         _active_pos is not None, _paper_pos is not None,
-        _diag["range_rej"], _diag["accel_weak"], _diag["accel_slow"],
-        _diag["vol_rej"], _diag["breakdown_rej"], _diag["chase_rej"],
-        _diag["early_rej"], _diag["spread_rej"], _diag["frag_rej"],
+        _obs_diag["observed"], _obs_diag["crashes"],
+        _diag["range_rej"], _diag["accel_weak"], _diag["accel_bounce"],
+        _diag["accel_slow"], _diag["vol_rej"], _diag["breakdown_rej"],
+        _diag["chase_rej"], _diag["early_rej"], _diag["spread_rej"],
+        _diag["frag_thin"], _diag["frag_whale"], _diag["frag_ratio"],
         _diag["candle_fail"], _diag["depth_fail"], _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"],
     )
     for k in _diag:
         _diag[k] = 0
+    for k in _obs_diag:
+        _obs_diag[k] = 0
 
 
 # =============================================================================
@@ -1144,24 +1379,28 @@ async def main():
         raise SystemExit(1)
 
     for _name in ("PCT_15M_MIN_DROP", "PCT_15M_MAX_DROP",
-                  "VOLUME_EXPANSION_MIN", "BREAKDOWN_BUFFER_PCT",
-                  "ANTI_CHASE_MAX_PCT", "MIN_SIDE_DEPTH_USD",
-                  "FRAGILITY_RATIO_MIN", "MAX_SPREAD_PCT"):
+                  "DROP6_MIN_PCT", "VOLUME_EXPANSION_MIN",
+                  "MAX_BID_DEPTH_USD", "FRAGILITY_RATIO_MIN"):
         if not hasattr(mm, _name):
             log.critical("market_math.py missing %s — stale.", _name)
             raise SystemExit(1)
 
     _load_streak()
+    _load_learnings()
+
     log.info(
         "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "pct15 in [%.1f%%, %.1f%%] | vol>=%.1fx | bd<%.2f%% | "
-        "chase<=%.2f%% | frag>=%.2f | minBid=$%.0f",
+        "pct15[%.1f,%.1f] | drop6>%.2f%% | vol>=%.1fx | bd<%.2f%% | "
+        "chase<=%.2f%% | frag: %.2f<=ratio & $%.0f<=bid<=$%.0f | "
+        "inv=+%.2f%% | obs:>=%.1f%% in 5m",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
         mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP,
-        mm.VOLUME_EXPANSION_MIN, mm.BREAKDOWN_BUFFER_PCT,
-        mm.ANTI_CHASE_MAX_PCT, mm.FRAGILITY_RATIO_MIN,
-        mm.MIN_SIDE_DEPTH_USD,
+        mm.DROP6_MIN_PCT, mm.VOLUME_EXPANSION_MIN,
+        mm.BREAKDOWN_BUFFER_PCT, mm.ANTI_CHASE_MAX_PCT,
+        mm.FRAGILITY_RATIO_MIN, mm.MIN_SIDE_DEPTH_USD,
+        mm.MAX_BID_DEPTH_USD, mm.INVALIDATION_BUFFER_PCT,
+        OBSERVER_CRASH_THRESHOLD_PCT,
     )
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
@@ -1179,6 +1418,7 @@ async def main():
 
         asyncio.create_task(contracts_refresh_loop(session))
         asyncio.create_task(ranker_loop(session))
+        asyncio.create_task(observer_loop(session))
 
         log.info("Main loop started | universe=%d ranked=%d",
                  len(_universe), len(_top_candidates))
