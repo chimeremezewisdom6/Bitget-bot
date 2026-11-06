@@ -2,22 +2,15 @@
 market_math.py
 ==============
 Pure mathematical engine for the Coiled Spring Ignition strategy.
+Zero network I/O. Standard library only.
 
-Zero network I/O. Standard library only. Deterministic and testable.
-
-Candle format (normalized 6-element):
+Candle format:
     [timestamp, open, high, low, close, base_volume]
        [0]     [1]    [2]   [3]    [4]     [5]
-
-TUNING CONSTANTS (rationale in README comments below):
-    BOX_RANGE_MAX_PCT   : 0.70  — tighter than 1.25 so we only see real coils
-    MIN_SIDE_DEPTH_USD  : 100.0 — reject symbols where our $7 order would slip
-    MAX_SPREAD_PCT      : 0.15  — reject wide-spread symbols before entry
-    DEPTH_FRAGILITY_MIN : 1.35  — 1.5 was too strict on real crypto books
 """
 
 FEE_ROUND_TRIP_PCT = 0.22
-BOX_RANGE_MAX_PCT = 0.70
+BOX_RANGE_MAX_PCT = 0.55
 VOLUME_EXPANSION_MIN = 3.0
 DISPLACEMENT_MIN_PCT = 0.10
 ANTI_CHASE_MAX_PCT = 0.60
@@ -40,14 +33,7 @@ def _f(x, default=0.0):
         return default
 
 
-# ---------------------------------------------------------------------------
-# 1. COMPRESSION BOX
-# ---------------------------------------------------------------------------
 def calculate_compression_box(candles):
-    """
-    Returns:
-        box_high, box_low, box_range_pct, base_volume, is_compressed
-    """
     invalid = {
         "box_high": 0.0,
         "box_low": 0.0,
@@ -87,13 +73,7 @@ def calculate_compression_box(candles):
     }
 
 
-# ---------------------------------------------------------------------------
-# 2. IGNITION TRIGGER
-# ---------------------------------------------------------------------------
 def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
-    """
-    Returns: is_ignition, direction, vol_ratio, chase_pct
-    """
     result = {
         "is_ignition": False,
         "direction": None,
@@ -140,14 +120,7 @@ def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
     return result
 
 
-# ---------------------------------------------------------------------------
-# 3. SPREAD SANITY (before fragility)
-# ---------------------------------------------------------------------------
 def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
-    """
-    Rejects wide-spread symbols before fragility analysis.
-    Returns: is_ok, spread_pct, mid
-    """
     result = {"is_ok": False, "spread_pct": 999.0, "mid": 0.0}
     if not bids or not asks:
         return result
@@ -166,17 +139,9 @@ def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
     return result
 
 
-# ---------------------------------------------------------------------------
-# 4. BOOK FRAGILITY
-# ---------------------------------------------------------------------------
 def evaluate_book_fragility(bids, asks, mid_price, direction,
                             band_pct=DEPTH_BAND_PCT,
                             min_side_depth=MIN_SIDE_DEPTH_USD):
-    """
-    Returns: is_fragile, depth_ratio, d_bid, d_ask
-    Also rejects symbols where absolute depth on the consumed side is
-    below min_side_depth (our $7 order would slip badly).
-    """
     result = {"is_fragile": False, "depth_ratio": 0.0, "d_bid": 0.0, "d_ask": 0.0}
     if mid_price <= 0 or not bids or not asks:
         return result
@@ -214,9 +179,6 @@ def evaluate_book_fragility(bids, asks, mid_price, direction,
     return result
 
 
-# ---------------------------------------------------------------------------
-# 5. ORDER SIZING
-# ---------------------------------------------------------------------------
 def calculate_order_qty(balance, price, leverage, volume_place, min_order_volume,
                         min_notional=5.0):
     if balance <= 0 or price <= 0 or leverage <= 0:
@@ -235,9 +197,6 @@ def calculate_order_qty(balance, price, leverage, volume_place, min_order_volume
     return f"{qty:.{vp}f}"
 
 
-# ---------------------------------------------------------------------------
-# 6. RATCHET / EXIT ENGINE
-# ---------------------------------------------------------------------------
 def evaluate_ratchet(entry_price, current_price, direction, peak_net,
                      elapsed_seconds, box_high, box_low):
     result = {
