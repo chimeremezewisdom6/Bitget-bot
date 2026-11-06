@@ -4,10 +4,11 @@ bot.py
 ======
 Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
 
-v2026.11.13:
-  - Macro alignment gate (reject JCT-style relief-bounce shorts)
-  - Observer elapsed-time fix (uses actual high timestamp)
-  - ACCEL_DROP_3M_MIN raised to 1.50% via market_math
+v2026.11.14:
+  - FIX: universe flip-flop — don't shrink when 2+ exchanges miss a refresh
+  - IMPROVE: near-miss fragility counter (fnear) for tuning FRAGILITY_RATIO_MIN
+  - IMPROVE: [STALE] tag on fingerprints older than 90m
+  (Carried from 11.13: macro alignment gate + real elapsed-minutes for observer)
 """
 
 import asyncio
@@ -50,6 +51,7 @@ OBSERVER_BATCH_SLEEP = 0.10
 OBSERVER_CRASH_THRESHOLD_PCT = 10.0
 OBSERVER_COOLDOWN_MS = 30 * 60 * 1000
 OBSERVER_ESCALATION_PCT = 3.0
+OBSERVER_STALE_MINUTES = 90.0
 
 HEARTBEAT_SEC = 60.0
 SYMBOL_COOLDOWN_SEC = 60.0
@@ -59,7 +61,7 @@ MAX_CRASH_EVENTS = 30
 PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 16
 
-_EXPECTED_MM_VERSION = "2026.11.13"
+_EXPECTED_MM_VERSION = "2026.11.14"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -192,9 +194,13 @@ async def _get_public_json(session, url, timeout=10.0):
         return None
 
 
+# =============================================================================
+# STATE
+# =============================================================================
 _contracts: Dict[str, dict] = {}
 _universe = []
 _top_candidates = []
+_last_universe_exchange_count = 0
 _cooldown_until: Dict[str, float] = {}
 _active_pos = None
 _paper_pos = None
@@ -212,12 +218,16 @@ _diag = {
     "range_rej": 0, "accel_weak": 0, "accel_bounce": 0, "accel_slow": 0,
     "vol_rej": 0, "breakdown_rej": 0, "chase_rej": 0, "early_rej": 0,
     "macro_align_rej": 0,
-    "spread_rej": 0, "frag_thin": 0, "frag_whale": 0, "frag_ratio": 0,
+    "spread_rej": 0, "frag_thin": 0, "frag_whale": 0,
+    "frag_ratio": 0, "frag_near": 0,
     "candle_fail": 0, "depth_fail": 0, "entered": 0,
 }
 _obs_diag = {"observed": 0, "crashes": 0, "capture_fail": 0}
 
 
+# =============================================================================
+# HELPERS
+# =============================================================================
 def _extract_positions(d):
     payload = d.get("data")
     if isinstance(payload, dict):
@@ -247,6 +257,9 @@ def _env_bool_or_none(name: str) -> Optional[bool]:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+# =============================================================================
+# STREAK PERSISTENCE
+# =============================================================================
 def _load_streak():
     try:
         with open(STREAK_FILE, "r") as f:
@@ -303,6 +316,9 @@ def _record_result(net_pnl, exit_reason):
     )
 
 
+# =============================================================================
+# LEARNINGS
+# =============================================================================
 def _load_learnings():
     global _crash_events
     try:
@@ -331,17 +347,21 @@ def record_crash(fp):
     while len(_crash_events) > MAX_CRASH_EVENTS:
         _crash_events.pop(0)
     _save_learnings()
+    tag = " [STALE]" if fp["time_to_10pct_minutes"] >= OBSERVER_STALE_MINUTES else ""
     log.info(
         "CRASH_FINGERPRINT | %s | drop=%.2f%% in %.0fm | vol=%.2fx | "
         "ratio=%.2f | d_bid=$%.0f | drop3=%.2f%% | drop6=%.2f%% | "
-        "vel=%s | book=%s",
+        "vel=%s | book=%s%s",
         fp["symbol"], fp["total_drop_pct"], fp["time_to_10pct_minutes"],
         fp["ignition_vol_multiple"], fp["ratio_real"],
         fp["bid_depth_at_ignition"], fp["drop3m"], fp["drop6m"],
-        fp["velocity_class"], fp["book_state"],
+        fp["velocity_class"], fp["book_state"], tag,
     )
 
 
+# =============================================================================
+# UTA V3 POSITION MODE
+# =============================================================================
 async def enforce_one_way(session):
     settings = await _request(session, "GET", "/api/v3/account/settings")
     if settings.get("code") == "00000":
@@ -373,6 +393,9 @@ async def enforce_one_way(session):
                     res.get("code"), msg)
 
 
+# =============================================================================
+# CONTRACT RULES
+# =============================================================================
 async def refresh_contracts(session):
     d = await _request(
         session, "GET", "/api/v2/mix/market/contracts",
@@ -403,6 +426,9 @@ async def refresh_contracts(session):
              len(_contracts), stock_n)
 
 
+# =============================================================================
+# UNIVERSE (8-exchange aggregation with flip-flop guard)
+# =============================================================================
 def _norm(sym):
     s = (sym or "").upper().replace("-", "").replace("_", "").replace("/", "")
     if s.startswith("XBT"):
@@ -554,6 +580,8 @@ async def _vol_htx(session):
 
 
 async def refresh_universe(session):
+    global _last_universe_exchange_count
+
     results = await asyncio.gather(
         _vol_bitget(session), _vol_binance(session), _vol_bybit(session),
         _vol_okx(session), _vol_gate(session), _vol_kucoin(session),
@@ -567,6 +595,16 @@ async def refresh_universe(session):
             ok += 1
             for sym, vol in r.items():
                 agg[sym] = agg.get(sym, 0.0) + vol
+
+    # FIX: don't shrink universe when 2+ exchanges miss a refresh
+    if (_last_universe_exchange_count > 0
+            and ok < _last_universe_exchange_count - 1):
+        log.warning(
+            "Universe refresh SKIPPED: %d/8 exchanges (previous %d) — "
+            "keeping %d-symbol universe",
+            ok, _last_universe_exchange_count, len(_universe),
+        )
+        return
 
     filtered = []
     excluded_stock = 0
@@ -586,6 +624,8 @@ async def refresh_universe(session):
     filtered.sort(key=lambda s: agg[s], reverse=True)
     _universe.clear()
     _universe.extend(filtered)
+    _last_universe_exchange_count = ok
+
     log.info(
         "Universe: %d symbols (>= $%.1fM, %d/8 exchanges) | "
         "excluded: %d stock, %d low-vol",
@@ -594,6 +634,9 @@ async def refresh_universe(session):
     )
 
 
+# =============================================================================
+# CANDLES / DEPTH
+# =============================================================================
 def _normalize_candle(row):
     return [row[0], row[1], row[2], row[3], row[4], row[5]]
 
@@ -668,6 +711,9 @@ async def fetch_depth(session, symbol):
     return bids, asks, mid
 
 
+# =============================================================================
+# ACCOUNT / POSITION
+# =============================================================================
 async def get_usdt_balance(session):
     d = await _request(session, "GET", "/api/v3/account/assets")
     if d.get("code") == "00000":
@@ -764,6 +810,9 @@ async def adopt_orphan_positions(session):
         return
 
 
+# =============================================================================
+# ORDER PLACEMENT
+# =============================================================================
 async def place_short_order(session, symbol, qty_str):
     body = {
         "category": PRODUCT_TYPE, "symbol": symbol,
@@ -824,6 +873,9 @@ async def close_live_position(session, pos, reason):
     return False
 
 
+# =============================================================================
+# RANKER
+# =============================================================================
 async def rank_candidates(session):
     global _top_candidates
 
@@ -871,6 +923,9 @@ async def rank_candidates(session):
                  mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP, len(results))
 
 
+# =============================================================================
+# SCANNER
+# =============================================================================
 def _bump_diag(reason):
     if reason == "RANGE":
         _diag["range_rej"] += 1
@@ -920,7 +975,7 @@ async def scan_candidates(session):
             _bump_diag(result["reason"])
             continue
 
-        # NEW: macro alignment check via hourly candles
+        # Macro alignment via hourly candles
         hourly = await fetch_hourly_candles(session, symbol)
         align = mm.evaluate_macro_alignment(hourly, result["live_close"])
         if not align["is_aligned"]:
@@ -947,16 +1002,19 @@ async def scan_candidates(session):
         frag = mm.evaluate_book_fragility(bids, asks, mid)
         if not frag["is_fragile"]:
             reason = frag["reason"]
+            ratio = frag["depth_ratio"]
             if reason == "THIN_BID":
                 _diag["frag_thin"] += 1
             elif reason == "WHALE_BID":
                 _diag["frag_whale"] += 1
+            elif ratio >= 1.60:
+                _diag["frag_near"] += 1
             else:
                 _diag["frag_ratio"] += 1
             log.info(
-                "REJECT frag | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f | pct15=%.2f%%",
-                symbol, reason, frag["depth_ratio"],
-                frag["d_bid"], frag["d_ask"], pct_15m,
+                "REJECT frag | %s | %s ratio=%.2f d_bid=%.0f d_ask=%.0f | pct15=%.2f%%%s",
+                symbol, reason, ratio, frag["d_bid"], frag["d_ask"], pct_15m,
+                " [NEAR]" if (reason == "LOW_RATIO" and ratio >= 1.60) else "",
             )
             continue
 
@@ -1028,6 +1086,9 @@ async def enter_short(session, symbol, entry_price, breakdown_level, pct_15m):
     return True
 
 
+# =============================================================================
+# WATCHDOG
+# =============================================================================
 async def _latest_close(session, symbol):
     d = await _request(
         session, "GET", "/api/v2/mix/market/ticker",
@@ -1118,6 +1179,9 @@ async def manage_paper_position(session):
     _paper_pos = None
 
 
+# =============================================================================
+# OBSERVER
+# =============================================================================
 async def _build_fingerprint(session, symbol, current_price, high_4h,
                              high_4h_ts_ms):
     candles = await fetch_candles(session, symbol, limit=16)
@@ -1149,9 +1213,6 @@ async def _build_fingerprint(session, symbol, current_price, high_4h,
     frag = mm.evaluate_book_fragility(bids, asks, mid)
 
     total_drop_pct = (high_4h - current_price) / high_4h * 100.0
-
-    # FIX: real elapsed minutes since the actual 4h-high candle,
-    # floor at 1.0 minute so we never log "in 0m"
     time_to_10pct = max(1.0, (now_ms - high_4h_ts_ms) / 60000.0)
 
     return {
@@ -1194,7 +1255,6 @@ async def _process_observer_symbol(session, symbol, hourly):
             last_crash_ts=0, last_crash_drop=0.0,
         )
     else:
-        # FIX: always use fresh candle-derived high + its real timestamp
         state = prev._replace(
             high_4h=high_4h,
             high_4h_ts=high_4h_ts_ms,
@@ -1244,6 +1304,9 @@ async def run_observer_pass(session):
         await asyncio.sleep(OBSERVER_BATCH_SLEEP)
 
 
+# =============================================================================
+# BACKGROUND LOOPS
+# =============================================================================
 async def contracts_refresh_loop(session):
     while True:
         await asyncio.sleep(CONTRACTS_REFRESH_SEC)
@@ -1276,6 +1339,9 @@ async def observer_loop(session):
         await asyncio.sleep(OBSERVER_INTERVAL_SEC)
 
 
+# =============================================================================
+# HEARTBEAT
+# =============================================================================
 def _heartbeat():
     global _last_heartbeat
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
@@ -1284,7 +1350,7 @@ def _heartbeat():
     log.info(
         "HEARTBEAT | uni=%d ranked=%d active=%s paper=%s obs=%d crs=%d | "
         "funnel: rng=%d aw=%d ab=%d as=%d vol=%d bd=%d chs=%d early=%d "
-        "mac=%d spr=%d fthin=%d fwhl=%d fr=%d cf=%d df=%d ent=%d | "
+        "mac=%d spr=%d fthin=%d fwhl=%d fr=%d fnear=%d cf=%d df=%d ent=%d | "
         "streak W=%d L=%d live=%s tr=%d",
         len(_universe), len(_top_candidates),
         _active_pos is not None, _paper_pos is not None,
@@ -1293,7 +1359,7 @@ def _heartbeat():
         _diag["accel_slow"], _diag["vol_rej"], _diag["breakdown_rej"],
         _diag["chase_rej"], _diag["early_rej"], _diag["macro_align_rej"],
         _diag["spread_rej"], _diag["frag_thin"], _diag["frag_whale"],
-        _diag["frag_ratio"],
+        _diag["frag_ratio"], _diag["frag_near"],
         _diag["candle_fail"], _diag["depth_fail"], _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"],
@@ -1304,6 +1370,9 @@ def _heartbeat():
         _obs_diag[k] = 0
 
 
+# =============================================================================
+# MAIN
+# =============================================================================
 async def main():
     _start_keepalive()
 
