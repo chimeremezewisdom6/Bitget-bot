@@ -4,20 +4,27 @@ market_math.py
 Pure mathematical engine for the Coiled Spring Ignition strategy.
 
 Zero network I/O. Standard library only. Deterministic and testable.
-Sub-millisecond per call on any input in the 30-candle / 20-level regime.
 
 Candle format (normalized 6-element):
     [timestamp, open, high, low, close, base_volume]
        [0]     [1]    [2]   [3]    [4]     [5]
+
+TUNING CONSTANTS (rationale in README comments below):
+    BOX_RANGE_MAX_PCT   : 0.70  — tighter than 1.25 so we only see real coils
+    MIN_SIDE_DEPTH_USD  : 100.0 — reject symbols where our $7 order would slip
+    MAX_SPREAD_PCT      : 0.15  — reject wide-spread symbols before entry
+    DEPTH_FRAGILITY_MIN : 1.35  — 1.5 was too strict on real crypto books
 """
 
 FEE_ROUND_TRIP_PCT = 0.22
-BOX_RANGE_MAX_PCT = 1.25
+BOX_RANGE_MAX_PCT = 0.70
 VOLUME_EXPANSION_MIN = 3.0
-DISPLACEMENT_MIN_PCT = 0.10          # 0.10% beyond the box boundary
-ANTI_CHASE_MAX_PCT = 0.60            # 0.60% max distance from boundary
-DEPTH_FRAGILITY_MIN = 1.50
-DEPTH_BAND_PCT = 0.01                # 1.0% band around mid
+DISPLACEMENT_MIN_PCT = 0.10
+ANTI_CHASE_MAX_PCT = 0.60
+DEPTH_FRAGILITY_MIN = 1.35
+DEPTH_BAND_PCT = 0.01
+MIN_SIDE_DEPTH_USD = 100.0
+MAX_SPREAD_PCT = 0.15
 FAKEOUT_WINDOW_SEC = 40.0
 BREAKEVEN_TRIGGER_PCT = 0.50
 RATCHET_TRIGGER_PCT = 1.20
@@ -38,14 +45,8 @@ def _f(x, default=0.0):
 # ---------------------------------------------------------------------------
 def calculate_compression_box(candles):
     """
-    candles: list of 30 closed 1-minute candles [ts, o, h, l, c, v]
-
     Returns:
-        box_high        : float
-        box_low         : float
-        box_range_pct   : float
-        base_volume     : float
-        is_compressed   : bool
+        box_high, box_low, box_range_pct, base_volume, is_compressed
     """
     invalid = {
         "box_high": 0.0,
@@ -57,9 +58,7 @@ def calculate_compression_box(candles):
     if not candles or len(candles) < 2:
         return invalid
 
-    highs = []
-    lows = []
-    vols = []
+    highs, lows, vols = [], [], []
     for c in candles:
         try:
             highs.append(float(c[2]))
@@ -93,13 +92,7 @@ def calculate_compression_box(candles):
 # ---------------------------------------------------------------------------
 def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
     """
-    live_candle: [ts, o, h, l, c, v]
-
-    Returns:
-        is_ignition : bool
-        direction   : "LONG" | "SHORT" | None
-        vol_ratio   : float
-        chase_pct   : float
+    Returns: is_ignition, direction, vol_ratio, chase_pct
     """
     result = {
         "is_ignition": False,
@@ -126,7 +119,6 @@ def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
     if vol_ratio < VOLUME_EXPANSION_MIN:
         return result
 
-    # LONG: displacement above box_high by >= 0.10%
     long_disp = box_high * (1.0 + DISPLACEMENT_MIN_PCT / 100.0)
     if live_high > long_disp:
         chase = (live_close - box_high) / box_high * 100.0
@@ -136,7 +128,6 @@ def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
             result["direction"] = "LONG"
         return result
 
-    # SHORT: displacement below box_low by >= 0.10%
     short_disp = box_low * (1.0 - DISPLACEMENT_MIN_PCT / 100.0)
     if live_low < short_disp:
         chase = (box_low - live_close) / box_low * 100.0
@@ -150,19 +141,41 @@ def evaluate_ignition_trigger(live_candle, box_high, box_low, base_volume):
 
 
 # ---------------------------------------------------------------------------
-# 3. BOOK FRAGILITY
+# 3. SPREAD SANITY (before fragility)
 # ---------------------------------------------------------------------------
-def evaluate_book_fragility(bids, asks, mid_price, direction, band_pct=DEPTH_BAND_PCT):
+def evaluate_spread(bids, asks, max_spread_pct=MAX_SPREAD_PCT):
     """
-    bids, asks: list of [price, qty] (strings or floats)
-    mid_price : float
-    direction : "LONG" | "SHORT"
+    Rejects wide-spread symbols before fragility analysis.
+    Returns: is_ok, spread_pct, mid
+    """
+    result = {"is_ok": False, "spread_pct": 999.0, "mid": 0.0}
+    if not bids or not asks:
+        return result
+    try:
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
+    except (IndexError, TypeError, ValueError):
+        return result
+    if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
+        return result
+    mid = (best_bid + best_ask) / 2.0
+    spread_pct = (best_ask - best_bid) / mid * 100.0
+    result["spread_pct"] = spread_pct
+    result["mid"] = mid
+    result["is_ok"] = spread_pct <= max_spread_pct
+    return result
 
-    Returns:
-        is_fragile  : bool
-        depth_ratio : float  (relevant ratio for the direction)
-        d_bid       : float  (USD depth within band on the bid side)
-        d_ask       : float  (USD depth within band on the ask side)
+
+# ---------------------------------------------------------------------------
+# 4. BOOK FRAGILITY
+# ---------------------------------------------------------------------------
+def evaluate_book_fragility(bids, asks, mid_price, direction,
+                            band_pct=DEPTH_BAND_PCT,
+                            min_side_depth=MIN_SIDE_DEPTH_USD):
+    """
+    Returns: is_fragile, depth_ratio, d_bid, d_ask
+    Also rejects symbols where absolute depth on the consumed side is
+    below min_side_depth (our $7 order would slip badly).
     """
     result = {"is_fragile": False, "depth_ratio": 0.0, "d_bid": 0.0, "d_ask": 0.0}
     if mid_price <= 0 or not bids or not asks:
@@ -186,21 +199,15 @@ def evaluate_book_fragility(bids, asks, mid_price, direction, band_pct=DEPTH_BAN
     result["d_ask"] = d_ask
 
     if direction == "LONG":
-        if d_ask > 0:
-            ratio = d_bid / d_ask
-        elif d_bid > 0:
-            ratio = 999.0
-        else:
-            ratio = 0.0
+        if d_ask < min_side_depth:
+            return result
+        ratio = (d_bid / d_ask) if d_ask > 0 else 999.0
         result["depth_ratio"] = ratio
         result["is_fragile"] = ratio >= DEPTH_FRAGILITY_MIN
     elif direction == "SHORT":
-        if d_bid > 0:
-            ratio = d_ask / d_bid
-        elif d_ask > 0:
-            ratio = 999.0
-        else:
-            ratio = 0.0
+        if d_bid < min_side_depth:
+            return result
+        ratio = (d_ask / d_bid) if d_bid > 0 else 999.0
         result["depth_ratio"] = ratio
         result["is_fragile"] = ratio >= DEPTH_FRAGILITY_MIN
 
@@ -208,61 +215,31 @@ def evaluate_book_fragility(bids, asks, mid_price, direction, band_pct=DEPTH_BAN
 
 
 # ---------------------------------------------------------------------------
-# 4. ORDER SIZING
+# 5. ORDER SIZING
 # ---------------------------------------------------------------------------
 def calculate_order_qty(balance, price, leverage, volume_place, min_order_volume,
                         min_notional=5.0):
-    """
-    Computes the market-order quantity string that:
-        - uses 90% of available margin at the given leverage,
-        - respects the exchange $5.00 minimum notional,
-        - matches the contract's volumePlace precision,
-        - respects the contract's minOrderVolume.
-
-    Returns:
-        qty_str : str  (formatted to volumePlace decimals) or None
-    """
     if balance <= 0 or price <= 0 or leverage <= 0:
         return None
-
     notional = balance * 0.90 * leverage
     if notional < min_notional:
         return None
-
     vp = int(volume_place)
-    raw_qty = notional / price
-    qty = round(raw_qty, vp)
-
+    qty = round(notional / price, vp)
     if qty <= 0:
         return None
     if min_order_volume > 0 and qty < min_order_volume:
         return None
-
-    final_notional = qty * price
-    if final_notional < min_notional:
+    if qty * price < min_notional:
         return None
-
     return f"{qty:.{vp}f}"
 
 
 # ---------------------------------------------------------------------------
-# 5. RATCHET / EXIT ENGINE
+# 6. RATCHET / EXIT ENGINE
 # ---------------------------------------------------------------------------
 def evaluate_ratchet(entry_price, current_price, direction, peak_net,
                      elapsed_seconds, box_high, box_low):
-    """
-    The 4-rule asymmetric risk ladder.
-
-    Priority: FAKEOUT > RATCHET > BREAKEVEN > STAGNATION.
-
-    Returns:
-        should_exit      : bool
-        exit_reason      : str  (HOLD | FAKEOUT_SCRATCH | BREAKEVEN_SHIELD
-                                 | RATCHET_BANK | STAGNATION_CUT)
-        net_pnl          : float
-        gross_pnl        : float
-        updated_peak_net : float
-    """
     result = {
         "should_exit": False,
         "exit_reason": "HOLD",
@@ -285,7 +262,6 @@ def evaluate_ratchet(entry_price, current_price, direction, peak_net,
     result["net_pnl"] = net
     result["updated_peak_net"] = peak
 
-    # Rule 1 — Fakeout shield (first 40 s only)
     if elapsed_seconds <= FAKEOUT_WINDOW_SEC:
         if direction == "LONG" and current_price <= box_high:
             result["should_exit"] = True
@@ -296,7 +272,6 @@ def evaluate_ratchet(entry_price, current_price, direction, peak_net,
             result["exit_reason"] = "FAKEOUT_SCRATCH"
             return result
 
-    # Rule 3 — 40% dynamic ratchet (checked before breakeven so higher peak wins)
     if peak >= RATCHET_TRIGGER_PCT:
         floor = peak * RATCHET_KEEP_RATIO
         if net <= floor:
@@ -304,13 +279,11 @@ def evaluate_ratchet(entry_price, current_price, direction, peak_net,
             result["exit_reason"] = "RATCHET_BANK"
             return result
 
-    # Rule 2 — Breakeven shield
     if peak >= BREAKEVEN_TRIGGER_PCT and net <= 0.0:
         result["should_exit"] = True
         result["exit_reason"] = "BREAKEVEN_SHIELD"
         return result
 
-    # Rule 4 — Stagnation cut
     if (elapsed_seconds >= STAGNATION_WINDOW_SEC
             and peak < STAGNATION_PEAK_FLOOR
             and net < 0.0):
