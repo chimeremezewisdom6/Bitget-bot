@@ -4,18 +4,14 @@ bot.py
 ======
 Accelerated Weakness Runner | Bitget UTA V3 | Render Free Tier.
 
-Pivot from Coiled Spring compression to Cross-Sectional Relative Weakness.
-
 Pipeline every PULSE_SEC (4s):
-  - if position open   -> manage_*_position (4s watchdog)
-  - else                -> scan_candidates() over the last-ranked top 10
+  - if position open -> manage_*_position (4s watchdog)
+  - else             -> scan_candidates() over the last-ranked top 10
 
-Background tasks:
-  - refresh_universe every 5 min  (aggregate 8-exchange 24h volume)
-  - rank_candidates every 5 min   (16 x 1m candles per universe symbol,
-                                   compute pct_15m, keep 10 most negative
-                                   within the [-5.5%, -1.8%] sweet-spot)
-  - refresh_contracts every 15 min (contract rules: volumePlace, minQty)
+Background:
+  - refresh_universe every 5 min
+  - rank_candidates every 5 min
+  - refresh_contracts every 15 min
 """
 
 import asyncio
@@ -54,7 +50,7 @@ STREAK_FILE = "streak.json"
 PAPER_WINS_REQUIRED = 8
 CANDLE_COUNT = 16
 
-_EXPECTED_MM_VERSION = "2026.11.09"
+_EXPECTED_MM_VERSION = "2026.11.10"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -195,7 +191,7 @@ async def _get_public_json(session, url, timeout=10.0):
 # =============================================================================
 _contracts: Dict[str, dict] = {}
 _universe = []
-_hot_list = _top_candidates = []  # alias for clarity: _top_candidates is used
+_top_candidates = []
 _last_rank_ts = 0.0
 _cooldown_until: Dict[str, float] = {}
 _active_pos = None
@@ -205,13 +201,16 @@ _streak = {"wins": 0, "losses": 0, "live_activated": False, "trades": 0}
 
 _diag = {
     "range_rej": 0,
-    "accel_rej": 0,
+    "accel_weak": 0,
+    "accel_slow": 0,
     "vol_rej": 0,
     "breakdown_rej": 0,
     "chase_rej": 0,
     "early_rej": 0,
     "spread_rej": 0,
     "frag_rej": 0,
+    "candle_fail": 0,
+    "depth_fail": 0,
     "entered": 0,
 }
 
@@ -712,7 +711,7 @@ async def adopt_orphan_positions(session):
 
         _active_pos = {
             "symbol": sym, "direction": direction, "entry": entry,
-            "breakdown_level": 0.0,  # skip invalidation for adopted
+            "breakdown_level": 0.0,
             "opened_at": time.time(),
             "peak_net": -999.0, "peak_gross": -999.0,
             "paper": False, "adopted": True,
@@ -799,10 +798,6 @@ async def close_live_position(session, pos, reason):
 # RANKER
 # =============================================================================
 async def rank_candidates(session):
-    """
-    Fetch 16×1m candles per universe symbol, compute 15m change,
-    keep TOP_CANDIDATE_COUNT most-negative within [-5.5%, -1.8%].
-    """
     global _top_candidates, _last_rank_ts
 
     symbols = list(_universe)
@@ -859,8 +854,10 @@ async def rank_candidates(session):
 def _bump_diag(reason):
     if reason == "RANGE":
         _diag["range_rej"] += 1
-    elif reason == "ACCEL":
-        _diag["accel_rej"] += 1
+    elif reason == "ACCEL_WEAK":
+        _diag["accel_weak"] += 1
+    elif reason == "ACCEL_SLOW":
+        _diag["accel_slow"] += 1
     elif reason == "VOLUME":
         _diag["vol_rej"] += 1
     elif reason == "BREAKDOWN":
@@ -882,6 +879,7 @@ async def scan_candidates(session):
 
         candles = await fetch_candles(session, symbol, limit=16)
         if not candles or len(candles) < 16:
+            _diag["candle_fail"] += 1
             continue
         candles = candles[-16:]
 
@@ -901,6 +899,7 @@ async def scan_candidates(session):
 
         depth = await fetch_depth(session, symbol)
         if depth is None:
+            _diag["depth_fail"] += 1
             continue
         bids, asks, mid = depth
 
@@ -913,8 +912,7 @@ async def scan_candidates(session):
         if not frag["is_fragile"]:
             _diag["frag_rej"] += 1
             log.info(
-                "REJECT frag | %s | ratio=%.2f d_bid=%.0f d_ask=%.0f | "
-                "pct15=%.2f%%",
+                "REJECT frag | %s | ratio=%.2f d_bid=%.0f d_ask=%.0f | pct15=%.2f%%",
                 symbol, frag["depth_ratio"], frag["d_bid"], frag["d_ask"],
                 pct_15m,
             )
@@ -1115,13 +1113,15 @@ def _heartbeat():
     _last_heartbeat = time.time()
     log.info(
         "HEARTBEAT | universe=%d ranked=%d active=%s paper=%s | "
-        "funnel: range=%d accel=%d vol=%d bd=%d chase=%d early=%d "
-        "spr=%d frag=%d enter=%d | streak W=%d L=%d live=%s trades=%d",
+        "funnel: rng=%d aw=%d as=%d vol=%d bd=%d chs=%d early=%d "
+        "spr=%d frg=%d cf=%d df=%d ent=%d | "
+        "streak W=%d L=%d live=%s trades=%d",
         len(_universe), len(_top_candidates),
         _active_pos is not None, _paper_pos is not None,
-        _diag["range_rej"], _diag["accel_rej"], _diag["vol_rej"],
-        _diag["breakdown_rej"], _diag["chase_rej"], _diag["early_rej"],
-        _diag["spread_rej"], _diag["frag_rej"], _diag["entered"],
+        _diag["range_rej"], _diag["accel_weak"], _diag["accel_slow"],
+        _diag["vol_rej"], _diag["breakdown_rej"], _diag["chase_rej"],
+        _diag["early_rej"], _diag["spread_rej"], _diag["frag_rej"],
+        _diag["candle_fail"], _diag["depth_fail"], _diag["entered"],
         _streak["wins"], _streak["losses"], _streak["live_activated"],
         _streak["trades"],
     )
@@ -1154,11 +1154,11 @@ async def main():
     _load_streak()
     log.info(
         "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "pct15<=%.1f%% | accel>%.2fx | vol>=%.1fx | "
-        "break<%.2f%% | chase<=%.2f%% | frag>=%.2f | minBid=$%.0f",
+        "pct15 in [%.1f%%, %.1f%%] | vol>=%.1fx | bd<%.2f%% | "
+        "chase<=%.2f%% | frag>=%.2f | minBid=$%.0f",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
-        mm.PCT_15M_MAX_DROP, mm.ACCELERATION_MIN_RATIO,
+        mm.PCT_15M_MIN_DROP, mm.PCT_15M_MAX_DROP,
         mm.VOLUME_EXPANSION_MIN, mm.BREAKDOWN_BUFFER_PCT,
         mm.ANTI_CHASE_MAX_PCT, mm.FRAGILITY_RATIO_MIN,
         mm.MIN_SIDE_DEPTH_USD,
