@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-bot.py — Clean-Move Momentum Engine | Bitget UTA V3 | Render Free Tier.
+bot.py — Multi-strategy engine | Bitget UTA V3 | Render Free Tier.
 
-v2026.11.21
-  No velocity math. Pure price movement.
-  Qualify: 8%+ move in <30 min with no >2% interim reversal.
-  Learn: measure reversal speed, compute asymmetry.
-  Trade: only on coins with prior 4:1+ asymmetry event.
-  Exit: 2% retrace from low, -3% hard stop, 30 min cap.
+v2026.11.22 — Four trade types (MOMENTUM, RANGE, ROTATION, VOLUME).
+One position at a time. Each type independently needs 8 wins in a row
+for live unlock. All trades paper mode until then.
 """
 
 import asyncio
@@ -31,23 +28,27 @@ PORT = 10000
 PRODUCT_TYPE = "USDT-FUTURES"
 LEVERAGE = 5
 PULSE_SEC = 4.0
-PRICE_SWEEP_SEC = 4.0
 
 UNIVERSE_REFRESH_SEC = 300
 CONTRACTS_REFRESH_SEC = 900
 UNIVERSE_MIN_VOL_USD = 1_000_000.0
 
-LEARNING_PHASE_SEC = 7200.0
-REPORT_INTERVAL_SEC = 900.0
+# Warmup per type
+MOMENTUM_WARMUP_SEC = 1800
+RANGE_WARMUP_SEC = 3600
+ROTATION_WARMUP_SEC = 900
+VOLUME_WARMUP_SEC = 60
+
+# 30-min boundary
+BOUNDARY_INTERVAL_SEC = 1800
+
 HEARTBEAT_SEC = 60.0
 SYMBOL_COOLDOWN_SEC = 300.0
-MAX_EVENTS_PER_HOUR = 3
-STUCK_TRACKING_SEC = 3600.0
-
 PAPER_WINS_REQUIRED = 8
+
 STREAK_FILE = "streak.json"
 
-_EXPECTED_MM_VERSION = "2026.11.21"
+_EXPECTED_MM_VERSION = "2026.11.22"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -68,7 +69,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-5s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
-log = logging.getLogger("momentum")
+log = logging.getLogger("multi")
 
 
 def _env(*names: str) -> str:
@@ -84,9 +85,6 @@ SECRET_KEY = _env("BITGET_API_SECRET", "SECRET_KEY")
 PASSPHRASE = _env("BITGET_API_PASSPHRASE", "PASSPHRASE")
 
 
-# =============================================================================
-# KEEP-ALIVE
-# =============================================================================
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/health"):
@@ -109,15 +107,10 @@ def _start_keepalive() -> None:
     log.info("Keep-alive listening on :%d", PORT)
 
 
-# =============================================================================
-# BITGET API
-# =============================================================================
 def _sign(timestamp, method, request_path, body):
     msg = timestamp + method.upper() + request_path + body
     digest = hmac.new(
-        SECRET_KEY.encode("utf-8"),
-        msg.encode("utf-8"),
-        hashlib.sha256,
+        SECRET_KEY.encode("utf-8"), msg.encode("utf-8"), hashlib.sha256
     ).digest()
     return base64.b64encode(digest).decode("utf-8")
 
@@ -160,7 +153,7 @@ async def _request(session, method, path, *, query=None, body=None,
                     await asyncio.sleep((2 ** attempt) + 1)
                     continue
                 return data
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        except (aiohttp.ClientError, asyncio.TimeoutError):
             await asyncio.sleep((2 ** attempt) + 1)
     return {"code": "RETRY_EXHAUSTED", "msg": "max retries"}
 
@@ -168,7 +161,7 @@ async def _request(session, method, path, *, query=None, body=None,
 async def _get_public_json(session, url, timeout=10.0):
     try:
         async with session.get(
-            url, headers={"User-Agent": "momentum-bot/1.0"},
+            url, headers={"User-Agent": "multi-bot/1.0"},
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as resp:
             if resp.status != 200:
@@ -186,29 +179,53 @@ _universe = []
 _last_universe_exchange_count = 0
 
 _coin_state: Dict[str, dict] = {}
-_learning_started_at = time.time()
-_trading_enabled = False
+_ticker_cache: Dict[str, dict] = {}
+
+_started_at = time.time()
+_next_boundary_ts = 0.0
 
 _active_pos = None
 _paper_pos = None
 _cooldown_until: Dict[str, float] = {}
-_streak = {"wins": 0, "losses": 0, "live_activated": False, "trades": 0}
+
+_streak = {
+    "MOMENTUM": {"wins": 0, "losses": 0, "live_activated": False, "trades": 0},
+    "RANGE": {"wins": 0, "losses": 0, "live_activated": False, "trades": 0},
+    "ROTATION": {"wins": 0, "losses": 0, "live_activated": False, "trades": 0},
+    "VOLUME": {"wins": 0, "losses": 0, "live_activated": False, "trades": 0},
+}
 
 _last_heartbeat = 0.0
-_last_report = 0.0
 
 _diag = {
     "sweep_fails": 0,
-    "qualified_moves": 0,
-    "interim_rejects": 0,
-    "events_finalized": 0,
-    "trades_entered": 0,
-    "exits_reversal": 0,
-    "exits_hard": 0,
-    "exits_time": 0,
-    "skips_no_profile": 0,
+    # Momentum
+    "mom_qualified": 0,
+    "mom_events": 0,
+    "mom_entries": 0,
+    "mom_exit_rev": 0,
+    "mom_exit_hard": 0,
+    "mom_exit_time": 0,
+    # Range
+    "range_qual": 0,
+    "range_entries": 0,
+    "range_exit_target": 0,
+    "range_exit_break": 0,
+    "range_exit_time": 0,
+    # Rotation
+    "rot_cycles": 0,
+    "rot_entries": 0,
+    "rot_exit_hard": 0,
+    "rot_exit_time": 0,
+    # Volume
+    "vol_cycles": 0,
+    "vol_entries": 0,
+    "vol_exit_hard": 0,
+    "vol_exit_time": 0,
+    # Skips
     "skips_book": 0,
     "skips_spread": 0,
+    "boundaries_blocked": 0,
 }
 
 
@@ -224,31 +241,18 @@ def _extract_positions(d):
     return []
 
 
-def _env_int_or_none(name):
-    v = os.getenv(name)
-    if v is None or v.strip() == "":
-        return None
-    try:
-        return int(v)
-    except ValueError:
-        return None
-
-
-def _env_bool_or_none(name):
-    v = os.getenv(name)
-    if v is None or v.strip() == "":
-        return None
-    return v.strip().lower() in ("1", "true", "yes", "on")
-
-
 def _load_streak():
     try:
         with open(STREAK_FILE, "r") as f:
-            d = json.load(f)
-        _streak["wins"] = int(d.get("wins", 0))
-        _streak["losses"] = int(d.get("losses", 0))
-        _streak["live_activated"] = bool(d.get("live_activated", False))
-        _streak["trades"] = int(d.get("trades", 0))
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return
+        for t in _streak:
+            if t in data and isinstance(data[t], dict):
+                _streak[t]["wins"] = int(data[t].get("wins", 0))
+                _streak[t]["losses"] = int(data[t].get("losses", 0))
+                _streak[t]["live_activated"] = bool(data[t].get("live_activated", False))
+                _streak[t]["trades"] = int(data[t].get("trades", 0))
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         pass
 
@@ -261,23 +265,28 @@ def _save_streak():
         pass
 
 
-def _record_result(net_pnl, exit_reason):
-    _streak["trades"] += 1
+def _record_result(trade_type, net_pnl, exit_reason):
+    s = _streak[trade_type]
+    s["trades"] += 1
     if net_pnl > 0:
-        _streak["wins"] += 1
-        _streak["losses"] = 0
+        s["wins"] += 1
+        s["losses"] = 0
     elif net_pnl < 0:
-        _streak["losses"] += 1
-        _streak["wins"] = 0
-    if not _streak["live_activated"] and _streak["wins"] >= PAPER_WINS_REQUIRED:
-        _streak["live_activated"] = True
-        log.info("*** PAPER GAUNTLET PASSED — LIVE TRADING UNLOCKED ***")
+        s["losses"] += 1
+        s["wins"] = 0
+    if not s["live_activated"] and s["wins"] >= PAPER_WINS_REQUIRED:
+        s["live_activated"] = True
+        log.info("*** %s GAUNTLET PASSED — LIVE UNLOCKED ***", trade_type)
     _save_streak()
     log.info(
-        "STREAK | W=%d L=%d live=%s trades=%d | net=%.3f%% | %s",
-        _streak["wins"], _streak["losses"], _streak["live_activated"],
-        _streak["trades"], net_pnl, exit_reason,
+        "%s | W=%d L=%d live=%s tr=%d | net=%.3f%% | %s",
+        trade_type, s["wins"], s["losses"], s["live_activated"],
+        s["trades"], net_pnl, exit_reason,
     )
+
+
+def _is_live(trade_type):
+    return _streak[trade_type]["live_activated"]
 
 
 # =============================================================================
@@ -287,15 +296,16 @@ def _get_state(symbol):
     if symbol not in _coin_state:
         _coin_state[symbol] = {
             "price_history": [],
-            "phase": "SCANNING",     # SCANNING | TRACKING | MEASURING
+            "phase": "SCANNING",
             "tracking": None,
             "measuring": None,
             "profile": {
-                "events": [],
-                "median_asymmetry": 0.0,
+                "events": [], "median_asymmetry": 0.0,
                 "verdict": "NO_DATA",
-                "recent_event_ts": [],
             },
+            "mid_crossovers": [],
+            "last_side_of_mid": None,
+            "range_data": None,
         }
     return _coin_state[symbol]
 
@@ -310,181 +320,17 @@ def _profile_is_tradable(profile):
     return True
 
 
-def _events_within_hour(profile, now_ts):
-    recent = [t for t in profile.get("recent_event_ts", [])
-              if now_ts - t < 3600]
-    return len(recent)
-
-
-def _add_event(profile, event, now_ts):
+def _add_event(profile, event):
     profile["events"].append(event)
-    profile.setdefault("recent_event_ts", []).append(now_ts)
-    profile["recent_event_ts"] = [
-        t for t in profile["recent_event_ts"] if now_ts - t < 3600
-    ]
     asyms = sorted(e["asymmetry"] for e in profile["events"]
                    if e["asymmetry"] > 0)
     if not asyms:
         profile["median_asymmetry"] = 0.0
     else:
         n = len(asyms)
-        median = asyms[n // 2] if n % 2 else (asyms[n // 2 - 1] + asyms[n // 2]) / 2.0
-        profile["median_asymmetry"] = round(median, 2)
+        med = asyms[n // 2] if n % 2 else (asyms[n // 2 - 1] + asyms[n // 2]) / 2.0
+        profile["median_asymmetry"] = round(med, 2)
     profile["verdict"] = mm.classify_asymmetry(profile["median_asymmetry"])
-
-
-# =============================================================================
-# STATE MACHINE — called every sweep
-# =============================================================================
-def _advance_state(symbol, state, current_price, now_ts):
-    history = state["price_history"]
-    history.append((now_ts, current_price))
-    cutoff = now_ts - mm.PRICE_WINDOW_SEC
-    state["price_history"] = [(t, p) for t, p in history if t >= cutoff]
-
-    if state["phase"] == "SCANNING":
-        _advance_scanning(symbol, state, current_price, now_ts)
-    elif state["phase"] == "TRACKING":
-        _advance_tracking(symbol, state, current_price, now_ts)
-    elif state["phase"] == "MEASURING":
-        _advance_measuring(symbol, state, now_ts)
-
-
-def _advance_scanning(symbol, state, current_price, now_ts):
-    move = mm.find_qualifying_move(state["price_history"], now_ts)
-    if not move["qualified"]:
-        if move["reason"].startswith("INTERIM_REVERSAL"):
-            _diag["interim_rejects"] += 1
-        return
-
-    _diag["qualified_moves"] += 1
-    log.info(
-        "MOVE_QUALIFIED | %s | dir=%s | pct=%.2f%% | dur=%ds | "
-        "speed=%.3f%%/min | start=%.6f peak=%.6f",
-        symbol, move["direction"], move["move_pct"],
-        move["move_duration_sec"], move["move_speed_pct_per_min"],
-        move["start_price"], move["peak_price"],
-    )
-
-    state["phase"] = "TRACKING"
-    state["tracking"] = {
-        "direction": move["direction"],
-        "start_price": move["start_price"],
-        "start_ts": move["start_ts"],
-        "peak_price": move["peak_price"],
-        "peak_ts": move["peak_ts"],
-        "move_pct": move["move_pct"],
-        "move_duration_sec": move["move_duration_sec"],
-        "move_speed_pct_per_min": move["move_speed_pct_per_min"],
-        "reversal_start_ts": 0,
-    }
-
-
-def _advance_tracking(symbol, state, current_price, now_ts):
-    tracking = state["tracking"]
-    if tracking is None:
-        state["phase"] = "SCANNING"
-        return
-
-    direction = tracking["direction"]
-
-    if direction == "down" and current_price < tracking["peak_price"]:
-        tracking["peak_price"] = current_price
-        tracking["peak_ts"] = now_ts
-        tracking["reversal_start_ts"] = 0
-    elif direction == "up" and current_price > tracking["peak_price"]:
-        tracking["peak_price"] = current_price
-        tracking["peak_ts"] = now_ts
-        tracking["reversal_start_ts"] = 0
-
-    retrace, started, new_ts = mm.check_reversal_started(
-        direction, tracking["peak_price"], current_price,
-        tracking["reversal_start_ts"], now_ts,
-    )
-    tracking["reversal_start_ts"] = new_ts
-
-    if started:
-        log.info(
-            "MOVE_PEAKED | %s | dir=%s | peak=%.6f | retrace=%.2f%% | "
-            "final_pct=%.2f%%",
-            symbol, direction, tracking["peak_price"],
-            retrace, tracking["move_pct"],
-        )
-        state["phase"] = "MEASURING"
-        state["measuring"] = {
-            "direction": direction,
-            "start_price": tracking["start_price"],
-            "start_ts": tracking["start_ts"],
-            "peak_price": tracking["peak_price"],
-            "peak_ts": tracking["peak_ts"],
-            "move_pct": (tracking["start_price"] - tracking["peak_price"])
-                        / tracking["start_price"] * 100.0
-                        if direction == "down"
-                        else (tracking["peak_price"] - tracking["start_price"])
-                             / tracking["start_price"] * 100.0,
-            "move_duration_sec": tracking["peak_ts"] - tracking["start_ts"],
-            "move_speed_pct_per_min": 0.0,
-        }
-        m = state["measuring"]
-        if m["move_duration_sec"] > 0:
-            m["move_speed_pct_per_min"] = m["move_pct"] / (m["move_duration_sec"] / 60.0)
-        state["tracking"] = None
-        return
-
-    if now_ts - tracking["start_ts"] > STUCK_TRACKING_SEC:
-        log.warning("STUCK_TRACKING | %s | clearing", symbol)
-        state["tracking"] = None
-        state["phase"] = "SCANNING"
-
-
-def _advance_measuring(symbol, state, now_ts):
-    measuring = state["measuring"]
-    if measuring is None:
-        state["phase"] = "SCANNING"
-        return
-
-    reversal = mm.measure_reversal(
-        state["price_history"], measuring["direction"],
-        measuring["peak_ts"], measuring["peak_price"], now_ts,
-    )
-    if not reversal["complete"]:
-        return
-
-    asym = mm.compute_asymmetry(
-        measuring["move_speed_pct_per_min"],
-        reversal["reversal_speed_pct_per_min"],
-    )
-    verdict = mm.classify_asymmetry(asym)
-
-    event = {
-        "ts_utc": time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(measuring["start_ts"])),
-        "direction": measuring["direction"],
-        "move_pct": round(measuring["move_pct"], 2),
-        "move_duration_sec": measuring["move_duration_sec"],
-        "move_speed_pct_per_min": round(measuring["move_speed_pct_per_min"], 4),
-        "reversal_pct": round(reversal["reversal_pct"], 2),
-        "reversal_duration_sec": reversal["reversal_duration_sec"],
-        "reversal_speed_pct_per_min": round(reversal["reversal_speed_pct_per_min"], 4),
-        "asymmetry": round(asym, 2),
-        "verdict": verdict,
-    }
-
-    profile = state["profile"]
-    _add_event(profile, event, now_ts)
-    _diag["events_finalized"] += 1
-
-    log.info(
-        "EVENT_DONE | %s | dir=%s | move=%.2f%%@%.3f%%/m | "
-        "rev=%.2f%%@%.3f%%/m | asym=%.2f | verdict=%s | median=%.2f | n=%d",
-        symbol, measuring["direction"], measuring["move_pct"],
-        measuring["move_speed_pct_per_min"], reversal["reversal_pct"],
-        reversal["reversal_speed_pct_per_min"], asym, verdict,
-        profile["median_asymmetry"], len(profile["events"]),
-    )
-
-    state["measuring"] = None
-    state["phase"] = "SCANNING"
 
 
 # =============================================================================
@@ -504,7 +350,7 @@ async def enforce_one_way(session):
     if res.get("code") == "00000":
         log.info("One-way mode enforced.")
     else:
-        log.warning("set-hold-mode rejected: %s", res.get("msg"))
+        log.warning("set-hold-mode: %s", res.get("msg"))
 
 
 async def refresh_contracts(session):
@@ -513,7 +359,7 @@ async def refresh_contracts(session):
         query={"productType": PRODUCT_TYPE}, signed=False,
     )
     if d.get("code") != "00000":
-        log.warning("Contract refresh failed: %s", d.get("msg"))
+        log.warning("Contract refresh failed")
         return
     new_cache = {}
     for c in d.get("data", []) or []:
@@ -548,43 +394,42 @@ def _norm(sym):
     return s
 
 
-async def _prices_bitget(session):
-    out = {}
+async def _tickers_bitget(session):
+    prices = {}
+    stats = {}
     d = await _get_public_json(
         session, API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}")
     if not isinstance(d, dict) or d.get("code") != "00000":
-        return out
+        return prices, stats
     for t in d.get("data", []) or []:
         sym = t.get("symbol", "")
-        if sym.endswith("USDT"):
-            try:
-                p = t.get("lastPr") or t.get("last")
-                if p:
-                    out[sym] = float(p)
-            except (TypeError, ValueError):
-                pass
-    return out
+        if not sym.endswith("USDT"):
+            continue
+        try:
+            p = t.get("lastPr") or t.get("last")
+            if not p:
+                continue
+            prices[sym] = float(p)
+            stats[sym] = {
+                "high_24h": float(t.get("high24h") or 0),
+                "low_24h": float(t.get("low24h") or 0),
+                "open_24h": float(t.get("openUtc") or t.get("open24h") or 0),
+                "volume_24h_usd": float(t.get("usdtVolume") or t.get("quoteVolume") or 0),
+            }
+        except (TypeError, ValueError):
+            continue
+    return prices, stats
 
 
-async def _vol_bitget(session):
+async def _vol_exchange(session, name, url, parser):
+    d = await _get_public_json(session, url)
+    if d is None:
+        return {}
+    return parser(d)
+
+
+def _parse_binance(d):
     out = {}
-    d = await _get_public_json(
-        session, API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}")
-    if not isinstance(d, dict) or d.get("code") != "00000":
-        return out
-    for t in d.get("data", []) or []:
-        sym = t.get("symbol", "")
-        if sym.endswith("USDT"):
-            try:
-                out[sym] = float(t.get("usdtVolume") or 0)
-            except (TypeError, ValueError):
-                pass
-    return out
-
-
-async def _vol_binance(session):
-    out = {}
-    d = await _get_public_json(session, "https://fapi.binance.com/fapi/v1/ticker/24hr")
     if not isinstance(d, list):
         return out
     for t in d:
@@ -597,10 +442,8 @@ async def _vol_binance(session):
     return out
 
 
-async def _vol_bybit(session):
+def _parse_bybit(d):
     out = {}
-    d = await _get_public_json(
-        session, "https://api.bybit.com/v5/market/tickers?category=linear")
     if not isinstance(d, dict) or d.get("retCode") != 0:
         return out
     for t in d.get("result", {}).get("list", []) or []:
@@ -613,10 +456,8 @@ async def _vol_bybit(session):
     return out
 
 
-async def _vol_okx(session):
+def _parse_okx(d):
     out = {}
-    d = await _get_public_json(
-        session, "https://www.okx.com/api/v5/market/tickers?instType=SWAP")
     if not isinstance(d, dict) or d.get("code") != "0":
         return out
     for t in d.get("data", []) or []:
@@ -632,82 +473,34 @@ async def _vol_okx(session):
     return out
 
 
-async def _vol_gate(session):
-    out = {}
-    d = await _get_public_json(
-        session, "https://api.gateio.ws/api/v4/futures/usdt/tickers")
-    if not isinstance(d, list):
-        return out
-    for t in d:
-        sym = _norm(t.get("contract", ""))
-        if sym.endswith("USDT"):
-            try:
-                out[sym] = out.get(sym, 0.0) + float(t.get("volume_24h_quote") or 0)
-            except (TypeError, ValueError):
-                pass
-    return out
-
-
-async def _vol_kucoin(session):
-    out = {}
-    d = await _get_public_json(
-        session, "https://api-futures.kucoin.com/api/v1/contracts/active")
-    if not isinstance(d, dict) or d.get("code") != "200000":
-        return out
-    for t in d.get("data", []) or []:
-        sym = _norm(t.get("symbol", ""))
-        if sym.endswith("USDT"):
-            try:
-                out[sym] = out.get(sym, 0.0) + float(t.get("turnoverOf24h") or 0)
-            except (TypeError, ValueError):
-                pass
-    return out
-
-
-async def _vol_mexc(session):
-    out = {}
-    d = await _get_public_json(
-        session, "https://contract.mexc.com/api/v1/contract/ticker")
-    if not isinstance(d, dict) or not d.get("success"):
-        return out
-    for t in d.get("data", []) or []:
-        sym = _norm(t.get("symbol", ""))
-        if sym.endswith("USDT"):
-            try:
-                out[sym] = out.get(sym, 0.0) + float(t.get("amount24") or 0)
-            except (TypeError, ValueError):
-                pass
-    return out
-
-
-async def _vol_htx(session):
-    out = {}
-    d = await _get_public_json(
-        session,
-        "https://api.hbdm.com/linear-swap-ex/market/tickers?business_type=swap")
-    if not isinstance(d, dict) or d.get("status") != "ok":
-        return out
-    for t in d.get("data", []) or []:
-        sym = _norm(t.get("contract_code", ""))
-        if sym.endswith("USDT"):
-            try:
-                out[sym] = out.get(sym, 0.0) + float(t.get("trade_turnover") or 0)
-            except (TypeError, ValueError):
-                pass
-    return out
-
-
 async def refresh_universe(session):
     global _last_universe_exchange_count
-    results = await asyncio.gather(
-        _vol_bitget(session), _vol_binance(session), _vol_bybit(session),
-        _vol_okx(session), _vol_gate(session), _vol_kucoin(session),
-        _vol_mexc(session), _vol_htx(session),
+
+    bitget_vol = {}
+    d = await _get_public_json(
+        session, API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}")
+    if isinstance(d, dict) and d.get("code") == "00000":
+        for t in d.get("data", []) or []:
+            sym = t.get("symbol", "")
+            if sym.endswith("USDT"):
+                try:
+                    bitget_vol[sym] = float(t.get("usdtVolume") or 0)
+                except (TypeError, ValueError):
+                    pass
+
+    others = await asyncio.gather(
+        _vol_exchange(session, "binance",
+                      "https://fapi.binance.com/fapi/v1/ticker/24hr", _parse_binance),
+        _vol_exchange(session, "bybit",
+                      "https://api.bybit.com/v5/market/tickers?category=linear", _parse_bybit),
+        _vol_exchange(session, "okx",
+                      "https://www.okx.com/api/v5/market/tickers?instType=SWAP", _parse_okx),
         return_exceptions=True,
     )
-    agg = {}
-    ok = 0
-    for r in results:
+
+    agg = dict(bitget_vol)
+    ok = 1 if bitget_vol else 0
+    for r in others:
         if isinstance(r, dict) and r:
             ok += 1
             for sym, vol in r.items():
@@ -715,7 +508,7 @@ async def refresh_universe(session):
 
     if (_last_universe_exchange_count > 0
             and ok < _last_universe_exchange_count - 1):
-        log.warning("Universe refresh SKIPPED: %d/8 exchanges", ok)
+        log.warning("Universe refresh SKIPPED: %d exchanges", ok)
         return
 
     filtered = []
@@ -737,12 +530,12 @@ async def refresh_universe(session):
     _universe.clear()
     _universe.extend(filtered)
     _last_universe_exchange_count = ok
-    log.info("Universe: %d symbols | excluded: %d stock, %d low-vol",
+    log.info("Universe: %d | excluded: %d stock, %d low-vol",
              len(_universe), excluded_stock, excluded_vol)
 
 
 # =============================================================================
-# MARKET DATA / POSITION
+# MARKET DATA / POSITION HELPERS
 # =============================================================================
 async def fetch_depth(session, symbol):
     d = await _request(
@@ -814,8 +607,7 @@ async def get_position(session, symbol):
                 entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
             except (TypeError, ValueError):
                 entry = 0.0
-            return {"total": size, "entryPrice": entry,
-                    "posSide": p.get("posSide", "")}
+            return {"total": size, "entryPrice": entry}
     return None
 
 
@@ -843,43 +635,32 @@ async def adopt_orphan_positions(session):
             entry = float(p.get("entryPrice") or p.get("averageOpenPrice") or 0)
         except (TypeError, ValueError):
             entry = 0.0
+        side = (p.get("posSide") or "").lower()
+        direction = "LONG" if side in ("long", "buy") else "SHORT"
         _active_pos = {
-            "symbol": sym, "entry": entry,
-            "opened_at": time.time(),
-            "extreme_since_entry": entry,
-            "paper": False, "adopted": True,
+            "symbol": sym, "direction": direction, "entry": entry,
+            "opened_at": time.time(), "extreme_since_entry": entry,
+            "trade_type": "MOMENTUM", "paper": False, "adopted": True,
         }
-        log.warning("ADOPTED orphan | %s | entry=%.6f", sym, entry)
+        log.warning("ADOPTED orphan | %s %s | entry=%.6f",
+                    sym, direction, entry)
         return
 
 
-async def place_short_order(session, symbol, qty_str):
+async def _place_order(session, symbol, side, qty_str, trade_side):
     body = {
         "category": PRODUCT_TYPE, "symbol": symbol,
-        "side": "sell", "orderType": "market",
-        "tradeSide": "open", "qty": qty_str, "reduceOnly": "no",
+        "side": side, "orderType": "market",
+        "tradeSide": trade_side, "qty": qty_str,
+        "reduceOnly": "no" if trade_side == "open" else "yes",
     }
     res = await _request(session, "POST", "/api/v3/trade/place-order", body=body)
     if res.get("code") == "00000":
         oid = (res.get("data") or {}).get("orderId")
-        log.info("SHORT OPEN OK | %s qty=%s | id=%s", symbol, qty_str, oid)
+        log.info("%s %s OK | %s qty=%s | id=%s",
+                 side.upper(), trade_side.upper(), symbol, qty_str, oid)
         return oid
-    log.error("SHORT OPEN FAIL | %s | %s", symbol, res.get("msg"))
-    return None
-
-
-async def place_close_order(session, symbol, qty_str):
-    body = {
-        "category": PRODUCT_TYPE, "symbol": symbol,
-        "side": "buy", "orderType": "market",
-        "tradeSide": "close", "qty": qty_str, "reduceOnly": "yes",
-    }
-    res = await _request(session, "POST", "/api/v3/trade/place-order", body=body)
-    if res.get("code") == "00000":
-        oid = (res.get("data") or {}).get("orderId")
-        log.info("SHORT CLOSE OK | %s qty=%s | id=%s", symbol, qty_str, oid)
-        return oid
-    log.error("SHORT CLOSE FAIL | %s | %s", symbol, res.get("msg"))
+    log.error("%s FAIL | %s | %s", side.upper(), symbol, res.get("msg"))
     return None
 
 
@@ -900,37 +681,229 @@ async def close_live_position(session, pos, reason):
     symbol = pos["symbol"]
     live = await get_position(session, symbol)
     if not live or live["total"] <= 0:
-        log.info("No live position for %s", symbol)
         return True
     await cancel_open_orders(session, symbol)
     vp = _contracts.get(symbol, {}).get("volumePlace", 0)
     qty_str = f"{live['total']:.{vp}f}"
-    oid = await place_close_order(session, symbol, qty_str)
+
+    direction = pos.get("direction", "SHORT")
+    if direction == "SHORT":
+        side = "buy"
+    else:
+        side = "sell"
+
+    oid = await _place_order(session, symbol, side, qty_str, "close")
     if oid:
-        log.info("CLOSE OK | %s | %s | size=%s", symbol, reason, qty_str)
+        log.info("CLOSE OK | %s %s | %s | size=%s",
+                 symbol, direction, reason, qty_str)
         return True
-    log.error("CLOSE FAIL | %s | %s", symbol, reason)
     return False
 
 
 # =============================================================================
-# TRADE ENTRY
+# MOMENTUM STATE MACHINE
 # =============================================================================
-async def try_enter_momentum(session, symbol, state, current_price, now_ts):
+def _new_spike_window(price, now_ts, move):
+    return {
+        "direction": move["direction"],
+        "start_price": move["start_price"],
+        "start_ts": move["start_ts"],
+        "peak_price": move["peak_price"],
+        "peak_ts": move["peak_ts"],
+        "move_pct": move["move_pct"],
+        "move_duration_sec": move["move_duration_sec"],
+        "move_speed_pct_per_min": move["move_speed_pct_per_min"],
+        "reversal_start_ts": 0,
+    }
+
+
+def _advance_scanning(symbol, state, now_ts):
+    move = mm.find_qualifying_move(state["price_history"], now_ts)
+    if not move["qualified"]:
+        return
+    _diag["mom_qualified"] += 1
+    log.info(
+        "MOVE_QUALIFIED | %s | dir=%s | pct=%.2f%% | dur=%ds | speed=%.3f%%/m",
+        symbol, move["direction"], move["move_pct"],
+        move["move_duration_sec"], move["move_speed_pct_per_min"],
+    )
+    state["phase"] = "TRACKING"
+    state["tracking"] = _new_spike_window(0, now_ts, move)
+
+
+def _advance_tracking(symbol, state, current_price, now_ts):
+    tracking = state["tracking"]
+    if tracking is None:
+        state["phase"] = "SCANNING"
+        return
+
+    direction = tracking["direction"]
+    if direction == "down" and current_price < tracking["peak_price"]:
+        tracking["peak_price"] = current_price
+        tracking["peak_ts"] = now_ts
+        tracking["reversal_start_ts"] = 0
+    elif direction == "up" and current_price > tracking["peak_price"]:
+        tracking["peak_price"] = current_price
+        tracking["peak_ts"] = now_ts
+        tracking["reversal_start_ts"] = 0
+
+    retrace, started, new_ts = mm.check_reversal_started(
+        direction, tracking["peak_price"], current_price,
+        tracking["reversal_start_ts"], now_ts,
+    )
+    tracking["reversal_start_ts"] = new_ts
+
+    if started:
+        log.info("MOVE_PEAKED | %s | dir=%s | retrace=%.2f%%",
+                 symbol, direction, retrace)
+        state["phase"] = "MEASURING"
+        move_pct = (tracking["start_price"] - tracking["peak_price"]) / tracking["start_price"] * 100.0 if direction == "down" else (tracking["peak_price"] - tracking["start_price"]) / tracking["start_price"] * 100.0
+        state["measuring"] = {
+            "direction": direction,
+            "start_price": tracking["start_price"],
+            "start_ts": tracking["start_ts"],
+            "peak_price": tracking["peak_price"],
+            "peak_ts": tracking["peak_ts"],
+            "move_pct": move_pct,
+            "move_duration_sec": tracking["peak_ts"] - tracking["start_ts"],
+            "move_speed_pct_per_min": 0.0,
+        }
+        if state["measuring"]["move_duration_sec"] > 0:
+            state["measuring"]["move_speed_pct_per_min"] = (
+                move_pct / (state["measuring"]["move_duration_sec"] / 60.0)
+            )
+        state["tracking"] = None
+
+
+def _advance_measuring(symbol, state, now_ts):
+    measuring = state["measuring"]
+    if measuring is None:
+        state["phase"] = "SCANNING"
+        return
+
+    reversal = mm.measure_reversal(
+        state["price_history"], measuring["direction"],
+        measuring["peak_ts"], measuring["peak_price"], now_ts,
+    )
+    if not reversal["complete"]:
+        return
+
+    asym = mm.compute_asymmetry(
+        measuring["move_speed_pct_per_min"],
+        reversal["reversal_speed_pct_per_min"],
+    )
+    verdict = mm.classify_asymmetry(asym)
+
+    event = {
+        "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                time.gmtime(measuring["start_ts"])),
+        "direction": measuring["direction"],
+        "move_pct": round(measuring["move_pct"], 2),
+        "move_speed_pct_per_min": round(measuring["move_speed_pct_per_min"], 4),
+        "reversal_pct": round(reversal["reversal_pct"], 2),
+        "reversal_speed_pct_per_min": round(reversal["reversal_speed_pct_per_min"], 4),
+        "asymmetry": round(asym, 2),
+        "verdict": verdict,
+    }
+
+    _add_event(state["profile"], event)
+    _diag["mom_events"] += 1
+
+    log.info(
+        "EVENT_DONE | %s | move=%.2f%%@%.3f%%/m | rev=%.2f%%@%.3f%%/m | "
+        "asym=%.2f | %s | median=%.2f | n=%d",
+        symbol, measuring["move_pct"], measuring["move_speed_pct_per_min"],
+        reversal["reversal_pct"], reversal["reversal_speed_pct_per_min"],
+        asym, verdict, state["profile"]["median_asymmetry"],
+        len(state["profile"]["events"]),
+    )
+
+    state["measuring"] = None
+    state["phase"] = "SCANNING"
+
+
+def _update_mid_crossovers(state, current_price, high_24h, low_24h, now_ts):
+    if high_24h <= 0 or low_24h <= 0 or high_24h <= low_24h:
+        return
+    mid = (high_24h + low_24h) / 2.0
+    side = "top" if current_price >= mid else "bottom"
+    prev = state.get("last_side_of_mid")
+    if prev is not None and prev != side:
+        state["mid_crossovers"].append(now_ts)
+    state["last_side_of_mid"] = side
+    cutoff = now_ts - 3600
+    state["mid_crossovers"] = [t for t in state["mid_crossovers"] if t >= cutoff]
+
+
+# =============================================================================
+# ENTRY HELPERS
+# =============================================================================
+async def _open_position(session, symbol, side, trade_type, extra_fields):
     global _active_pos, _paper_pos
 
-    if time.time() < _cooldown_until.get(symbol, 0):
+    contract = _contracts.get(symbol)
+    if not contract:
+        return False
+    balance = await get_usdt_balance(session)
+    qty_str = mm.calculate_order_qty(
+        balance=balance, price=extra_fields["entry"], leverage=LEVERAGE,
+        volume_place=contract["volumePlace"],
+        min_order_volume=contract["minOrderVolume"],
+        min_notional=contract["minNotional"],
+    )
+    if not qty_str:
+        return False
+
+    is_live = _is_live(trade_type)
+    if is_live:
+        if side == "SHORT":
+            oid = await _place_order(session, symbol, "sell", qty_str, "open")
+        else:
+            oid = await _place_order(session, symbol, "buy", qty_str, "open")
+        if not oid:
+            return False
+        pos_dict = dict(extra_fields)
+        pos_dict.update({
+            "symbol": symbol, "direction": side,
+            "opened_at": time.time(),
+            "trade_type": trade_type, "paper": False, "order_id": oid,
+        })
+        _active_pos = pos_dict
+        log.info("LIVE OPEN %s | %s %s @ %.6f qty=%s",
+                 trade_type, symbol, side, extra_fields["entry"], qty_str)
+        return True
+    else:
+        pos_dict = dict(extra_fields)
+        pos_dict.update({
+            "symbol": symbol, "direction": side,
+            "opened_at": time.time(),
+            "trade_type": trade_type, "paper": True,
+        })
+        _paper_pos = pos_dict
+        log.info("PAPER OPEN %s | %s %s @ %.6f",
+                 trade_type, symbol, side, extra_fields["entry"])
+        return True
+
+
+async def try_momentum_entry(session, symbol, state, current_price, now_ts):
+    if time.time() - _started_at < MOMENTUM_WARMUP_SEC:
         return False
     if _active_pos is not None or _paper_pos is not None:
         return False
-    if not _trading_enabled:
+    if time.time() < _cooldown_until.get(symbol, 0):
         return False
-
     profile = state.get("profile")
     if not _profile_is_tradable(profile):
-        _diag["skips_no_profile"] += 1
         return False
-    if _events_within_hour(profile, now_ts) >= MAX_EVENTS_PER_HOUR:
+
+    tracking = state.get("tracking")
+    if tracking is None:
+        return False
+    # Only enter on DOWN moves (SHORT-only)
+    if tracking["direction"] != "down":
+        return False
+    # Only enter during tracking (before peak confirmed)
+    if tracking["peak_price"] > current_price:
         return False
 
     depth = await fetch_depth(session, symbol)
@@ -938,115 +911,300 @@ async def try_enter_momentum(session, symbol, state, current_price, now_ts):
         _diag["skips_book"] += 1
         return False
     bids, asks, mid = depth
-
     book = mm.evaluate_book(bids, asks, mid)
     if not book["is_valid"]:
         _diag["skips_book"] += 1
         return False
-
     spread = mm.evaluate_spread(bids, asks)
     if not spread["is_ok"]:
         _diag["skips_spread"] += 1
         return False
 
-    tracking = state["tracking"]
-    asym = profile["median_asymmetry"]
+    log.info(
+        "MOMENTUM ENTRY | %s | SHORT | asym=%.2f | move=%.2f%% | price=%.6f",
+        symbol, profile["median_asymmetry"], tracking["move_pct"], current_price,
+    )
+    _diag["mom_entries"] += 1
+    return await _open_position(
+        session, symbol, "SHORT", "MOMENTUM",
+        {"entry": current_price, "extreme_since_entry": current_price},
+    )
+
+
+async def try_range_entry(session, symbol, state, current_price, now_ts):
+    if time.time() - _started_at < RANGE_WARMUP_SEC:
+        return False
+    if _active_pos is not None or _paper_pos is not None:
+        return False
+    if time.time() < _cooldown_until.get(symbol, 0):
+        return False
+
+    rd = state.get("range_data")
+    if not rd or not rd.get("is_range"):
+        return False
+
+    high_24h = rd.get("high_24h", 0.0)
+    low_24h = rd.get("low_24h", 0.0)
+    entry = mm.evaluate_range_entry(current_price, low_24h, high_24h)
+    if not entry["should_enter"]:
+        return False
+
+    depth = await fetch_depth(session, symbol)
+    if depth is None:
+        _diag["skips_book"] += 1
+        return False
+    bids, asks, mid = depth
+    book = mm.evaluate_book(bids, asks, mid)
+    if not book["is_valid"]:
+        _diag["skips_book"] += 1
+        return False
+    spread = mm.evaluate_spread(bids, asks)
+    if not spread["is_ok"]:
+        _diag["skips_spread"] += 1
+        return False
 
     log.info(
-        "MOMENTUM ENTRY | %s | dir=%s | asym=%.2f | move=%.2f%% | "
-        "price=%.6f",
-        symbol, tracking["direction"], asym, tracking["move_pct"],
-        current_price,
+        "RANGE ENTRY | %s | %s | %s | price=%.6f | range=[%.6f, %.6f] | "
+        "range_pct=%.2f%% | net_pct=%.2f%% | xovers=%d",
+        symbol, entry["side"], entry["reason"], current_price,
+        low_24h, high_24h, rd.get("range_pct", 0),
+        rd.get("net_pct", 0), rd.get("crossovers_1h", 0),
+    )
+    _diag["range_entries"] += 1
+    return await _open_position(
+        session, symbol, entry["side"], "RANGE",
+        {"entry": current_price,
+         "range_high": high_24h, "range_low": low_24h,
+         "range_mid": entry["range_mid"]},
     )
 
-    if not _streak["live_activated"]:
-        _diag["trades_entered"] += 1
-        _paper_pos = {
-            "symbol": symbol, "entry": current_price,
-            "opened_at": time.time(),
-            "extreme_since_entry": current_price,
-            "is_panic": True, "paper": True,
-        }
-        log.info("PAPER OPEN | %s SHORT @ %.6f | W=%d/%d",
-                 symbol, current_price, _streak["wins"], PAPER_WINS_REQUIRED)
-        return True
 
-    contract = _contracts.get(symbol)
-    if not contract:
+async def try_rotation_entry(session, now_ts):
+    if time.time() - _started_at < ROTATION_WARMUP_SEC:
         return False
-    balance = await get_usdt_balance(session)
-    qty_str = mm.calculate_order_qty(
-        balance=balance, price=current_price, leverage=LEVERAGE,
-        volume_place=contract["volumePlace"],
-        min_order_volume=contract["minOrderVolume"],
-        min_notional=contract["minNotional"],
+    if _active_pos is not None or _paper_pos is not None:
+        return False
+
+    best_sym, best_score, best_dir = None, 0.0, None
+    for sym, state in _coin_state.items():
+        if sym not in _contracts:
+            continue
+        if _contracts[sym].get("is_stock"):
+            continue
+        if time.time() < _cooldown_until.get(sym, 0):
+            continue
+        r = mm.compute_rotation_score(state["price_history"], now_ts)
+        if r["score"] > best_score and r["direction"] is not None:
+            best_sym, best_score, best_dir = sym, r["score"], r["direction"]
+
+    if not best_sym or best_score <= 0:
+        return False
+
+    current_price = _ticker_cache.get(best_sym, {}).get("price", 0)
+    if current_price <= 0:
+        return False
+
+    depth = await fetch_depth(session, best_sym)
+    if depth is None:
+        return False
+    bids, asks, mid = depth
+    book = mm.evaluate_book(bids, asks, mid)
+    if not book["is_valid"]:
+        return False
+    spread = mm.evaluate_spread(bids, asks)
+    if not spread["is_ok"]:
+        return False
+
+    log.info(
+        "ROTATION ENTRY | %s | %s | score=%.2f | price=%.6f",
+        best_sym, best_dir, best_score, current_price,
     )
-    if not qty_str:
-        log.warning("Sizing rejected | %s | balance=%.4f", symbol, balance)
+    _diag["rot_entries"] += 1
+    return await _open_position(
+        session, best_sym, best_dir, "ROTATION",
+        {"entry": current_price},
+    )
+
+
+async def try_volume_entry(session, now_ts):
+    if _active_pos is not None or _paper_pos is not None:
         return False
 
-    oid = await place_short_order(session, symbol, qty_str)
-    if not oid:
+    best_short_sym, best_short_score = None, 0.0
+    best_long_sym, best_long_score = None, 0.0
+
+    for sym, state in _coin_state.items():
+        if sym not in _contracts:
+            continue
+        if _contracts[sym].get("is_stock"):
+            continue
+        if time.time() < _cooldown_until.get(sym, 0):
+            continue
+        cache = _ticker_cache.get(sym, {})
+        current_price = cache.get("price", 0)
+        high_24h = cache.get("high_24h", 0)
+        low_24h = cache.get("low_24h", 0)
+        vol_24h = cache.get("volume_24h_usd", 0)
+        if current_price <= 0:
+            continue
+        scores = mm.compute_volume_scores(current_price, high_24h, low_24h, vol_24h)
+        if scores["short_score"] > best_short_score:
+            best_short_sym = sym
+            best_short_score = scores["short_score"]
+        if scores["long_score"] > best_long_score:
+            best_long_sym = sym
+            best_long_score = scores["long_score"]
+
+    if best_short_score <= 0 and best_long_score <= 0:
         return False
 
-    _diag["trades_entered"] += 1
-    _active_pos = {
-        "symbol": symbol, "entry": current_price,
-        "opened_at": time.time(),
-        "extreme_since_entry": current_price,
-        "is_panic": True, "paper": False, "order_id": oid,
-    }
-    log.info("LIVE OPEN | %s SHORT @ %.6f | qty=%s",
-             symbol, current_price, qty_str)
-    return True
+    if best_short_score >= best_long_score:
+        chosen_sym = best_short_sym
+        chosen_side = "SHORT"
+        chosen_score = best_short_score
+    else:
+        chosen_sym = best_long_sym
+        chosen_side = "LONG"
+        chosen_score = best_long_score
+
+    if not chosen_sym:
+        return False
+
+    current_price = _ticker_cache.get(chosen_sym, {}).get("price", 0)
+    if current_price <= 0:
+        return False
+
+    depth = await fetch_depth(session, chosen_sym)
+    if depth is None:
+        return False
+    bids, asks, mid = depth
+    book = mm.evaluate_book(bids, asks, mid)
+    if not book["is_valid"]:
+        return False
+    spread = mm.evaluate_spread(bids, asks)
+    if not spread["is_ok"]:
+        return False
+
+    log.info(
+        "VOLUME ENTRY | %s | %s | score=%.2f | price=%.6f",
+        chosen_sym, chosen_side, chosen_score, current_price,
+    )
+    _diag["vol_entries"] += 1
+    return await _open_position(
+        session, chosen_sym, chosen_side, "VOLUME",
+        {"entry": current_price},
+    )
 
 
 # =============================================================================
-# PRICE SWEEPER — THE CORE LOOP
+# SWEEPER — MAIN ENGINE
 # =============================================================================
 async def price_sweeper_loop(session):
-    global _trading_enabled
+    global _next_boundary_ts
+
+    # Initialize first boundary 30 min from now
+    _next_boundary_ts = time.time() + BOUNDARY_INTERVAL_SEC
 
     while True:
         try:
             now_ts = time.time()
 
-            if not _trading_enabled and (now_ts - _learning_started_at) >= LEARNING_PHASE_SEC:
-                _trading_enabled = True
-                tradable = sum(1 for s in _coin_state.values()
-                               if _profile_is_tradable(s.get("profile")))
-                log.info(
-                    "*** LEARNING COMPLETE — TRADING ENABLED *** "
-                    "(%d profiles, %d tradable)",
-                    len(_coin_state), tradable,
-                )
-
-            prices = await _prices_bitget(session)
+            prices, stats = await _tickers_bitget(session)
             if not prices:
                 _diag["sweep_fails"] += 1
-                await asyncio.sleep(PRICE_SWEEP_SEC)
+                await asyncio.sleep(PULSE_SEC)
                 continue
 
-            for sym, price in prices.items():
-                if sym not in _contracts:
-                    continue
-                if _contracts[sym].get("is_stock"):
+            _ticker_cache.clear()
+            _ticker_cache.update(stats)
+
+            for sym in _universe:
+                price = prices.get(sym)
+                if not price or price <= 0:
                     continue
                 state = _get_state(sym)
-                _advance_state(sym, state, price, now_ts)
 
-                if (state["phase"] == "TRACKING"
-                        and _trading_enabled
-                        and _profile_is_tradable(state.get("profile"))
-                        and _active_pos is None
-                        and _paper_pos is None):
-                    await try_enter_momentum(session, sym, state, price, now_ts)
+                state["price_history"].append((now_ts, price))
+                cutoff = now_ts - mm.PRICE_WINDOW_SEC
+                state["price_history"] = [
+                    (t, p) for t, p in state["price_history"] if t >= cutoff
+                ]
+
+                # Momentum state machine
+                if state["phase"] == "SCANNING":
+                    _advance_scanning(sym, state, now_ts)
+                elif state["phase"] == "TRACKING":
+                    _advance_tracking(sym, state, price, now_ts)
+                elif state["phase"] == "MEASURING":
+                    _advance_measuring(sym, state, now_ts)
+
+                # Range tracking
+                cache = stats.get(sym, {})
+                high_24h = cache.get("high_24h", 0)
+                low_24h = cache.get("low_24h", 0)
+                open_24h = cache.get("open_24h", 0)
+
+                if high_24h > 0 and low_24h > 0:
+                    _update_mid_crossovers(state, price, high_24h, low_24h, now_ts)
+                    ref_price = open_24h if open_24h > 0 else (high_24h + low_24h) / 2.0
+                    if ref_price > 0:
+                        range_pct = (high_24h - low_24h) / low_24h * 100.0
+                        net_pct = (price - ref_price) / ref_price * 100.0
+                        rd = mm.evaluate_range_coin(
+                            range_pct, net_pct, len(state["mid_crossovers"]))
+                        if rd["is_range"]:
+                            rd["high_24h"] = high_24h
+                            rd["low_24h"] = low_24h
+                            state["range_data"] = rd
+                            _diag["range_qual"] += 1
+                        else:
+                            state["range_data"] = None
+
+            # Try momentum entry on any tracked down-move
+            for sym in _universe:
+                state = _coin_state.get(sym)
+                if not state or state["phase"] != "TRACKING":
+                    continue
+                price = prices.get(sym, 0)
+                if price > 0:
+                    if await try_momentum_entry(session, sym, state, price, now_ts):
+                        break
+
+            # Try range entry if slot still free
+            if _active_pos is None and _paper_pos is None:
+                for sym in _universe:
+                    state = _coin_state.get(sym)
+                    if not state or not state.get("range_data"):
+                        continue
+                    price = prices.get(sym, 0)
+                    if price > 0:
+                        if await try_range_entry(session, sym, state, price, now_ts):
+                            break
+
+            # Boundary check (rotation / volume)
+            if now_ts >= _next_boundary_ts:
+                _next_boundary_ts += BOUNDARY_INTERVAL_SEC
+                # If still behind (clock drift), advance multiple
+                while _next_boundary_ts <= now_ts:
+                    _next_boundary_ts += BOUNDARY_INTERVAL_SEC
+
+                if _active_pos is not None or _paper_pos is not None:
+                    _diag["boundaries_blocked"] += 1
+                    log.info("BOUNDARY blocked — position open")
+                else:
+                    _diag["vol_cycles"] += 1
+                    entered = await try_volume_entry(session, now_ts)
+                    if not entered:
+                        _diag["rot_cycles"] += 1
+                        entered = await try_rotation_entry(session, now_ts)
+                    if not entered:
+                        log.info("BOUNDARY — no qualifying vol/rotation signal")
 
         except Exception as exc:
             log.warning("Sweeper error: %s", exc)
             _diag["sweep_fails"] += 1
 
-        await asyncio.sleep(PRICE_SWEEP_SEC)
+        await asyncio.sleep(PULSE_SEC)
 
 
 # =============================================================================
@@ -1071,177 +1229,90 @@ async def _latest_close(session, symbol):
         return None
 
 
-async def manage_live_position(session):
-    global _active_pos
-    if _active_pos is None:
-        return
-    pos = _active_pos
-    symbol = pos["symbol"]
+def _check_exit(pos, current_price, now_ts):
+    trade_type = pos.get("trade_type", "MOMENTUM")
+    elapsed = now_ts - pos["opened_at"]
 
-    live = await get_position(session, symbol)
-    if live is None or live["total"] <= 0:
-        log.info("Position %s vanished", symbol)
-        _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
-        _active_pos = None
-        return
+    if trade_type == "MOMENTUM":
+        return mm.check_momentum_exit(
+            pos["entry"], pos["extreme_since_entry"], current_price, elapsed)
+    elif trade_type == "RANGE":
+        return mm.check_range_exit(
+            pos["entry"], pos["direction"],
+            pos["range_high"], pos["range_low"], pos["range_mid"],
+            current_price, elapsed)
+    elif trade_type == "ROTATION":
+        return mm.check_fixed_cycle_exit(
+            pos["entry"], pos["direction"], current_price, elapsed,
+            mm.ROTATION_EXIT_HARD_STOP_PCT, mm.ROTATION_MAX_HOLD_SEC)
+    elif trade_type == "VOLUME":
+        return mm.check_fixed_cycle_exit(
+            pos["entry"], pos["direction"], current_price, elapsed,
+            mm.VOLUME_EXIT_HARD_STOP_PCT, mm.VOLUME_MAX_HOLD_SEC)
+    return {"should_exit": False, "exit_reason": "HOLD",
+            "gross_pnl": 0.0, "net_pnl": 0.0}
+
+
+async def _manage_position(session, pos, is_paper):
+    global _active_pos, _paper_pos
+    symbol = pos["symbol"]
+    trade_type = pos.get("trade_type", "MOMENTUM")
+
+    if not is_paper:
+        live = await get_position(session, symbol)
+        if live is None or live["total"] <= 0:
+            log.info("Position %s vanished", symbol)
+            _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
+            if is_paper:
+                _paper_pos = None
+            else:
+                _active_pos = None
+            return
 
     current = await _latest_close(session, symbol)
     if current is None or current <= 0:
         return
 
-    if current < pos["extreme_since_entry"]:
-        pos["extreme_since_entry"] = current
+    if trade_type == "MOMENTUM":
+        if current < pos.get("extreme_since_entry", current):
+            pos["extreme_since_entry"] = current
 
-    elapsed = time.time() - pos["opened_at"]
-    state = mm.compute_exit_signal(
-        pos["entry"], pos["extreme_since_entry"], current, elapsed,
-    )
+    state = _check_exit(pos, current, time.time())
     if not state["should_exit"]:
         return
 
     reason = state["exit_reason"]
-    if reason == "REVERSAL_CONFIRMED":
-        _diag["exits_reversal"] += 1
-    elif reason == "HARD_STOP":
-        _diag["exits_hard"] += 1
-    elif reason == "TIME_EXIT":
-        _diag["exits_time"] += 1
-
     log.info(
-        "EXIT | %s | %s | gross=%.2f%% net=%.2f%% | retrace=%.2f%% | "
-        "extreme=%.6f",
-        symbol, reason, state["gross_pnl"], state["net_pnl"],
-        state["retrace_from_low_pct"], pos["extreme_since_entry"],
+        "%s EXIT | %s %s | %s | gross=%.2f%% net=%.2f%%",
+        "PAPER" if is_paper else "LIVE",
+        symbol, pos["direction"], reason,
+        state["gross_pnl"], state["net_pnl"],
     )
 
-    closed = await close_live_position(session, pos, reason)
-    if closed:
-        _record_result(state["net_pnl"], reason)
+    # Update diag by type + reason
+    prefix = {"MOMENTUM": "mom", "RANGE": "range",
+              "ROTATION": "rot", "VOLUME": "vol"}[trade_type]
+    if reason == "REVERSAL_CONFIRMED":
+        _diag["mom_exit_rev"] += 1
+    elif reason == "HARD_STOP":
+        _diag[f"{prefix}_exit_hard"] = _diag.get(f"{prefix}_exit_hard", 0) + 1
+    elif reason == "TIME_EXIT":
+        _diag[f"{prefix}_exit_time"] = _diag.get(f"{prefix}_exit_time", 0) + 1
+    elif reason == "TARGET_MID":
+        _diag["range_exit_target"] += 1
+    elif reason in ("RANGE_BREAK_UP", "RANGE_BREAK_DOWN"):
+        _diag["range_exit_break"] += 1
+
+    if is_paper:
+        _record_result(trade_type, state["net_pnl"], reason)
         _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
-        _active_pos = None
-
-
-async def manage_paper_position(session):
-    global _paper_pos
-    if _paper_pos is None:
-        return
-    pos = _paper_pos
-    symbol = pos["symbol"]
-
-    current = await _latest_close(session, symbol)
-    if current is None or current <= 0:
-        return
-
-    if current < pos["extreme_since_entry"]:
-        pos["extreme_since_entry"] = current
-
-    elapsed = time.time() - pos["opened_at"]
-    state = mm.compute_exit_signal(
-        pos["entry"], pos["extreme_since_entry"], current, elapsed,
-    )
-    if not state["should_exit"]:
-        return
-
-    reason = state["exit_reason"]
-    if reason == "REVERSAL_CONFIRMED":
-        _diag["exits_reversal"] += 1
-    elif reason == "HARD_STOP":
-        _diag["exits_hard"] += 1
-    elif reason == "TIME_EXIT":
-        _diag["exits_time"] += 1
-
-    log.info(
-        "PAPER EXIT | %s | %s | gross=%.2f%% net=%.2f%% | retrace=%.2f%% | "
-        "extreme=%.6f",
-        symbol, reason, state["gross_pnl"], state["net_pnl"],
-        state["retrace_from_low_pct"], pos["extreme_since_entry"],
-    )
-    _record_result(state["net_pnl"], reason)
-    _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
-    _paper_pos = None
-
-
-# =============================================================================
-# REPORT
-# =============================================================================
-def _report():
-    now = time.time()
-    runtime = now - _learning_started_at
-    phase = "TRADING" if _trading_enabled else "LEARNING"
-
-    momentum = []
-    middle = []
-    noise = []
-    no_data = 0
-
-    for sym, st in _coin_state.items():
-        p = st.get("profile")
-        if not p or not p["events"]:
-            no_data += 1
-            continue
-        if p["verdict"] == "MOMENTUM":
-            momentum.append((sym, p))
-        elif p["verdict"] == "NOISE":
-            noise.append((sym, p))
-        else:
-            middle.append((sym, p))
-
-    momentum.sort(key=lambda x: -x[1]["median_asymmetry"])
-    noise.sort(key=lambda x: x[1]["median_asymmetry"])
-
-    log.info("========== MOMENTUM REPORT ==========")
-    log.info("Phase: %s | Runtime: %.1fh | Coins: %d | Total events: %d",
-             phase, runtime / 3600.0, len(_coin_state),
-             sum(len(s.get("profile", {}).get("events", []))
-                 for s in _coin_state.values()))
-    log.info("MOMENTUM: %d | MIDDLE: %d | NOISE: %d | NO_DATA: %d",
-             len(momentum), len(middle), len(noise), no_data)
-
-    if momentum:
-        log.info("--- MOMENTUM COINS (tradable) ---")
-        for sym, p in momentum[:15]:
-            last = p["events"][-1]
-            log.info(
-                "MOMENTUM | %s | n=%d | median_asym=%.2f | last: "
-                "move=%.2f%%@%.3f%%/m rev=%.2f%%@%.3f%%/m asym=%.2f",
-                sym, len(p["events"]), p["median_asymmetry"],
-                last["move_pct"], last["move_speed_pct_per_min"],
-                last["reversal_pct"], last["reversal_speed_pct_per_min"],
-                last["asymmetry"],
-            )
-
-    if noise:
-        log.info("--- NOISE COINS ---")
-        for sym, p in noise[:10]:
-            last = p["events"][-1]
-            log.info(
-                "NOISE | %s | n=%d | median_asym=%.2f | last asym=%.2f",
-                sym, len(p["events"]), p["median_asymmetry"], last["asymmetry"],
-            )
-
-    tracking = [(s, st) for s, st in _coin_state.items()
-                if st["phase"] == "TRACKING"]
-    if tracking:
-        log.info("--- TRACKING (in progress) ---")
-        for sym, st in tracking[:10]:
-            t = st["tracking"]
-            age = now - t["start_ts"]
-            log.info("TRACK | %s | dir=%s | move=%.2f%% | age=%.0fs",
-                     sym, t["direction"], t["move_pct"], age)
-
-    log.info("========== END REPORT ==========")
-
-
-async def report_loop():
-    global _last_report
-    while True:
-        try:
-            if time.time() - _last_report >= REPORT_INTERVAL_SEC:
-                _last_report = time.time()
-                _report()
-        except Exception as exc:
-            log.warning("Report error: %s", exc)
-        await asyncio.sleep(30.0)
+        _paper_pos = None
+    else:
+        closed = await close_live_position(session, pos, reason)
+        if closed:
+            _record_result(trade_type, state["net_pnl"], reason)
+            _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
+            _active_pos = None
 
 
 # =============================================================================
@@ -1270,21 +1341,38 @@ def _heartbeat():
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
         return
     _last_heartbeat = time.time()
-    tracking = sum(1 for s in _coin_state.values() if s["phase"] == "TRACKING")
-    measuring = sum(1 for s in _coin_state.values() if s["phase"] == "MEASURING")
-    tradable = sum(1 for s in _coin_state.values()
-                   if _profile_is_tradable(s.get("profile")))
+
+    phases = {"SCANNING": 0, "TRACKING": 0, "MEASURING": 0}
+    for s in _coin_state.values():
+        phases[s["phase"]] = phases.get(s["phase"], 0) + 1
+
+    tradable_mom = sum(1 for s in _coin_state.values()
+                       if _profile_is_tradable(s.get("profile")))
+    range_ready = sum(1 for s in _coin_state.values() if s.get("range_data"))
+
+    pos_info = "none"
+    if _active_pos:
+        pos_info = f"LIVE:{_active_pos['trade_type']}:{_active_pos['symbol']}"
+    elif _paper_pos:
+        pos_info = f"PAPER:{_paper_pos['trade_type']}:{_paper_pos['symbol']}"
+
+    streak_str = " ".join(
+        f"{t[0]}={_streak[t]['wins']}W/{_streak[t]['losses']}L{'*' if _streak[t]['live_activated'] else ''}"
+        for t in ("MOMENTUM", "RANGE", "ROTATION", "VOLUME")
+    )
+
     log.info(
-        "HEARTBEAT | phase=%s | coins=%d tracking=%d measuring=%d tradable=%d "
-        "| pos=%s | diag[qual=%d rej=%d evt=%d ent=%d "
-        "ex_rev=%d ex_hard=%d ex_time=%d] | streak W=%d L=%d tr=%d",
-        "TRADING" if _trading_enabled else "LEARNING",
-        len(_coin_state), tracking, measuring, tradable,
-        "open" if (_active_pos or _paper_pos) else "none",
-        _diag["qualified_moves"], _diag["interim_rejects"],
-        _diag["events_finalized"], _diag["trades_entered"],
-        _diag["exits_reversal"], _diag["exits_hard"], _diag["exits_time"],
-        _streak["wins"], _streak["losses"], _streak["trades"],
+        "HEARTBEAT | coins=%d scan=%d track=%d meas=%d | "
+        "mom_tradable=%d range_ready=%d | pos=%s | "
+        "diag[qual=%d evt=%d | range=%d | ent(M=%d R=%d Rot=%d V=%d)] | "
+        "streak %s",
+        len(_coin_state), phases.get("SCANNING", 0),
+        phases.get("TRACKING", 0), phases.get("MEASURING", 0),
+        tradable_mom, range_ready, pos_info,
+        _diag["mom_qualified"], _diag["mom_events"], _diag["range_qual"],
+        _diag["mom_entries"], _diag["range_entries"],
+        _diag["rot_entries"], _diag["vol_entries"],
+        streak_str,
     )
 
 
@@ -1302,19 +1390,25 @@ async def main():
     _load_streak()
 
     log.info(
-        "Startup | mode=%s | streak W=%d L=%d tr=%d | "
-        "qualify: >=%.1f%% in <%ds no >%.1f%% interim reversal | "
-        "asym>=%.1f | exit: %.1f%% retrace OR -%.1f%% hard OR %ds | "
-        "learn=%.0fs",
-        "LIVE" if _streak["live_activated"] else "PAPER",
-        _streak["wins"], _streak["losses"], _streak["trades"],
-        mm.MOVE_THRESHOLD_PCT, mm.MOVE_MAX_DURATION_SEC,
-        mm.MOVE_MAX_INTERIM_REVERSAL_PCT,
+        "Startup | 4 trade types | "
+        "MOMENTUM: 8%%+ move <%ds, max %.1f%% interim, asym>=%.1f | "
+        "RANGE: range>=%.1f%%, net<=%.1f%%, xovers>=%d | "
+        "ROTATION+VOLUME: every %ds at boundary | "
+        "streak req=%d wins per type",
+        mm.MOVE_MAX_DURATION_SEC, mm.MOVE_MAX_INTERIM_REVERSAL_PCT,
         mm.MIN_ASYMMETRY_RATIO,
-        mm.EXIT_REVERSAL_PCT, mm.EXIT_HARD_STOP_PCT, mm.EXIT_TIME_CAP_SEC,
-        LEARNING_PHASE_SEC,
+        mm.RANGE_MIN_RANGE_PCT, mm.RANGE_MAX_NET_DISPLACEMENT_PCT,
+        mm.RANGE_MIN_CROSSOVERS_1H,
+        BOUNDARY_INTERVAL_SEC,
+        PAPER_WINS_REQUIRED,
     )
-    log.info("Fresh learning phase — no profiles loaded. Starting from zero.")
+    log.info(
+        "Streaks: MOM=%d/%d RANGE=%d/%d ROT=%d/%d VOL=%d/%d",
+        _streak["MOMENTUM"]["wins"], _streak["MOMENTUM"]["losses"],
+        _streak["RANGE"]["wins"], _streak["RANGE"]["losses"],
+        _streak["ROTATION"]["wins"], _streak["ROTATION"]["losses"],
+        _streak["VOLUME"]["wins"], _streak["VOLUME"]["losses"],
+    )
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=30)
@@ -1331,7 +1425,6 @@ async def main():
         asyncio.create_task(contracts_refresh_loop(session))
         asyncio.create_task(universe_refresh_loop(session))
         asyncio.create_task(price_sweeper_loop(session))
-        asyncio.create_task(report_loop())
 
         log.info("Main loop started | universe=%d", len(_universe))
 
@@ -1339,9 +1432,9 @@ async def main():
             loop_start = time.time()
             try:
                 if _active_pos is not None:
-                    await manage_live_position(session)
+                    await _manage_position(session, _active_pos, is_paper=False)
                 elif _paper_pos is not None:
-                    await manage_paper_position(session)
+                    await _manage_position(session, _paper_pos, is_paper=True)
             except Exception as exc:
                 log.error("Loop error: %s", exc, exc_info=True)
 
