@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-bot.py — Momentum Learning Engine | Bitget UTA V3 | Render Free Tier.
+bot.py — Clean-Move Momentum Engine | Bitget UTA V3 | Render Free Tier.
 
-v2026.11.20
-  Phase 1 (first 2h): OBSERVE every coin spike, measure reversal quietness.
-  Phase 2 (after):    TRADE only coins with proven asymmetry >= 4:1.
-  Exit: momentum death or symmetric reversal. No stop loss. No profit target.
-  Report: copy-pasteable profile summary every 15 min.
+v2026.11.21
+  No velocity math. Pure price movement.
+  Qualify: 8%+ move in <30 min with no >2% interim reversal.
+  Learn: measure reversal speed, compute asymmetry.
+  Trade: only on coins with prior 4:1+ asymmetry event.
+  Exit: 2% retrace from low, -3% hard stop, 30 min cap.
 """
 
 import asyncio
@@ -18,7 +19,6 @@ import logging
 import os
 import threading
 import time
-from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, Optional
 
@@ -31,8 +31,7 @@ PORT = 10000
 PRODUCT_TYPE = "USDT-FUTURES"
 LEVERAGE = 5
 PULSE_SEC = 4.0
-VELOCITY_SWEEP_SEC = 10.0
-VELOCITY_HISTORY_KEEP_SEC = 600.0
+PRICE_SWEEP_SEC = 4.0
 
 UNIVERSE_REFRESH_SEC = 300
 CONTRACTS_REFRESH_SEC = 900
@@ -41,13 +40,14 @@ UNIVERSE_MIN_VOL_USD = 1_000_000.0
 LEARNING_PHASE_SEC = 7200.0
 REPORT_INTERVAL_SEC = 900.0
 HEARTBEAT_SEC = 60.0
-SYMBOL_COOLDOWN_SEC = 120.0
+SYMBOL_COOLDOWN_SEC = 300.0
+MAX_EVENTS_PER_HOUR = 3
+STUCK_TRACKING_SEC = 3600.0
+
 PAPER_WINS_REQUIRED = 8
-
 STREAK_FILE = "streak.json"
-PROFILES_FILE = "momentum_profiles.json"
 
-_EXPECTED_MM_VERSION = "2026.11.20"
+_EXPECTED_MM_VERSION = "2026.11.21"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -110,9 +110,9 @@ def _start_keepalive() -> None:
 
 
 # =============================================================================
-# BITGET API CLIENT
+# BITGET API
 # =============================================================================
-def _sign(timestamp: str, method: str, request_path: str, body: str) -> str:
+def _sign(timestamp, method, request_path, body):
     msg = timestamp + method.upper() + request_path + body
     digest = hmac.new(
         SECRET_KEY.encode("utf-8"),
@@ -144,8 +144,7 @@ async def _request(session, method, path, *, query=None, body=None,
         url = API_BASE + path_with_q
         try:
             async with session.request(
-                method, url,
-                headers=headers,
+                method, url, headers=headers,
                 data=body_str if body_str else None,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
@@ -162,24 +161,20 @@ async def _request(session, method, path, *, query=None, body=None,
                     continue
                 return data
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            log.warning("Net err [%s %s]: %s", method, path, exc)
             await asyncio.sleep((2 ** attempt) + 1)
-
     return {"code": "RETRY_EXHAUSTED", "msg": "max retries"}
 
 
 async def _get_public_json(session, url, timeout=10.0):
     try:
         async with session.get(
-            url,
-            headers={"User-Agent": "momentum-bot/1.0"},
+            url, headers={"User-Agent": "momentum-bot/1.0"},
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
-    except Exception as exc:
-        log.debug("Public fetch fail %s: %s", url, exc)
+    except Exception:
         return None
 
 
@@ -190,14 +185,10 @@ _contracts: Dict[str, dict] = {}
 _universe = []
 _last_universe_exchange_count = 0
 
-# Learning state
-_coin_profiles: Dict[str, dict] = {}
-_price_history: Dict[str, list] = {}
-_active_spikes: Dict[str, dict] = {}
+_coin_state: Dict[str, dict] = {}
 _learning_started_at = time.time()
 _trading_enabled = False
 
-# Trading state
 _active_pos = None
 _paper_pos = None
 _cooldown_until: Dict[str, float] = {}
@@ -207,16 +198,17 @@ _last_heartbeat = 0.0
 _last_report = 0.0
 
 _diag = {
-    "spikes_detected": 0,
-    "spikes_finalized": 0,
     "sweep_fails": 0,
-    "tradable_skips_book": 0,
-    "tradable_skips_spread": 0,
-    "entries": 0,
-    "exit_momentum_dead": 0,
-    "exit_symmetric": 0,
-    "exit_hard": 0,
-    "exit_time": 0,
+    "qualified_moves": 0,
+    "interim_rejects": 0,
+    "events_finalized": 0,
+    "trades_entered": 0,
+    "exits_reversal": 0,
+    "exits_hard": 0,
+    "exits_time": 0,
+    "skips_no_profile": 0,
+    "skips_book": 0,
+    "skips_spread": 0,
 }
 
 
@@ -226,16 +218,13 @@ _diag = {
 def _extract_positions(d):
     payload = d.get("data")
     if isinstance(payload, dict):
-        return (payload.get("list")
-                or payload.get("rows")
-                or payload.get("positions")
-                or [])
+        return payload.get("list") or []
     if isinstance(payload, list):
         return payload
     return []
 
 
-def _env_int_or_none(name: str) -> Optional[int]:
+def _env_int_or_none(name):
     v = os.getenv(name)
     if v is None or v.strip() == "":
         return None
@@ -245,16 +234,13 @@ def _env_int_or_none(name: str) -> Optional[int]:
         return None
 
 
-def _env_bool_or_none(name: str) -> Optional[bool]:
+def _env_bool_or_none(name):
     v = os.getenv(name)
     if v is None or v.strip() == "":
         return None
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
-# =============================================================================
-# STREAK / PROFILES PERSISTENCE
-# =============================================================================
 def _load_streak():
     try:
         with open(STREAK_FILE, "r") as f:
@@ -265,26 +251,14 @@ def _load_streak():
         _streak["trades"] = int(d.get("trades", 0))
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
         pass
-    v = _env_int_or_none("STREAK_WINS")
-    if v is not None:
-        _streak["wins"] = v
-    v = _env_int_or_none("STREAK_LOSSES")
-    if v is not None:
-        _streak["losses"] = v
-    v = _env_int_or_none("STREAK_TRADES")
-    if v is not None:
-        _streak["trades"] = v
-    v = _env_bool_or_none("STREAK_LIVE")
-    if v is not None:
-        _streak["live_activated"] = v
 
 
 def _save_streak():
     try:
         with open(STREAK_FILE, "w") as f:
             json.dump(_streak, f)
-    except OSError as exc:
-        log.error("Streak save failed: %s", exc)
+    except OSError:
+        pass
 
 
 def _record_result(net_pnl, exit_reason):
@@ -306,164 +280,211 @@ def _record_result(net_pnl, exit_reason):
     )
 
 
-def _load_profiles():
-    global _coin_profiles, _learning_started_at
-    try:
-        with open(PROFILES_FILE, "r") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            _coin_profiles = data.get("coins", {}) or {}
-            _learning_started_at = float(data.get("learning_started_at",
-                                                   time.time()))
-            log.info("Loaded %d coin profiles from %s (learning started %.0fs ago)",
-                     len(_coin_profiles), PROFILES_FILE,
-                     time.time() - _learning_started_at)
-    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
-        _coin_profiles = {}
-        _learning_started_at = time.time()
-
-
-def _save_profiles():
-    tmp = PROFILES_FILE + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump({
-                "learning_started_at": _learning_started_at,
-                "last_updated": time.time(),
-                "coins": _coin_profiles,
-            }, f, indent=2)
-        os.replace(tmp, PROFILES_FILE)
-    except OSError as exc:
-        log.error("Profiles save failed: %s", exc)
-
-
 # =============================================================================
-# SPIKE WINDOW TRACKING
+# COIN STATE
 # =============================================================================
-def _new_spike_window(price, vel, ts):
-    return {
-        "start_ts": ts,
-        "start_price": price,
-        "peak_velocity": vel["velocity_multiple"],
-        "peak_price": price,
-        "peak_ts": ts,
-        "peak_baseline": vel["baseline_pct_per_min"],
-        "max_reversal_velocity": 0.0,
-        "max_reversal_price": 0.0,
-        "settled_streak": 0,
-        "last_update_ts": ts,
-    }
+def _get_state(symbol):
+    if symbol not in _coin_state:
+        _coin_state[symbol] = {
+            "price_history": [],
+            "phase": "SCANNING",     # SCANNING | TRACKING | MEASURING
+            "tracking": None,
+            "measuring": None,
+            "profile": {
+                "events": [],
+                "median_asymmetry": 0.0,
+                "verdict": "NO_DATA",
+                "recent_event_ts": [],
+            },
+        }
+    return _coin_state[symbol]
 
 
-def _update_spike_window(window, price, vel, ts):
-    if vel["reason"] != "OK":
-        return window
-
-    # New peak?
-    if vel["direction"] < 0 and vel["velocity_multiple"] > window["peak_velocity"]:
-        window["peak_velocity"] = vel["velocity_multiple"]
-        window["peak_price"] = price
-        window["peak_ts"] = ts
-        window["peak_baseline"] = vel["baseline_pct_per_min"]
-        window["settled_streak"] = 0
-    # Reversal phase?
-    elif vel["direction"] > 0 and vel["velocity_multiple"] > window["max_reversal_velocity"]:
-        window["max_reversal_velocity"] = vel["velocity_multiple"]
-        window["max_reversal_price"] = price
-        # Reset settle streak since price is moving again
-        window["settled_streak"] = 0
-    # Settled?
-    elif vel["velocity_multiple"] < mm.SPIKE_SETTLED_RATIO:
-        window["settled_streak"] += 1
-    else:
-        window["settled_streak"] = 0
-
-    window["last_update_ts"] = ts
-    return window
-
-
-def _should_finalize(window, ts):
-    # Hard timeout
-    if ts - window["start_ts"] >= mm.SPIKE_WINDOW_SEC:
-        return True
-    # Settled (velocity back below 2x for N consecutive checks, min 60s after peak)
-    if (ts - window["peak_ts"] >= mm.SPIKE_MIN_SETTLE_AFTER_PEAK_SEC
-            and window["settled_streak"] >= mm.SPIKE_SETTLED_CONSECUTIVE):
-        return True
-    return False
-
-
-def _finalize_spike(symbol):
-    window = _active_spikes.pop(symbol, None)
-    if not window:
-        return
-
-    if window["peak_velocity"] < mm.SPIKE_VELOCITY_THRESHOLD:
-        return
-
-    reversal_vel = window["max_reversal_velocity"]
-    if reversal_vel <= 0.01:
-        reversal_vel = 0.01
-
-    asymmetry = window["peak_velocity"] / reversal_vel
-
-    giveback_pct = 0.0
-    if window["max_reversal_price"] > 0 and window["peak_price"] > 0:
-        giveback_pct = (
-            (window["max_reversal_price"] - window["peak_price"])
-            / window["peak_price"] * 100.0
-        )
-
-    event = {
-        "ts_utc": time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(window["start_ts"])),
-        "peak_velocity_multiple": round(window["peak_velocity"], 2),
-        "peak_baseline_pct_per_min": round(window["peak_baseline"], 3),
-        "peak_price": window["peak_price"],
-        "spike_duration_sec": int(window["peak_ts"] - window["start_ts"]),
-        "reversal_velocity_multiple": round(reversal_vel, 2),
-        "reversal_giveback_pct": round(giveback_pct, 2),
-        "reversal_duration_sec": int(
-            window["last_update_ts"] - window["peak_ts"]),
-        "asymmetry": round(asymmetry, 2),
-        "verdict": mm.verdict_for(asymmetry),
-    }
-
-    profile = _coin_profiles.setdefault(symbol, {
-        "events": [], "median_asymmetry": 0.0, "verdict": "NO_DATA",
-    })
-    profile["events"].append(event)
-
-    asyms = sorted(e["asymmetry"] for e in profile["events"])
-    n = len(asyms)
-    if n % 2 == 1:
-        median = asyms[n // 2]
-    else:
-        median = (asyms[n // 2 - 1] + asyms[n // 2]) / 2.0
-    profile["median_asymmetry"] = round(median, 2)
-    profile["verdict"] = mm.verdict_for(median)
-
-    _diag["spikes_finalized"] += 1
-
-    log.info(
-        "SPIKE_DONE | %s | peak_vel=%.1fx | rev_vel=%.1fx | asym=%.2f "
-        "| verdict=%s | events=%d",
-        symbol, window["peak_velocity"], reversal_vel, asymmetry,
-        event["verdict"], len(profile["events"]),
-    )
-
-
-def _is_tradable(symbol):
-    if not _trading_enabled:
-        return False
-    profile = _coin_profiles.get(symbol)
+def _profile_is_tradable(profile):
     if not profile:
         return False
     if profile["verdict"] != "MOMENTUM":
         return False
-    if len(profile["events"]) < 1:
+    if not profile["events"]:
         return False
     return True
+
+
+def _events_within_hour(profile, now_ts):
+    recent = [t for t in profile.get("recent_event_ts", [])
+              if now_ts - t < 3600]
+    return len(recent)
+
+
+def _add_event(profile, event, now_ts):
+    profile["events"].append(event)
+    profile.setdefault("recent_event_ts", []).append(now_ts)
+    profile["recent_event_ts"] = [
+        t for t in profile["recent_event_ts"] if now_ts - t < 3600
+    ]
+    asyms = sorted(e["asymmetry"] for e in profile["events"]
+                   if e["asymmetry"] > 0)
+    if not asyms:
+        profile["median_asymmetry"] = 0.0
+    else:
+        n = len(asyms)
+        median = asyms[n // 2] if n % 2 else (asyms[n // 2 - 1] + asyms[n // 2]) / 2.0
+        profile["median_asymmetry"] = round(median, 2)
+    profile["verdict"] = mm.classify_asymmetry(profile["median_asymmetry"])
+
+
+# =============================================================================
+# STATE MACHINE — called every sweep
+# =============================================================================
+def _advance_state(symbol, state, current_price, now_ts):
+    history = state["price_history"]
+    history.append((now_ts, current_price))
+    cutoff = now_ts - mm.PRICE_WINDOW_SEC
+    state["price_history"] = [(t, p) for t, p in history if t >= cutoff]
+
+    if state["phase"] == "SCANNING":
+        _advance_scanning(symbol, state, current_price, now_ts)
+    elif state["phase"] == "TRACKING":
+        _advance_tracking(symbol, state, current_price, now_ts)
+    elif state["phase"] == "MEASURING":
+        _advance_measuring(symbol, state, now_ts)
+
+
+def _advance_scanning(symbol, state, current_price, now_ts):
+    move = mm.find_qualifying_move(state["price_history"], now_ts)
+    if not move["qualified"]:
+        if move["reason"].startswith("INTERIM_REVERSAL"):
+            _diag["interim_rejects"] += 1
+        return
+
+    _diag["qualified_moves"] += 1
+    log.info(
+        "MOVE_QUALIFIED | %s | dir=%s | pct=%.2f%% | dur=%ds | "
+        "speed=%.3f%%/min | start=%.6f peak=%.6f",
+        symbol, move["direction"], move["move_pct"],
+        move["move_duration_sec"], move["move_speed_pct_per_min"],
+        move["start_price"], move["peak_price"],
+    )
+
+    state["phase"] = "TRACKING"
+    state["tracking"] = {
+        "direction": move["direction"],
+        "start_price": move["start_price"],
+        "start_ts": move["start_ts"],
+        "peak_price": move["peak_price"],
+        "peak_ts": move["peak_ts"],
+        "move_pct": move["move_pct"],
+        "move_duration_sec": move["move_duration_sec"],
+        "move_speed_pct_per_min": move["move_speed_pct_per_min"],
+        "reversal_start_ts": 0,
+    }
+
+
+def _advance_tracking(symbol, state, current_price, now_ts):
+    tracking = state["tracking"]
+    if tracking is None:
+        state["phase"] = "SCANNING"
+        return
+
+    direction = tracking["direction"]
+
+    if direction == "down" and current_price < tracking["peak_price"]:
+        tracking["peak_price"] = current_price
+        tracking["peak_ts"] = now_ts
+        tracking["reversal_start_ts"] = 0
+    elif direction == "up" and current_price > tracking["peak_price"]:
+        tracking["peak_price"] = current_price
+        tracking["peak_ts"] = now_ts
+        tracking["reversal_start_ts"] = 0
+
+    retrace, started, new_ts = mm.check_reversal_started(
+        direction, tracking["peak_price"], current_price,
+        tracking["reversal_start_ts"], now_ts,
+    )
+    tracking["reversal_start_ts"] = new_ts
+
+    if started:
+        log.info(
+            "MOVE_PEAKED | %s | dir=%s | peak=%.6f | retrace=%.2f%% | "
+            "final_pct=%.2f%%",
+            symbol, direction, tracking["peak_price"],
+            retrace, tracking["move_pct"],
+        )
+        state["phase"] = "MEASURING"
+        state["measuring"] = {
+            "direction": direction,
+            "start_price": tracking["start_price"],
+            "start_ts": tracking["start_ts"],
+            "peak_price": tracking["peak_price"],
+            "peak_ts": tracking["peak_ts"],
+            "move_pct": (tracking["start_price"] - tracking["peak_price"])
+                        / tracking["start_price"] * 100.0
+                        if direction == "down"
+                        else (tracking["peak_price"] - tracking["start_price"])
+                             / tracking["start_price"] * 100.0,
+            "move_duration_sec": tracking["peak_ts"] - tracking["start_ts"],
+            "move_speed_pct_per_min": 0.0,
+        }
+        m = state["measuring"]
+        if m["move_duration_sec"] > 0:
+            m["move_speed_pct_per_min"] = m["move_pct"] / (m["move_duration_sec"] / 60.0)
+        state["tracking"] = None
+        return
+
+    if now_ts - tracking["start_ts"] > STUCK_TRACKING_SEC:
+        log.warning("STUCK_TRACKING | %s | clearing", symbol)
+        state["tracking"] = None
+        state["phase"] = "SCANNING"
+
+
+def _advance_measuring(symbol, state, now_ts):
+    measuring = state["measuring"]
+    if measuring is None:
+        state["phase"] = "SCANNING"
+        return
+
+    reversal = mm.measure_reversal(
+        state["price_history"], measuring["direction"],
+        measuring["peak_ts"], measuring["peak_price"], now_ts,
+    )
+    if not reversal["complete"]:
+        return
+
+    asym = mm.compute_asymmetry(
+        measuring["move_speed_pct_per_min"],
+        reversal["reversal_speed_pct_per_min"],
+    )
+    verdict = mm.classify_asymmetry(asym)
+
+    event = {
+        "ts_utc": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(measuring["start_ts"])),
+        "direction": measuring["direction"],
+        "move_pct": round(measuring["move_pct"], 2),
+        "move_duration_sec": measuring["move_duration_sec"],
+        "move_speed_pct_per_min": round(measuring["move_speed_pct_per_min"], 4),
+        "reversal_pct": round(reversal["reversal_pct"], 2),
+        "reversal_duration_sec": reversal["reversal_duration_sec"],
+        "reversal_speed_pct_per_min": round(reversal["reversal_speed_pct_per_min"], 4),
+        "asymmetry": round(asym, 2),
+        "verdict": verdict,
+    }
+
+    profile = state["profile"]
+    _add_event(profile, event, now_ts)
+    _diag["events_finalized"] += 1
+
+    log.info(
+        "EVENT_DONE | %s | dir=%s | move=%.2f%%@%.3f%%/m | "
+        "rev=%.2f%%@%.3f%%/m | asym=%.2f | verdict=%s | median=%.2f | n=%d",
+        symbol, measuring["direction"], measuring["move_pct"],
+        measuring["move_speed_pct_per_min"], reversal["reversal_pct"],
+        reversal["reversal_speed_pct_per_min"], asym, verdict,
+        profile["median_asymmetry"], len(profile["events"]),
+    )
+
+    state["measuring"] = None
+    state["phase"] = "SCANNING"
 
 
 # =============================================================================
@@ -473,8 +494,7 @@ async def enforce_one_way(session):
     settings = await _request(session, "GET", "/api/v3/account/settings")
     if settings.get("code") == "00000":
         data = settings.get("data") or {}
-        current = data.get("holdMode") if isinstance(data, dict) else None
-        if current == "one_way_mode":
+        if isinstance(data, dict) and data.get("holdMode") == "one_way_mode":
             log.info("Account already in one-way mode.")
             return
     res = await _request(
@@ -515,12 +535,23 @@ async def refresh_contracts(session):
     log.info("Contracts cached: %d", len(_contracts))
 
 
+def _norm(sym):
+    s = (sym or "").upper().replace("-", "").replace("_", "").replace("/", "")
+    if s.startswith("XBT"):
+        s = "BTC" + s[3:]
+    if s.endswith("USDTM"):
+        s = s[:-1]
+    if s.endswith("SWAP"):
+        s = s[:-4]
+    if s.endswith("PERP"):
+        s = s[:-4]
+    return s
+
+
 async def _prices_bitget(session):
     out = {}
     d = await _get_public_json(
-        session,
-        API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
-    )
+        session, API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}")
     if not isinstance(d, dict) or d.get("code") != "00000":
         return out
     for t in d.get("data", []) or []:
@@ -538,9 +569,7 @@ async def _prices_bitget(session):
 async def _vol_bitget(session):
     out = {}
     d = await _get_public_json(
-        session,
-        API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}",
-    )
+        session, API_BASE + f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}")
     if not isinstance(d, dict) or d.get("code") != "00000":
         return out
     for t in d.get("data", []) or []:
@@ -551,19 +580,6 @@ async def _vol_bitget(session):
             except (TypeError, ValueError):
                 pass
     return out
-
-
-def _norm(sym):
-    s = (sym or "").upper().replace("-", "").replace("_", "").replace("/", "")
-    if s.startswith("XBT"):
-        s = "BTC" + s[3:]
-    if s.endswith("USDTM"):
-        s = s[:-1]
-    if s.endswith("SWAP"):
-        s = s[:-4]
-    if s.endswith("PERP"):
-        s = s[:-4]
-    return s
 
 
 async def _vol_binance(session):
@@ -584,8 +600,7 @@ async def _vol_binance(session):
 async def _vol_bybit(session):
     out = {}
     d = await _get_public_json(
-        session, "https://api.bybit.com/v5/market/tickers?category=linear",
-    )
+        session, "https://api.bybit.com/v5/market/tickers?category=linear")
     if not isinstance(d, dict) or d.get("retCode") != 0:
         return out
     for t in d.get("result", {}).get("list", []) or []:
@@ -601,8 +616,7 @@ async def _vol_bybit(session):
 async def _vol_okx(session):
     out = {}
     d = await _get_public_json(
-        session, "https://www.okx.com/api/v5/market/tickers?instType=SWAP",
-    )
+        session, "https://www.okx.com/api/v5/market/tickers?instType=SWAP")
     if not isinstance(d, dict) or d.get("code") != "0":
         return out
     for t in d.get("data", []) or []:
@@ -621,8 +635,7 @@ async def _vol_okx(session):
 async def _vol_gate(session):
     out = {}
     d = await _get_public_json(
-        session, "https://api.gateio.ws/api/v4/futures/usdt/tickers",
-    )
+        session, "https://api.gateio.ws/api/v4/futures/usdt/tickers")
     if not isinstance(d, list):
         return out
     for t in d:
@@ -638,8 +651,7 @@ async def _vol_gate(session):
 async def _vol_kucoin(session):
     out = {}
     d = await _get_public_json(
-        session, "https://api-futures.kucoin.com/api/v1/contracts/active",
-    )
+        session, "https://api-futures.kucoin.com/api/v1/contracts/active")
     if not isinstance(d, dict) or d.get("code") != "200000":
         return out
     for t in d.get("data", []) or []:
@@ -655,8 +667,7 @@ async def _vol_kucoin(session):
 async def _vol_mexc(session):
     out = {}
     d = await _get_public_json(
-        session, "https://contract.mexc.com/api/v1/contract/ticker",
-    )
+        session, "https://contract.mexc.com/api/v1/contract/ticker")
     if not isinstance(d, dict) or not d.get("success"):
         return out
     for t in d.get("data", []) or []:
@@ -672,8 +683,8 @@ async def _vol_mexc(session):
 async def _vol_htx(session):
     out = {}
     d = await _get_public_json(
-        session, "https://api.hbdm.com/linear-swap-ex/market/tickers?business_type=swap",
-    )
+        session,
+        "https://api.hbdm.com/linear-swap-ex/market/tickers?business_type=swap")
     if not isinstance(d, dict) or d.get("status") != "ok":
         return out
     for t in d.get("data", []) or []:
@@ -726,12 +737,13 @@ async def refresh_universe(session):
     _universe.clear()
     _universe.extend(filtered)
     _last_universe_exchange_count = ok
-    log.info("Universe: %d symbols (>= $%.1fM, %d/8 exchanges) "
-             "| excluded: %d stock, %d low-vol",
-             len(_universe), UNIVERSE_MIN_VOL_USD / 1e6, ok,
-             excluded_stock, excluded_vol)
+    log.info("Universe: %d symbols | excluded: %d stock, %d low-vol",
+             len(_universe), excluded_stock, excluded_vol)
 
 
+# =============================================================================
+# MARKET DATA / POSITION
+# =============================================================================
 async def fetch_depth(session, symbol):
     d = await _request(
         session, "GET", "/api/v2/mix/market/merge-depth",
@@ -752,8 +764,7 @@ async def fetch_depth(session, symbol):
         return None
     if best_bid <= 0 or best_ask <= 0:
         return None
-    mid = (best_bid + best_ask) / 2.0
-    return bids, asks, mid
+    return bids, asks, (best_bid + best_ask) / 2.0
 
 
 async def get_usdt_balance(session):
@@ -833,13 +844,9 @@ async def adopt_orphan_positions(session):
         except (TypeError, ValueError):
             entry = 0.0
         _active_pos = {
-            "symbol": sym, "direction": "SHORT", "entry": entry,
+            "symbol": sym, "entry": entry,
             "opened_at": time.time(),
-            "peak_price": entry, "peak_net": -999.0,
-            "peak_gross": -999.0,
-            "price_history": [(time.time(), entry)],
-            "momentum_dead_streak": 0,
-            "reversal_streak": 0,
+            "extreme_since_entry": entry,
             "paper": False, "adopted": True,
         }
         log.warning("ADOPTED orphan | %s | entry=%.6f", sym, entry)
@@ -907,58 +914,61 @@ async def close_live_position(session, pos, reason):
 
 
 # =============================================================================
-# ENTRY
+# TRADE ENTRY
 # =============================================================================
-async def try_enter_momentum(session, symbol, entry_price, vel):
+async def try_enter_momentum(session, symbol, state, current_price, now_ts):
     global _active_pos, _paper_pos
 
     if time.time() < _cooldown_until.get(symbol, 0):
         return False
+    if _active_pos is not None or _paper_pos is not None:
+        return False
+    if not _trading_enabled:
+        return False
+
+    profile = state.get("profile")
+    if not _profile_is_tradable(profile):
+        _diag["skips_no_profile"] += 1
+        return False
+    if _events_within_hour(profile, now_ts) >= MAX_EVENTS_PER_HOUR:
+        return False
 
     depth = await fetch_depth(session, symbol)
     if depth is None:
-        _diag["tradable_skips_book"] += 1
+        _diag["skips_book"] += 1
         return False
     bids, asks, mid = depth
 
     book = mm.evaluate_book(bids, asks, mid)
     if not book["is_valid"]:
-        _diag["tradable_skips_book"] += 1
-        log.info("SKIP book | %s | %s ratio=%.2f d_bid=%.0f",
-                 symbol, book["reason"], book["depth_ratio"], book["d_bid"])
+        _diag["skips_book"] += 1
         return False
 
     spread = mm.evaluate_spread(bids, asks)
     if not spread["is_ok"]:
-        _diag["tradable_skips_spread"] += 1
+        _diag["skips_spread"] += 1
         return False
 
-    profile = _coin_profiles.get(symbol, {})
-    asym = profile.get("median_asymmetry", 0.0)
+    tracking = state["tracking"]
+    asym = profile["median_asymmetry"]
 
     log.info(
-        "MOMENTUM ENTRY | %s | vel=%.1fx | baseline=%.2f%%/m | asym=%.2f "
-        "| peak_v=%.1fx | price=%.6f",
-        symbol, vel["velocity_multiple"], vel["baseline_pct_per_min"],
-        asym, profile.get("events", [{}])[-1].get("peak_velocity_multiple", 0.0),
-        entry_price,
+        "MOMENTUM ENTRY | %s | dir=%s | asym=%.2f | move=%.2f%% | "
+        "price=%.6f",
+        symbol, tracking["direction"], asym, tracking["move_pct"],
+        current_price,
     )
 
     if not _streak["live_activated"]:
-        _diag["entries"] += 1
+        _diag["trades_entered"] += 1
         _paper_pos = {
-            "symbol": symbol, "direction": "SHORT",
-            "entry": entry_price,
+            "symbol": symbol, "entry": current_price,
             "opened_at": time.time(),
-            "peak_price": entry_price,
-            "peak_net": -999.0, "peak_gross": -999.0,
-            "price_history": [(time.time(), entry_price)],
-            "momentum_dead_streak": 0,
-            "reversal_streak": 0,
-            "paper": True,
+            "extreme_since_entry": current_price,
+            "is_panic": True, "paper": True,
         }
         log.info("PAPER OPEN | %s SHORT @ %.6f | W=%d/%d",
-                 symbol, entry_price, _streak["wins"], PAPER_WINS_REQUIRED)
+                 symbol, current_price, _streak["wins"], PAPER_WINS_REQUIRED)
         return True
 
     contract = _contracts.get(symbol)
@@ -966,7 +976,7 @@ async def try_enter_momentum(session, symbol, entry_price, vel):
         return False
     balance = await get_usdt_balance(session)
     qty_str = mm.calculate_order_qty(
-        balance=balance, price=entry_price, leverage=LEVERAGE,
+        balance=balance, price=current_price, leverage=LEVERAGE,
         volume_place=contract["volumePlace"],
         min_order_volume=contract["minOrderVolume"],
         min_notional=contract["minNotional"],
@@ -979,118 +989,68 @@ async def try_enter_momentum(session, symbol, entry_price, vel):
     if not oid:
         return False
 
-    _diag["entries"] += 1
+    _diag["trades_entered"] += 1
     _active_pos = {
-        "symbol": symbol, "direction": "SHORT",
-        "entry": entry_price,
+        "symbol": symbol, "entry": current_price,
         "opened_at": time.time(),
-        "peak_price": entry_price,
-        "peak_net": -999.0, "peak_gross": -999.0,
-        "price_history": [(time.time(), entry_price)],
-        "momentum_dead_streak": 0,
-        "reversal_streak": 0,
-        "paper": False, "order_id": oid,
+        "extreme_since_entry": current_price,
+        "is_panic": True, "paper": False, "order_id": oid,
     }
     log.info("LIVE OPEN | %s SHORT @ %.6f | qty=%s",
-             symbol, entry_price, qty_str)
+             symbol, current_price, qty_str)
     return True
 
 
 # =============================================================================
-# VELOCITY SWEEPER — THE CORE LOOP
+# PRICE SWEEPER — THE CORE LOOP
 # =============================================================================
-async def velocity_sweeper_loop(session):
-    global _trading_enabled, _learning_started_at
+async def price_sweeper_loop(session):
+    global _trading_enabled
 
     while True:
         try:
-            ts = time.time()
+            now_ts = time.time()
 
-            # Enable trading after learning phase
-            if not _trading_enabled:
-                if ts - _learning_started_at >= LEARNING_PHASE_SEC:
-                    _trading_enabled = True
-                    log.info(
-                        "*** LEARNING COMPLETE — TRADING ENABLED *** "
-                        "(%d coin profiles, %d spike events)",
-                        len(_coin_profiles),
-                        sum(len(p.get("events", []))
-                            for p in _coin_profiles.values()),
-                    )
+            if not _trading_enabled and (now_ts - _learning_started_at) >= LEARNING_PHASE_SEC:
+                _trading_enabled = True
+                tradable = sum(1 for s in _coin_state.values()
+                               if _profile_is_tradable(s.get("profile")))
+                log.info(
+                    "*** LEARNING COMPLETE — TRADING ENABLED *** "
+                    "(%d profiles, %d tradable)",
+                    len(_coin_state), tradable,
+                )
 
             prices = await _prices_bitget(session)
             if not prices:
                 _diag["sweep_fails"] += 1
-                await asyncio.sleep(VELOCITY_SWEEP_SEC)
+                await asyncio.sleep(PRICE_SWEEP_SEC)
                 continue
 
-            cutoff = ts - VELOCITY_HISTORY_KEEP_SEC
-
-            # Update price histories
             for sym, price in prices.items():
-                if sym not in _price_history:
-                    _price_history[sym] = []
-                _price_history[sym].append((ts, price))
-                _price_history[sym] = [
-                    (t, p) for t, p in _price_history[sym] if t >= cutoff
-                ]
-
-            # Compute velocity + detect spikes
-            for sym in list(_price_history.keys()):
-                history = _price_history[sym]
-                if len(history) < mm.MIN_SAMPLES_FOR_VELOCITY:
+                if sym not in _contracts:
                     continue
+                if _contracts[sym].get("is_stock"):
+                    continue
+                state = _get_state(sym)
+                _advance_state(sym, state, price, now_ts)
 
-                vel = mm.compute_ticker_velocity(history, ts)
-                current_price = history[-1][1]
-
-                if mm.is_spike(vel):
-                    if sym not in _active_spikes:
-                        _active_spikes[sym] = _new_spike_window(
-                            current_price, vel, ts
-                        )
-                        _diag["spikes_detected"] += 1
-                        log.info(
-                            "SPIKE_START | %s | vel=%.1fx | baseline=%.2f%%/m "
-                            "| price=%.6f",
-                            sym, vel["velocity_multiple"],
-                            vel["baseline_pct_per_min"], current_price,
-                        )
-                    else:
-                        _active_spikes[sym] = _update_spike_window(
-                            _active_spikes[sym], current_price, vel, ts
-                        )
-
-                    # Try to enter (if tradable and no position)
-                    if (_is_tradable(sym)
-                            and _active_pos is None
-                            and _paper_pos is None):
-                        await try_enter_momentum(
-                            session, sym, current_price, vel
-                        )
-                elif sym in _active_spikes:
-                    _active_spikes[sym] = _update_spike_window(
-                        _active_spikes[sym], current_price, vel, ts
-                    )
-
-            # Finalize expired/settled spikes
-            for sym in list(_active_spikes.keys()):
-                if _should_finalize(_active_spikes[sym], ts):
-                    _finalize_spike(sym)
-
-            # Persist periodically
-            if int(ts) % 60 < VELOCITY_SWEEP_SEC:
-                _save_profiles()
+                if (state["phase"] == "TRACKING"
+                        and _trading_enabled
+                        and _profile_is_tradable(state.get("profile"))
+                        and _active_pos is None
+                        and _paper_pos is None):
+                    await try_enter_momentum(session, sym, state, price, now_ts)
 
         except Exception as exc:
             log.warning("Sweeper error: %s", exc)
             _diag["sweep_fails"] += 1
 
-        await asyncio.sleep(VELOCITY_SWEEP_SEC)
+        await asyncio.sleep(PRICE_SWEEP_SEC)
 
 
 # =============================================================================
-# POSITION MANAGEMENT — VELOCITY-BASED EXIT
+# POSITION MANAGEMENT
 # =============================================================================
 async def _latest_close(session, symbol):
     d = await _request(
@@ -1111,57 +1071,6 @@ async def _latest_close(session, symbol):
         return None
 
 
-def _update_position_and_check_exit(pos, current_price, ts):
-    entry = pos["entry"]
-    pos["price_history"].append((ts, current_price))
-    cutoff = ts - mm.VELOCITY_HISTORY_SEC
-    pos["price_history"] = [
-        (t, p) for t, p in pos["price_history"] if t >= cutoff
-    ]
-
-    if current_price < pos["peak_price"]:
-        pos["peak_price"] = current_price
-
-    gross = (entry - current_price) / entry * 100.0
-    net = gross - mm.FEE_ROUND_TRIP_PCT
-    if net > pos["peak_net"]:
-        pos["peak_net"] = net
-    if gross > pos["peak_gross"]:
-        pos["peak_gross"] = gross
-
-    elapsed = ts - pos["opened_at"]
-
-    # Hard safety
-    if net <= -mm.HARD_STOP_PCT:
-        return "HARD_STOP", net
-
-    # Time cap
-    if elapsed >= mm.MAX_HOLD_SEC:
-        return "TIME_EXIT", net
-
-    # Velocity checks (only after min hold)
-    if elapsed >= mm.MIN_HOLD_FOR_EXIT_CHECK_SEC:
-        vel = mm.compute_ticker_velocity(pos["price_history"], ts)
-
-        # Momentum death
-        if mm.check_momentum_death(vel):
-            pos["momentum_dead_streak"] += 1
-            if pos["momentum_dead_streak"] >= mm.MOMENTUM_DEATH_CONSECUTIVE:
-                return "MOMENTUM_DEAD", net
-        else:
-            pos["momentum_dead_streak"] = 0
-
-        # Symmetric reversal
-        if mm.check_symmetric_reversal(vel):
-            pos["reversal_streak"] += 1
-            if pos["reversal_streak"] >= mm.SYMMETRIC_REVERSAL_CONSECUTIVE:
-                return "SYMMETRIC_REVERSAL", net
-        else:
-            pos["reversal_streak"] = 0
-
-    return None, net
-
-
 async def manage_live_position(session):
     global _active_pos
     if _active_pos is None:
@@ -1180,26 +1089,34 @@ async def manage_live_position(session):
     if current is None or current <= 0:
         return
 
-    reason, net = _update_position_and_check_exit(pos, current, time.time())
-    if not reason:
+    if current < pos["extreme_since_entry"]:
+        pos["extreme_since_entry"] = current
+
+    elapsed = time.time() - pos["opened_at"]
+    state = mm.compute_exit_signal(
+        pos["entry"], pos["extreme_since_entry"], current, elapsed,
+    )
+    if not state["should_exit"]:
         return
 
-    log.info(
-        "EXIT SIGNAL | %s | %s | net=%.2f%% | peak_net=%.2f%%",
-        symbol, reason, net, pos["peak_net"],
-    )
-    if reason == "MOMENTUM_DEAD":
-        _diag["exit_momentum_dead"] += 1
-    elif reason == "SYMMETRIC_REVERSAL":
-        _diag["exit_symmetric"] += 1
+    reason = state["exit_reason"]
+    if reason == "REVERSAL_CONFIRMED":
+        _diag["exits_reversal"] += 1
     elif reason == "HARD_STOP":
-        _diag["exit_hard"] += 1
+        _diag["exits_hard"] += 1
     elif reason == "TIME_EXIT":
-        _diag["exit_time"] += 1
+        _diag["exits_time"] += 1
+
+    log.info(
+        "EXIT | %s | %s | gross=%.2f%% net=%.2f%% | retrace=%.2f%% | "
+        "extreme=%.6f",
+        symbol, reason, state["gross_pnl"], state["net_pnl"],
+        state["retrace_from_low_pct"], pos["extreme_since_entry"],
+    )
 
     closed = await close_live_position(session, pos, reason)
     if closed:
-        _record_result(net, reason)
+        _record_result(state["net_pnl"], reason)
         _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
         _active_pos = None
 
@@ -1215,102 +1132,102 @@ async def manage_paper_position(session):
     if current is None or current <= 0:
         return
 
-    reason, net = _update_position_and_check_exit(pos, current, time.time())
-    if not reason:
+    if current < pos["extreme_since_entry"]:
+        pos["extreme_since_entry"] = current
+
+    elapsed = time.time() - pos["opened_at"]
+    state = mm.compute_exit_signal(
+        pos["entry"], pos["extreme_since_entry"], current, elapsed,
+    )
+    if not state["should_exit"]:
         return
 
-    log.info(
-        "PAPER EXIT | %s | %s | gross=%.2f%% net=%.2f%% peak_net=%.2f%%",
-        symbol, reason, pos["peak_gross"], net, pos["peak_net"],
-    )
-    if reason == "MOMENTUM_DEAD":
-        _diag["exit_momentum_dead"] += 1
-    elif reason == "SYMMETRIC_REVERSAL":
-        _diag["exit_symmetric"] += 1
+    reason = state["exit_reason"]
+    if reason == "REVERSAL_CONFIRMED":
+        _diag["exits_reversal"] += 1
     elif reason == "HARD_STOP":
-        _diag["exit_hard"] += 1
+        _diag["exits_hard"] += 1
     elif reason == "TIME_EXIT":
-        _diag["exit_time"] += 1
+        _diag["exits_time"] += 1
 
-    _record_result(net, reason)
+    log.info(
+        "PAPER EXIT | %s | %s | gross=%.2f%% net=%.2f%% | retrace=%.2f%% | "
+        "extreme=%.6f",
+        symbol, reason, state["gross_pnl"], state["net_pnl"],
+        state["retrace_from_low_pct"], pos["extreme_since_entry"],
+    )
+    _record_result(state["net_pnl"], reason)
     _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
     _paper_pos = None
 
 
 # =============================================================================
-# REPORT LOOP — COPY-PASTEABLE
+# REPORT
 # =============================================================================
-def _report_profiles():
+def _report():
     now = time.time()
     runtime = now - _learning_started_at
-    phase = "LEARNING" if not _trading_enabled else "TRADING"
+    phase = "TRADING" if _trading_enabled else "LEARNING"
 
-    momentum_coins = []
-    noise_coins = []
-    middle_coins = []
+    momentum = []
+    middle = []
+    noise = []
     no_data = 0
 
-    for sym, profile in _coin_profiles.items():
-        verdict = profile.get("verdict", "NO_DATA")
-        events = profile.get("events", [])
-        if not events:
+    for sym, st in _coin_state.items():
+        p = st.get("profile")
+        if not p or not p["events"]:
             no_data += 1
             continue
-        if verdict == "MOMENTUM":
-            momentum_coins.append((sym, profile))
-        elif verdict == "NOISE":
-            noise_coins.append((sym, profile))
+        if p["verdict"] == "MOMENTUM":
+            momentum.append((sym, p))
+        elif p["verdict"] == "NOISE":
+            noise.append((sym, p))
         else:
-            middle_coins.append((sym, profile))
+            middle.append((sym, p))
 
-    momentum_coins.sort(key=lambda x: -x[1]["median_asymmetry"])
-    noise_coins.sort(key=lambda x: x[1]["median_asymmetry"])
+    momentum.sort(key=lambda x: -x[1]["median_asymmetry"])
+    noise.sort(key=lambda x: x[1]["median_asymmetry"])
 
-    total_events = sum(len(p.get("events", []))
-                       for p in _coin_profiles.values())
-
-    log.info("========== MOMENTUM LEARNING REPORT ==========")
-    log.info("Phase: %s | Runtime: %.1fh | Events: %d | Coins: %d",
-             phase, runtime / 3600.0, total_events, len(_coin_profiles))
+    log.info("========== MOMENTUM REPORT ==========")
+    log.info("Phase: %s | Runtime: %.1fh | Coins: %d | Total events: %d",
+             phase, runtime / 3600.0, len(_coin_state),
+             sum(len(s.get("profile", {}).get("events", []))
+                 for s in _coin_state.values()))
     log.info("MOMENTUM: %d | MIDDLE: %d | NOISE: %d | NO_DATA: %d",
-             len(momentum_coins), len(middle_coins),
-             len(noise_coins), no_data)
+             len(momentum), len(middle), len(noise), no_data)
 
-    if momentum_coins:
+    if momentum:
         log.info("--- MOMENTUM COINS (tradable) ---")
-        for sym, prof in momentum_coins[:15]:
-            last = prof["events"][-1]
+        for sym, p in momentum[:15]:
+            last = p["events"][-1]
             log.info(
-                "MOMENTUM | %s | n=%d | asym=%.2f | peak_v=%.1fx "
-                "| rev_v=%.1fx | baseline=%.2f%%/m | giveback=%.1f%% "
-                "| spike_dur=%ds",
-                sym, len(prof["events"]), prof["median_asymmetry"],
-                last["peak_velocity_multiple"],
-                last["reversal_velocity_multiple"],
-                last["peak_baseline_pct_per_min"],
-                last["reversal_giveback_pct"],
-                last["spike_duration_sec"],
+                "MOMENTUM | %s | n=%d | median_asym=%.2f | last: "
+                "move=%.2f%%@%.3f%%/m rev=%.2f%%@%.3f%%/m asym=%.2f",
+                sym, len(p["events"]), p["median_asymmetry"],
+                last["move_pct"], last["move_speed_pct_per_min"],
+                last["reversal_pct"], last["reversal_speed_pct_per_min"],
+                last["asymmetry"],
             )
 
-    if noise_coins:
-        log.info("--- NOISE COINS (do not trade) ---")
-        for sym, prof in noise_coins[:10]:
-            last = prof["events"][-1]
+    if noise:
+        log.info("--- NOISE COINS ---")
+        for sym, p in noise[:10]:
+            last = p["events"][-1]
             log.info(
-                "NOISE | %s | n=%d | asym=%.2f | peak_v=%.1fx | rev_v=%.1fx",
-                sym, len(prof["events"]), prof["median_asymmetry"],
-                last["peak_velocity_multiple"],
-                last["reversal_velocity_multiple"],
+                "NOISE | %s | n=%d | median_asym=%.2f | last asym=%.2f",
+                sym, len(p["events"]), p["median_asymmetry"], last["asymmetry"],
             )
 
-    if _active_spikes:
-        log.info("--- WATCHING (spike in progress) ---")
-        for sym, w in list(_active_spikes.items())[:10]:
-            age = time.time() - w["start_ts"]
-            log.info(
-                "WATCH | %s | peak_v=%.1fx | rev_v=%.1fx | age=%.0fs",
-                sym, w["peak_velocity"], w["max_reversal_velocity"], age,
-            )
+    tracking = [(s, st) for s, st in _coin_state.items()
+                if st["phase"] == "TRACKING"]
+    if tracking:
+        log.info("--- TRACKING (in progress) ---")
+        for sym, st in tracking[:10]:
+            t = st["tracking"]
+            age = now - t["start_ts"]
+            log.info("TRACK | %s | dir=%s | move=%.2f%% | age=%.0fs",
+                     sym, t["direction"], t["move_pct"], age)
 
     log.info("========== END REPORT ==========")
 
@@ -1321,7 +1238,7 @@ async def report_loop():
         try:
             if time.time() - _last_report >= REPORT_INTERVAL_SEC:
                 _last_report = time.time()
-                _report_profiles()
+                _report()
         except Exception as exc:
             log.warning("Report error: %s", exc)
         await asyncio.sleep(30.0)
@@ -1336,7 +1253,7 @@ async def contracts_refresh_loop(session):
         try:
             await refresh_contracts(session)
         except Exception as exc:
-            log.warning("Contract refresh error: %s", exc)
+            log.warning("Contract refresh: %s", exc)
 
 
 async def universe_refresh_loop(session):
@@ -1344,7 +1261,7 @@ async def universe_refresh_loop(session):
         try:
             await refresh_universe(session)
         except Exception as exc:
-            log.warning("Universe refresh error: %s", exc)
+            log.warning("Universe refresh: %s", exc)
         await asyncio.sleep(UNIVERSE_REFRESH_SEC)
 
 
@@ -1353,21 +1270,20 @@ def _heartbeat():
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
         return
     _last_heartbeat = time.time()
-    total_events = sum(len(p.get("events", []))
-                       for p in _coin_profiles.values())
+    tracking = sum(1 for s in _coin_state.values() if s["phase"] == "TRACKING")
+    measuring = sum(1 for s in _coin_state.values() if s["phase"] == "MEASURING")
+    tradable = sum(1 for s in _coin_state.values()
+                   if _profile_is_tradable(s.get("profile")))
     log.info(
-        "HEARTBEAT | phase=%s | uni=%d profiles=%d events=%d watching=%d "
-        "| pos=%s | diag[det=%d fin=%d book=%d spr=%d ent=%d "
-        "dead=%d sym=%d hard=%d time=%d] | streak W=%d L=%d tr=%d",
+        "HEARTBEAT | phase=%s | coins=%d tracking=%d measuring=%d tradable=%d "
+        "| pos=%s | diag[qual=%d rej=%d evt=%d ent=%d "
+        "ex_rev=%d ex_hard=%d ex_time=%d] | streak W=%d L=%d tr=%d",
         "TRADING" if _trading_enabled else "LEARNING",
-        len(_universe), len(_coin_profiles), total_events,
-        len(_active_spikes),
+        len(_coin_state), tracking, measuring, tradable,
         "open" if (_active_pos or _paper_pos) else "none",
-        _diag["spikes_detected"], _diag["spikes_finalized"],
-        _diag["tradable_skips_book"], _diag["tradable_skips_spread"],
-        _diag["entries"],
-        _diag["exit_momentum_dead"], _diag["exit_symmetric"],
-        _diag["exit_hard"], _diag["exit_time"],
+        _diag["qualified_moves"], _diag["interim_rejects"],
+        _diag["events_finalized"], _diag["trades_entered"],
+        _diag["exits_reversal"], _diag["exits_hard"], _diag["exits_time"],
         _streak["wins"], _streak["losses"], _streak["trades"],
     )
 
@@ -1379,27 +1295,26 @@ async def main():
     _start_keepalive()
 
     if getattr(mm, "__version__", "UNKNOWN") != _EXPECTED_MM_VERSION:
-        log.critical(
-            "market_math.py version mismatch: expected %s, got %s.",
-            _EXPECTED_MM_VERSION, getattr(mm, "__version__", "UNKNOWN"),
-        )
+        log.critical("Version mismatch: expected %s got %s",
+                     _EXPECTED_MM_VERSION, getattr(mm, "__version__", "?"))
         raise SystemExit(1)
 
     _load_streak()
-    _load_profiles()
 
     log.info(
-        "Startup | mode=%s | streak W=%d L=%d trades=%d | "
-        "spike>=%.1fx | asym>=%.2f | learn=%.0fh | "
-        "exit: dead<%.1fx*%d OR rev>%.1fx*%d OR hard<=-%.1f%% OR time>%.0fs",
+        "Startup | mode=%s | streak W=%d L=%d tr=%d | "
+        "qualify: >=%.1f%% in <%ds no >%.1f%% interim reversal | "
+        "asym>=%.1f | exit: %.1f%% retrace OR -%.1f%% hard OR %ds | "
+        "learn=%.0fs",
         "LIVE" if _streak["live_activated"] else "PAPER",
         _streak["wins"], _streak["losses"], _streak["trades"],
-        mm.SPIKE_VELOCITY_THRESHOLD, mm.MIN_ASYMMETRY_RATIO,
-        LEARNING_PHASE_SEC / 3600.0,
-        mm.MOMENTUM_DEATH_RATIO, mm.MOMENTUM_DEATH_CONSECUTIVE,
-        mm.SYMMETRIC_REVERSAL_MULTIPLE, mm.SYMMETRIC_REVERSAL_CONSECUTIVE,
-        mm.HARD_STOP_PCT, mm.MAX_HOLD_SEC,
+        mm.MOVE_THRESHOLD_PCT, mm.MOVE_MAX_DURATION_SEC,
+        mm.MOVE_MAX_INTERIM_REVERSAL_PCT,
+        mm.MIN_ASYMMETRY_RATIO,
+        mm.EXIT_REVERSAL_PCT, mm.EXIT_HARD_STOP_PCT, mm.EXIT_TIME_CAP_SEC,
+        LEARNING_PHASE_SEC,
     )
+    log.info("Fresh learning phase — no profiles loaded. Starting from zero.")
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=30)
@@ -1415,7 +1330,7 @@ async def main():
 
         asyncio.create_task(contracts_refresh_loop(session))
         asyncio.create_task(universe_refresh_loop(session))
-        asyncio.create_task(velocity_sweeper_loop(session))
+        asyncio.create_task(price_sweeper_loop(session))
         asyncio.create_task(report_loop())
 
         log.info("Main loop started | universe=%d", len(_universe))
