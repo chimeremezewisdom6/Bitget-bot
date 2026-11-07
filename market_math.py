@@ -1,41 +1,52 @@
 """
 market_math.py
 ==============
-Price-movement based momentum engine. No velocity math.
+Multi-strategy momentum engine.
 
-v2026.11.21
-  Qualify: 8%+ move, <30 min, no >2% interim reversal.
-  Measure: reversal speed from peak.
-  Trade: only if coin has prior 4:1+ asymmetry event.
-  Exit: 2% retrace from peak, or -3% hard stop, or 30 min.
+v2026.11.22 — Four trade types:
+  MOMENTUM  : 8%+ clean move in <30 min, proven 4:1+ asymmetry, SHORT only
+  RANGE     : 24h range >=6%, net displacement <=10%, entry at edges
+  ROTATION  : every 30 min, pick best momentum-persistence coin
+  VOLUME    : every 30 min, best dump%/volume (SHORT) vs pump%/volume (LONG)
 """
 
+import math
 import time
 
-__version__ = "2026.11.21"
+__version__ = "2026.11.22"
 
 FEE_ROUND_TRIP_PCT = 0.22
 
-# ---- Qualifying move ----
+# ---- Momentum ----
 MOVE_THRESHOLD_PCT = 8.0
-MOVE_MAX_DURATION_SEC = 1800            # 30 min
+MOVE_MAX_DURATION_SEC = 1800
 MOVE_MAX_INTERIM_REVERSAL_PCT = 2.0
-PRICE_WINDOW_SEC = 1800                 # 30 min rolling window
-
-# ---- Reversal measurement ----
+PRICE_WINDOW_SEC = 1800
 REVERSAL_START_RETRACE_PCT = 1.0
 REVERSAL_START_CONFIRM_SEC = 60
-REVERSAL_MEASURE_MAX_SEC = 1800         # measure up to 30 min after peak
-REVERSAL_STABILITY_SEC = 300            # or 5 min stable
-
-# ---- Asymmetry thresholds ----
+REVERSAL_MEASURE_MAX_SEC = 1800
+REVERSAL_STABILITY_SEC = 300
 MIN_ASYMMETRY_RATIO = 4.0
 NOISE_ASYMMETRY_MAX = 1.5
+MOMENTUM_EXIT_REVERSAL_PCT = 2.0
+MOMENTUM_EXIT_HARD_STOP_PCT = 3.0
+MOMENTUM_MAX_HOLD_SEC = 1800.0
 
-# ---- Exit ----
-EXIT_REVERSAL_PCT = 2.0
-EXIT_HARD_STOP_PCT = 3.0
-EXIT_TIME_CAP_SEC = 1800
+# ---- Range ----
+RANGE_MIN_RANGE_PCT = 6.0
+RANGE_MAX_NET_DISPLACEMENT_PCT = 10.0
+RANGE_MIN_CROSSOVERS_1H = 2
+RANGE_ENTRY_BUFFER_PCT = 1.0
+RANGE_BREAK_BUFFER_PCT = 1.0
+RANGE_MAX_HOLD_SEC = 3600.0
+
+# ---- Rotation / Volume ----
+ROTATION_MIN_HISTORY_SEC = 900
+ROTATION_EXIT_HARD_STOP_PCT = 3.0
+ROTATION_MAX_HOLD_SEC = 1800.0
+
+VOLUME_EXIT_HARD_STOP_PCT = 3.0
+VOLUME_MAX_HOLD_SEC = 1800.0
 
 # ---- Book ----
 DEPTH_BAND_PCT = 0.01
@@ -51,17 +62,10 @@ def _f(x, default=0.0):
         return default
 
 
+# =========================================================================
+# MOMENTUM
+# =========================================================================
 def find_qualifying_move(price_window, now_ts):
-    """
-    Scan rolling window for a clean 8%+ move in <30 min.
-
-    Returns dict:
-      qualified: bool
-      reason: OK or NO_MOVE/TOO_SLOW/INTERIM_REVERSAL/DATA
-      direction: 'down' or 'up' or None
-      start_price, start_ts, peak_price, peak_ts
-      move_pct, move_duration_sec, move_speed_pct_per_min
-    """
     result = {
         "qualified": False, "reason": "DATA", "direction": None,
         "start_price": 0.0, "start_ts": 0,
@@ -77,7 +81,6 @@ def find_qualifying_move(price_window, now_ts):
         return result
 
     current_ts, current_price = window[-1]
-
     max_price, max_ts = max(window, key=lambda x: x[1])
     min_price, min_ts = min(window, key=lambda x: x[1])
 
@@ -106,7 +109,6 @@ def find_qualifying_move(price_window, now_ts):
         result["reason"] = "ZERO_DURATION"
         return result
 
-    # Cleanliness: any retrace >2% from running extreme disqualifies the move
     move_slice = [(t, p) for t, p in window if start_ts <= t <= current_ts]
     if not move_slice:
         result["reason"] = "NO_SLICE"
@@ -120,7 +122,7 @@ def find_qualifying_move(price_window, now_ts):
             else:
                 retrace = (p - running_low) / running_low * 100.0
                 if retrace > MOVE_MAX_INTERIM_REVERSAL_PCT:
-                    result["reason"] = f"INTERIM_REVERSAL_{retrace:.2f}"
+                    result["reason"] = f"INTERIM_{retrace:.2f}"
                     return result
     else:
         running_high = start_price
@@ -130,7 +132,7 @@ def find_qualifying_move(price_window, now_ts):
             else:
                 retrace = (running_high - p) / running_high * 100.0
                 if retrace > MOVE_MAX_INTERIM_REVERSAL_PCT:
-                    result["reason"] = f"INTERIM_REVERSAL_{retrace:.2f}"
+                    result["reason"] = f"INTERIM_{retrace:.2f}"
                     return result
 
     result["qualified"] = True
@@ -148,18 +150,12 @@ def find_qualifying_move(price_window, now_ts):
 
 def check_reversal_started(direction, peak_price, current_price,
                            reversal_start_ts, now_ts):
-    """
-    Detect if reversal has begun from peak.
-    Returns (retrace_pct, is_reversal_started, new_reversal_start_ts).
-    """
     if peak_price <= 0 or current_price <= 0:
         return 0.0, False, 0
-
     if direction == "down":
         retrace = (current_price - peak_price) / peak_price * 100.0
     else:
         retrace = (peak_price - current_price) / peak_price * 100.0
-
     if retrace >= REVERSAL_START_RETRACE_PCT:
         if reversal_start_ts == 0:
             return retrace, False, now_ts
@@ -170,9 +166,6 @@ def check_reversal_started(direction, peak_price, current_price,
 
 
 def measure_reversal(price_window, direction, peak_ts, peak_price, now_ts):
-    """
-    Measure reversal strength from peak. Returns complete flag + metrics.
-    """
     result = {
         "complete": False, "reason": "MEASURING",
         "reversal_end_price": 0.0, "reversal_end_ts": 0,
@@ -221,7 +214,6 @@ def compute_asymmetry(move_speed_pct_per_min, reversal_speed_pct_per_min):
     if move_speed_pct_per_min <= 0:
         return 0.0
     if reversal_speed_pct_per_min <= 0:
-        # No reversal yet measured — return high but capped
         return 20.0
     return move_speed_pct_per_min / reversal_speed_pct_per_min
 
@@ -234,16 +226,144 @@ def classify_asymmetry(asym):
     return "MIDDLE"
 
 
-def compute_exit_signal(entry_price, extreme_low_since_entry, current_price,
+# =========================================================================
+# RANGE
+# =========================================================================
+def evaluate_range_coin(range_pct, net_pct, crossovers_1h):
+    result = {
+        "is_range": False, "reason": "INVALID",
+        "range_pct": range_pct, "net_pct": net_pct,
+        "crossovers_1h": crossovers_1h,
+    }
+    if range_pct <= 0:
+        return result
+    if range_pct < RANGE_MIN_RANGE_PCT:
+        result["reason"] = "RANGE_TOO_SMALL"
+        return result
+    if abs(net_pct) > RANGE_MAX_NET_DISPLACEMENT_PCT:
+        result["reason"] = "DISPLACED"
+        return result
+    if crossovers_1h < RANGE_MIN_CROSSOVERS_1H:
+        result["reason"] = "LOW_OSCILLATION"
+        return result
+    result["is_range"] = True
+    result["reason"] = "OK"
+    return result
+
+
+def evaluate_range_entry(current_price, range_low, range_high):
+    result = {
+        "should_enter": False, "side": None, "reason": "WAIT",
+        "pct_from_high": 0.0, "pct_from_low": 0.0, "range_mid": 0.0,
+    }
+    if range_high <= 0 or range_low <= 0 or current_price <= 0:
+        return result
+    if range_high <= range_low:
+        return result
+
+    range_mid = (range_high + range_low) / 2.0
+    result["range_mid"] = range_mid
+
+    pct_from_high = (range_high - current_price) / range_high * 100.0
+    pct_from_low = (current_price - range_low) / range_low * 100.0
+    result["pct_from_high"] = round(pct_from_high, 2)
+    result["pct_from_low"] = round(pct_from_low, 2)
+
+    if pct_from_high <= RANGE_ENTRY_BUFFER_PCT:
+        result["should_enter"] = True
+        result["side"] = "SHORT"
+        result["reason"] = "NEAR_HIGH"
+        return result
+    if pct_from_low <= RANGE_ENTRY_BUFFER_PCT:
+        result["should_enter"] = True
+        result["side"] = "LONG"
+        result["reason"] = "NEAR_LOW"
+        return result
+    result["reason"] = "MIDDLE"
+    return result
+
+
+# =========================================================================
+# ROTATION
+# =========================================================================
+def compute_rotation_score(price_history, now_ts):
+    result = {
+        "score": 0.0, "direction": None,
+        "change_15m_pct": 0.0, "change_5m_pct": 0.0,
+    }
+    if not price_history:
+        return result
+
+    cutoff_15m = now_ts - 900
+    prices_15m = [(t, p) for t, p in price_history if t >= cutoff_15m and p > 0]
+    if len(prices_15m) < 4:
+        return result
+
+    oldest_15m = prices_15m[0][1]
+    newest = prices_15m[-1][1]
+    if oldest_15m <= 0:
+        return result
+    change_15m_pct = (newest - oldest_15m) / oldest_15m * 100.0
+    result["change_15m_pct"] = change_15m_pct
+
+    cutoff_5m = now_ts - 300
+    prices_5m = [(t, p) for t, p in prices_15m if t >= cutoff_5m]
+    if len(prices_5m) < 2:
+        return result
+    oldest_5m = prices_5m[0][1]
+    if oldest_5m <= 0:
+        return result
+    change_5m_pct = (newest - oldest_5m) / oldest_5m * 100.0
+    result["change_5m_pct"] = change_5m_pct
+
+    if change_15m_pct * change_5m_pct > 0:
+        consistency = 1.0
+    else:
+        consistency = 0.5
+
+    score = abs(change_15m_pct) * abs(change_5m_pct) * consistency
+    result["score"] = score
+    result["direction"] = "LONG" if change_15m_pct > 0 else "SHORT"
+    return result
+
+
+# =========================================================================
+# VOLUME
+# =========================================================================
+def compute_volume_scores(current_price, high_24h, low_24h, volume_24h_usd):
+    result = {
+        "short_score": 0.0, "long_score": 0.0,
+        "dump_pct": 0.0, "pump_pct": 0.0,
+    }
+    if (current_price <= 0 or high_24h <= 0 or low_24h <= 0
+            or volume_24h_usd <= 0):
+        return result
+    if high_24h < low_24h:
+        return result
+
+    dump_pct = (high_24h - current_price) / high_24h * 100.0
+    pump_pct = (current_price - low_24h) / low_24h * 100.0
+    result["dump_pct"] = dump_pct
+    result["pump_pct"] = pump_pct
+
+    vol_m = volume_24h_usd / 1_000_000.0
+    denom = max(1.0, math.log10(vol_m + 1.0))
+
+    if dump_pct > 0:
+        result["short_score"] = dump_pct / denom
+    if pump_pct > 0:
+        result["long_score"] = pump_pct / denom
+    return result
+
+
+# =========================================================================
+# EXIT LOGIC PER TYPE
+# =========================================================================
+def check_momentum_exit(entry_price, extreme_since_entry, current_price,
                         elapsed_sec):
-    """
-    Short-trade exit. extreme_low_since_entry = best profit point since entry.
-    Works for both down-cascade ride and up-pump fade (both are short).
-    """
     result = {
         "should_exit": False, "exit_reason": "HOLD",
-        "gross_pnl": 0.0, "net_pnl": 0.0,
-        "retrace_from_low_pct": 0.0,
+        "gross_pnl": 0.0, "net_pnl": 0.0, "retrace_from_extreme_pct": 0.0,
     }
     if entry_price <= 0 or current_price <= 0:
         return result
@@ -253,27 +373,101 @@ def compute_exit_signal(entry_price, extreme_low_since_entry, current_price,
     result["gross_pnl"] = gross
     result["net_pnl"] = net
 
-    if net <= -EXIT_HARD_STOP_PCT:
+    if net <= -MOMENTUM_EXIT_HARD_STOP_PCT:
         result["should_exit"] = True
         result["exit_reason"] = "HARD_STOP"
         return result
-
-    if elapsed_sec >= EXIT_TIME_CAP_SEC:
+    if elapsed_sec >= MOMENTUM_MAX_HOLD_SEC:
         result["should_exit"] = True
         result["exit_reason"] = "TIME_EXIT"
         return result
-
-    if extreme_low_since_entry > 0:
-        retrace = (current_price - extreme_low_since_entry) / extreme_low_since_entry * 100.0
-        result["retrace_from_low_pct"] = retrace
-        if retrace >= EXIT_REVERSAL_PCT:
+    if extreme_since_entry > 0:
+        retrace = (current_price - extreme_since_entry) / extreme_since_entry * 100.0
+        result["retrace_from_extreme_pct"] = retrace
+        if retrace >= MOMENTUM_EXIT_REVERSAL_PCT:
             result["should_exit"] = True
             result["exit_reason"] = "REVERSAL_CONFIRMED"
             return result
-
     return result
 
 
+def check_range_exit(entry_price, side, range_high, range_low, range_mid,
+                     current_price, elapsed_sec):
+    result = {
+        "should_exit": False, "exit_reason": "HOLD",
+        "gross_pnl": 0.0, "net_pnl": 0.0,
+    }
+    if entry_price <= 0 or current_price <= 0:
+        return result
+
+    if side == "SHORT":
+        gross = (entry_price - current_price) / entry_price * 100.0
+    else:
+        gross = (current_price - entry_price) / entry_price * 100.0
+
+    net = gross - FEE_ROUND_TRIP_PCT
+    result["gross_pnl"] = gross
+    result["net_pnl"] = net
+
+    if (side == "SHORT"
+            and current_price > range_high * (1.0 + RANGE_BREAK_BUFFER_PCT / 100.0)):
+        result["should_exit"] = True
+        result["exit_reason"] = "RANGE_BREAK_UP"
+        return result
+    if (side == "LONG"
+            and current_price < range_low * (1.0 - RANGE_BREAK_BUFFER_PCT / 100.0)):
+        result["should_exit"] = True
+        result["exit_reason"] = "RANGE_BREAK_DOWN"
+        return result
+
+    if side == "SHORT" and current_price <= range_mid:
+        result["should_exit"] = True
+        result["exit_reason"] = "TARGET_MID"
+        return result
+    if side == "LONG" and current_price >= range_mid:
+        result["should_exit"] = True
+        result["exit_reason"] = "TARGET_MID"
+        return result
+
+    if elapsed_sec >= RANGE_MAX_HOLD_SEC:
+        result["should_exit"] = True
+        result["exit_reason"] = "TIME_EXIT"
+        return result
+    return result
+
+
+def check_fixed_cycle_exit(entry_price, side, current_price, elapsed_sec,
+                           hard_stop_pct, max_hold_sec):
+    result = {
+        "should_exit": False, "exit_reason": "HOLD",
+        "gross_pnl": 0.0, "net_pnl": 0.0,
+    }
+    if entry_price <= 0 or current_price <= 0:
+        return result
+
+    if side == "SHORT":
+        gross = (entry_price - current_price) / entry_price * 100.0
+    else:
+        gross = (current_price - entry_price) / entry_price * 100.0
+
+    net = gross - FEE_ROUND_TRIP_PCT
+    result["gross_pnl"] = gross
+    result["net_pnl"] = net
+
+    if net <= -hard_stop_pct:
+        result["should_exit"] = True
+        result["exit_reason"] = "HARD_STOP"
+        return result
+    if elapsed_sec >= max_hold_sec:
+        result["should_exit"] = True
+        result["exit_reason"] = "TIME_EXIT"
+        return result
+    return result
+
+
+# =========================================================================
+# BOOK / SPREAD / SIZING
+# =========================================================================
 def evaluate_book(bids, asks, mid_price):
     result = {"is_valid": False, "reason": "INVALID",
               "depth_ratio": 0.0, "d_bid": 0.0, "d_ask": 0.0}
@@ -293,8 +487,7 @@ def evaluate_book(bids, asks, mid_price):
             d_ask += pf * _f(q)
     result["d_bid"] = d_bid
     result["d_ask"] = d_ask
-    ratio = (d_ask / d_bid) if d_bid > 0 else 0.0
-    result["depth_ratio"] = ratio
+    result["depth_ratio"] = (d_ask / d_bid) if d_bid > 0 else 0.0
     if d_bid < MIN_SIDE_DEPTH_USD:
         result["reason"] = "THIN_BID"
         return result
