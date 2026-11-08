@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 bot.py — PREDICT strategy | Bitget UTA V3 | Render Free Tier.
-v2026.12.10
+v2026.12.14
 """
 import asyncio
 import base64
@@ -40,11 +40,12 @@ PAPER_HISTORY_SIZE = 40
 PAPER_WINS_REQUIRED = 32
 PROFILE_HISTORY_SIZE = 10
 MIN_MATCHES_FOR_MULTI = 3
+WATCH_POOL_SIZE = 30
 
 STREAK_FILE = "predict_streak.json"
 PROFILE_FILE = "predict_profiles.json"
 
-_EXPECTED_PM_VERSION = "2026.12.10"
+_EXPECTED_PM_VERSION = "2026.12.14"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -82,9 +83,6 @@ SECRET_KEY = _env("BITGET_API_SECRET", "SECRET_KEY")
 PASSPHRASE = _env("BITGET_API_PASSPHRASE", "PASSPHRASE")
 
 
-# =============================================================================
-# HEALTH
-# =============================================================================
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path.startswith("/health"):
@@ -106,9 +104,6 @@ def _start_keepalive():
     log.info("Keep-alive listening on :%d", PORT)
 
 
-# =============================================================================
-# API
-# =============================================================================
 def _sign(timestamp, method, request_path, body):
     msg = timestamp + method.upper() + request_path + body
     digest = hmac.new(SECRET_KEY.encode(), msg.encode(), hashlib.sha256).digest()
@@ -131,14 +126,12 @@ async def _request(session, method, path, *, query=None, body=None,
                 "ACCESS-KEY": API_KEY,
                 "ACCESS-SIGN": _sign(ts, method, path_with_q, body_str),
                 "ACCESS-TIMESTAMP": ts,
-                "ACCESS-PASSPHRASE": PASSPHRASE,
-            })
+                "ACCESS-PASSPHRASE": PASSPHRASE})
         try:
             async with session.request(
                 method, API_BASE + path_with_q, headers=headers,
                 data=body_str if body_str else None,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
+                timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 text = await resp.text()
                 if resp.status == 429 or resp.status >= 500:
                     await asyncio.sleep((2 ** attempt) + 1)
@@ -160,8 +153,7 @@ async def _get_public_json(session, url, timeout=10.0):
     try:
         async with session.get(
             url, headers={"User-Agent": "predict-bot/1.0"},
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        ) as resp:
+            timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
@@ -203,22 +195,20 @@ _new_feature_candidates: Dict[str, dict] = {}
 _new_features: set = set()
 _pending_candidates: list = []
 _recent_paper_stories: list = []
+_feature_ratings: Dict[str, dict] = {}
+_watch_ticks: Dict[str, list] = {}
+_watch_pool: list = []
 
-_cycle_snapshot = {
-    "cycle_id": 0, "started_at": 0.0,
-    "features": {}, "prices": {},
-    "traded_symbols": set(), "trade_profile_ids": {},
-}
+_cycle_snapshot = {"cycle_id": 0, "started_at": 0.0,
+                   "features": {}, "prices": {},
+                   "traded_symbols": set(), "trade_profile_ids": {}}
 
 _last_heartbeat = 0.0
-
-_diag = {
-    "sweep_fails": 0, "cycles": 0, "matches": 0,
-    "paper_entries": 0, "live_entries": 0,
-    "profiles_added": 0, "features_promoted": 0,
-    "bans_fired": 0, "unbans": 0,
-    "skips_book": 0, "skips_spread": 0, "skips_pressure": 0,
-}
+_diag = {"sweep_fails": 0, "cycles": 0, "matches": 0,
+         "paper_entries": 0, "live_entries": 0,
+         "profiles_added": 0, "features_promoted": 0,
+         "bans_fired": 0, "unbans": 0,
+         "skips_book": 0, "skips_spread": 0, "skips_pressure": 0}
 
 
 # =============================================================================
@@ -245,13 +235,11 @@ def _load_streak():
 def _save_streak():
     try:
         with open(STREAK_FILE, "w") as f:
-            json.dump({
-                "live_activated": _streak["live_activated"],
-                "paper_total_trades": _paper_total_trades,
-                "paper_total_wins": _paper_total_wins,
-                "paper_total_losses": _paper_total_losses,
-                "recent_history": _paper_trade_history,
-            }, f)
+            json.dump({"live_activated": _streak["live_activated"],
+                       "paper_total_trades": _paper_total_trades,
+                       "paper_total_wins": _paper_total_wins,
+                       "paper_total_losses": _paper_total_losses,
+                       "recent_history": _paper_trade_history}, f)
     except OSError:
         pass
 
@@ -266,6 +254,7 @@ def _load_predict_profiles():
     global _predict_profiles, _next_profile_id
     global _global_tag_stats, _tag_descriptions, _live_tier_history
     global _live_bans, _new_feature_candidates, _new_features
+    global _feature_ratings
     try:
         with open(PROFILE_FILE, "r") as f:
             data = json.load(f)
@@ -277,6 +266,7 @@ def _load_predict_profiles():
             _live_bans = data.get("live_bans", {}) or {}
             _new_feature_candidates = data.get("new_feature_candidates", {}) or {}
             _new_features = set(data.get("new_features", []) or [])
+            _feature_ratings = data.get("feature_ratings", {}) or {}
         elif isinstance(data, list):
             active = data
         else:
@@ -301,26 +291,26 @@ def _load_predict_profiles():
         _live_bans = {}
         _new_feature_candidates = {}
         _new_features = set()
+        _feature_ratings = {}
 
 
 def _save_predict_profiles():
     try:
         with open(PROFILE_FILE, "w") as f:
-            json.dump({
-                "active": _predict_profiles,
-                "global_tag_stats": _global_tag_stats,
-                "tag_descriptions": _tag_descriptions,
-                "live_tier_history": _live_tier_history,
-                "live_bans": _live_bans,
-                "new_feature_candidates": _new_feature_candidates,
-                "new_features": list(_new_features),
-            }, f)
+            json.dump({"active": _predict_profiles,
+                       "global_tag_stats": _global_tag_stats,
+                       "tag_descriptions": _tag_descriptions,
+                       "live_tier_history": _live_tier_history,
+                       "live_bans": _live_bans,
+                       "new_feature_candidates": _new_feature_candidates,
+                       "new_features": list(_new_features),
+                       "feature_ratings": _feature_ratings}, f)
     except OSError:
         pass
 
 
 # =============================================================================
-# RECORDING
+# RECORDING (paper only — live uses _record_live_tier_result)
 # =============================================================================
 def _record_result(net_pnl, exit_reason, source):
     global _paper_total_trades, _paper_total_wins, _paper_total_losses
@@ -334,15 +324,12 @@ def _record_result(net_pnl, exit_reason, source):
     else:
         _paper_total_losses += 1
     _save_streak()
-
     recent_n = len(_paper_trade_history)
     recent_wins = sum(_paper_trade_history)
-    log.debug(
-        "TRADE | net=%.3f%% | %s | src=%s | TOTAL %d/%d/%d | RECENT %d/%d/%d",
-        net_pnl, exit_reason, source,
-        _paper_total_wins, _paper_total_losses, _paper_total_trades,
-        recent_wins, recent_n - recent_wins, recent_n)
-
+    log.debug("TRADE | net=%.3f%% | %s | src=%s | TOTAL %d/%d/%d | RECENT %d/%d/%d",
+              net_pnl, exit_reason, source,
+              _paper_total_wins, _paper_total_losses, _paper_total_trades,
+              recent_wins, recent_n - recent_wins, recent_n)
     if not _streak["live_activated"] and recent_n >= PAPER_HISTORY_SIZE:
         if recent_wins >= PAPER_WINS_REQUIRED:
             _streak["live_activated"] = True
@@ -373,12 +360,10 @@ def _update_profile_result(prof_id, net_pnl, peak_pct=None, trough_pct=None,
     else:
         p["losses"] = p.get("losses", 0) + 1
     if peak_pct is not None and trough_pct is not None:
-        p.setdefault("swings", []).append({
-            "net": round(net_pnl, 3),
-            "peak": round(peak_pct, 3),
-            "trough": round(trough_pct, 3),
-            "story": (story_text or "")[:600],
-        })
+        p.setdefault("swings", []).append({"net": round(net_pnl, 3),
+                                           "peak": round(peak_pct, 3),
+                                           "trough": round(trough_pct, 3),
+                                           "story": (story_text or "")[:600]})
         if len(p["swings"]) > PROFILE_HISTORY_SIZE:
             p["swings"].pop(0)
     if tags and ticks and direction and start_ts:
@@ -388,7 +373,8 @@ def _update_profile_result(prof_id, net_pnl, peak_pct=None, trough_pct=None,
         for t in tags:
             tag = t.get("tag")
             minute = t.get("minute", 0)
-            ft = pm.measure_tag_followthrough(ticks, start_ts + minute * 60, direction)
+            ft = pm.measure_tag_followthrough(
+                ticks, start_ts + minute * 60, direction)
             ft["tier"] = tier
             tag_hist.setdefault(tag, []).append(ft)
             if len(tag_hist[tag]) > 10:
@@ -416,17 +402,32 @@ def _record_live_tier_result(tag, tier, net):
     if not tag or not tier:
         return
     th = _live_tier_history.setdefault(tag, {}).setdefault(
-        tier, {"recent_net": [], "inactive": False})
+        tier, {"recent_net": [], "inactive": False,
+               "observations": [], "live_trades": []})
+    th.setdefault("live_trades", [])
+    th.setdefault("observations", [])
+    th.setdefault("recent_net", [])
+    now = time.time()
+    th["live_trades"].append(round(net, 3))
+    if len(th["live_trades"]) > 40:
+        th["live_trades"].pop(0)
+    th["observations"].append({"ts": now, "coin": "live",
+                                "net_pct": round(net, 3),
+                                "peak_net_pct": round(net, 3),
+                                "peak_move_pct": round(net + pm.FEE_ROUND_TRIP_PCT, 3),
+                                "peak_minute": 1, "tier": tier,
+                                "reason_category": "live_trade",
+                                "was_best_mover": False})
+    if len(th["observations"]) > 40:
+        th["observations"].pop(0)
     th["recent_net"].append(round(net, 3))
-    if len(th["recent_net"]) > 20:
+    if len(th["recent_net"]) > 40:
         th["recent_net"].pop(0)
-    th["inactive"] = False
-    fails, diag = pm.live_window_fails(th["recent_net"])
-    if fails:
+    should_ban, why = pm.tier_should_ban(th["live_trades"])
+    if should_ban:
         already, _ = _is_banned(tag, tier)
         if not already:
-            classification = _classify_failure(tag, tier)
-            _ban_tier(tag, tier, diag["reason"], classification)
+            _ban_tier(tag, tier, why, "consecutive_losses")
     _save_predict_profiles()
 
 
@@ -448,17 +449,15 @@ def _add_predict_profile(features, actual_direction):
             return None
     if not _can_bank_new_profile(features):
         return None
-    profile = {
-        "id": _new_profile_id(),
-        "fluct_per_min": features["fluct_per_min"],
-        "recent_abs_pct": features["recent_abs_pct"],
-        "prior_move_pct": features["prior_move_pct"],
-        "acceleration": features["acceleration"],
-        "distance_from_extreme_pct": features["distance_from_extreme_pct"],
-        "direction": actual_direction,
-        "wins": 0, "losses": 0, "recent": [], "swings": [],
-        "tag_history": {}, "added_at": time.time(),
-    }
+    profile = {"id": _new_profile_id(),
+               "fluct_per_min": features["fluct_per_min"],
+               "recent_abs_pct": features["recent_abs_pct"],
+               "prior_move_pct": features["prior_move_pct"],
+               "acceleration": features["acceleration"],
+               "distance_from_extreme_pct": features["distance_from_extreme_pct"],
+               "direction": actual_direction,
+               "wins": 0, "losses": 0, "recent": [], "swings": [],
+               "tag_history": {}, "added_at": time.time()}
     _predict_profiles.append(profile)
     if len(_predict_profiles) > pm.PRED_PROFILE_MAX:
         _predict_profiles.pop(0)
@@ -489,18 +488,18 @@ def _classify_failure(tag, tier):
         if other_tag == tag:
             continue
         rn = (tiers_map.get(tier) or {}).get("recent_net", [])
-        if len(rn) >= pm.LIVE_FAIL_WINDOW:
+        if len(rn) >= pm.LIVE_BAN_CONSECUTIVE_LOSSES:
             other_tier_checked += 1
-            if sum(rn[-pm.LIVE_FAIL_WINDOW:]) < pm.LIVE_FAIL_MIN_NET_SUM:
+            if all(n < 0 for n in rn[-pm.LIVE_BAN_CONSECUTIVE_LOSSES:]):
                 other_tier_failing += 1
     same_tag_other_failing = same_tag_other_checked = 0
     for other_tier, tv in (_live_tier_history.get(tag) or {}).items():
         if other_tier == tier:
             continue
         rn = tv.get("recent_net", [])
-        if len(rn) >= pm.LIVE_FAIL_WINDOW:
+        if len(rn) >= pm.LIVE_BAN_CONSECUTIVE_LOSSES:
             same_tag_other_checked += 1
-            if sum(rn[-pm.LIVE_FAIL_WINDOW:]) < pm.LIVE_FAIL_MIN_NET_SUM:
+            if all(n < 0 for n in rn[-pm.LIVE_BAN_CONSECUTIVE_LOSSES:]):
                 same_tag_other_failing += 1
     if other_tier_checked >= 2 and other_tier_failing >= 2:
         return "market_regime"
@@ -511,46 +510,43 @@ def _classify_failure(tag, tier):
 
 def _ban_tier(tag, tier, reason, classification):
     key = _ban_key(tag, tier)
-    b = _live_bans.setdefault(key, {
-        "banned_until": 0.0, "ban_count": 0,
-        "last_reason": "", "last_classification": "", "history": []})
+    b = _live_bans.setdefault(key, {"banned_until": 0.0, "ban_count": 0,
+                                     "banned_at": 0.0, "last_reason": "",
+                                     "last_classification": "", "history": []})
     b["ban_count"] += 1
-    duration = min(pm.LIVE_BAN_INITIAL_SEC * (2 ** min(b["ban_count"] - 1, 4)),
-                   pm.LIVE_BAN_MAX_SEC)
-    b["banned_until"] = time.time() + duration
+    now = time.time()
+    b["banned_until"] = pm.LIVE_BAN_INDEFINITE
+    b["banned_at"] = now
     b["last_reason"] = reason
     b["last_classification"] = classification
-    b["history"].append({"ts": int(time.time()), "reason": reason,
-                         "classification": classification,
-                         "duration": duration})
+    b["history"].append({"ts": int(now), "reason": reason,
+                         "classification": classification})
     if len(b["history"]) > 20:
         b["history"].pop(0)
     _diag["bans_fired"] += 1
-    log.info("TIER BANNED | tag=%s tier=%s | %s | %s | #%d | %ds",
-             tag, tier, reason, classification, b["ban_count"], duration)
+    log.info("TIER BANNED | %s | %s | needs 8 consecutive paper wins "
+             "avg>=0.2%% since %s to unban",
+             key, reason, time.strftime("%H:%M:%S", time.gmtime(now)))
     _save_predict_profiles()
 
 
 def _review_bans():
-    now = time.time()
     for key in list(_live_bans.keys()):
         b = _live_bans[key]
-        if b.get("banned_until", 0) > now:
+        banned, _ = _is_banned(*key.split("|", 1))
+        if not banned:
             continue
         tag, tier = key.split("|", 1)
-        samples = _global_tag_stats.get(tag, [])
-        p_ok, p_diag = pm.tier_paper_eligible(tier, samples)
-        if p_ok:
-            if now - b.get("banned_until", now) > pm.LIVE_BAN_CLEAN_RESET_SEC:
-                b["ban_count"] = 0
-            log.info("TIER UNBANNED | tag=%s tier=%s | paper: %s",
-                     tag, tier, p_diag.get("reason"))
+        th = (_live_tier_history.get(tag) or {}).get(tier) or {}
+        obs = th.get("observations", [])
+        banned_at = b.get("banned_at", 0.0)
+        ok, why = pm.tier_unban_check(obs, banned_at)
+        if ok:
+            log.info("TIER UNBANNED | %s | %s", key, why)
             b["banned_until"] = 0.0
+            b["banned_at"] = 0.0
+            b["last_classification"] = "unbanned_by_paper"
             _diag["unbans"] += 1
-        else:
-            b["banned_until"] = now + pm.LIVE_BAN_INITIAL_SEC * 2
-            log.info("TIER BAN EXTENDED | tag=%s tier=%s | paper: %s",
-                     tag, tier, p_diag.get("reason"))
     _save_predict_profiles()
 
 
@@ -578,13 +574,11 @@ async def refresh_contracts(session):
         if not sym or not sym.endswith("USDT"):
             continue
         try:
-            new_cache[sym] = {
-                "volumePlace": int(float(c.get("volumePlace") or 0)),
-                "pricePlace": int(float(c.get("pricePlace") or 0)),
-                "minOrderVolume": float(c.get("minTradeNum") or 0),
-                "minNotional": float(c.get("minTradeUSDT") or 5.0),
-                "is_stock": sym in _STOCK_TOKENS,
-            }
+            new_cache[sym] = {"volumePlace": int(float(c.get("volumePlace") or 0)),
+                              "pricePlace": int(float(c.get("pricePlace") or 0)),
+                              "minOrderVolume": float(c.get("minTradeNum") or 0),
+                              "minNotional": float(c.get("minTradeUSDT") or 5.0),
+                              "is_stock": sym in _STOCK_TOKENS}
         except (TypeError, ValueError):
             continue
     _contracts.clear()
@@ -618,12 +612,10 @@ async def _tickers_bitget(session):
             if not p:
                 continue
             prices[sym] = float(p)
-            stats[sym] = {
-                "high_24h": float(t.get("high24h") or 0),
-                "low_24h": float(t.get("low24h") or 0),
-                "open_24h": float(t.get("openUtc") or t.get("open24h") or 0),
-                "volume_24h_usd": float(t.get("usdtVolume") or t.get("quoteVolume") or 0),
-            }
+            stats[sym] = {"high_24h": float(t.get("high24h") or 0),
+                          "low_24h": float(t.get("low24h") or 0),
+                          "open_24h": float(t.get("openUtc") or t.get("open24h") or 0),
+                          "volume_24h_usd": float(t.get("usdtVolume") or t.get("quoteVolume") or 0)}
         except (TypeError, ValueError):
             continue
     return prices, stats
@@ -696,8 +688,7 @@ async def refresh_universe(session):
         _vol_exchange(session, "https://fapi.binance.com/fapi/v1/ticker/24hr", _parse_binance),
         _vol_exchange(session, "https://api.bybit.com/v5/market/tickers?category=linear", _parse_bybit),
         _vol_exchange(session, "https://www.okx.com/api/v5/market/tickers?instType=SWAP", _parse_okx),
-        return_exceptions=True,
-    )
+        return_exceptions=True)
     agg = dict(bitget_vol)
     ok = 1 if bitget_vol else 0
     for r in others:
@@ -835,9 +826,6 @@ async def _latest_close(session, symbol):
         return None
 
 
-# =============================================================================
-# SYMBOL READINESS
-# =============================================================================
 async def _ensure_symbol_ready(session, sym):
     if sym in _ready_symbols:
         return True
@@ -862,6 +850,72 @@ def _get_state(symbol):
 
 def _has_open_position(sym):
     return sym in _active_positions or sym in _paper_positions
+
+
+def _build_tier_map():
+    return {sym: pm.market_cap_tier_from_volume(
+                _ticker_cache.get(sym, {}).get("volume_24h_usd", 0))
+            for sym in _ticker_cache.keys()}
+
+
+# =============================================================================
+# WATCH POOL
+# =============================================================================
+def _refresh_watch_pool(now_ts):
+    global _watch_pool
+    candidates = _build_predict_candidates(now_ts)
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    _watch_pool = [(sym, score) for sym, _, score in candidates[:WATCH_POOL_SIZE]]
+    keep = set(s for s, _ in _watch_pool) | set(_paper_positions.keys())
+    cutoff = now_ts - pm.PRED_MAX_HOLD_SEC - 300
+    for sym in list(_watch_ticks.keys()):
+        if sym not in keep:
+            del _watch_ticks[sym]
+        else:
+            _watch_ticks[sym] = [t for t in _watch_ticks[sym] if t["ts"] >= cutoff]
+
+
+async def _sample_watch(session, sym):
+    ticks = _watch_ticks.setdefault(sym, [])
+    now = time.time()
+    price = await _latest_close(session, sym)
+    if price is None or price <= 0:
+        return
+    vol_usd = 0.0
+    d = await _request(session, "GET", "/api/v2/mix/market/candles",
+                        query={"symbol": sym, "productType": PRODUCT_TYPE,
+                               "granularity": "1m", "limit": "2"}, signed=False)
+    if d.get("code") == "00000" and isinstance(d.get("data"), list) and d["data"]:
+        try:
+            vol_usd = float(d["data"][-1][6]) if len(d["data"][-1]) > 6 else 0.0
+        except (TypeError, ValueError, IndexError):
+            vol_usd = 0.0
+    buy = sell = 0.0
+    trades = wb = ws = 0
+    d2 = await _request(session, "GET", "/api/v2/mix/market/fills",
+                         query={"symbol": sym, "productType": PRODUCT_TYPE,
+                                "limit": "100"}, signed=False)
+    if d2.get("code") == "00000" and isinstance(d2.get("data"), list):
+        for f in d2["data"]:
+            try:
+                usd = float(f.get("size") or 0) * float(f.get("price") or 0)
+                side = (f.get("side") or "").lower()
+                trades += 1
+                if side in ("buy", "long"):
+                    buy += usd
+                    if usd >= pm.WHALE_ORDER_USD:
+                        wb += 1
+                else:
+                    sell += usd
+                    if usd >= pm.WHALE_ORDER_USD:
+                        ws += 1
+            except (TypeError, ValueError):
+                continue
+    ticks.append({"ts": now, "price": price, "vol_usd": vol_usd,
+                  "taker_buy_usd": buy, "taker_sell_usd": sell,
+                  "trades": trades})
+    cutoff = now - pm.PRED_MAX_HOLD_SEC - 300
+    _watch_ticks[sym] = [t for t in ticks if t["ts"] >= cutoff]
 
 
 # =============================================================================
@@ -914,13 +968,13 @@ async def _enter_one_paper(session, sym, feats, score, prof_id):
                 or balance["depth_ratio"] > 1.0 / pm.PRED_ENTRY_MIN_DEPTH_RATIO):
             _diag["skips_pressure"] += 1
             return False
-    _paper_positions[sym] = {
-        "symbol": sym, "direction": feats["direction"], "entry": price,
-        "opened_at": time.time(), "paper": True, "trade_type": "PREDICT",
-        "matched_profile_id": prof_id, "kind": "paper",
-        "entry_depth_ratio": balance["depth_ratio"],
-        "peak_price": price, "trough_price": price, "ticks": [],
-    }
+    _paper_positions[sym] = {"symbol": sym, "direction": feats["direction"],
+                              "entry": price, "opened_at": time.time(),
+                              "paper": True, "trade_type": "PREDICT",
+                              "matched_profile_id": prof_id, "kind": "paper",
+                              "entry_depth_ratio": balance["depth_ratio"],
+                              "peak_price": price, "trough_price": price,
+                              "ticks": []}
     _diag["paper_entries"] += 1
     log.debug("PAPER OPEN | %s %s @ %.6f | profile#%s",
               sym, feats["direction"], price, prof_id)
@@ -970,6 +1024,55 @@ def _snapshot_predict_features(now_ts):
     return candidates
 
 
+def _merge_feature_ratings(cycle_obs, cycle_id):
+    for tag, data in cycle_obs.items():
+        g = _feature_ratings.setdefault(tag, {
+            "total_fired": 0, "total_moved": 0,
+            "rating": 0.0, "best_ever": None, "recent": [],
+            "reason_totals": {c: 0 for c in pm.REASON_CATEGORIES}})
+        g.setdefault("reason_totals", {c: 0 for c in pm.REASON_CATEGORIES})
+        g["total_fired"] += data["fired"]
+        g["total_moved"] += data["moved_count"]
+        if data["fired"] > 0:
+            hr = g["total_moved"] / g["total_fired"]
+            g["rating"] = round(pm.compute_feature_rating(hr, data["avg_moved"]), 1)
+        for c, n in data["reasons"].items():
+            g["reason_totals"][c] = g["reason_totals"].get(c, 0) + n
+        if data["best"]:
+            if (g["best_ever"] is None
+                    or abs(data["best"]["peak_net_pct"])
+                    > abs(g["best_ever"].get("peak_net_pct", 0))):
+                g["best_ever"] = {**data["best"], "cycle": cycle_id}
+        g["recent"].append({"cycle": cycle_id, "rating": data["rating"],
+                             "best": data["best"]})
+        if len(g["recent"]) > 20:
+            g["recent"].pop(0)
+        for o in data.get("raw_obs", []):
+            tier = o.get("tier", "unknown")
+            th = _live_tier_history.setdefault(tag, {}).setdefault(
+                tier, {"recent_net": [], "inactive": False,
+                       "observations": [], "live_trades": []})
+            th.setdefault("observations", [])
+            th.setdefault("recent_net", [])
+            th.setdefault("live_trades", [])
+            th["observations"].append({"ts": time.time(), "coin": o["coin"],
+                                        "net_pct": o["net_pct"],
+                                        "peak_net_pct": o.get("peak_net_pct",
+                                                               o["net_pct"]),
+                                        "peak_move_pct": o.get("peak_move_pct",
+                                                                o["net_pct"] + pm.FEE_ROUND_TRIP_PCT),
+                                        "peak_minute": o.get("peak_minute", 1),
+                                        "tier": tier,
+                                        "reason_category": o.get("reason_category", "unknown"),
+                                        "was_best_mover": o.get("was_best_mover", False)})
+            if len(th["observations"]) > 40:
+                th["observations"].pop(0)
+            th["recent_net"].append(o["net_pct"])
+            if len(th["recent_net"]) > 40:
+                th["recent_net"].pop(0)
+    _save_predict_profiles()
+
+
 def _finalize_predict_cycle(now_ts):
     feats_map = _cycle_snapshot["features"]
     prices_map = _cycle_snapshot["prices"]
@@ -1012,30 +1115,95 @@ def _finalize_predict_cycle(now_ts):
     if best_sym:
         traded = best_sym in _cycle_snapshot["traded_symbols"]
         winner_feats = feats_map.get(best_sym, {})
-        note = ""
+        start_px = prices_map.get(best_sym, 0)
+        end_px = _ticker_cache.get(best_sym, {}).get("price", 0)
+        cycle_start = _cycle_snapshot.get("started_at", now_ts)
+
+        watch_ticks = {}
+        for sym, ticks in _watch_ticks.items():
+            if not ticks:
+                continue
+            cycle_ticks = [t for t in ticks
+                           if cycle_start - 60 <= t["ts"] <= now_ts]
+            if cycle_ticks:
+                watch_ticks[sym] = cycle_ticks
+
+        cycle_obs = pm.rank_cycle_features(
+            watch_ticks, best_sym, cycle_start, _build_tier_map())
+
+        winner_ticks = watch_ticks.get(best_sym, [])
+        narrative = pm.build_winner_narrative(
+            best_sym, winner_ticks, start_px, end_px, cycle_start)
+        if narrative:
+            for line in narrative["lines"]:
+                log.info(line)
+        else:
+            log.info("  WINNER: %s %+.2f%% (%s) — behavior data unavailable",
+                     best_sym, (best_abs if best_dir == "LONG" else -best_abs),
+                     best_dir)
+
+        if cycle_obs:
+            log.info("  FEATURES THAT MOVED THE WINNER:")
+            winner_effects, _ = pm.summarize_feature_effects(
+                winner_ticks, cycle_start, now_ts)
+            for tag in list(winner_effects.keys()):
+                obs = cycle_obs.get(tag)
+                if not obs:
+                    continue
+                log.info("    %s | RATING=%.1f (fired=%d hit=%.0f%% avg=%.2f%%)",
+                         tag, obs["rating"], obs["fired"],
+                         obs["hit_rate"] * 100, obs["avg_moved"])
+                wi = obs["winner_instance"]
+                if wi:
+                    log.info("      winner: %s minute %d, %+.2f%% | reason: %s",
+                             wi["coin"], wi["minute"], wi["net_pct"], wi["reason"])
+                if obs["better"]:
+                    b = obs["better"][0]
+                    log.info("      better: %s minute %d, %+.2f%% | reason: %s",
+                             b["coin"], b["minute"], b["peak_net_pct"], b["reason"])
+                live_ready_parts = []
+                for tier_name in ("micro", "small", "mid", "large", "mega"):
+                    ok, why, st = pm.feature_tier_live_ready(
+                        tag, tier_name, _live_tier_history)
+                    banned, _ = _is_banned(tag, tier_name)
+                    if st:
+                        state = "BANNED" if banned else ("LIVE" if ok else "wait")
+                        live_ready_parts.append(
+                            f"{tier_name}:{state}({st['obs']}/20,{st['wins']}w,"
+                            f"avg{st['avg_net']:+.2f}%)")
+                if live_ready_parts:
+                    log.info("      tiers: %s", " | ".join(live_ready_parts))
+
+        _merge_feature_ratings(cycle_obs, cycle_id)
+
+        if _feature_ratings:
+            log.info("  FEATURE LEADERBOARD (by rating):")
+            ranked = sorted(_feature_ratings.items(),
+                            key=lambda x: x[1].get("rating", 0), reverse=True)
+            for idx, (tag, r) in enumerate(ranked[:10], start=1):
+                be = r.get("best_ever")
+                best_str = (f"{be['coin']} {be['peak_net_pct']:+.2f}% "
+                            f"(c{be['cycle']} m{be['minute']}, "
+                            f"peak@m{be.get('peak_minute', 1)}) — "
+                            f"{be.get('reason', '')}") if be else "never moved"
+                live_ok_tiers = []
+                for tier_name in ("micro", "small", "mid", "large", "mega"):
+                    ok, why, st = pm.feature_tier_live_ready(
+                        tag, tier_name, _live_tier_history)
+                    banned, _ = _is_banned(tag, tier_name)
+                    if ok and not banned:
+                        live_ok_tiers.append(f"{tier_name}({st['wins']}/20)")
+                log.info("    #%d %-28s rating=%.0f fired=%d | LIVE: %s",
+                         idx, tag, r["rating"], r["total_fired"],
+                         ",".join(live_ok_tiers) or "—")
+                log.info("        best: %s", best_str)
+
         if not traded and winner_feats:
             added = _add_predict_profile(winner_feats, best_dir)
-            note = f" -> PROFILE #{added} ADDED" if added else " -> REJECTED"
+            if added:
+                log.info("  BANKED: PROFILE #%d", added)
         elif traded:
-            note = " -> traded (no bank)"
-        log.info("  WINNER | %s %+.2f%% (%s)%s",
-                 best_sym, (best_abs if best_dir == "LONG" else -best_abs),
-                 best_dir, note)
-
-    ranked = pm.rank_features(_global_tag_stats, _tag_descriptions,
-                              _live_tier_history, _new_features)
-    if ranked:
-        log.info("  FEATURE LEADERBOARD (top 6):")
-        for idx, r in enumerate(ranked[:6], start=1):
-            parts = []
-            for tier, ts in list(r["tiers"].items())[:2]:
-                banned, _ = _is_banned(r["tag"], tier)
-                status = "BAN" if banned else "ok"
-                parts.append(f"{tier}:paper={ts.get('paper_majority')}/"
-                             f"{pm.GATE_WINDOW}/{ts.get('paper_avg')} "
-                             f"live_n={ts.get('live_trades')}/{status}")
-            log.info("    #%d %s | n=%d | %s",
-                     idx, r["tag"], r["samples"], " ".join(parts))
+            log.info("  (was paper-traded — not banked)")
 
     now = time.time()
     active = [(k, v) for k, v in _live_bans.items()
@@ -1043,9 +1211,9 @@ def _finalize_predict_cycle(now_ts):
     if active:
         log.info("  BANS ACTIVE: %d", len(active))
         for k, b in active[:4]:
-            log.info("    %s | #%d | %s | %dmin left",
-                     k, b["ban_count"], b["last_classification"],
-                     int(b["banned_until"] - now) // 60)
+            log.info("    %s | #%d | since %s",
+                     k, b["ban_count"],
+                     time.strftime("%H:%M:%S", time.gmtime(b.get("banned_at", 0))))
 
     log.info("  BANK: %d (proven=%d) | gauntlet %d/%d | live %s",
              len(_predict_profiles),
@@ -1093,14 +1261,14 @@ async def _manage_paper_position(session, pos):
                            ticks=ticks, direction=pos["direction"],
                            start_ts=pos["opened_at"], tags=story.get("tags"),
                            symbol=symbol)
-    _recent_paper_stories.append({
-        "symbol": symbol, "direction": pos["direction"],
-        "profile_id": pos.get("matched_profile_id"),
-        "net": round(net, 2),
-        "peak": round(peak_swing, 2), "trough": round(trough_swing, 2),
-        "opened_at": pos["opened_at"], "closed_at": time.time(),
-        "story": story.get("story", ""),
-    })
+    _recent_paper_stories.append({"symbol": symbol, "direction": pos["direction"],
+                                    "profile_id": pos.get("matched_profile_id"),
+                                    "net": round(net, 2),
+                                    "peak": round(peak_swing, 2),
+                                    "trough": round(trough_swing, 2),
+                                    "opened_at": pos["opened_at"],
+                                    "closed_at": time.time(),
+                                    "story": story.get("story", "")})
     if len(_recent_paper_stories) > 20:
         _recent_paper_stories.pop(0)
     _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
@@ -1119,8 +1287,7 @@ def _recent_minute_bucket(sym, now_ts):
     if len(window) < 3:
         return None
     prices = [p for _, p in window]
-    b = {"minute": 0,
-         "open": prices[0], "close": prices[-1],
+    b = {"minute": 0, "open": prices[0], "close": prices[-1],
          "high": max(prices), "low": min(prices),
          "vol_usd": 0.0, "buy_usd": 0.0, "sell_usd": 0.0,
          "trades": len(window), "whale_buys": 0, "whale_sells": 0}
@@ -1135,18 +1302,11 @@ def _recent_minute_bucket(sym, now_ts):
 
 
 async def _scan_live_tags(session, now_ts):
-    feature_rules = pm.build_live_feature_rules(
-        _global_tag_stats, _tag_descriptions, _live_tier_history, _new_features)
-    if not feature_rules:
+    feature_rules = pm.build_live_feature_rules if False else None  # placeholder
+    # live gate is economic now — iterate over the ranked feature registry
+    if not _feature_ratings:
         return
-    for tag in list(feature_rules.keys()):
-        rule = feature_rules[tag]
-        rule["tiers"] = {tier: tr for tier, tr in rule["tiers"].items()
-                         if not _is_banned(tag, tier)[0]}
-        if not rule["tiers"]:
-            del feature_rules[tag]
-    if not feature_rules:
-        return
+
     for sym in _universe:
         if _has_open_position(sym):
             continue
@@ -1159,13 +1319,14 @@ async def _scan_live_tags(session, now_ts):
             continue
         for bt in pm.tag_behaviour_events([bucket]):
             tag = bt["tag"]
-            rule = feature_rules.get(tag)
-            if not rule:
+            ready, why, stats = pm.feature_tier_live_ready(
+                tag, cap_tier, _live_tier_history)
+            if not ready:
                 continue
-            tier_rule = rule["tiers"].get(cap_tier)
-            if not tier_rule:
+            banned, _ = _is_banned(tag, cap_tier)
+            if banned:
                 continue
-            direction = tier_rule["direction"]
+            direction = "LONG" if "buy" in tag else "SHORT"
             state = _coin_state.get(sym)
             if not state or not state.get("price_history"):
                 continue
@@ -1183,14 +1344,16 @@ async def _scan_live_tags(session, now_ts):
                     break
             if matched_profile_id is None:
                 continue
+            log.info("LIVE GATE PASS | %s %s | %s tier=%s | %s",
+                     sym, direction, tag, cap_tier, why)
             await _open_live_microtrade(session, sym, direction,
-                                          matched_profile_id, tag, cap_tier,
-                                          tier_rule)
+                                          matched_profile_id, tag, cap_tier)
             break
 
 
-async def _open_live_microtrade(session, sym, direction, prof_id, tag,
-                                 tier, rule):
+async def _open_live_microtrade(session, sym, direction, prof_id, tag, tier):
+    if _is_banned(tag, tier)[0]:
+        return False
     contract = _contracts.get(sym)
     if not contract:
         return False
@@ -1211,19 +1374,18 @@ async def _open_live_microtrade(session, sym, direction, prof_id, tag,
     oid = await _place_order(session, sym, side_api, qty_str, "open")
     if not oid:
         return False
-    _active_positions[sym] = {
-        "symbol": sym, "direction": direction, "entry": px,
-        "opened_at": time.time(), "paper": False, "order_id": oid,
-        "trade_type": "PREDICT", "matched_profile_id": prof_id,
-        "kind": "microtrade", "tag": tag, "tier": tier,
-        "target_pct": rule["target_pct"],
-        "timeout_sec": rule["timeout_sec"],
-        "peak_price": px, "trough_price": px,
-    }
+    _active_positions[sym] = {"symbol": sym, "direction": direction,
+                               "entry": px, "opened_at": time.time(),
+                               "paper": False, "order_id": oid,
+                               "trade_type": "PREDICT",
+                               "matched_profile_id": prof_id,
+                               "kind": "microtrade", "tag": tag, "tier": tier,
+                               "target_pct": pm.LIVE_NET_TARGET_PCT,
+                               "timeout_sec": pm.LIVE_TAG_TIMEOUT_SEC,
+                               "peak_price": px, "trough_price": px}
     _diag["live_entries"] += 1
-    log.info("LIVE MICRO | %s %s | tag=%s tier=%s | profile#%d | "
-             "target=%+.2f%% | price=%.6f",
-             sym, direction, tag, tier, prof_id, rule["target_pct"], px)
+    log.info("LIVE MICRO | %s %s | tag=%s tier=%s | profile#%d | target=%+.2f%% | price=%.6f",
+             sym, direction, tag, tier, prof_id, pm.LIVE_NET_TARGET_PCT, px)
     return True
 
 
@@ -1258,7 +1420,7 @@ async def _manage_live_microtrade(session, pos):
         return
     log.debug("LIVE EXIT | %s %s | %s | net=%+.2f%%",
               symbol, pos["direction"], reason, net)
-    _record_result(net, reason, "MATCH")
+    # NOTE: live trades do NOT count toward gauntlet (paper-only metric)
     _update_profile_from_live(pos.get("matched_profile_id"), net)
     _record_live_tier_result(pos.get("tag"), pos.get("tier"), net)
     _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
@@ -1273,7 +1435,7 @@ async def _manage_positions(session):
 
 
 # =============================================================================
-# BEHAVIOUR SAMPLER (paper only)
+# BEHAVIOUR SAMPLER
 # =============================================================================
 async def _sample_behaviour(session, pos):
     sym = pos["symbol"]
@@ -1285,44 +1447,41 @@ async def _sample_behaviour(session, pos):
     vol_usd = 0.0
     d = await _request(session, "GET", "/api/v2/mix/market/candles",
                         query={"symbol": sym, "productType": PRODUCT_TYPE,
-                               "granularity": "1m", "limit": "2"},
-                        signed=False)
+                               "granularity": "1m", "limit": "2"}, signed=False)
     if d.get("code") == "00000" and isinstance(d.get("data"), list) and d["data"]:
         try:
             vol_usd = float(d["data"][-1][6]) if len(d["data"][-1]) > 6 else 0.0
         except (TypeError, ValueError, IndexError):
             vol_usd = 0.0
-    buy_usd = sell_usd = 0.0
-    trades = whale_buys = whale_sells = 0
+    buy = sell = 0.0
+    trades = wb = ws = 0
     d2 = await _request(session, "GET", "/api/v2/mix/market/fills",
                          query={"symbol": sym, "productType": PRODUCT_TYPE,
                                 "limit": "100"}, signed=False)
     if d2.get("code") == "00000" and isinstance(d2.get("data"), list):
-        for fill in d2["data"]:
+        for f in d2["data"]:
             try:
-                size = float(fill.get("size") or 0)
-                px = float(fill.get("price") or 0)
-                side = (fill.get("side") or "").lower()
-                usd = size * px
+                usd = float(f.get("size") or 0) * float(f.get("price") or 0)
+                side = (f.get("side") or "").lower()
                 trades += 1
                 if side in ("buy", "long"):
-                    buy_usd += usd
+                    buy += usd
                     if usd >= pm.WHALE_ORDER_USD:
-                        whale_buys += 1
+                        wb += 1
                 else:
-                    sell_usd += usd
+                    sell += usd
                     if usd >= pm.WHALE_ORDER_USD:
-                        whale_sells += 1
+                        ws += 1
             except (TypeError, ValueError):
                 continue
     ticks.append({"ts": now, "price": price, "vol_usd": vol_usd,
-                  "taker_buy_usd": buy_usd, "taker_sell_usd": sell_usd,
+                  "taker_buy_usd": buy, "taker_sell_usd": sell,
                   "trades": trades})
     cutoff = now - pm.PRED_MAX_HOLD_SEC - 300
     pos["ticks"] = [t for t in ticks if t["ts"] >= cutoff]
-    _recent_fills_cache[sym] = {
-        "vol_usd": vol_usd, "buy_usd": buy_usd, "sell_usd": sell_usd,
-        "whale_buys": whale_buys, "whale_sells": whale_sells, "ts": now}
+    _recent_fills_cache[sym] = {"vol_usd": vol_usd, "buy_usd": buy,
+                                 "sell_usd": sell, "whale_buys": wb,
+                                 "whale_sells": ws, "ts": now}
 
 
 async def _behaviour_loop(session):
@@ -1333,8 +1492,14 @@ async def _behaviour_loop(session):
             continue
         last_run = time.time()
         try:
+            sampled = set()
             for pos in list(_paper_positions.values()):
                 await _sample_behaviour(session, pos)
+                sampled.add(pos["symbol"])
+            for sym, _ in _watch_pool:
+                if sym in sampled:
+                    continue
+                await _sample_watch(session, sym)
         except Exception as exc:
             log.debug("Behaviour sample error: %s", exc)
         await asyncio.sleep(2)
@@ -1371,10 +1536,9 @@ async def _candidate_evaluation_loop(session):
                     obj["promoted"] = True
                     _diag["features_promoted"] += 1
                     _save_predict_profiles()
-                    log.info("NEW FEATURE PROMOTED | tag=%s | streak=%d | tiers=%s | desc=%s",
+                    log.info("NEW FEATURE PROMOTED | tag=%s | streak=%d | tiers=%s",
                              c["tag"], obj["streak"],
-                             {s["tier"] for s in obj["streak_successes"]},
-                             c["description"][:200])
+                             {s["tier"] for s in obj["streak_successes"]})
             except Exception as exc:
                 log.debug("Candidate eval: %s", exc)
         _pending_candidates = still
@@ -1385,7 +1549,7 @@ async def _candidate_evaluation_loop(session):
 # =============================================================================
 async def _ban_review_loop(session):
     while True:
-        await asyncio.sleep(600)
+        await asyncio.sleep(120)
         try:
             _review_bans()
         except Exception as exc:
@@ -1463,6 +1627,7 @@ async def price_sweeper_loop(session):
                 _finalize_predict_cycle(now_ts)
                 candidates = _snapshot_predict_features(now_ts)
                 await try_predict_entries(session, candidates, now_ts)
+                _refresh_watch_pool(now_ts)
 
             if _streak["live_activated"]:
                 await _scan_live_tags(session, now_ts)
@@ -1489,12 +1654,13 @@ async def price_sweeper_loop(session):
                     cache = _ticker_cache.get(pos["symbol"], {})
                     tier = pm.market_cap_tier_from_volume(
                         cache.get("volume_24h_usd", 0))
-                    _pending_candidates.append({
-                        "tag": proposed, "symbol": pos["symbol"],
-                        "tier": tier, "direction": direction,
-                        "entry_price": b["close"], "ts": time.time(),
-                        "description": desc,
-                    })
+                    _pending_candidates.append({"tag": proposed,
+                                                 "symbol": pos["symbol"],
+                                                 "tier": tier,
+                                                 "direction": direction,
+                                                 "entry_price": b["close"],
+                                                 "ts": time.time(),
+                                                 "description": desc})
                     if len(_pending_candidates) > 200:
                         _pending_candidates = _pending_candidates[-200:]
         except Exception as exc:
@@ -1511,16 +1677,15 @@ def _heartbeat():
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
         return
     _last_heartbeat = time.time()
-    log.debug(
-        "pulse | coins=%d | cycles=%d | paper=%d live=%d | bank=%d feats=%d "
-        "bans=%d | gauntlet=%d/%d | live=%s",
-        len(_coin_state), _diag["cycles"],
-        len(_paper_positions), len(_active_positions),
-        len(_predict_profiles), len(_global_tag_stats),
-        sum(1 for b in _live_bans.values()
-            if b.get("banned_until", 0) > time.time()),
-        sum(_paper_trade_history), len(_paper_trade_history),
-        _streak["live_activated"])
+    log.debug("pulse | coins=%d | cycles=%d | paper=%d live=%d | bank=%d "
+              "feats=%d bans=%d | gauntlet=%d/%d | live=%s",
+              len(_coin_state), _diag["cycles"],
+              len(_paper_positions), len(_active_positions),
+              len(_predict_profiles), len(_global_tag_stats),
+              sum(1 for b in _live_bans.values()
+                  if b.get("banned_until", 0) > time.time()),
+              sum(_paper_trade_history), len(_paper_trade_history),
+              _streak["live_activated"])
 
 
 # =============================================================================
@@ -1537,18 +1702,17 @@ async def main():
     _load_streak()
     _load_predict_profiles()
 
-    log.info(
-        "Startup | PREDICT | vol>=%.0f | fluct>=%.2f%%/m | cycle=%ds | "
-        "paper hold=%.0fs | gauntlet=%d/%d | profiles=%d (proven=%d) | "
-        "features=%d (new=%d) | bans=%d",
-        pm.PRED_VOLUME_MIN_USD, pm.PRED_MIN_FLUCTUATION_PCT_PER_MIN,
-        BOUNDARY_INTERVAL_SEC, pm.PRED_MAX_HOLD_SEC,
-        PAPER_WINS_REQUIRED, PAPER_HISTORY_SIZE,
-        len(_predict_profiles),
-        sum(1 for p in _predict_profiles if p.get("wins", 0) >= 1),
-        len(_global_tag_stats), len(_new_features),
-        sum(1 for b in _live_bans.values()
-            if b.get("banned_until", 0) > time.time()))
+    log.info("Startup | PREDICT | vol>=%.0f | fluct>=%.2f%%/m | cycle=%ds | "
+             "paper hold=%.0fs | gauntlet=%d/%d | profiles=%d (proven=%d) | "
+             "features=%d (new=%d) | bans=%d",
+             pm.PRED_VOLUME_MIN_USD, pm.PRED_MIN_FLUCTUATION_PCT_PER_MIN,
+             BOUNDARY_INTERVAL_SEC, pm.PRED_MAX_HOLD_SEC,
+             PAPER_WINS_REQUIRED, PAPER_HISTORY_SIZE,
+             len(_predict_profiles),
+             sum(1 for p in _predict_profiles if p.get("wins", 0) >= 1),
+             len(_global_tag_stats), len(_new_features),
+             sum(1 for b in _live_bans.values()
+                 if b.get("banned_until", 0) > time.time()))
 
     connector = aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=30)
