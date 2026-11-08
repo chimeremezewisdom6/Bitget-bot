@@ -1,12 +1,13 @@
 """
 market_math.py
 ==============
-PREDICT strategy math — paper + live, feature ranking, live ban system.
-v2026.12.10
+PREDICT strategy math — paper + live, feature ranking, reason classification,
+economic live gate, and 8-wins-since-ban unban system.
+v2026.12.14
 """
 import math
 
-__version__ = "2026.12.10"
+__version__ = "2026.12.14"
 
 FEE_ROUND_TRIP_PCT = 0.22
 
@@ -31,15 +32,14 @@ PRED_PROFILE_MATCH_TOL = 0.35
 PRED_PROFILE_RESEMBLE_TOL = 0.60
 PRED_PROFILE_MAX = 12
 
-# ---- Behaviour sampling ----
-BEHAVIOUR_MIN_TICKS = 20
+# ---- Behaviour ----
 WHALE_ORDER_USD = 50_000.0
 AGGRESSIVE_TAKER_USD = 20_000.0
 QUIET_VOLUME_RATIO = 0.5
 PANIC_VOLUME_RATIO = 2.0
 STALL_PRICE_PCT = 0.05
 
-# ---- Feature follow-through ----
+# ---- Follow-through ----
 FOLLOWTHROUGH_HORIZONS_SEC = (30, 60, 120, 180)
 LIVE_NET_TARGET_PCT = 0.28
 LIVE_TAG_TIMEOUT_SEC = 180.0
@@ -69,28 +69,43 @@ TIER_GATES = {
                           "min_avg": 0.45}},
 }
 
+# ---- Economic live gate ----
+LIVE_OBS_WINDOW = 20
+LIVE_MIN_WINS_OUT_OF_20 = 15
+LIVE_MIN_AVG_NET_PCT = 0.15
+LIVE_PEAK_WINDOW_MIN = 3
+
 # ---- Live ban system ----
-LIVE_FAIL_WINDOW = 5
-LIVE_FAIL_MIN_NET_SUM = 0.10
-LIVE_BAN_INITIAL_SEC = 7200
-LIVE_BAN_MAX_SEC = 86400
-LIVE_BAN_CLEAN_RESET_SEC = 86400
+LIVE_BAN_CONSECUTIVE_LOSSES = 2
+UNBAN_CONSECUTIVE_PAPER_WINS = 8
+UNBAN_MIN_AVG_NET_PCT = 0.20
+LIVE_BAN_INDEFINITE = 9_999_999_999.0
 
 # ---- New feature discovery ----
 UNEXPLAINED_MOVE_MIN_PCT = 1.1
 UNEXPLAINED_MAX_DURATION_SEC = 120
-NEW_FEATURE_MAX_CANDIDATES = 40
 NEW_FEATURE_PROMOTE_MIN_OCCURRENCES = 5
 NEW_FEATURE_PROMOTE_MIN_STREAK = 5
 NEW_FEATURE_MAX_DESCRIPTION_WORDS = 200
 
-# ---- Market cap tiers (proxy: 24h volume USD) ----
+# ---- Feature effect thresholds ----
+FEATURE_EFFECT_MIN_MOVE_PCT = 0.20
+WINNER_MOVE_WINDOW_MIN_PCT = 1.0
+
+# ---- Market cap tiers ----
 MARKET_CAP_TIERS = (
     ("micro",  0,            5_000_000),
     ("small",  5_000_000,    20_000_000),
     ("mid",    20_000_000,   100_000_000),
     ("large",  100_000_000,  1_000_000_000),
     ("mega",   1_000_000_000, 1e18),
+)
+
+REASON_CATEGORIES = (
+    "no_resistance", "heavy_volume", "light_cap_thin_book",
+    "overpowered_opposition", "mixed",
+    "absorbed_by_opposition", "no_volume", "heavy_cap_inertia",
+    "feature_failed",
 )
 
 
@@ -186,15 +201,13 @@ def compute_prior_move_pct(price_history, now_ts,
 # =========================================================================
 def compute_features_for_predict(price_history, now_ts, high_24h, low_24h,
                                  volume_24h_usd):
-    out = {
-        "valid": False, "reason": "NO_DATA",
-        "fluct_per_min": 0.0, "recent_abs_pct": 0.0,
-        "recent_rate_pct_per_min": 0.0, "prior_move_pct": 0.0,
-        "prior_rate_pct_per_min": 0.0, "acceleration": 0.0,
-        "distance_from_extreme_pct": 0.0, "direction": None,
-        "volume_24h_usd": volume_24h_usd,
-        "high_24h": high_24h, "low_24h": low_24h,
-    }
+    out = {"valid": False, "reason": "NO_DATA",
+           "fluct_per_min": 0.0, "recent_abs_pct": 0.0,
+           "recent_rate_pct_per_min": 0.0, "prior_move_pct": 0.0,
+           "prior_rate_pct_per_min": 0.0, "acceleration": 0.0,
+           "distance_from_extreme_pct": 0.0, "direction": None,
+           "volume_24h_usd": volume_24h_usd,
+           "high_24h": high_24h, "low_24h": low_24h}
     if not price_history or len(price_history) < 10:
         return out
     if volume_24h_usd < PRED_VOLUME_MIN_USD:
@@ -281,8 +294,7 @@ def summarize_minute_window(ticks, start_ts, end_ts):
         b = buckets.setdefault(m, {
             "minute": m, "prices": [], "vol_usd": 0.0,
             "buy_usd": 0.0, "sell_usd": 0.0, "trades": 0,
-            "whale_buys": 0, "whale_sells": 0,
-        })
+            "whale_buys": 0, "whale_sells": 0})
         b["prices"].append(t["price"])
         b["vol_usd"] += t.get("vol_usd", 0.0)
         b["buy_usd"] += t.get("taker_buy_usd", 0.0)
@@ -297,14 +309,13 @@ def summarize_minute_window(ticks, start_ts, end_ts):
         b = buckets[m]
         if not b["prices"]:
             continue
-        out.append({
-            "minute": m,
-            "open": b["prices"][0], "close": b["prices"][-1],
-            "high": max(b["prices"]), "low": min(b["prices"]),
-            "vol_usd": b["vol_usd"], "buy_usd": b["buy_usd"],
-            "sell_usd": b["sell_usd"], "trades": b["trades"],
-            "whale_buys": b["whale_buys"], "whale_sells": b["whale_sells"],
-        })
+        out.append({"minute": m,
+                    "open": b["prices"][0], "close": b["prices"][-1],
+                    "high": max(b["prices"]), "low": min(b["prices"]),
+                    "vol_usd": b["vol_usd"], "buy_usd": b["buy_usd"],
+                    "sell_usd": b["sell_usd"], "trades": b["trades"],
+                    "whale_buys": b["whale_buys"],
+                    "whale_sells": b["whale_sells"]})
     return out
 
 
@@ -317,57 +328,58 @@ def tag_behaviour_events(minute_buckets):
     med = vols[len(vols) // 2]
     tags = []
     for b in minute_buckets:
-        move = abs(b["close"] - b["open"]) / max(b["open"], 1e-9) * 100.0
+        move = (b["close"] - b["open"]) / max(b["open"], 1e-9) * 100.0
+        abs_move = abs(move)
         buy, sell, vol = b["buy_usd"], b["sell_usd"], b["vol_usd"]
         buy_dom = buy > sell * 1.4 and buy > 0
         sell_dom = sell > buy * 1.4 and sell > 0
         vol_high = vol > med * 1.5
         vol_low = vol < med * 0.5
+        vol_panic = vol > med * 3.0
+        stalled = abs_move < STALL_PRICE_PCT
+        m = b["minute"]
 
-        if buy_dom and vol_high:
-            tags.append({"tag": "aggressive_buy_with_volume", "minute": b["minute"]})
         if sell_dom and vol_high:
-            tags.append({"tag": "aggressive_sell_with_volume", "minute": b["minute"]})
-        if buy_dom and vol_low:
-            tags.append({"tag": "aggressive_buy_no_volume", "minute": b["minute"]})
-        if sell_dom and vol_low:
-            tags.append({"tag": "aggressive_sell_no_volume", "minute": b["minute"]})
-
-        if b["trades"] > 0 and buy < b["trades"] * 100 and sell < b["trades"] * 100:
-            if vol_low and move < STALL_PRICE_PCT:
-                if buy > sell:
-                    tags.append({"tag": "weak_buy_limits", "minute": b["minute"]})
-                elif sell > buy:
-                    tags.append({"tag": "weak_sell_limits", "minute": b["minute"]})
-
-        if b["whale_buys"] >= 1:
-            tags.append({"tag": "whale_buy_taker", "minute": b["minute"]})
+            tags.append({"tag": "aggressive_sell_taker_vol", "minute": m})
+        if buy_dom and vol_high:
+            tags.append({"tag": "aggressive_buy_taker_vol", "minute": m})
+        if sell_dom and not vol_high and not vol_low:
+            tags.append({"tag": "aggressive_sell_taker", "minute": m})
+        if buy_dom and not vol_high and not vol_low:
+            tags.append({"tag": "aggressive_buy_taker", "minute": m})
+        if sell_dom and vol_high and stalled:
+            tags.append({"tag": "aggressive_sell_limit", "minute": m})
+        if buy_dom and vol_high and stalled:
+            tags.append({"tag": "aggressive_buy_limit", "minute": m})
+        if vol_low and sell_dom:
+            tags.append({"tag": "weak_sell_taker_vol", "minute": m})
+        if vol_low and buy_dom:
+            tags.append({"tag": "weak_buy_taker_vol", "minute": m})
+        if vol_low and not buy_dom and not sell_dom and sell > buy:
+            tags.append({"tag": "weak_sell_taker", "minute": m})
+        if vol_low and not buy_dom and not sell_dom and buy > sell:
+            tags.append({"tag": "weak_buy_taker", "minute": m})
+        if vol_low and move < -0.15:
+            tags.append({"tag": "weak_sell_limit_vol", "minute": m})
+        if vol_low and move > 0.15:
+            tags.append({"tag": "weak_buy_limit_vol", "minute": m})
+        if vol_low and stalled and sell > buy:
+            tags.append({"tag": "weak_sell_limit", "minute": m})
+        if vol_low and stalled and buy > sell:
+            tags.append({"tag": "weak_buy_limit", "minute": m})
+        if sell_dom and vol_panic:
+            tags.append({"tag": "panic_sell_taker", "minute": m})
+        if buy_dom and vol_panic:
+            tags.append({"tag": "panic_buy_taker", "minute": m})
         if b["whale_sells"] >= 1:
-            tags.append({"tag": "whale_sell_taker", "minute": b["minute"]})
-
-        if vol_high and move > 0.3 and buy > sell:
-            tags.append({"tag": "large_volume_buy", "minute": b["minute"]})
-        if vol_high and move < -0.3 and sell > buy:
-            tags.append({"tag": "large_volume_sell", "minute": b["minute"]})
-
-        if vol > med * 2.0 and buy_dom:
-            tags.append({"tag": "panic_buy", "minute": b["minute"]})
-        if vol > med * 2.0 and sell_dom:
-            tags.append({"tag": "panic_sell", "minute": b["minute"]})
-
-        if vol_high and move < STALL_PRICE_PCT:
-            tags.append({"tag": "stall_under_volume", "minute": b["minute"]})
-
-        if sell_dom and move < STALL_PRICE_PCT:
-            tags.append({"tag": "aggressive_sell_quiet_buy", "minute": b["minute"]})
-        if buy_dom and move < STALL_PRICE_PCT:
-            tags.append({"tag": "aggressive_buy_quiet_sell", "minute": b["minute"]})
-
+            tags.append({"tag": "whale_sell_taker", "minute": m})
+        if b["whale_buys"] >= 1:
+            tags.append({"tag": "whale_buy_taker", "minute": m})
     return tags
 
 
 # =========================================================================
-# FOLLOW-THROUGH MEASUREMENT
+# FOLLOW-THROUGH
 # =========================================================================
 def measure_tag_followthrough(ticks, tag_ts, direction):
     out = {str(h): None for h in FOLLOWTHROUGH_HORIZONS_SEC}
@@ -394,6 +406,210 @@ def measure_tag_followthrough(ticks, tag_ts, direction):
             raw = -raw
         out[str(h)] = round(raw - FEE_ROUND_TRIP_PCT, 3)
     return out
+
+
+# =========================================================================
+# FEATURE RATING
+# =========================================================================
+def compute_feature_rating(hit_rate, avg_magnitude):
+    return min(100.0, hit_rate * 60 + min(40.0, avg_magnitude * 20))
+
+
+def measure_feature_instance(minute_buckets, i):
+    if i + 1 >= len(minute_buckets):
+        return None
+    b = minute_buckets[i]
+    if b["close"] <= 0:
+        return None
+    next_b = minute_buckets[i + 1]
+    immediate_move = (next_b["close"] - b["close"]) / b["close"] * 100.0
+    immediate_net = immediate_move - FEE_ROUND_TRIP_PCT
+    peak_move = immediate_move
+    peak_minute = 1
+    for j in range(1, min(LIVE_PEAK_WINDOW_MIN + 1, len(minute_buckets) - i)):
+        cb = minute_buckets[i + j]
+        ext_move = (cb["close"] - b["close"]) / b["close"] * 100.0
+        if abs(ext_move) > abs(peak_move):
+            peak_move = ext_move
+            peak_minute = j
+    return {"immediate_move_pct": round(immediate_move, 3),
+            "immediate_net_pct": round(immediate_net, 3),
+            "peak_move_pct": round(peak_move, 3),
+            "peak_net_pct": round(peak_move - FEE_ROUND_TRIP_PCT, 3),
+            "peak_minute": peak_minute,
+            "duration_min": peak_minute}
+
+
+# =========================================================================
+# REASON CLASSIFIERS
+# =========================================================================
+def _feature_side_of_tag(tag):
+    if "buy" in tag:
+        return "buy"
+    if "sell" in tag:
+        return "sell"
+    return None
+
+
+def classify_opposite_side(b, feature_side):
+    if not feature_side:
+        return "unknown"
+    buy, sell = b.get("buy_usd", 0.0), b.get("sell_usd", 0.0)
+    own = buy if feature_side == "buy" else sell
+    opp = sell if feature_side == "buy" else buy
+    if own <= 0:
+        return "unknown"
+    if opp <= 0:
+        return "absent"
+    ratio = opp / own
+    if ratio < 0.3:
+        return "quiet"
+    if ratio < 0.6:
+        return "weak"
+    if ratio > 1.2:
+        return "dominant"
+    if ratio > 0.8:
+        return "strong"
+    return "normal"
+
+
+def classify_volume(b, median_vol):
+    if median_vol <= 0:
+        return "unknown"
+    vol = b.get("vol_usd", 0.0)
+    if vol < median_vol * 0.5:
+        return "light"
+    if vol > median_vol * 3.0:
+        return "panic"
+    if vol > median_vol * 1.5:
+        return "heavy"
+    return "normal"
+
+
+def classify_tier_weight(tier):
+    if tier in ("micro", "small"):
+        return "light"
+    if tier == "mid":
+        return "medium"
+    if tier in ("large", "mega"):
+        return "heavy"
+    return "unknown"
+
+
+def classify_reason_category(opposite_state, volume_class, tier_weight, moved):
+    if not moved:
+        if opposite_state in ("strong", "dominant"):
+            return "absorbed_by_opposition"
+        if volume_class == "light":
+            return "no_volume"
+        if tier_weight == "heavy":
+            return "heavy_cap_inertia"
+        return "feature_failed"
+    if opposite_state in ("quiet", "weak", "absent"):
+        return "no_resistance"
+    if volume_class in ("heavy", "panic"):
+        return "heavy_volume"
+    if tier_weight == "light":
+        return "light_cap_thin_book"
+    if opposite_state in ("strong", "dominant"):
+        return "overpowered_opposition"
+    return "mixed"
+
+
+def infer_move_reason(category, opposite_state, volume_class,
+                       tier_weight, move_pct):
+    t = f"{tier_weight}-cap" if tier_weight != "unknown" else "unknown-cap"
+    if category == "no_resistance":
+        return f"opposite side was {opposite_state} — no resistance ({t})"
+    if category == "heavy_volume":
+        return f"{volume_class} volume forced the move on {t}"
+    if category == "light_cap_thin_book":
+        return f"light-cap inertia — thin book moved easily on {t}"
+    if category == "overpowered_opposition":
+        return f"overpowered {opposite_state} opposite side on {t}"
+    if category == "absorbed_by_opposition":
+        return f"absorbed by {opposite_state} opposite side on {t}"
+    if category == "no_volume":
+        return f"volume too light, {volume_class} flow"
+    if category == "heavy_cap_inertia":
+        return f"{t} inertia, feature couldn't shift price"
+    if category == "feature_failed":
+        return f"feature fired but {t} price held"
+    return f"mixed — {opposite_state} opposition, {volume_class} volume, {t}"
+
+
+# =========================================================================
+# CYCLE-LEVEL FEATURE RANKING
+# =========================================================================
+def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
+    tier_map = tier_map or {}
+    all_obs = {}
+    for sym, ticks in watch_ticks.items():
+        if not ticks or len(ticks) < 5:
+            continue
+        minute_buckets = summarize_minute_window(ticks, start_ts, start_ts + 1800)
+        if len(minute_buckets) < 3:
+            continue
+        vols = sorted([b["vol_usd"] for b in minute_buckets if b["vol_usd"] > 0])
+        med_vol = vols[len(vols) // 2] if vols else 0.0
+        tier = tier_map.get(sym, "unknown")
+        tier_weight = classify_tier_weight(tier)
+        for i, b in enumerate(minute_buckets[:-1]):
+            tags = tag_behaviour_events([b])
+            if not tags:
+                continue
+            measurement = measure_feature_instance(minute_buckets, i)
+            if not measurement:
+                continue
+            net = measurement["immediate_net_pct"]
+            moved = abs(net) >= FEATURE_EFFECT_MIN_MOVE_PCT
+            vol_class = classify_volume(b, med_vol)
+            for t in tags:
+                side = _feature_side_of_tag(t["tag"])
+                opp_state = classify_opposite_side(b, side) if side else "unknown"
+                cat = classify_reason_category(
+                    opp_state, vol_class, tier_weight, moved)
+                reason = infer_move_reason(
+                    cat, opp_state, vol_class, tier_weight, net)
+                all_obs.setdefault(t["tag"], []).append({
+                    "coin": sym, "minute": b["minute"] + 1,
+                    "net_pct": net, "moved": moved,
+                    "immediate_move_pct": measurement["immediate_move_pct"],
+                    "peak_move_pct": measurement["peak_move_pct"],
+                    "peak_net_pct": measurement["peak_net_pct"],
+                    "peak_minute": measurement["peak_minute"],
+                    "opposite_state": opp_state,
+                    "volume_class": vol_class,
+                    "tier": tier, "tier_weight": tier_weight,
+                    "reason_category": cat, "reason": reason,
+                    "was_best_mover": sym == winner_sym,
+                })
+    result = {}
+    for tag, obs in all_obs.items():
+        moved_obs = [o for o in obs if o["moved"]]
+        winner_inst = next((o for o in obs if o["coin"] == winner_sym), None)
+        best = max(moved_obs, key=lambda o: abs(o["peak_net_pct"])) if moved_obs else None
+        better = []
+        if winner_inst and winner_inst["moved"]:
+            w_abs = abs(winner_inst["peak_net_pct"])
+            better = [o for o in moved_obs
+                      if o["coin"] != winner_sym
+                      and abs(o["peak_net_pct"]) > w_abs + 0.10]
+        hit_rate = len(moved_obs) / len(obs) if obs else 0.0
+        avg_moved = (sum(abs(o["peak_net_pct"]) for o in moved_obs) / len(moved_obs)
+                     if moved_obs else 0.0)
+        rating = compute_feature_rating(hit_rate, avg_moved)
+        reasons = {c: 0 for c in REASON_CATEGORIES}
+        for o in obs:
+            reasons[o["reason_category"]] += 1
+        result[tag] = {"fired": len(obs), "moved_count": len(moved_obs),
+                       "hit_rate": round(hit_rate, 3),
+                       "avg_moved": round(avg_moved, 3),
+                       "rating": round(rating, 1),
+                       "winner_instance": winner_inst,
+                       "best": best, "better": better,
+                       "reasons": reasons, "raw_obs": obs}
+    return result
 
 
 # =========================================================================
@@ -458,18 +674,6 @@ def tier_live_eligible(tier, recent_net):
     return _window_check(raws, gate)["pass"], _window_check(raws, gate)
 
 
-def live_window_fails(recent_net):
-    if len(recent_net) < LIVE_FAIL_WINDOW:
-        return False, {"reason": f"{len(recent_net)}/{LIVE_FAIL_WINDOW} trades"}
-    win = recent_net[-LIVE_FAIL_WINDOW:]
-    total = sum(win)
-    if total < LIVE_FAIL_MIN_NET_SUM:
-        return True, {"reason": f"net sum {total:+.3f}% < {LIVE_FAIL_MIN_NET_SUM:+.2f}%",
-                      "window": win, "total": round(total, 3)}
-    return False, {"reason": f"net sum {total:+.3f}% — okay",
-                   "window": win, "total": round(total, 3)}
-
-
 def tier_fully_eligible(tier, recent_net, samples):
     p_ok, _ = tier_paper_eligible(tier, samples)
     return p_ok
@@ -484,7 +688,67 @@ def diagnose_tier(tier, recent_net, samples):
 
 
 # =========================================================================
-# FEATURE RANKING
+# ECONOMIC LIVE GATE
+# =========================================================================
+def feature_tier_live_ready(tag, tier, live_history):
+    """Live gate uses paper evidence only: 20 obs, 15+ wins, avg net >= 0.15%."""
+    th = (live_history.get(tag) or {}).get(tier)
+    if not th:
+        return False, "no history", {}
+    obs_all = th.get("observations") or []
+    obs = [o for o in obs_all
+           if o.get("reason_category") != "live_trade"][-LIVE_OBS_WINDOW:]
+    if len(obs) < LIVE_OBS_WINDOW:
+        return False, f"{len(obs)}/{LIVE_OBS_WINDOW} paper obs", {}
+    nets = [o["net_pct"] for o in obs]
+    wins = sum(1 for n in nets if n > 0)
+    avg = sum(nets) / len(nets)
+    stats = {"obs": len(obs), "wins": wins, "avg_net": round(avg, 3),
+             "avg_peak": round(sum(o.get("peak_net_pct", o["net_pct"])
+                                   for o in obs) / len(obs), 3),
+             "avg_duration_min": round(sum(o.get("peak_minute", 1)
+                                           for o in obs) / len(obs), 2)}
+    if wins < LIVE_MIN_WINS_OUT_OF_20:
+        return False, f"wins {wins}/20 < {LIVE_MIN_WINS_OUT_OF_20}", stats
+    if avg < LIVE_MIN_AVG_NET_PCT:
+        return False, f"avg {avg:+.3f}% < {LIVE_MIN_AVG_NET_PCT}%", stats
+    return True, f"OK ({wins}/20, avg {avg:+.3f}%)", stats
+
+
+# =========================================================================
+# BAN SYSTEM
+# =========================================================================
+def tier_should_ban(live_trades):
+    """Ban when the last 2 live trades are both losses."""
+    if len(live_trades) < LIVE_BAN_CONSECUTIVE_LOSSES:
+        return False, f"{len(live_trades)}/{LIVE_BAN_CONSECUTIVE_LOSSES} live trades"
+    last = live_trades[-LIVE_BAN_CONSECUTIVE_LOSSES:]
+    if all(n < 0 for n in last):
+        return True, (f"{LIVE_BAN_CONSECUTIVE_LOSSES} consecutive losses: "
+                      + ", ".join(f"{n:+.3f}%" for n in last))
+    return False, "last 2 not both losses"
+
+
+def tier_unban_check(observations, banned_at):
+    """Unban when the last 8 paper obs AFTER banned_at are all wins with avg >= 0.2%."""
+    paper_obs = [o for o in observations
+                 if o.get("reason_category") != "live_trade"
+                 and o.get("ts", 0) >= banned_at]
+    if len(paper_obs) < UNBAN_CONSECUTIVE_PAPER_WINS:
+        return False, (f"{len(paper_obs)}/{UNBAN_CONSECUTIVE_PAPER_WINS} "
+                       f"paper obs since ban")
+    last8 = paper_obs[-UNBAN_CONSECUTIVE_PAPER_WINS:]
+    for o in last8:
+        if o["net_pct"] <= 0:
+            return False, f"non-win in last 8 (net={o['net_pct']:+.3f}%)"
+    avg = sum(o["net_pct"] for o in last8) / len(last8)
+    if avg < UNBAN_MIN_AVG_NET_PCT:
+        return False, f"avg {avg:+.3f}% < {UNBAN_MIN_AVG_NET_PCT:+.2f}%"
+    return True, f"8 consecutive wins since ban, avg {avg:+.3f}%"
+
+
+# =========================================================================
+# FEATURE LEADERBOARD / RANK (global)
 # =========================================================================
 def rank_features(global_tag_stats, tag_descriptions=None,
                   live_history=None, new_features=None):
@@ -510,7 +774,6 @@ def rank_features(global_tag_stats, tag_descriptions=None,
         hit_rate = hits / n
         median_abs = sorted(abs(v) for v in vals_all)[n // 2]
         median_signed = sorted(vals_all)[n // 2]
-
         tier_stats = {}
         for tier in set(s.get("tier", "unknown") for s in samples):
             tier_samples = [s for s in samples if s.get("tier") == tier]
@@ -521,79 +784,134 @@ def rank_features(global_tag_stats, tag_descriptions=None,
                     vals.append(r)
             if not vals:
                 continue
-            lh = (live_history.get(tag) or {}).get(tier) or {}
-            recent_net = lh.get("recent_net", [])
-            recent_raw = [_raw(v) for v in recent_net]
-            live_win = recent_raw[-GATE_WINDOW:]
-            live_avg = (sum(live_win) / len(live_win)) if live_win else 0.0
-            live_maj = sum(1 for v in live_win if v >= 0.40) if live_win else 0
             p_ok, p_diag = tier_paper_eligible(tier, samples)
-            tier_stats[tier] = {
-                "samples": len(vals),
-                "hits_at_040": sum(1 for v in vals if v >= 0.40),
-                "hits_at_050": sum(1 for v in vals if v >= 0.50),
-                "mean_raw_pct": round(sum(vals) / len(vals), 3),
-                "median_abs_pct": round(sorted(abs(v) for v in vals)[len(vals) // 2], 3),
-                "median_followthrough_pct": round(sorted(vals)[len(vals) // 2], 3),
-                "paper_pass": p_ok,
-                "paper_window": p_diag.get("window", []),
-                "paper_avg": p_diag.get("avg"),
-                "paper_majority": p_diag.get("majority_count"),
-                "paper_reason": p_diag.get("reason"),
-                "live_trades": len(recent_net),
-                "live_window": live_win,
-                "live_avg_raw": round(live_avg, 3),
-                "live_majority": live_maj,
-            }
-        ranked.append({
-            "tag": tag,
-            "description": tag_descriptions.get(tag, ""),
-            "is_new_feature": tag in new_features,
-            "samples": n,
-            "hit_rate": round(hit_rate, 3),
-            "median_followthrough_pct": round(median_signed, 3),
-            "median_abs_pct": round(median_abs, 3),
-            "tiers": tier_stats,
-        })
+            tier_stats[tier] = {"samples": len(vals),
+                                "paper_pass": p_ok,
+                                "paper_window": p_diag.get("window", []),
+                                "paper_avg": p_diag.get("avg"),
+                                "paper_majority": p_diag.get("majority_count"),
+                                "paper_reason": p_diag.get("reason")}
+        ranked.append({"tag": tag,
+                       "description": tag_descriptions.get(tag, ""),
+                       "is_new_feature": tag in new_features,
+                       "samples": n, "hit_rate": round(hit_rate, 3),
+                       "median_followthrough_pct": round(median_signed, 3),
+                       "median_abs_pct": round(median_abs, 3),
+                       "tiers": tier_stats})
     ranked.sort(key=lambda x: (x["hit_rate"], x["median_abs_pct"]), reverse=True)
     return ranked
 
 
-def build_live_feature_rules(global_tag_stats, tag_descriptions=None,
-                             live_history=None, new_features=None):
-    tag_descriptions = tag_descriptions or {}
-    rules = {}
-    for r in rank_features(global_tag_stats, tag_descriptions,
-                            live_history, new_features):
-        tag = r["tag"]
-        samples = global_tag_stats.get(tag, [])
-        usable = {}
-        for tier, ts in r["tiers"].items():
-            if not tier_fully_eligible(tier, [], samples):
+# =========================================================================
+# STORY BUILDER
+# =========================================================================
+def build_behaviour_story(ticks, start_price, end_price, start_ts):
+    empty = {"story": "no data", "peak_pct": 0.0, "trough_pct": 0.0,
+             "net_pct": 0.0, "verdict": "NO_DATA",
+             "peak_minute": None, "trough_minute": None, "tags": []}
+    if not ticks or start_price <= 0:
+        return empty
+    minute_buckets = summarize_minute_window(
+        ticks, start_ts, start_ts + PRED_MAX_HOLD_SEC)
+    if len(minute_buckets) < 3:
+        return empty
+    prices_all = [t["price"] for t in ticks if t["price"] > 0]
+    if not prices_all:
+        return empty
+    peak = max(prices_all)
+    trough = min(prices_all)
+    peak_pct = (peak - start_price) / start_price * 100.0
+    trough_pct = (trough - start_price) / start_price * 100.0
+    net_pct = (end_price - start_price) / start_price * 100.0
+    tags_fired = tag_behaviour_events(minute_buckets)
+    sentences = []
+    sentences.append(f"Net over 30 minutes: {net_pct:+.2f}% "
+                     f"(peak {peak_pct:+.2f}%, trough {trough_pct:+.2f}%).")
+    if net_pct > 0.5:
+        verdict = "WINNER_LONG"
+    elif net_pct < -0.5:
+        verdict = "WINNER_SHORT"
+    else:
+        verdict = "FLAT"
+    return {"story": " ".join(sentences),
+            "peak_pct": round(peak_pct, 2),
+            "trough_pct": round(trough_pct, 2),
+            "net_pct": round(net_pct, 2),
+            "peak_minute": None, "trough_minute": None,
+            "verdict": verdict, "peak_price": peak, "trough_price": trough,
+            "tags": tags_fired}
+
+
+def find_move_window(ticks, start_ts, min_move_pct=WINNER_MOVE_WINDOW_MIN_PCT):
+    minute_buckets = summarize_minute_window(ticks, start_ts, start_ts + 1800)
+    if len(minute_buckets) < 3:
+        return None
+    best = None
+    for i in range(len(minute_buckets)):
+        for j in range(i + 3, min(i + 9, len(minute_buckets) + 1)):
+            start, end = minute_buckets[i], minute_buckets[j - 1]
+            if start["open"] <= 0:
                 continue
-            direction = "LONG" if ts["median_followthrough_pct"] > 0 else "SHORT"
-            usable[tier] = {
-                "direction": direction,
-                "target_pct": LIVE_NET_TARGET_PCT,
-                "timeout_sec": LIVE_TAG_TIMEOUT_SEC,
-                "samples": ts["samples"],
-                "mean_raw_pct": ts["mean_raw_pct"],
-                "paper_window": ts["paper_window"],
-                "paper_avg": ts["paper_avg"],
-                "paper_majority": ts["paper_majority"],
-                "live_window": ts["live_window"],
-                "live_avg_raw": ts["live_avg_raw"],
-                "live_majority": ts["live_majority"],
-            }
-        if usable:
-            rules[tag] = {
-                "samples": r["samples"],
-                "hit_rate": r["hit_rate"],
-                "median_abs_pct": r["median_abs_pct"],
-                "description": r["description"],
-                "tiers": usable,
-            }
-    return rules
+            move = (end["close"] - start["open"]) / start["open"] * 100.0
+            if best is None or abs(move) > abs(best["move_pct"]):
+                best = {"start_minute": start["minute"] + 1,
+                        "end_minute": end["minute"] + 1,
+                        "move_pct": round(move, 2),
+                        "direction": "LONG" if move > 0 else "SHORT"}
+    return best if best and abs(best["move_pct"]) >= min_move_pct else None
+
+
+def summarize_feature_effects(ticks, start_ts, end_ts):
+    minute_buckets = summarize_minute_window(ticks, start_ts, end_ts)
+    if len(minute_buckets) < 3:
+        return {}, {}
+    raw = {}
+    for i, b in enumerate(minute_buckets[:-1]):
+        tags = tag_behaviour_events([b])
+        if not tags:
+            continue
+        next_b = minute_buckets[i + 1]
+        if b["close"] <= 0:
+            continue
+        move = (next_b["close"] - b["close"]) / b["close"] * 100.0
+        net = move - FEE_ROUND_TRIP_PCT
+        moved = abs(net) >= FEATURE_EFFECT_MIN_MOVE_PCT
+        for t in tags:
+            raw.setdefault(t["tag"], []).append({
+                "minute": b["minute"] + 1,
+                "move_pct": round(move, 3),
+                "net_pct": round(net, 3),
+                "moved": moved})
+    summary = {}
+    for tag, samples in raw.items():
+        n = len(samples)
+        mv = [s for s in samples if s["moved"]]
+        um = [s for s in samples if not s["moved"]]
+        summary[tag] = {"fired": n, "moved_count": len(mv),
+                        "unmoved_count": len(um),
+                        "hit_rate": round(len(mv) / n, 3),
+                        "avg_net_when_moved": round(sum(s["net_pct"] for s in mv) / len(mv), 3) if mv else 0.0,
+                        "avg_net_when_unmoved": round(sum(s["net_pct"] for s in um) / len(um), 3) if um else 0.0,
+                        "minutes": [s["minute"] for s in samples]}
+    return summary, raw
+
+
+def build_winner_narrative(winner_sym, ticks, start_price, end_price, start_ts):
+    if not ticks:
+        return None
+    story = build_behaviour_story(ticks, start_price, end_price, start_ts)
+    effects, raw = summarize_feature_effects(ticks, start_ts, start_ts + 1800)
+    move_window = find_move_window(ticks, start_ts)
+    lines = [f"  WINNER: {winner_sym} | net={story['net_pct']:+.2f}% | "
+             f"peak={story['peak_pct']:+.2f}% | trough={story['trough_pct']:+.2f}%",
+             f"    {story['story']}"]
+    if move_window:
+        lines.append(f"    BIG MOVE: minutes {move_window['start_minute']}-"
+                     f"{move_window['end_minute']} | "
+                     f"{move_window['move_pct']:+.2f}% "
+                     f"({move_window['direction']})")
+    return {"lines": lines, "effects": effects, "raw": raw,
+            "move_window": move_window, "story": story}
 
 
 # =========================================================================
@@ -631,17 +949,16 @@ def describe_move_context(minute_buckets, tags_fired, move_pct, elapsed_sec):
     parts = [f"Price moved {direction} {abs(move_pct):.2f}% in {int(elapsed_sec)}s."]
     if abs(taker_imb) > 0.4:
         dom = "buy" if taker_imb > 0 else "sell"
-        parts.append(f"Taker {dom} volume dominated ({abs(taker_imb)*100:.0f}% imbalance).")
+        parts.append(f"Taker {dom} dominated ({abs(taker_imb)*100:.0f}%).")
     else:
-        parts.append("Taker flow was balanced.")
+        parts.append("Taker flow balanced.")
     if b.get("whale_buys", 0) > b.get("whale_sells", 0):
         parts.append("Whale buy cluster fired.")
     elif b.get("whale_sells", 0) > b.get("whale_buys", 0):
         parts.append("Whale sell cluster fired.")
-    parts.append(f"Average trade size ${avg_size:.0f}.")
-    parts.append(f"Total volume ${vol:.0f}.")
+    parts.append(f"Avg trade ${avg_size:.0f}. Vol ${vol:.0f}.")
     if tags_fired:
-        parts.append("Registered tags: " + ", ".join(t["tag"] for t in tags_fired) + ".")
+        parts.append("Tags: " + ", ".join(t["tag"] for t in tags_fired) + ".")
     else:
         parts.append("No registered tags fired.")
     desc = " ".join(parts)
@@ -652,10 +969,8 @@ def describe_move_context(minute_buckets, tags_fired, move_pct, elapsed_sec):
 
 
 def update_candidate_streak(candidates, tag, tier, net_pct):
-    entry = candidates.setdefault(tag, {
-        "occurrences": [], "streak": 0,
-        "streak_successes": [], "promoted": False,
-    })
+    entry = candidates.setdefault(tag, {"occurrences": [], "streak": 0,
+                                        "streak_successes": [], "promoted": False})
     if entry["promoted"]:
         return entry
     if tier in ("large", "mega", "unknown"):
@@ -682,130 +997,6 @@ def candidate_ready_to_promote(entry):
         return False
     tiers = {s["tier"] for s in entry["streak_successes"]}
     return "mid" in tiers and ("small" in tiers or "micro" in tiers)
-
-
-# =========================================================================
-# STORY BUILDER
-# =========================================================================
-def build_behaviour_story(ticks, start_price, end_price, start_ts):
-    empty = {"story": "no data", "peak_pct": 0.0, "trough_pct": 0.0,
-             "net_pct": 0.0, "verdict": "NO_DATA",
-             "peak_minute": None, "trough_minute": None, "tags": []}
-    if not ticks or start_price <= 0:
-        return empty
-    minute_buckets = summarize_minute_window(
-        ticks, start_ts, start_ts + PRED_MAX_HOLD_SEC)
-    if len(minute_buckets) < 3:
-        return empty
-    prices_all = [t["price"] for t in ticks if t["price"] > 0]
-    if not prices_all:
-        return empty
-    peak = max(prices_all)
-    trough = min(prices_all)
-    peak_pct = (peak - start_price) / start_price * 100.0
-    trough_pct = (trough - start_price) / start_price * 100.0
-    net_pct = (end_price - start_price) / start_price * 100.0
-    vols = [b["vol_usd"] for b in minute_buckets if b["vol_usd"] > 0]
-    median_vol = (sorted(vols)[len(vols) // 2]) if vols else 0.0
-    tags_fired = tag_behaviour_events(minute_buckets)
-    sentences = []
-
-    first3 = minute_buckets[:3]
-    first_vol = sum(b["vol_usd"] for b in first3)
-    first_buy = sum(b["buy_usd"] for b in first3)
-    first_sell = sum(b["sell_usd"] for b in first3)
-    if median_vol > 0 and first_vol / max(1, len(first3)) > median_vol * PANIC_VOLUME_RATIO:
-        if first_buy > first_sell:
-            sentences.append("Right out of the gate buyers swarmed on heavy volume.")
-        else:
-            sentences.append("Right out of the gate sellers hit hard on heavy volume.")
-    elif first_buy > first_sell * 1.3:
-        sentences.append("Early minutes tilted toward calm buying.")
-    elif first_sell > first_buy * 1.3:
-        sentences.append("Early minutes tilted toward calm selling.")
-
-    for b in minute_buckets:
-        if b["whale_sells"] >= 2 and b["vol_usd"] > median_vol * 1.5:
-            d = "down" if b["close"] < b["open"] else "up"
-            sentences.append(f"At minute {b['minute']+1}-{b['minute']+2} whales "
-                             f"dumped heavily and price still moved {d}.")
-            break
-        if b["whale_buys"] >= 2 and b["vol_usd"] > median_vol * 1.5:
-            d = "up" if b["close"] > b["open"] else "down"
-            sentences.append(f"At minute {b['minute']+1}-{b['minute']+2} whales "
-                             f"bought aggressively and price moved {d}.")
-            break
-
-    for b in minute_buckets[3:10]:
-        move = abs(b["close"] - b["open"]) / max(b["open"], 1e-9) * 100.0
-        if b["vol_usd"] > median_vol * 1.5 and move < STALL_PRICE_PCT:
-            sentences.append(f"Minutes {b['minute']+1}-{b['minute']+2} saw heavy "
-                             f"volume but price barely wiggled — that much flow "
-                             f"didn't move price.")
-            break
-
-    for b in minute_buckets:
-        sell_dom = b["sell_usd"] > b["buy_usd"] * 1.5
-        buy_dom = b["buy_usd"] > b["sell_usd"] * 1.5
-        move = abs(b["close"] - b["open"]) / max(b["open"], 1e-9) * 100.0
-        if sell_dom and move < STALL_PRICE_PCT and b["vol_usd"] > 0:
-            sentences.append(f"Minute {b['minute']+1} sellers were aggressive "
-                             f"takers, buyers quiet — the aggression didn't move price.")
-            break
-        if buy_dom and move < STALL_PRICE_PCT and b["vol_usd"] > 0:
-            sentences.append(f"Minute {b['minute']+1} buyers were aggressive "
-                             f"takers, sellers used limits — the aggression "
-                             f"didn't move price.")
-            break
-
-    tail = minute_buckets[-10:]
-    for b in tail:
-        buy_dom = b["buy_usd"] > b["sell_usd"] * 1.5
-        sell_dom = b["sell_usd"] > b["buy_usd"] * 1.5
-        move = (b["close"] - b["open"]) / max(b["open"], 1e-9) * 100.0
-        if buy_dom and b["vol_usd"] > median_vol and move > 0.3:
-            sentences.append(f"Minutes {b['minute']+1}-{b['minute']+2} buyers hit "
-                             f"large taker volume while sellers sat on limits — "
-                             f"moved price up {move:.2f}%.")
-            break
-        if sell_dom and b["vol_usd"] > median_vol and move < -0.3:
-            sentences.append(f"Minutes {b['minute']+1}-{b['minute']+2} sellers hit "
-                             f"large taker volume while buyers sat on limits — "
-                             f"moved price down {abs(move):.2f}%.")
-            break
-
-    peak_minute = trough_minute = None
-    pk_ref, tr_ref = -1e18, 1e18
-    for t in ticks:
-        if t["price"] > pk_ref:
-            pk_ref = t["price"]
-            peak_minute = int((t["ts"] - start_ts) // 60)
-        if t["price"] < tr_ref:
-            tr_ref = t["price"]
-            trough_minute = int((t["ts"] - start_ts) // 60)
-
-    peak_note = (f"Peak at minute {peak_minute+1} (+{peak_pct:.2f}%). "
-                 if peak_minute is not None and peak_pct > 0.5 else "")
-    trough_note = (f"Trough at minute {trough_minute+1} ({trough_pct:.2f}%). "
-                   if trough_minute is not None and trough_pct < -0.5 else "")
-    sentences.append(f"Net over 30 minutes: {net_pct:+.2f}% "
-                     f"(peak {peak_pct:+.2f}%, trough {trough_pct:+.2f}%). "
-                     f"{peak_note}{trough_note}")
-
-    if net_pct > 0.5:
-        verdict = "WINNER_LONG"
-    elif net_pct < -0.5:
-        verdict = "WINNER_SHORT"
-    else:
-        verdict = "FLAT"
-
-    return {"story": " ".join(sentences),
-            "peak_pct": round(peak_pct, 2),
-            "trough_pct": round(trough_pct, 2),
-            "net_pct": round(net_pct, 2),
-            "peak_minute": peak_minute, "trough_minute": trough_minute,
-            "verdict": verdict, "peak_price": peak, "trough_price": trough,
-            "tags": tags_fired}
 
 
 # =========================================================================
