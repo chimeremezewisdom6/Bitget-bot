@@ -1,13 +1,13 @@
 """
 market_math.py
 ==============
-PREDICT strategy math — paper + live, feature ranking, reason classification,
-economic live gate, and 8-wins-since-ban unban system.
-v2026.12.14
+PREDICT strategy math — noise-filtered feature learning, signed metrics,
+duration × magnitude classification, per-feature live timeout.
+v2026.12.15
 """
 import math
 
-__version__ = "2026.12.14"
+__version__ = "2026.12.15"
 
 FEE_ROUND_TRIP_PCT = 0.22
 
@@ -29,6 +29,7 @@ PRED_EXIT_DEPTH_RATIO_MAX = 1.2
 
 # ---- Profile bank ----
 PRED_PROFILE_MATCH_TOL = 0.35
+PRED_PROFILE_MATCH_MIN_FIELDS = 3
 PRED_PROFILE_RESEMBLE_TOL = 0.60
 PRED_PROFILE_MAX = 12
 
@@ -42,31 +43,17 @@ STALL_PRICE_PCT = 0.05
 # ---- Follow-through ----
 FOLLOWTHROUGH_HORIZONS_SEC = (30, 60, 120, 180)
 LIVE_NET_TARGET_PCT = 0.28
-LIVE_TAG_TIMEOUT_SEC = 180.0
 
-# ---- Feature ranking ----
-FEATURE_LEADERBOARD_MIN_SAMPLES = 5
+# ---- Feature signal classification ----
+FEATURE_EFFECT_MIN_MOVE_PCT = 0.20
+FEATURE_BIG_MOVE_PCT = 0.50
+FEATURE_NOISE_SIGNAL_RATIO = 0.25
+FEATURE_LEADERBOARD_MIN_SAMPLES = 3
 
-# ---- Tier gates ----
-GATE_WINDOW = 5
-TIER_GATES = {
-    "mega":  {"paper": {"majority_floor": 0.40, "majority_count": 3},
-              "live":  {"majority_floor": 0.40, "majority_count": 3,
-                        "min_avg": 0.45}},
-    "large": {"paper": {"majority_floor": 0.40, "majority_count": 3},
-              "live":  {"majority_floor": 0.40, "majority_count": 3,
-                        "min_avg": 0.45}},
-    "mid":   {"paper": {"majority_floor": 0.40, "majority_count": 3},
-              "live":  {"min_avg": 0.45}},
-    "small": {"paper": {"majority_floor": 0.40, "majority_count": 3},
-              "live":  {"majority_floor": 0.40, "majority_count": 3,
-                        "min_avg": 0.45}},
-    "micro": {"paper": {"majority_floor": 0.40, "majority_count": 3},
-              "live":  {"majority_floor": 0.40, "majority_count": 3,
-                        "min_avg": 0.45}},
-    "unknown": {"paper": {"majority_floor": 0.40, "majority_count": 3},
-                "live":  {"majority_floor": 0.40, "majority_count": 3,
-                          "min_avg": 0.45}},
+KIND_TIMEOUT_SEC = {
+    "FLASH": 60.0, "FLASH_BIG": 90.0,
+    "PULSE": 180.0, "PULSE_BIG": 240.0,
+    "SUSTAINED": 600.0, "SUSTAINED_BIG": 900.0,
 }
 
 # ---- Economic live gate ----
@@ -88,11 +75,10 @@ NEW_FEATURE_PROMOTE_MIN_OCCURRENCES = 5
 NEW_FEATURE_PROMOTE_MIN_STREAK = 5
 NEW_FEATURE_MAX_DESCRIPTION_WORDS = 200
 
-# ---- Feature effect thresholds ----
-FEATURE_EFFECT_MIN_MOVE_PCT = 0.20
+# ---- Winner window ----
 WINNER_MOVE_WINDOW_MIN_PCT = 1.0
 
-# ---- Market cap tiers ----
+# ---- Market cap tiers (volume proxy) ----
 MARKET_CAP_TIERS = (
     ("micro",  0,            5_000_000),
     ("small",  5_000_000,    20_000_000),
@@ -120,8 +106,16 @@ def _raw(v_net):
     return v_net + FEE_ROUND_TRIP_PCT
 
 
+def _tag_direction(tag):
+    if "buy" in tag:
+        return "LONG"
+    if "sell" in tag:
+        return "SHORT"
+    return "LONG"
+
+
 # =========================================================================
-# MARKET CAP TIER
+# MARKET CAP / VOLUME TIER
 # =========================================================================
 def market_cap_tier_from_volume(vol_24h_usd):
     if vol_24h_usd is None or vol_24h_usd <= 0:
@@ -171,13 +165,12 @@ def compute_recent_dump(price_history, now_ts, window_sec=PRED_RECENT_WINDOW_SEC
     dump_pct = (peak_price - current_price) / peak_price * 100.0
     duration_min = window_sec / 60.0
     recovery_pct = (current_price - low_price) / low_price * 100.0
-    out.update({
-        "peak_price": peak_price, "low_price": low_price, "low_ts": low_ts,
-        "current_price": current_price, "dump_pct": dump_pct,
-        "dump_rate_pct_per_min":
-            dump_pct / duration_min if duration_min > 0 else 0.0,
-        "recovery_pct": recovery_pct,
-    })
+    out.update({"peak_price": peak_price, "low_price": low_price,
+                "low_ts": low_ts, "current_price": current_price,
+                "dump_pct": dump_pct,
+                "dump_rate_pct_per_min":
+                    dump_pct / duration_min if duration_min > 0 else 0.0,
+                "recovery_pct": recovery_pct})
     return out
 
 
@@ -197,7 +190,7 @@ def compute_prior_move_pct(price_history, now_ts,
 
 
 # =========================================================================
-# FEATURES FOR PROFILE MATCHING
+# PROFILE FEATURE MATCHING
 # =========================================================================
 def compute_features_for_predict(price_history, now_ts, high_24h, low_24h,
                                  volume_24h_usd):
@@ -252,19 +245,29 @@ def compute_features_for_predict(price_history, now_ts, high_24h, low_24h,
     return out
 
 
-def features_match_profile(features, profile, tol=PRED_PROFILE_MATCH_TOL):
+def _count_feature_matches(features, profile, tol):
+    fields = ("fluct_per_min", "recent_abs_pct", "prior_move_pct",
+              "acceleration", "distance_from_extreme_pct")
+    matched = 0
+    for k in fields:
+        fv = features.get(k, 0.0)
+        pv = profile.get(k, 0.0)
+        if fv < 0.02 and pv < 0.02:
+            matched += 1
+            continue
+        ratio = fv / max(pv, 0.01)
+        if 1.0 - tol <= ratio <= 1.0 + tol:
+            matched += 1
+    return matched
+
+
+def features_match_profile(features, profile, tol=PRED_PROFILE_MATCH_TOL,
+                           min_fields=PRED_PROFILE_MATCH_MIN_FIELDS):
     if not features or not features.get("valid"):
         return False
     if features.get("direction") != profile.get("direction"):
         return False
-    for k in ("fluct_per_min", "recent_abs_pct", "prior_move_pct",
-              "acceleration", "distance_from_extreme_pct"):
-        fv = features.get(k, 0.0)
-        pv = profile.get(k, 0.0)
-        ratio = fv / max(pv, 0.01)
-        if not (1.0 - tol <= ratio <= 1.0 + tol):
-            return False
-    return True
+    return _count_feature_matches(features, profile, tol) >= min_fields
 
 
 def features_resemble_profile(features, profile, tol=PRED_PROFILE_RESEMBLE_TOL):
@@ -272,14 +275,7 @@ def features_resemble_profile(features, profile, tol=PRED_PROFILE_RESEMBLE_TOL):
         return False
     if features.get("direction") != profile.get("direction"):
         return False
-    for k in ("fluct_per_min", "recent_abs_pct", "prior_move_pct",
-              "acceleration", "distance_from_extreme_pct"):
-        fv = features.get(k, 0.0)
-        pv = profile.get(k, 0.0)
-        ratio = fv / max(pv, 0.01)
-        if not (1.0 - tol <= ratio <= 1.0 + tol):
-            return False
-    return True
+    return _count_feature_matches(features, profile, tol) >= PRED_PROFILE_MATCH_MIN_FIELDS
 
 
 # =========================================================================
@@ -409,12 +405,8 @@ def measure_tag_followthrough(ticks, tag_ts, direction):
 
 
 # =========================================================================
-# FEATURE RATING
+# FEATURE INSTANCE MEASUREMENT
 # =========================================================================
-def compute_feature_rating(hit_rate, avg_magnitude):
-    return min(100.0, hit_rate * 60 + min(40.0, avg_magnitude * 20))
-
-
 def measure_feature_instance(minute_buckets, i):
     if i + 1 >= len(minute_buckets):
         return None
@@ -438,6 +430,66 @@ def measure_feature_instance(minute_buckets, i):
             "peak_net_pct": round(peak_move - FEE_ROUND_TRIP_PCT, 3),
             "peak_minute": peak_minute,
             "duration_min": peak_minute}
+
+
+# =========================================================================
+# NOISE vs SIGNAL CLASSIFICATION
+# =========================================================================
+def classify_feature_signal(observations, direction):
+    """Data-driven classification. Uses aligned net (LONG wants +, SHORT wants -)."""
+    empty = {"kind": "NOISE", "signal_ratio": 0.0,
+             "median_duration": 0.0, "median_magnitude": 0.0,
+             "fired": 0, "moved": 0, "big_moved": 0,
+             "direction_aligned": direction}
+    if not observations or not direction:
+        return empty
+
+    sign = 1 if direction == "LONG" else -1
+    aligned_nets = []
+    durations_of_moves = []
+    for o in observations:
+        net = o.get("peak_net_pct", o.get("net_pct", 0.0))
+        aligned = net * sign
+        aligned_nets.append(aligned)
+        if aligned >= FEATURE_EFFECT_MIN_MOVE_PCT:
+            durations_of_moves.append(o.get("peak_minute", 1))
+
+    fired = len(aligned_nets)
+    moved = sum(1 for a in aligned_nets if a >= FEATURE_EFFECT_MIN_MOVE_PCT)
+    big_moved = sum(1 for a in aligned_nets if a >= FEATURE_BIG_MOVE_PCT)
+    signal_ratio = moved / fired if fired > 0 else 0.0
+
+    median_duration = 0.0
+    if durations_of_moves:
+        sorted_d = sorted(durations_of_moves)
+        median_duration = sorted_d[len(sorted_d) // 2]
+
+    positive_aligned = sorted(a for a in aligned_nets if a > 0)
+    median_magnitude = (positive_aligned[len(positive_aligned) // 2]
+                        if positive_aligned else 0.0)
+
+    if signal_ratio < FEATURE_NOISE_SIGNAL_RATIO:
+        kind = "NOISE"
+    else:
+        if median_duration <= 1:
+            base = "FLASH"
+        elif median_duration <= 5:
+            base = "PULSE"
+        else:
+            base = "SUSTAINED"
+        kind = base + ("_BIG" if median_magnitude >= FEATURE_BIG_MOVE_PCT else "")
+
+    return {"kind": kind, "signal_ratio": round(signal_ratio, 3),
+            "median_duration": round(median_duration, 1),
+            "median_magnitude": round(median_magnitude, 3),
+            "fired": fired, "moved": moved, "big_moved": big_moved,
+            "direction_aligned": direction}
+
+
+def kind_priority(kind):
+    return {"SUSTAINED_BIG": 6, "PULSE_BIG": 5, "FLASH_BIG": 4,
+            "SUSTAINED": 3, "PULSE": 2, "FLASH": 1,
+            "NOISE": 0}.get(kind, 0)
 
 
 # =========================================================================
@@ -539,7 +591,7 @@ def infer_move_reason(category, opposite_state, volume_class,
 
 
 # =========================================================================
-# CYCLE-LEVEL FEATURE RANKING
+# CYCLE FEATURE RANKING (signed, with kind)
 # =========================================================================
 def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
     tier_map = tier_map or {}
@@ -547,7 +599,8 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
     for sym, ticks in watch_ticks.items():
         if not ticks or len(ticks) < 5:
             continue
-        minute_buckets = summarize_minute_window(ticks, start_ts, start_ts + 1800)
+        minute_buckets = summarize_minute_window(ticks, start_ts,
+                                                  start_ts + 1800)
         if len(minute_buckets) < 3:
             continue
         vols = sorted([b["vol_usd"] for b in minute_buckets if b["vol_usd"] > 0])
@@ -567,10 +620,10 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
             for t in tags:
                 side = _feature_side_of_tag(t["tag"])
                 opp_state = classify_opposite_side(b, side) if side else "unknown"
-                cat = classify_reason_category(
-                    opp_state, vol_class, tier_weight, moved)
-                reason = infer_move_reason(
-                    cat, opp_state, vol_class, tier_weight, net)
+                cat = classify_reason_category(opp_state, vol_class,
+                                                 tier_weight, moved)
+                reason = infer_move_reason(cat, opp_state, vol_class,
+                                             tier_weight, net)
                 all_obs.setdefault(t["tag"], []).append({
                     "coin": sym, "minute": b["minute"] + 1,
                     "net_pct": net, "moved": moved,
@@ -582,30 +635,43 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
                     "volume_class": vol_class,
                     "tier": tier, "tier_weight": tier_weight,
                     "reason_category": cat, "reason": reason,
-                    "was_best_mover": sym == winner_sym,
-                })
+                    "was_best_mover": sym == winner_sym})
+
     result = {}
     for tag, obs in all_obs.items():
-        moved_obs = [o for o in obs if o["moved"]]
+        direction = _tag_direction(tag)
+        sign = 1 if direction == "LONG" else -1
+        cls = classify_feature_signal(obs, direction)
+
         winner_inst = next((o for o in obs if o["coin"] == winner_sym), None)
-        best = max(moved_obs, key=lambda o: abs(o["peak_net_pct"])) if moved_obs else None
+        best = None
+        best_aligned = -1e9
+        for o in obs:
+            aligned = o["peak_net_pct"] * sign
+            if aligned > best_aligned:
+                best_aligned = aligned
+                best = o
+
         better = []
-        if winner_inst and winner_inst["moved"]:
-            w_abs = abs(winner_inst["peak_net_pct"])
-            better = [o for o in moved_obs
-                      if o["coin"] != winner_sym
-                      and abs(o["peak_net_pct"]) > w_abs + 0.10]
-        hit_rate = len(moved_obs) / len(obs) if obs else 0.0
-        avg_moved = (sum(abs(o["peak_net_pct"]) for o in moved_obs) / len(moved_obs)
-                     if moved_obs else 0.0)
-        rating = compute_feature_rating(hit_rate, avg_moved)
+        if winner_inst:
+            w_aligned = winner_inst["peak_net_pct"] * sign
+            if w_aligned > 0:
+                better = [o for o in obs
+                          if o["coin"] != winner_sym
+                          and o["peak_net_pct"] * sign > w_aligned + 0.10]
+
         reasons = {c: 0 for c in REASON_CATEGORIES}
         for o in obs:
             reasons[o["reason_category"]] += 1
-        result[tag] = {"fired": len(obs), "moved_count": len(moved_obs),
-                       "hit_rate": round(hit_rate, 3),
-                       "avg_moved": round(avg_moved, 3),
-                       "rating": round(rating, 1),
+
+        result[tag] = {"direction": direction,
+                       "kind": cls["kind"],
+                       "signal_ratio": cls["signal_ratio"],
+                       "median_duration": cls["median_duration"],
+                       "median_magnitude": cls["median_magnitude"],
+                       "fired": len(obs),
+                       "moved_count": cls["moved"],
+                       "big_moved": cls["big_moved"],
                        "winner_instance": winner_inst,
                        "best": best, "better": better,
                        "reasons": reasons, "raw_obs": obs}
@@ -613,21 +679,13 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
 
 
 # =========================================================================
-# TIER GATE HELPERS
+# TIER GATES
 # =========================================================================
-def _best_horizon_raw(sample):
-    vals = [sample.get(k) for k in ("60", "120", "180")
-            if sample.get(k) is not None]
-    if not vals:
-        return None
-    return _raw(max(vals, key=abs))
-
-
 def _window_check(raw_values, gate):
-    if len(raw_values) < GATE_WINDOW:
-        return {"pass": False, "reason": f"need {GATE_WINDOW} samples",
-                "window": raw_values[-GATE_WINDOW:] if raw_values else []}
-    win = raw_values[-GATE_WINDOW:]
+    if len(raw_values) < 5:
+        return {"pass": False, "reason": "need 5 samples",
+                "window": raw_values[-5:] if raw_values else []}
+    win = raw_values[-5:]
     avg = sum(win) / len(win)
     floor = gate.get("majority_floor")
     need = gate.get("majority_count", 3)
@@ -650,48 +708,24 @@ def _window_check(raw_values, gate):
 
 
 def tier_paper_eligible(tier, samples):
-    gate = (TIER_GATES.get(tier) or {}).get("paper")
-    if not gate:
-        return False, {"reason": "no paper gate"}
+    if tier not in ("micro", "small", "mid", "large", "mega", "unknown"):
+        return False, {"reason": "no gate"}
     raws = []
     for s in samples:
         if s.get("tier") != tier:
             continue
-        r = _best_horizon_raw(s)
-        if r is not None:
-            raws.append(r)
+        vals = [s.get(k) for k in ("60", "120", "180")
+                if s.get(k) is not None]
+        if vals:
+            raws.append(_raw(max(vals, key=abs)))
+    gate = {"majority_floor": 0.40, "majority_count": 3}
     return _window_check(raws, gate)["pass"], _window_check(raws, gate)
-
-
-def tier_live_eligible(tier, recent_net):
-    gate = (TIER_GATES.get(tier) or {}).get("live")
-    if not gate:
-        return True, {"reason": "no live gate"}
-    raws = [_raw(v) for v in recent_net]
-    if len(raws) < GATE_WINDOW:
-        return True, {"reason": f"{len(raws)}/{GATE_WINDOW} live trades",
-                      "window": raws}
-    return _window_check(raws, gate)["pass"], _window_check(raws, gate)
-
-
-def tier_fully_eligible(tier, recent_net, samples):
-    p_ok, _ = tier_paper_eligible(tier, samples)
-    return p_ok
-
-
-def diagnose_tier(tier, recent_net, samples):
-    p_ok, p_diag = tier_paper_eligible(tier, samples)
-    l_ok, l_diag = tier_live_eligible(tier, recent_net)
-    return {"paper_pass": p_ok, "paper": p_diag,
-            "live_pass": l_ok, "live": l_diag,
-            "eligible": p_ok and l_ok}
 
 
 # =========================================================================
 # ECONOMIC LIVE GATE
 # =========================================================================
 def feature_tier_live_ready(tag, tier, live_history):
-    """Live gate uses paper evidence only: 20 obs, 15+ wins, avg net >= 0.15%."""
     th = (live_history.get(tag) or {}).get(tier)
     if not th:
         return False, "no history", {}
@@ -719,7 +753,6 @@ def feature_tier_live_ready(tag, tier, live_history):
 # BAN SYSTEM
 # =========================================================================
 def tier_should_ban(live_trades):
-    """Ban when the last 2 live trades are both losses."""
     if len(live_trades) < LIVE_BAN_CONSECUTIVE_LOSSES:
         return False, f"{len(live_trades)}/{LIVE_BAN_CONSECUTIVE_LOSSES} live trades"
     last = live_trades[-LIVE_BAN_CONSECUTIVE_LOSSES:]
@@ -730,7 +763,6 @@ def tier_should_ban(live_trades):
 
 
 def tier_unban_check(observations, banned_at):
-    """Unban when the last 8 paper obs AFTER banned_at are all wins with avg >= 0.2%."""
     paper_obs = [o for o in observations
                  if o.get("reason_category") != "live_trade"
                  and o.get("ts", 0) >= banned_at]
@@ -748,7 +780,7 @@ def tier_unban_check(observations, banned_at):
 
 
 # =========================================================================
-# FEATURE LEADERBOARD / RANK (global)
+# GLOBAL RANK (signed)
 # =========================================================================
 def rank_features(global_tag_stats, tag_descriptions=None,
                   live_history=None, new_features=None):
@@ -761,44 +793,46 @@ def rank_features(global_tag_stats, tag_descriptions=None,
     for tag, samples in global_tag_stats.items():
         if len(samples) < FEATURE_LEADERBOARD_MIN_SAMPLES:
             continue
-        vals_all = []
+        direction = _tag_direction(tag)
+        sign = 1 if direction == "LONG" else -1
+        obs_for_cls = []
         for s in samples:
+            best_val = None
             for k in ("60", "120", "180"):
                 v = s.get(k)
-                if v is not None:
-                    vals_all.append(v)
-        if not vals_all:
+                if v is not None and (best_val is None or abs(v) > abs(best_val)):
+                    best_val = v
+            if best_val is None:
+                continue
+            obs_for_cls.append({"net_pct": best_val,
+                                "peak_net_pct": best_val,
+                                "peak_minute": 2,
+                                "tier": s.get("tier", "unknown")})
+        if not obs_for_cls:
             continue
-        n = len(vals_all)
-        hits = sum(1 for v in vals_all if abs(v) >= LIVE_NET_TARGET_PCT)
-        hit_rate = hits / n
-        median_abs = sorted(abs(v) for v in vals_all)[n // 2]
-        median_signed = sorted(vals_all)[n // 2]
+        cls = classify_feature_signal(obs_for_cls, direction)
         tier_stats = {}
         for tier in set(s.get("tier", "unknown") for s in samples):
             tier_samples = [s for s in samples if s.get("tier") == tier]
-            vals = []
-            for s in tier_samples:
-                r = _best_horizon_raw(s)
-                if r is not None:
-                    vals.append(r)
-            if not vals:
-                continue
             p_ok, p_diag = tier_paper_eligible(tier, samples)
-            tier_stats[tier] = {"samples": len(vals),
-                                "paper_pass": p_ok,
-                                "paper_window": p_diag.get("window", []),
-                                "paper_avg": p_diag.get("avg"),
-                                "paper_majority": p_diag.get("majority_count"),
-                                "paper_reason": p_diag.get("reason")}
+            tier_stats[tier] = {"samples": len(tier_samples),
+                                 "paper_pass": p_ok,
+                                 "paper_window": p_diag.get("window", []),
+                                 "paper_avg": p_diag.get("avg"),
+                                 "paper_majority": p_diag.get("majority_count"),
+                                 "paper_reason": p_diag.get("reason")}
         ranked.append({"tag": tag,
                        "description": tag_descriptions.get(tag, ""),
                        "is_new_feature": tag in new_features,
-                       "samples": n, "hit_rate": round(hit_rate, 3),
-                       "median_followthrough_pct": round(median_signed, 3),
-                       "median_abs_pct": round(median_abs, 3),
+                       "direction": direction,
+                       "kind": cls["kind"],
+                       "signal_ratio": cls["signal_ratio"],
+                       "median_duration": cls["median_duration"],
+                       "median_magnitude": cls["median_magnitude"],
+                       "samples": len(obs_for_cls),
                        "tiers": tier_stats})
-    ranked.sort(key=lambda x: (x["hit_rate"], x["median_abs_pct"]), reverse=True)
+    ranked.sort(key=lambda x: (kind_priority(x["kind"]), x["signal_ratio"],
+                                x["median_magnitude"]), reverse=True)
     return ranked
 
 
@@ -811,8 +845,8 @@ def build_behaviour_story(ticks, start_price, end_price, start_ts):
              "peak_minute": None, "trough_minute": None, "tags": []}
     if not ticks or start_price <= 0:
         return empty
-    minute_buckets = summarize_minute_window(
-        ticks, start_ts, start_ts + PRED_MAX_HOLD_SEC)
+    minute_buckets = summarize_minute_window(ticks, start_ts,
+                                              start_ts + PRED_MAX_HOLD_SEC)
     if len(minute_buckets) < 3:
         return empty
     prices_all = [t["price"] for t in ticks if t["price"] > 0]
@@ -824,9 +858,8 @@ def build_behaviour_story(ticks, start_price, end_price, start_ts):
     trough_pct = (trough - start_price) / start_price * 100.0
     net_pct = (end_price - start_price) / start_price * 100.0
     tags_fired = tag_behaviour_events(minute_buckets)
-    sentences = []
-    sentences.append(f"Net over 30 minutes: {net_pct:+.2f}% "
-                     f"(peak {peak_pct:+.2f}%, trough {trough_pct:+.2f}%).")
+    sentences = [f"Net over 30 minutes: {net_pct:+.2f}% "
+                 f"(peak {peak_pct:+.2f}%, trough {trough_pct:+.2f}%)."]
     if net_pct > 0.5:
         verdict = "WINNER_LONG"
     elif net_pct < -0.5:
@@ -900,7 +933,6 @@ def build_winner_narrative(winner_sym, ticks, start_price, end_price, start_ts):
     if not ticks:
         return None
     story = build_behaviour_story(ticks, start_price, end_price, start_ts)
-    effects, raw = summarize_feature_effects(ticks, start_ts, start_ts + 1800)
     move_window = find_move_window(ticks, start_ts)
     lines = [f"  WINNER: {winner_sym} | net={story['net_pct']:+.2f}% | "
              f"peak={story['peak_pct']:+.2f}% | trough={story['trough_pct']:+.2f}%",
@@ -910,8 +942,7 @@ def build_winner_narrative(winner_sym, ticks, start_price, end_price, start_ts):
                      f"{move_window['end_minute']} | "
                      f"{move_window['move_pct']:+.2f}% "
                      f"({move_window['direction']})")
-    return {"lines": lines, "effects": effects, "raw": raw,
-            "move_window": move_window, "story": story}
+    return {"lines": lines, "move_window": move_window, "story": story}
 
 
 # =========================================================================
@@ -940,7 +971,9 @@ def describe_move_context(minute_buckets, tags_fired, move_pct, elapsed_sec):
     if not minute_buckets:
         return ""
     b = minute_buckets[-1]
-    buy, sell, vol = b.get("buy_usd", 0.0), b.get("sell_usd", 0.0), b.get("vol_usd", 0.0)
+    buy = b.get("buy_usd", 0.0)
+    sell = b.get("sell_usd", 0.0)
+    vol = b.get("vol_usd", 0.0)
     trades = b.get("trades", 0)
     total = buy + sell
     taker_imb = (buy - sell) / total if total > 0 else 0.0
@@ -970,18 +1003,21 @@ def describe_move_context(minute_buckets, tags_fired, move_pct, elapsed_sec):
 
 def update_candidate_streak(candidates, tag, tier, net_pct):
     entry = candidates.setdefault(tag, {"occurrences": [], "streak": 0,
-                                        "streak_successes": [], "promoted": False})
+                                        "streak_successes": [],
+                                        "promoted": False})
     if entry["promoted"]:
         return entry
     if tier in ("large", "mega", "unknown"):
-        entry["occurrences"].append({"tier": tier, "net": round(net_pct, 3), "counted": False})
+        entry["occurrences"].append({"tier": tier, "net": round(net_pct, 3),
+                                      "counted": False})
         return entry
     success = net_pct >= LIVE_NET_TARGET_PCT
     entry["occurrences"].append({"tier": tier, "net": round(net_pct, 3),
                                   "success": success, "counted": True})
     if success:
         entry["streak"] += 1
-        entry["streak_successes"].append({"tier": tier, "net": round(net_pct, 3)})
+        entry["streak_successes"].append({"tier": tier,
+                                           "net": round(net_pct, 3)})
     else:
         entry["streak"] = 0
         entry["streak_successes"] = []
@@ -1000,7 +1036,7 @@ def candidate_ready_to_promote(entry):
 
 
 # =========================================================================
-# EXIT
+# EXIT / BOOK / SIZING
 # =========================================================================
 def check_predict_exit(entry_price, side, current_price, elapsed_sec):
     result = {"should_exit": False, "exit_reason": "HOLD",
@@ -1020,9 +1056,6 @@ def check_predict_exit(entry_price, side, current_price, elapsed_sec):
     return result
 
 
-# =========================================================================
-# BOOK / SPREAD / SIZING
-# =========================================================================
 def evaluate_book(bids, asks, mid_price):
     result = {"is_valid": False, "reason": "INVALID"}
     if mid_price <= 0 or not bids or not asks:
