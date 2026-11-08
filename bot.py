@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 bot.py — PREDICT strategy | Bitget UTA V3 | Render Free Tier.
-v2026.12.14
+v2026.12.15 — noise-filtered, signed, duration-aware live trading.
 """
 import asyncio
 import base64
@@ -45,7 +45,7 @@ WATCH_POOL_SIZE = 30
 STREAK_FILE = "predict_streak.json"
 PROFILE_FILE = "predict_profiles.json"
 
-_EXPECTED_PM_VERSION = "2026.12.14"
+_EXPECTED_PM_VERSION = "2026.12.15"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -310,7 +310,7 @@ def _save_predict_profiles():
 
 
 # =============================================================================
-# RECORDING (paper only — live uses _record_live_tier_result)
+# RECORDING
 # =============================================================================
 def _record_result(net_pnl, exit_reason, source):
     global _paper_total_trades, _paper_total_wins, _paper_total_losses
@@ -396,6 +396,14 @@ def _update_profile_from_live(prof_id, net_pnl):
                 p["losses"] = p.get("losses", 0) + 1
             _save_predict_profiles()
             return
+
+
+def _recompute_feature_kind(tag):
+    direction = pm._tag_direction(tag)
+    all_obs = []
+    for tier_th in (_live_tier_history.get(tag) or {}).values():
+        all_obs.extend(tier_th.get("observations", []))
+    return pm.classify_feature_signal(all_obs, direction)
 
 
 def _record_live_tier_result(tag, tier, net):
@@ -840,7 +848,7 @@ async def _ensure_symbol_ready(session, sym):
 
 
 # =============================================================================
-# COIN STATE
+# COIN STATE / WATCH POOL
 # =============================================================================
 def _get_state(symbol):
     if symbol not in _coin_state:
@@ -858,9 +866,6 @@ def _build_tier_map():
             for sym in _ticker_cache.keys()}
 
 
-# =============================================================================
-# WATCH POOL
-# =============================================================================
 def _refresh_watch_pool(now_ts):
     global _watch_pool
     candidates = _build_predict_candidates(now_ts)
@@ -916,6 +921,9 @@ async def _sample_watch(session, sym):
                   "trades": trades})
     cutoff = now - pm.PRED_MAX_HOLD_SEC - 300
     _watch_ticks[sym] = [t for t in ticks if t["ts"] >= cutoff]
+    _recent_fills_cache[sym] = {"vol_usd": vol_usd, "buy_usd": buy,
+                                 "sell_usd": sell, "whale_buys": wb,
+                                 "whale_sells": ws, "ts": now}
 
 
 # =============================================================================
@@ -1028,14 +1036,11 @@ def _merge_feature_ratings(cycle_obs, cycle_id):
     for tag, data in cycle_obs.items():
         g = _feature_ratings.setdefault(tag, {
             "total_fired": 0, "total_moved": 0,
-            "rating": 0.0, "best_ever": None, "recent": [],
+            "best_ever": None, "recent": [],
             "reason_totals": {c: 0 for c in pm.REASON_CATEGORIES}})
         g.setdefault("reason_totals", {c: 0 for c in pm.REASON_CATEGORIES})
         g["total_fired"] += data["fired"]
         g["total_moved"] += data["moved_count"]
-        if data["fired"] > 0:
-            hr = g["total_moved"] / g["total_fired"]
-            g["rating"] = round(pm.compute_feature_rating(hr, data["avg_moved"]), 1)
         for c, n in data["reasons"].items():
             g["reason_totals"][c] = g["reason_totals"].get(c, 0) + n
         if data["best"]:
@@ -1043,7 +1048,8 @@ def _merge_feature_ratings(cycle_obs, cycle_id):
                     or abs(data["best"]["peak_net_pct"])
                     > abs(g["best_ever"].get("peak_net_pct", 0))):
                 g["best_ever"] = {**data["best"], "cycle": cycle_id}
-        g["recent"].append({"cycle": cycle_id, "rating": data["rating"],
+        g["recent"].append({"cycle": cycle_id, "kind": data["kind"],
+                             "signal_ratio": data["signal_ratio"],
                              "best": data["best"]})
         if len(g["recent"]) > 20:
             g["recent"].pop(0)
@@ -1070,6 +1076,15 @@ def _merge_feature_ratings(cycle_obs, cycle_id):
             th["recent_net"].append(o["net_pct"])
             if len(th["recent_net"]) > 40:
                 th["recent_net"].pop(0)
+
+    for tag in cycle_obs.keys():
+        cls = _recompute_feature_kind(tag)
+        g = _feature_ratings.get(tag)
+        if g:
+            g["kind"] = cls["kind"]
+            g["signal_ratio"] = cls["signal_ratio"]
+            g["median_duration"] = cls["median_duration"]
+            g["median_magnitude"] = cls["median_magnitude"]
     _save_predict_profiles()
 
 
@@ -1142,61 +1157,93 @@ def _finalize_predict_cycle(now_ts):
                      best_sym, (best_abs if best_dir == "LONG" else -best_abs),
                      best_dir)
 
+        # SIGNAL-only narrative — filter out NOISE features
         if cycle_obs:
-            log.info("  FEATURES THAT MOVED THE WINNER:")
+            signal_features = [(tag, obs) for tag, obs in cycle_obs.items()
+                                if obs["kind"] != "NOISE"]
+            noise_features = [(tag, obs) for tag, obs in cycle_obs.items()
+                               if obs["kind"] == "NOISE"]
             winner_effects, _ = pm.summarize_feature_effects(
                 winner_ticks, cycle_start, now_ts)
-            for tag in list(winner_effects.keys()):
-                obs = cycle_obs.get(tag)
-                if not obs:
-                    continue
-                log.info("    %s | RATING=%.1f (fired=%d hit=%.0f%% avg=%.2f%%)",
-                         tag, obs["rating"], obs["fired"],
-                         obs["hit_rate"] * 100, obs["avg_moved"])
-                wi = obs["winner_instance"]
-                if wi:
-                    log.info("      winner: %s minute %d, %+.2f%% | reason: %s",
-                             wi["coin"], wi["minute"], wi["net_pct"], wi["reason"])
-                if obs["better"]:
-                    b = obs["better"][0]
-                    log.info("      better: %s minute %d, %+.2f%% | reason: %s",
-                             b["coin"], b["minute"], b["peak_net_pct"], b["reason"])
-                live_ready_parts = []
-                for tier_name in ("micro", "small", "mid", "large", "mega"):
-                    ok, why, st = pm.feature_tier_live_ready(
-                        tag, tier_name, _live_tier_history)
-                    banned, _ = _is_banned(tag, tier_name)
-                    if st:
-                        state = "BANNED" if banned else ("LIVE" if ok else "wait")
-                        live_ready_parts.append(
-                            f"{tier_name}:{state}({st['obs']}/20,{st['wins']}w,"
-                            f"avg{st['avg_net']:+.2f}%)")
-                if live_ready_parts:
-                    log.info("      tiers: %s", " | ".join(live_ready_parts))
+
+            if signal_features:
+                log.info("  SIGNAL FEATURES THAT MOVED THE WINNER:")
+                for tag, obs in sorted(signal_features,
+                                        key=lambda x: pm.kind_priority(x[1]["kind"]),
+                                        reverse=True):
+                    if tag not in winner_effects:
+                        continue
+                    log.info("    %s | KIND=%s | signal=%.0f%% | dur=%.1fm | mag=%.2f%% | fired=%d",
+                             tag, obs["kind"], obs["signal_ratio"] * 100,
+                             obs["median_duration"], obs["median_magnitude"],
+                             obs["fired"])
+                    wi = obs["winner_instance"]
+                    sign = 1 if obs["direction"] == "LONG" else -1
+                    if wi:
+                        aligned = wi["peak_net_pct"] * sign
+                        if aligned < 0:
+                            log.info("      winner: %s minute %d, %+.2f%% | COUNTER-MOVE (feature failed here) | %s",
+                                     wi["coin"], wi["minute"],
+                                     wi["peak_net_pct"], wi["reason"])
+                        else:
+                            log.info("      winner: %s minute %d, %+.2f%% | %s",
+                                     wi["coin"], wi["minute"],
+                                     wi["peak_net_pct"], wi["reason"])
+                    if obs["better"]:
+                        b = obs["better"][0]
+                        log.info("      better: %s minute %d, %+.2f%% | %s",
+                                 b["coin"], b["minute"],
+                                 b["peak_net_pct"], b["reason"])
+            else:
+                log.info("  SIGNAL FEATURES: none fired on winner this cycle")
+
+            if noise_features:
+                top_noise = sorted(noise_features,
+                                    key=lambda x: x[1]["fired"],
+                                    reverse=True)[:3]
+                log.info("  NOISE FEATURES IGNORED (fired but didn't move price):")
+                for tag, obs in top_noise:
+                    log.info("    %s | signal=%.0f%% | fired=%d",
+                             tag, obs["signal_ratio"] * 100, obs["fired"])
 
         _merge_feature_ratings(cycle_obs, cycle_id)
 
         if _feature_ratings:
-            log.info("  FEATURE LEADERBOARD (by rating):")
-            ranked = sorted(_feature_ratings.items(),
-                            key=lambda x: x[1].get("rating", 0), reverse=True)
-            for idx, (tag, r) in enumerate(ranked[:10], start=1):
-                be = r.get("best_ever")
-                best_str = (f"{be['coin']} {be['peak_net_pct']:+.2f}% "
-                            f"(c{be['cycle']} m{be['minute']}, "
-                            f"peak@m{be.get('peak_minute', 1)}) — "
-                            f"{be.get('reason', '')}") if be else "never moved"
-                live_ok_tiers = []
-                for tier_name in ("micro", "small", "mid", "large", "mega"):
-                    ok, why, st = pm.feature_tier_live_ready(
-                        tag, tier_name, _live_tier_history)
-                    banned, _ = _is_banned(tag, tier_name)
-                    if ok and not banned:
-                        live_ok_tiers.append(f"{tier_name}({st['wins']}/20)")
-                log.info("    #%d %-28s rating=%.0f fired=%d | LIVE: %s",
-                         idx, tag, r["rating"], r["total_fired"],
-                         ",".join(live_ok_tiers) or "—")
-                log.info("        best: %s", best_str)
+            # Split into signal and noise
+            signal_list = [(t, r) for t, r in _feature_ratings.items()
+                           if r.get("kind", "NOISE") != "NOISE"]
+            noise_list = [(t, r) for t, r in _feature_ratings.items()
+                          if r.get("kind", "NOISE") == "NOISE"]
+            signal_list.sort(key=lambda x: (pm.kind_priority(x[1].get("kind", "NOISE")),
+                                              x[1].get("signal_ratio", 0)),
+                              reverse=True)
+            noise_list.sort(key=lambda x: x[1].get("total_fired", 0),
+                             reverse=True)
+
+            if signal_list:
+                log.info("  SIGNAL FEATURES (ranked by kind + signal_ratio):")
+                for idx, (tag, r) in enumerate(signal_list[:8], start=1):
+                    kind = r.get("kind", "NOISE")
+                    sr = r.get("signal_ratio", 0) * 100
+                    dur = r.get("median_duration", 0)
+                    mag = r.get("median_magnitude", 0)
+                    live_ok_tiers = []
+                    for tier_name in ("micro", "small", "mid", "large", "mega"):
+                        ok, why, st = pm.feature_tier_live_ready(
+                            tag, tier_name, _live_tier_history)
+                        banned, _ = _is_banned(tag, tier_name)
+                        if ok and not banned:
+                            live_ok_tiers.append(f"{tier_name}")
+                    log.info("    #%d %-28s %-14s signal=%.0f%% dur=%.1fm mag=%.2f%% | LIVE: %s",
+                             idx, tag, kind, sr, dur, mag,
+                             ",".join(live_ok_tiers) or "—")
+
+            if noise_list:
+                log.info("  NOISE FEATURES (learning only, never live-traded):")
+                for tag, r in noise_list[:6]:
+                    log.info("    %-28s fired=%d signal=%.0f%% — filtered",
+                             tag, r.get("total_fired", 0),
+                             r.get("signal_ratio", 0) * 100)
 
         if not traded and winner_feats:
             added = _add_predict_profile(winner_feats, best_dir)
@@ -1302,9 +1349,12 @@ def _recent_minute_bucket(sym, now_ts):
 
 
 async def _scan_live_tags(session, now_ts):
-    feature_rules = pm.build_live_feature_rules if False else None  # placeholder
-    # live gate is economic now — iterate over the ranked feature registry
     if not _feature_ratings:
+        return
+
+    signal_tags = {t for t, r in _feature_ratings.items()
+                   if r.get("kind", "NOISE") != "NOISE"}
+    if not signal_tags:
         return
 
     for sym in _universe:
@@ -1319,6 +1369,8 @@ async def _scan_live_tags(session, now_ts):
             continue
         for bt in pm.tag_behaviour_events([bucket]):
             tag = bt["tag"]
+            if tag not in signal_tags:
+                continue
             ready, why, stats = pm.feature_tier_live_ready(
                 tag, cap_tier, _live_tier_history)
             if not ready:
@@ -1326,7 +1378,7 @@ async def _scan_live_tags(session, now_ts):
             banned, _ = _is_banned(tag, cap_tier)
             if banned:
                 continue
-            direction = "LONG" if "buy" in tag else "SHORT"
+            direction = pm._tag_direction(tag)
             state = _coin_state.get(sym)
             if not state or not state.get("price_history"):
                 continue
@@ -1354,6 +1406,10 @@ async def _scan_live_tags(session, now_ts):
 async def _open_live_microtrade(session, sym, direction, prof_id, tag, tier):
     if _is_banned(tag, tier)[0]:
         return False
+    g = _feature_ratings.get(tag, {})
+    kind = g.get("kind", "PULSE")
+    timeout_sec = pm.KIND_TIMEOUT_SEC.get(kind, 180.0)
+
     contract = _contracts.get(sym)
     if not contract:
         return False
@@ -1380,12 +1436,14 @@ async def _open_live_microtrade(session, sym, direction, prof_id, tag, tier):
                                "trade_type": "PREDICT",
                                "matched_profile_id": prof_id,
                                "kind": "microtrade", "tag": tag, "tier": tier,
+                               "feature_kind": kind,
                                "target_pct": pm.LIVE_NET_TARGET_PCT,
-                               "timeout_sec": pm.LIVE_TAG_TIMEOUT_SEC,
+                               "timeout_sec": timeout_sec,
                                "peak_price": px, "trough_price": px}
     _diag["live_entries"] += 1
-    log.info("LIVE MICRO | %s %s | tag=%s tier=%s | profile#%d | target=%+.2f%% | price=%.6f",
-             sym, direction, tag, tier, prof_id, pm.LIVE_NET_TARGET_PCT, px)
+    log.info("LIVE MICRO | %s %s | tag=%s kind=%s tier=%s | profile#%d | target=%+.2f%% timeout=%.0fs | price=%.6f",
+             sym, direction, tag, kind, tier, prof_id,
+             pm.LIVE_NET_TARGET_PCT, timeout_sec, px)
     return True
 
 
@@ -1418,9 +1476,8 @@ async def _manage_live_microtrade(session, pos):
         return
     if not await close_live_position(session, pos, reason):
         return
-    log.debug("LIVE EXIT | %s %s | %s | net=%+.2f%%",
-              symbol, pos["direction"], reason, net)
-    # NOTE: live trades do NOT count toward gauntlet (paper-only metric)
+    log.debug("LIVE EXIT | %s %s | %s | net=%+.2f%% | kind=%s",
+              symbol, pos["direction"], reason, net, pos.get("feature_kind"))
     _update_profile_from_live(pos.get("matched_profile_id"), net)
     _record_live_tier_result(pos.get("tag"), pos.get("tier"), net)
     _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
@@ -1479,9 +1536,6 @@ async def _sample_behaviour(session, pos):
                   "trades": trades})
     cutoff = now - pm.PRED_MAX_HOLD_SEC - 300
     pos["ticks"] = [t for t in ticks if t["ts"] >= cutoff]
-    _recent_fills_cache[sym] = {"vol_usd": vol_usd, "buy_usd": buy,
-                                 "sell_usd": sell, "whale_buys": wb,
-                                 "whale_sells": ws, "ts": now}
 
 
 async def _behaviour_loop(session):
@@ -1677,11 +1731,15 @@ def _heartbeat():
     if time.time() - _last_heartbeat < HEARTBEAT_SEC:
         return
     _last_heartbeat = time.time()
+    signal_count = sum(1 for r in _feature_ratings.values()
+                       if r.get("kind", "NOISE") != "NOISE")
+    noise_count = sum(1 for r in _feature_ratings.values()
+                      if r.get("kind", "NOISE") == "NOISE")
     log.debug("pulse | coins=%d | cycles=%d | paper=%d live=%d | bank=%d "
-              "feats=%d bans=%d | gauntlet=%d/%d | live=%s",
+              "sig=%d noise=%d bans=%d | gauntlet=%d/%d | live=%s",
               len(_coin_state), _diag["cycles"],
               len(_paper_positions), len(_active_positions),
-              len(_predict_profiles), len(_global_tag_stats),
+              len(_predict_profiles), signal_count, noise_count,
               sum(1 for b in _live_bans.values()
                   if b.get("banned_until", 0) > time.time()),
               sum(_paper_trade_history), len(_paper_trade_history),
@@ -1702,9 +1760,9 @@ async def main():
     _load_streak()
     _load_predict_profiles()
 
-    log.info("Startup | PREDICT | vol>=%.0f | fluct>=%.2f%%/m | cycle=%ds | "
-             "paper hold=%.0fs | gauntlet=%d/%d | profiles=%d (proven=%d) | "
-             "features=%d (new=%d) | bans=%d",
+    log.info("Startup | PREDICT v2026.12.15 | vol>=%.0f | fluct>=%.2f%%/m | "
+             "cycle=%ds | paper hold=%.0fs | gauntlet=%d/%d | "
+             "profiles=%d (proven=%d) | features=%d (new=%d) | bans=%d",
              pm.PRED_VOLUME_MIN_USD, pm.PRED_MIN_FLUCTUATION_PCT_PER_MIN,
              BOUNDARY_INTERVAL_SEC, pm.PRED_MAX_HOLD_SEC,
              PAPER_WINS_REQUIRED, PAPER_HISTORY_SIZE,
