@@ -2,8 +2,6 @@
 account_setup.py
 ================
 Health, configuration, and recovery for Bitget UTA.
-Ensures UTA mode, one-way position, cross margin, leverage per symbol,
-and orphan recovery. Provides order failure diagnostics.
 """
 import asyncio
 import base64
@@ -57,14 +55,12 @@ async def _request(session, method, path, *, query=None, body=None,
                 "ACCESS-KEY": API_KEY,
                 "ACCESS-SIGN": _sign(ts, method, path_with_q, body_str),
                 "ACCESS-TIMESTAMP": ts,
-                "ACCESS-PASSPHRASE": PASSPHRASE,
-            })
+                "ACCESS-PASSPHRASE": PASSPHRASE})
         try:
             async with session.request(
                 method, API_BASE + path_with_q, headers=headers,
                 data=body_str if body_str else None,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
+                timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 text = await resp.text()
                 if resp.status == 429 or resp.status >= 500:
                     await asyncio.sleep((2 ** attempt) + 1)
@@ -78,21 +74,16 @@ async def _request(session, method, path, *, query=None, body=None,
     return {"code": "RETRY_EXHAUSTED", "msg": "max retries"}
 
 
-# =============================================================================
-# MODE
-# =============================================================================
 async def verify_uta_mode(session):
     d = await _request(session, "GET", "/api/v3/account/settings")
     if d.get("code") == "00000":
         data = d.get("data") or {}
-        return True, {"uta": True,
-                      "hold_mode": data.get("holdMode"),
+        return True, {"uta": True, "hold_mode": data.get("holdMode"),
                       "margin_mode": data.get("marginMode"),
                       "auto_loan": data.get("autoLoan")}
     msg = str(d.get("msg", "")).lower()
     if "not support" in msg or "unauthorized" in msg or d.get("code") == "40011":
-        return False, {"reason": "UTA not enabled (classic mode detected)",
-                       "detail": d.get("msg")}
+        return False, {"reason": "UTA not enabled", "detail": d.get("msg")}
     return False, {"reason": d.get("msg"), "code": d.get("code")}
 
 
@@ -135,9 +126,6 @@ async def ensure_leverage(session, symbol, leverage):
     return False, f"v3:{res.get('msg')} | v2:{res2.get('msg')}"
 
 
-# =============================================================================
-# BALANCE / POSITIONS
-# =============================================================================
 async def get_balance(session):
     d = await _request(session, "GET", "/api/v3/account/assets")
     if d.get("code") == "00000":
@@ -213,35 +201,26 @@ async def adopt_or_close_orphans(session, tracked_symbols, close_unknown=True):
     return orphans
 
 
-# =============================================================================
-# PREFLIGHT
-# =============================================================================
 async def startup_check(session, universe, leverage=5,
                         margin_mode="crossed", preflight_symbols=50):
     log.info("=" * 60)
     log.info("ACCOUNT PREFLIGHT")
     log.info("=" * 60)
-
     uta_ok, uta_info = await verify_uta_mode(session)
     if not uta_ok:
         log.critical("UTA mode NOT enabled. Reason: %s", uta_info.get("reason"))
-        log.critical("Enable Unified Trading in Bitget web UI. Halting.")
         raise SystemExit(1)
     log.info("UTA: OK (hold=%s margin=%s auto_loan=%s)",
              uta_info.get("hold_mode"), uta_info.get("margin_mode"),
              uta_info.get("auto_loan"))
-
     ow_ok, ow_msg = await ensure_one_way_mode(session)
     if not ow_ok:
         log.critical("One-way mode setup failed: %s", ow_msg)
         raise SystemExit(1)
     log.info("One-way mode: %s", ow_msg)
-
     bal = await get_balance(session)
     log.info("USDT available: %.4f", bal)
-
     orphans = await adopt_or_close_orphans(session, set(), close_unknown=True)
-
     if universe:
         to_set = universe[:preflight_symbols]
         log.info("Setting leverage=%dx margin=%s on first %d symbols...",
@@ -260,15 +239,11 @@ async def startup_check(session, universe, leverage=5,
         log.info("Leverage OK on %d/%d (failed %d — retried per-order)",
                  lev_ok, len(to_set), lev_fail)
         log.info("Margin OK on %d/%d", margin_ok, len(to_set))
-
     log.info("PREFLIGHT OK | orphans_closed=%d", len(orphans))
     log.info("=" * 60)
     return True
 
 
-# =============================================================================
-# ORDER FAILURE DIAGNOSTICS
-# =============================================================================
 _order_failures = []
 
 
