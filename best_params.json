@@ -1,9 +1,0 @@
-{
-  "ofi_1m_orders_min": 1.5,
-  "ofi_1m_volume_min": 2.0,
-  "ofi_3m_orders_min": 2.0,
-  "ofi_3m_volume_min": 3.0,
-  "ofi_10m_volume_min": 1.5,
-  "continuation_required": 4,
-  "lag_gap_min": 0.5
-}
