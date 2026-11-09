@@ -2,6 +2,11 @@
 account_setup.py
 ================
 Health, configuration, and recovery for Bitget UTA.
+
+Ensures UTA mode active, one-way position, cross margin per symbol,
+5x leverage per symbol, orphan recovery, and order failure diagnostics.
+
+Called at startup, before every live order, and every 5 min.
 """
 import asyncio
 import base64
@@ -74,6 +79,9 @@ async def _request(session, method, path, *, query=None, body=None,
     return {"code": "RETRY_EXHAUSTED", "msg": "max retries"}
 
 
+# =============================================================================
+# MODE
+# =============================================================================
 async def verify_uta_mode(session):
     d = await _request(session, "GET", "/api/v3/account/settings")
     if d.get("code") == "00000":
@@ -126,6 +134,9 @@ async def ensure_leverage(session, symbol, leverage):
     return False, f"v3:{res.get('msg')} | v2:{res2.get('msg')}"
 
 
+# =============================================================================
+# BALANCE / POSITIONS
+# =============================================================================
 async def get_balance(session):
     d = await _request(session, "GET", "/api/v3/account/assets")
     if d.get("code") == "00000":
@@ -201,6 +212,9 @@ async def adopt_or_close_orphans(session, tracked_symbols, close_unknown=True):
     return orphans
 
 
+# =============================================================================
+# PREFLIGHT
+# =============================================================================
 async def startup_check(session, universe, leverage=5,
                         margin_mode="crossed", preflight_symbols=50):
     log.info("=" * 60)
@@ -244,6 +258,9 @@ async def startup_check(session, universe, leverage=5,
     return True
 
 
+# =============================================================================
+# DIAGNOSTICS
+# =============================================================================
 _order_failures = []
 
 
