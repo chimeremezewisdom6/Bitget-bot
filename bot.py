@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
 bot.py — PREDICT strategy | Bitget UTA V3 | Render Free Tier.
-v2026.12.15 — noise-filtered, signed, duration-aware live trading.
+v2026.12.26
+
+Learning loop:
+  - Watch pool samples top-30 candidate coins every 60s
+  - Each cycle finalizes: ranking, side-by-side, power, acceleration
+  - Paper trades: cycle-boundary only, 30-min hold, no SL/TP
+  - Live trades: acceleration-gated or rate+power-gated microtrades
+  - Profiles: bootstrap then gated by resemblance to a proven winner
+  - Per (feature, tier): economic gate + ban/unban lifecycle
 """
 import asyncio
 import base64
@@ -45,7 +53,7 @@ WATCH_POOL_SIZE = 30
 STREAK_FILE = "predict_streak.json"
 PROFILE_FILE = "predict_profiles.json"
 
-_EXPECTED_PM_VERSION = "2026.12.15"
+_EXPECTED_PM_VERSION = "2026.12.26"
 
 _STOCK_TOKENS = {
     "AAPLUSDT", "MSFTUSDT", "METAUSDT", "AMZNUSDT", "GOOGUSDT",
@@ -171,6 +179,7 @@ _coin_state: Dict[str, dict] = {}
 _ticker_cache: Dict[str, dict] = {}
 _recent_fills_cache: Dict[str, dict] = {}
 _ready_symbols: set = set()
+_market_caps: Dict[str, float] = {}
 
 _started_at = time.time()
 _next_boundary_ts = 0.0
@@ -729,6 +738,42 @@ async def refresh_universe(session):
 
 
 # =============================================================================
+# MARKET CAP REFRESH
+# =============================================================================
+async def _market_cap_refresh_loop(session):
+    while True:
+        try:
+            d = await _get_public_json(
+                session,
+                "https://api.coingecko.com/api/v3/coins/markets"
+                "?vs_currency=usd&order=market_cap_desc&per_page=250&page=1",
+                timeout=15.0)
+            if isinstance(d, list):
+                new_caps = {}
+                for coin in d:
+                    sym = (coin.get("symbol") or "").upper()
+                    mcap = coin.get("market_cap") or 0
+                    if not sym or mcap <= 0:
+                        continue
+                    if sym not in new_caps or mcap > new_caps[sym]:
+                        new_caps[sym] = float(mcap)
+                if new_caps:
+                    _market_caps.clear()
+                    _market_caps.update(new_caps)
+                    log.info("Market caps cached: %d", len(_market_caps))
+        except Exception as exc:
+            log.debug("Market cap refresh: %s", exc)
+        await asyncio.sleep(300)
+
+
+def _market_cap_for(sym):
+    if not sym or not sym.endswith("USDT"):
+        return 0.0
+    base = sym[:-4].upper()
+    return _market_caps.get(base, 0.0)
+
+
+# =============================================================================
 # MARKET / POSITION
 # =============================================================================
 async def fetch_depth(session, symbol):
@@ -868,9 +913,21 @@ def _build_tier_map():
 
 def _refresh_watch_pool(now_ts):
     global _watch_pool
-    candidates = _build_predict_candidates(now_ts)
-    candidates.sort(key=lambda x: x[2], reverse=True)
-    _watch_pool = [(sym, score) for sym, _, score in candidates[:WATCH_POOL_SIZE]]
+    raw = _build_predict_candidates(now_ts)
+    filtered = []
+    for sym, feats, score in raw:
+        ok, reason = pm.passes_coin_filter(feats)
+        if not ok:
+            continue
+        mcap = _market_cap_for(sym)
+        vol = feats.get("volume_24h_usd", 0)
+        ratio_ok, ratio_reason = pm.passes_marketcap_volume_rule(mcap, vol)
+        if not ratio_ok:
+            log.debug("WATCH EXCLUDED | %s | mcap_vol=%s", sym, ratio_reason)
+            continue
+        filtered.append((sym, feats, score))
+    filtered.sort(key=lambda x: x[2], reverse=True)
+    _watch_pool = [(sym, score) for sym, _, score in filtered[:WATCH_POOL_SIZE]]
     keep = set(s for s, _ in _watch_pool) | set(_paper_positions.keys())
     cutoff = now_ts - pm.PRED_MAX_HOLD_SEC - 300
     for sym in list(_watch_ticks.keys()):
@@ -897,6 +954,7 @@ async def _sample_watch(session, sym):
             vol_usd = 0.0
     buy = sell = 0.0
     trades = wb = ws = 0
+    buy_fills = sell_fills = 0
     d2 = await _request(session, "GET", "/api/v2/mix/market/fills",
                          query={"symbol": sym, "productType": PRODUCT_TYPE,
                                 "limit": "100"}, signed=False)
@@ -908,17 +966,21 @@ async def _sample_watch(session, sym):
                 trades += 1
                 if side in ("buy", "long"):
                     buy += usd
+                    buy_fills += 1
                     if usd >= pm.WHALE_ORDER_USD:
                         wb += 1
                 else:
                     sell += usd
+                    sell_fills += 1
                     if usd >= pm.WHALE_ORDER_USD:
                         ws += 1
             except (TypeError, ValueError):
                 continue
     ticks.append({"ts": now, "price": price, "vol_usd": vol_usd,
                   "taker_buy_usd": buy, "taker_sell_usd": sell,
-                  "trades": trades})
+                  "trades": trades,
+                  "taker_buy_fills": buy_fills,
+                  "taker_sell_fills": sell_fills})
     cutoff = now - pm.PRED_MAX_HOLD_SEC - 300
     _watch_ticks[sym] = [t for t in ticks if t["ts"] >= cutoff]
     _recent_fills_cache[sym] = {"vol_usd": vol_usd, "buy_usd": buy,
@@ -1085,6 +1147,16 @@ def _merge_feature_ratings(cycle_obs, cycle_id):
             g["signal_ratio"] = cls["signal_ratio"]
             g["median_duration"] = cls["median_duration"]
             g["median_magnitude"] = cls["median_magnitude"]
+
+    power_table = pm.build_feature_power_table(_global_tag_stats)
+    for tag, p in power_table.items():
+        g = _feature_ratings.setdefault(tag, {})
+        g["power"] = p["power"]
+        g["magnitude"] = p["magnitude"]
+        g["velocity"] = p["velocity"]
+        g["directionality"] = p["directionality"]
+        g["cleanness"] = p["cleanness"]
+        g["power_samples"] = p["samples"]
     _save_predict_profiles()
 
 
@@ -1157,45 +1229,51 @@ def _finalize_predict_cycle(now_ts):
                      best_sym, (best_abs if best_dir == "LONG" else -best_abs),
                      best_dir)
 
-        # SIGNAL-only narrative — filter out NOISE features
         if cycle_obs:
             signal_features = [(tag, obs) for tag, obs in cycle_obs.items()
                                 if obs["kind"] != "NOISE"]
             noise_features = [(tag, obs) for tag, obs in cycle_obs.items()
                                if obs["kind"] == "NOISE"]
-            winner_effects, _ = pm.summarize_feature_effects(
-                winner_ticks, cycle_start, now_ts)
 
             if signal_features:
-                log.info("  SIGNAL FEATURES THAT MOVED THE WINNER:")
-                for tag, obs in sorted(signal_features,
-                                        key=lambda x: pm.kind_priority(x[1]["kind"]),
-                                        reverse=True):
-                    if tag not in winner_effects:
+                signal_features.sort(
+                    key=lambda x: (pm.kind_priority(x[1]["kind"]),
+                                    x[1]["signal_ratio"]),
+                    reverse=True)
+
+                for tag, obs in signal_features[:5]:
+                    sbs = obs.get("side_by_side")
+                    if not sbs:
                         continue
-                    log.info("    %s | KIND=%s | signal=%.0f%% | dur=%.1fm | mag=%.2f%% | fired=%d",
+                    log.info("  ── SIDE-BY-SIDE: %s (%s, signal=%.0f%%, fired=%d) ──",
                              tag, obs["kind"], obs["signal_ratio"] * 100,
-                             obs["median_duration"], obs["median_magnitude"],
                              obs["fired"])
-                    wi = obs["winner_instance"]
-                    sign = 1 if obs["direction"] == "LONG" else -1
-                    if wi:
-                        aligned = wi["peak_net_pct"] * sign
-                        if aligned < 0:
-                            log.info("      winner: %s minute %d, %+.2f%% | COUNTER-MOVE (feature failed here) | %s",
-                                     wi["coin"], wi["minute"],
-                                     wi["peak_net_pct"], wi["reason"])
-                        else:
-                            log.info("      winner: %s minute %d, %+.2f%% | %s",
-                                     wi["coin"], wi["minute"],
-                                     wi["peak_net_pct"], wi["reason"])
-                    if obs["better"]:
-                        b = obs["better"][0]
-                        log.info("      better: %s minute %d, %+.2f%% | %s",
-                                 b["coin"], b["minute"],
-                                 b["peak_net_pct"], b["reason"])
-            else:
-                log.info("  SIGNAL FEATURES: none fired on winner this cycle")
+                    w = sbs["worked"]
+                    log.info("    WORKED | %s m%d | feat_rate=%.0f opp_rate=%.0f "
+                             "delta=%.0f | %s | net=%+.2f%% in %dm",
+                             w["coin"], w["minute"], w["feature_rate"],
+                             w["opponent_rate"], w["delta"], w["tier_weight"],
+                             w["aligned_net"], w["peak_minute"] or 1)
+                    if sbs["failed"]:
+                        f = sbs["failed"]
+                        log.info("    FAILED | %s m%d | feat_rate=%.0f opp_rate=%.0f "
+                                 "delta=%.0f | %s | net=%+.2f%% in %dm",
+                                 f["coin"], f["minute"], f["feature_rate"],
+                                 f["opponent_rate"], f["delta"],
+                                 f["tier_weight"], f["aligned_net"],
+                                 f["peak_minute"] or 1)
+                        log.info("    WHY    | %s", sbs["why"])
+                    else:
+                        log.info("    FAILED | no counter-example this cycle")
+                    pats = obs.get("patterns", {})
+                    for label, key in (("BY DELTA", "by_delta"),
+                                       ("BY OPPONENT", "by_opponent")):
+                        pat = pats.get(key, {})
+                        if pat:
+                            bits = " ".join(
+                                f"{k}:{v['win_rate']*100:.0f}%(n={v['n']})"
+                                for k, v in sorted(pat.items()))
+                            log.info("    PATTERN | %s | %s", label, bits)
 
             if noise_features:
                 top_noise = sorted(noise_features,
@@ -1206,44 +1284,115 @@ def _finalize_predict_cycle(now_ts):
                     log.info("    %s | signal=%.0f%% | fired=%d",
                              tag, obs["signal_ratio"] * 100, obs["fired"])
 
+            # Feature power ranking
+            power_table = pm.build_feature_power_table(_global_tag_stats)
+            if power_table:
+                ranked_power = sorted(power_table.items(),
+                                       key=lambda x: x[1]["power"], reverse=True)
+                log.info("  FEATURE POWER RANKING (magnitude × speed × direction × clean):")
+                for idx, (tag, p) in enumerate(ranked_power[:8], start=1):
+                    marker = ""
+                    if p["power"] >= 70:
+                        marker = " ◀ TOP"
+                    elif p["power"] >= 50:
+                        marker = " ◀ strong"
+                    elif p["power"] < 25:
+                        marker = " (weak)"
+                    log.info(
+                        "    #%d %-30s POWER=%.0f | mag=%.2f%% vel=%.2f%%/m "
+                        "dir=%.0f%% clean=%.0f%% n=%d%s",
+                        idx, tag, p["power"], p["magnitude"], p["velocity"],
+                        p["directionality"] * 100, p["cleanness"] * 100,
+                        p["samples"], marker)
+                if ranked_power:
+                    top_tag, top_p = ranked_power[0]
+                    log.info(
+                        "    STORY: %s is the strongest feature — median move "
+                        "%.2f%% in ~%.1fm (%.2f%%/min), correct direction %.0f%% "
+                        "of the time. When it fires at rate ≥40 against a "
+                        "weaker opponent, entry is warranted even if raw rate "
+                        "is below 75.",
+                        top_tag, top_p["magnitude"],
+                        top_p["magnitude"] / max(0.01, top_p["velocity"]),
+                        top_p["velocity"], top_p["directionality"] * 100)
+
+            # Acceleration scanner (strict gate)
+            accel_hits = []
+            for sym, ticks in watch_ticks.items():
+                if not ticks or len(ticks) < 5:
+                    continue
+                bucket_list = pm.summarize_minute_window(
+                    ticks, cycle_start, now_ts)
+                if len(bucket_list) < 3:
+                    continue
+                sig_l = pm.detect_acceleration_signal(bucket_list, "LONG")
+                sig_s = pm.detect_acceleration_signal(bucket_list, "SHORT")
+                if sig_l["signal"] or sig_s["signal"]:
+                    accel_hits.append((sym, sig_l, sig_s))
+
+            if accel_hits:
+                log.info("  ACCELERATION SCANNER (per-min vol>=2x/fills>=1.5x, "
+                         "total vol>=3x/fills>=2x, accel):")
+                for sym, sig_l, sig_s in accel_hits[:5]:
+                    for sig, dir_name in ((sig_l, "LONG"), (sig_s, "SHORT")):
+                        if not sig["signal"]:
+                            continue
+                        log.info(
+                            "    %s %s [%s] | 3min: vol=%.1fx fills=%.1fx | "
+                            "permin vol=%s fills=%s | "
+                            "feat_vols=%s growth=%s | "
+                            "opp_vols=%s growth=%s | "
+                            "avg_order feat=$%.0f opp=$%.0f",
+                            sym, dir_name, sig["path"],
+                            sig["ratio"], sig["fill_ratio"],
+                            sig["per_minute_vol_ratios"],
+                            sig["per_minute_fill_ratios"],
+                            sig["feature_vols"], sig["feature_growth"],
+                            sig["opponent_vols"], sig["opponent_growth"],
+                            sig["feature_avg_order"],
+                            sig["opponent_avg_order"])
+                first = accel_hits[0]
+                sym0 = first[0]
+                sig = first[1] if first[1]["signal"] else first[2]
+                direction = "LONG" if first[1]["signal"] else "SHORT"
+                log.info(
+                    "    STORY: %s is building %s pressure — 3-min feature "
+                    "vol %s is %.1fx the opponent %s, per-minute volume ratios "
+                    "%s, fills %s. Feature accelerating %s. Real crowd, "
+                    "not one whale. This is the pattern worth catching.",
+                    sym0, direction,
+                    sig["feature_vols"], sig["ratio"],
+                    sig["opponent_vols"],
+                    sig["per_minute_vol_ratios"],
+                    sig["per_minute_fill_ratios"],
+                    sig["feature_growth"])
+            else:
+                log.info("  ACCELERATION SCANNER: no coin showed strict "
+                         "crowd-backed accelerating taker flow this cycle")
+
+            # Live-ready summary
+            live_ready_features = []
+            for tag, r in _feature_ratings.items():
+                if r.get("kind", "NOISE") == "NOISE":
+                    continue
+                for tier_name in ("micro", "small", "mid"):
+                    ok, why, st = pm.feature_tier_live_ready(
+                        tag, tier_name, _live_tier_history)
+                    banned, _ = _is_banned(tag, tier_name)
+                    if ok and not banned:
+                        live_ready_features.append(
+                            (tag, tier_name, r.get("kind"), st))
+            if live_ready_features:
+                log.info("  LIVE-READY (rate thresholds enforced at entry):")
+                for tag, tier, kind, st in live_ready_features[:6]:
+                    log.info(
+                        "    %s | tier=%s | kind=%s | %d/20 wins avg=%+.2f%% | "
+                        "entry needs feat_rate>=%.0f opp<=%.0f",
+                        tag, tier, kind, st["wins"], st["avg_net"],
+                        pm.LIVE_ENTRY_MIN_FEATURE_RATE,
+                        pm.LIVE_ENTRY_MAX_OPPONENT_RATE)
+
         _merge_feature_ratings(cycle_obs, cycle_id)
-
-        if _feature_ratings:
-            # Split into signal and noise
-            signal_list = [(t, r) for t, r in _feature_ratings.items()
-                           if r.get("kind", "NOISE") != "NOISE"]
-            noise_list = [(t, r) for t, r in _feature_ratings.items()
-                          if r.get("kind", "NOISE") == "NOISE"]
-            signal_list.sort(key=lambda x: (pm.kind_priority(x[1].get("kind", "NOISE")),
-                                              x[1].get("signal_ratio", 0)),
-                              reverse=True)
-            noise_list.sort(key=lambda x: x[1].get("total_fired", 0),
-                             reverse=True)
-
-            if signal_list:
-                log.info("  SIGNAL FEATURES (ranked by kind + signal_ratio):")
-                for idx, (tag, r) in enumerate(signal_list[:8], start=1):
-                    kind = r.get("kind", "NOISE")
-                    sr = r.get("signal_ratio", 0) * 100
-                    dur = r.get("median_duration", 0)
-                    mag = r.get("median_magnitude", 0)
-                    live_ok_tiers = []
-                    for tier_name in ("micro", "small", "mid", "large", "mega"):
-                        ok, why, st = pm.feature_tier_live_ready(
-                            tag, tier_name, _live_tier_history)
-                        banned, _ = _is_banned(tag, tier_name)
-                        if ok and not banned:
-                            live_ok_tiers.append(f"{tier_name}")
-                    log.info("    #%d %-28s %-14s signal=%.0f%% dur=%.1fm mag=%.2f%% | LIVE: %s",
-                             idx, tag, kind, sr, dur, mag,
-                             ",".join(live_ok_tiers) or "—")
-
-            if noise_list:
-                log.info("  NOISE FEATURES (learning only, never live-traded):")
-                for tag, r in noise_list[:6]:
-                    log.info("    %-28s fired=%d signal=%.0f%% — filtered",
-                             tag, r.get("total_fired", 0),
-                             r.get("signal_ratio", 0) * 100)
 
         if not traded and winner_feats:
             added = _add_predict_profile(winner_feats, best_dir)
@@ -1337,7 +1486,8 @@ def _recent_minute_bucket(sym, now_ts):
     b = {"minute": 0, "open": prices[0], "close": prices[-1],
          "high": max(prices), "low": min(prices),
          "vol_usd": 0.0, "buy_usd": 0.0, "sell_usd": 0.0,
-         "trades": len(window), "whale_buys": 0, "whale_sells": 0}
+         "trades": len(window), "buy_fills": 0, "sell_fills": 0,
+         "whale_buys": 0, "whale_sells": 0}
     last = _recent_fills_cache.get(sym)
     if last:
         b["vol_usd"] = last.get("vol_usd", 0.0)
@@ -1351,7 +1501,6 @@ def _recent_minute_bucket(sym, now_ts):
 async def _scan_live_tags(session, now_ts):
     if not _feature_ratings:
         return
-
     signal_tags = {t for t, r in _feature_ratings.items()
                    if r.get("kind", "NOISE") != "NOISE"}
     if not signal_tags:
@@ -1364,9 +1513,39 @@ async def _scan_live_tags(session, now_ts):
             continue
         cache = _ticker_cache.get(sym, {})
         cap_tier = pm.market_cap_tier_from_volume(cache.get("volume_24h_usd", 0))
+
+        state = _coin_state.get(sym)
+        if not state or not state.get("price_history"):
+            continue
+        feats = pm.compute_features_for_predict(
+            state["price_history"], now_ts,
+            cache.get("high_24h", 0), cache.get("low_24h", 0),
+            cache.get("volume_24h_usd", 0))
+        if not feats["valid"]:
+            continue
+        coin_ok, _ = pm.passes_coin_filter(feats)
+        if not coin_ok:
+            continue
+        mcap = _market_cap_for(sym)
+        ratio_ok, _ = pm.passes_marketcap_volume_rule(
+            mcap, feats.get("volume_24h_usd", 0))
+        if not ratio_ok:
+            continue
+
         bucket = _recent_minute_bucket(sym, now_ts)
         if not bucket:
             continue
+
+        med_vol = max(1.0, cache.get("volume_24h_usd", 0) / (24 * 60 * 1000))
+        rates = pm.compute_side_rates(bucket, med_vol)
+
+        # Get last 3 min for acceleration
+        cycle_start = now_ts - 300
+        ticks_3min = [t for t in _watch_ticks.get(sym, [])
+                      if t["ts"] >= cycle_start]
+        buckets_3min = pm.summarize_minute_window(
+            ticks_3min, cycle_start, now_ts) if ticks_3min else []
+
         for bt in pm.tag_behaviour_events([bucket]):
             tag = bt["tag"]
             if tag not in signal_tags:
@@ -1378,16 +1557,42 @@ async def _scan_live_tags(session, now_ts):
             banned, _ = _is_banned(tag, cap_tier)
             if banned:
                 continue
+
             direction = pm._tag_direction(tag)
-            state = _coin_state.get(sym)
-            if not state or not state.get("price_history"):
+            if direction != feats["direction"]:
                 continue
-            feats = pm.compute_features_for_predict(
-                state["price_history"], now_ts,
-                cache.get("high_24h", 0), cache.get("low_24h", 0),
-                cache.get("volume_24h_usd", 0))
-            if not feats["valid"] or feats["direction"] != direction:
+
+            # PATH 1: strict acceleration
+            accel = pm.detect_acceleration_signal(buckets_3min, direction)
+            accel_ok = accel["signal"]
+
+            # PATH 2: rate + power
+            power_table = pm.build_feature_power_table(_global_tag_stats)
+            feature_power = power_table.get(tag)
+            opp_tags = [
+                t2["tag"] for t2 in pm.tag_behaviour_events([bucket])
+                if t2["tag"] != tag
+                and pm._tag_direction(t2["tag"]) != pm._tag_direction(tag)]
+            opp_power = pm.get_opponent_power(tag, opp_tags, power_table)
+
+            if direction == "LONG":
+                feature_rate = rates["buy"]
+                opponent_rate = rates["sell"]
+            else:
+                feature_rate = rates["sell"]
+                opponent_rate = rates["buy"]
+
+            rate_ok, rate_why = pm.check_live_entry_conditions(
+                feature_rate, opponent_rate)
+            power_ok, power_why = pm.check_live_entry_with_power(
+                feature_rate, opponent_rate, feature_power, opp_power)
+
+            if not (accel_ok or (rate_ok and power_ok)):
                 continue
+
+            entry_path = "ACCEL" if accel_ok else "RATE+POWER"
+            entry_why = accel["reason"] if accel_ok else power_why
+
             matched_profile_id = None
             for p in _predict_profiles:
                 if (p.get("wins", 0) >= 1 and p["direction"] == direction
@@ -1396,20 +1601,27 @@ async def _scan_live_tags(session, now_ts):
                     break
             if matched_profile_id is None:
                 continue
-            log.info("LIVE GATE PASS | %s %s | %s tier=%s | %s",
-                     sym, direction, tag, cap_tier, why)
+
+            log.info("LIVE ENTRY [%s] | %s %s | %s tier=%s | "
+                     "feat_vols=%s opp_vols=%s | %s",
+                     entry_path, sym, direction, tag, cap_tier,
+                     accel["feature_vols"], accel["opponent_vols"],
+                     entry_why)
             await _open_live_microtrade(session, sym, direction,
-                                          matched_profile_id, tag, cap_tier)
+                                          matched_profile_id, tag, cap_tier,
+                                          feature_rate, opponent_rate,
+                                          entry_path=entry_path)
             break
 
 
-async def _open_live_microtrade(session, sym, direction, prof_id, tag, tier):
+async def _open_live_microtrade(session, sym, direction, prof_id, tag, tier,
+                                 feature_rate=0.0, opponent_rate=0.0,
+                                 entry_path="RATE"):
     if _is_banned(tag, tier)[0]:
         return False
     g = _feature_ratings.get(tag, {})
     kind = g.get("kind", "PULSE")
     timeout_sec = pm.KIND_TIMEOUT_SEC.get(kind, 180.0)
-
     contract = _contracts.get(sym)
     if not contract:
         return False
@@ -1437,12 +1649,16 @@ async def _open_live_microtrade(session, sym, direction, prof_id, tag, tier):
                                "matched_profile_id": prof_id,
                                "kind": "microtrade", "tag": tag, "tier": tier,
                                "feature_kind": kind,
+                               "feature_rate": feature_rate,
+                               "opponent_rate": opponent_rate,
+                               "entry_path": entry_path,
                                "target_pct": pm.LIVE_NET_TARGET_PCT,
                                "timeout_sec": timeout_sec,
                                "peak_price": px, "trough_price": px}
     _diag["live_entries"] += 1
-    log.info("LIVE MICRO | %s %s | tag=%s kind=%s tier=%s | profile#%d | target=%+.2f%% timeout=%.0fs | price=%.6f",
-             sym, direction, tag, kind, tier, prof_id,
+    log.info("LIVE MICRO | %s %s | tag=%s kind=%s tier=%s | "
+             "path=%s | profile#%d | target=%+.2f%% timeout=%.0fs | price=%.6f",
+             sym, direction, tag, kind, tier, entry_path, prof_id,
              pm.LIVE_NET_TARGET_PCT, timeout_sec, px)
     return True
 
@@ -1476,8 +1692,9 @@ async def _manage_live_microtrade(session, pos):
         return
     if not await close_live_position(session, pos, reason):
         return
-    log.debug("LIVE EXIT | %s %s | %s | net=%+.2f%% | kind=%s",
-              symbol, pos["direction"], reason, net, pos.get("feature_kind"))
+    log.debug("LIVE EXIT | %s %s | %s | net=%+.2f%% | kind=%s | path=%s",
+              symbol, pos["direction"], reason, net,
+              pos.get("feature_kind"), pos.get("entry_path"))
     _update_profile_from_live(pos.get("matched_profile_id"), net)
     _record_live_tier_result(pos.get("tag"), pos.get("tier"), net)
     _cooldown_until[symbol] = time.time() + SYMBOL_COOLDOWN_SEC
@@ -1512,6 +1729,7 @@ async def _sample_behaviour(session, pos):
             vol_usd = 0.0
     buy = sell = 0.0
     trades = wb = ws = 0
+    buy_fills = sell_fills = 0
     d2 = await _request(session, "GET", "/api/v2/mix/market/fills",
                          query={"symbol": sym, "productType": PRODUCT_TYPE,
                                 "limit": "100"}, signed=False)
@@ -1523,17 +1741,21 @@ async def _sample_behaviour(session, pos):
                 trades += 1
                 if side in ("buy", "long"):
                     buy += usd
+                    buy_fills += 1
                     if usd >= pm.WHALE_ORDER_USD:
                         wb += 1
                 else:
                     sell += usd
+                    sell_fills += 1
                     if usd >= pm.WHALE_ORDER_USD:
                         ws += 1
             except (TypeError, ValueError):
                 continue
     ticks.append({"ts": now, "price": price, "vol_usd": vol_usd,
                   "taker_buy_usd": buy, "taker_sell_usd": sell,
-                  "trades": trades})
+                  "trades": trades,
+                  "taker_buy_fills": buy_fills,
+                  "taker_sell_fills": sell_fills})
     cutoff = now - pm.PRED_MAX_HOLD_SEC - 300
     pos["ticks"] = [t for t in ticks if t["ts"] >= cutoff]
 
@@ -1649,7 +1871,7 @@ async def _universe_refresh_loop(session):
 # SWEEPER
 # =============================================================================
 async def price_sweeper_loop(session):
-    global _next_boundary_ts
+    global _next_boundary_ts, _pending_candidates
     _next_boundary_ts = time.time() + BOUNDARY_INTERVAL_SEC
     while True:
         try:
@@ -1760,7 +1982,7 @@ async def main():
     _load_streak()
     _load_predict_profiles()
 
-    log.info("Startup | PREDICT v2026.12.15 | vol>=%.0f | fluct>=%.2f%%/m | "
+    log.info("Startup | PREDICT v2026.12.26 | vol>=%.0f | fluct>=%.2f%%/m | "
              "cycle=%ds | paper hold=%.0fs | gauntlet=%d/%d | "
              "profiles=%d (proven=%d) | features=%d (new=%d) | bans=%d",
              pm.PRED_VOLUME_MIN_USD, pm.PRED_MIN_FLUCTUATION_PCT_PER_MIN,
@@ -1782,6 +2004,7 @@ async def main():
         await acc.startup_check(session, _universe, leverage=LEVERAGE,
                                 margin_mode="crossed")
 
+        asyncio.create_task(_market_cap_refresh_loop(session))
         asyncio.create_task(_contracts_refresh_loop(session))
         asyncio.create_task(_universe_refresh_loop(session))
         asyncio.create_task(_behaviour_loop(session))
