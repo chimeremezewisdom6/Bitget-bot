@@ -1,64 +1,54 @@
-# Paper exhaustion bot — growing vs dying side
+# Bitget/MEXC Trading Bot — Honest Edition
 
-Paper-trades the "one side is dying, the other is growing, take the
-biggest gap" signal across 4 windows: 10m, 20m, 30m, 1h.
+Two independent paper strategies running side by side:
+1. **OFI strategy** (`body.py` + `brain.py` + `lead_lag.py`) — short burst continuations
+2. **Scanner strategy** (`scanner.py`) — multi-timeframe momentum + exhaustion, every 10 min
 
-## Install
+Both are **paper-only** until their respective gate passes.
 
-    pip install -r requirements.txt
+## File Map
 
-## Run
+| File | Purpose |
+|---|---|
+| `setup_orchestrator.py` | FastAPI entrypoint, config contract, SQLite ledger, 4h volume aggregation |
+| `brain.py` | Pure OFI decision logic |
+| `lead_lag.py` | Cross-exchange gap detector |
+| `body.py` | WebSocket executor + MARKET_STATE (incl. trade_buffer) |
+| `scanner.py` | Multi-TF momentum scanner, 8-win streak gate |
+| `learner.py` | Patient 7-day learning loop, 6 gates, daily reports |
+| `test_harness.py` | 20 pure-function startup tests |
+| `live_runner.py` | OFI live entrypoint (requires learner stamp) |
+| `scanner_live.py` | Scanner live entrypoint (requires 8-win stamp) |
+| `best_params.json` | OFI parameters (learner overwrites with stamp) |
+| `render.yaml` | Render Blueprint |
+| `requirements.txt` | Dependencies |
 
-    python paper_exhaustion.py
+## Two Gates, Two Strategies
 
-Or in the background:
+### OFI Strategy Gate
+- 7 days minimum collection
+- 100 resolved observations
+- Top combo: ≥30 trades, ≥40% win rate, positive expectancy
+- Confirmed across ≥2 daily reports
+- `learner.py` writes `best_params.json` with `_validation` stamp when all pass
+- `live_runner.py` refuses live without stamp
 
-    ./run.sh
+### Scanner Strategy Gate
+- 8 **consecutive wins** (`move_pct >= 0.42%`)
+- `scanner.py` writes `scanner_validation.json` when streak hits 8
+- `scanner_live.py` refuses live without stamp
+- **Warning:** At 50% win rate, 8 in a row takes ~256 trades. At 45%, ~600 trades. Watch `/scanner/streak` — if the streak never exceeds 4 after 30 trades, the strategy is not working.
 
-## What the bot does
+## Scanner Endpoints
 
-For each symbol (>= $1M 24h volume) and each window:
+| Endpoint | What it returns |
+|---|---|
+| `GET /scanner` | Full state: last scan, position, streak, top 5 |
+| `GET /scanner/streak` | Just the win streak and unlock progress |
+| `GET /scanner/scans` | Last 6 scans (1 hour of coverage) |
+| `GET /scanner/trades` | All closed scanner trades |
+| `POST /scanner/force_scan` | Trigger a scan on next tick |
 
-1. Splits the window into 4 quarters
-2. Measures buy and sell USD in each quarter
-3. Computes `buy_growth = (Q3+Q4 buy) / (Q1+Q2 buy)`
-   and `sell_growth` the same way
-4. **Growing side** = whichever has the larger growth
-   **Dying side** = whichever has the smaller growth
-   **Gap** = grow_growth / die_growth
-5. Fires only when:
-   - gap >= 2.0
-   - grow_growth >= 1.5
-   - die_growth <= 0.7
-   - growing side dominates Q4 (>= 1.3x)
-   - Q4 growing volume >= $5k (scaled to window)
-6. Opens a **paper** trade on the growing side
+## What You See Every 10 Minutes
 
-Trade: TP 2% / SL 0.8% / timeout 2x window.
-Every trade tracked at 7 horizons (1m,3m,5m,10m,30m,1h,2h) for analysis.
-
-## Output
-
-Live on console when each signal fires and closes.
-Summary every 5 minutes.
-Full CSV at `/tmp/paper_exhaustion/trades.csv`.
-
-## Analyze after 24h
-
-    python analyze.py
-
-Shows per-window win rate, gap buckets (do bigger gaps win more?),
-best horizon per window, per-symbol ranking.
-
-## Do not run on Render free tier
-
-`/tmp` gets wiped on restart. Run locally or on a small VPS.
-
-## Tuning
-
-All parameters at the top of `paper_exhaustion.py`:
-
-- `GAP_MIN` (default 2.0) — raise to be pickier about "biggest gaps"
-- `ACCEL_MIN` (1.5), `DECAY_MAX` (0.7) — tighter to require cleaner divergence
-- `TP_PCT` (2.0), `SL_PCT` (0.8) — trade exit
-- `SYMBOLS_COUNT` (15) — coin universe size
+In Render logs, one line per scan:
