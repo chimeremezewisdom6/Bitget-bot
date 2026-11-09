@@ -1,39 +1,17 @@
-"""paper_exhaustion.py — paper trade the "dying side vs growing side" gap.
+"""paper_exhaustion.py — paper trade the gap between dying and growing side.
 
 FOCUSED ON 4 WINDOWS: 10min, 20min, 30min, 1h.
 
-THE LOGIC
-    For each window W and each symbol:
-      1. Split the last W seconds into 4 equal quarters
-      2. Measure buy USD and sell USD in each quarter
-      3. Compute buy_growth  = (Q3+Q4 buy)  / (Q1+Q2 buy)
-         Compute sell_growth = (Q3+Q4 sell) / (Q1+Q2 sell)
-      4. Growing side  = side with the larger growth
-         Dying side    = side with the smaller growth
-         GAP           = growing_growth / dying_growth
-      5. FIRE only when ALL of these are true:
-           - GAP           >= GAP_MIN        (the two sides are diverging)
-           - growing_growth >= ACCEL_MIN     (growing side is actually accelerating)
-           - dying_growth  <= DECAY_MAX      (dying side is actually fading)
-           - Q4 is dominated by the growing side (>= END_DOM_MIN)
-           - Q4 growing volume >= MIN_END_USD (scaled to window)
-      6. Enter PAPER trade on the growing side.
-
-    Each trade tracks 7 horizons (1m,3m,5m,10m,30m,1h,2h) AND a realistic exit
-    (TP 2%, SL 0.8%, timeout 2× window). All results go to CSV.
-
-HOW TO RUN
-    python paper_exhaustion.py
-    Ctrl+C stops it. Full summary at exit.
-
-OUTPUT
-    Console:           live per-signal opens/closes
-    Console (5-min):   per-window summary + top 10 gaps seen
-    /tmp/paper_exhaustion/trades.csv:   every signal + outcome
+Includes:
+  - HTTP server on /health, /stats, /csv (for UptimeRobot + data pull)
+  - Periodic CSV flush every 5 min (survives most restarts)
+  - WebSocket watchdog (reconnects stale feeds)
+  - Memory caps on trades and buffers
 """
 
 import asyncio
 import csv
+import io
 import json
 import logging
 import os
@@ -44,6 +22,7 @@ from pathlib import Path
 from statistics import mean
 
 import ccxt.pro as ccxtpro
+from aiohttp import web   # NEW: for HTTP server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,39 +32,34 @@ logging.basicConfig(
 log = logging.getLogger("paper")
 
 # ============================================================
-# PARAMETERS — tune here
+# PARAMETERS
 # ============================================================
-SYMBOLS_COUNT = int(os.environ.get("SYMBOLS_COUNT", "15"))
-MIN_VOL_USD   = 1_000_000
+SYMBOLS_COUNT  = int(os.environ.get("SYMBOLS_COUNT", "15"))
+MIN_VOL_USD    = 1_000_000
+HTTP_PORT      = int(os.environ.get("PORT", "10000"))
 
-WINDOWS = {
-    "10min": 600,
-    "20min": 1200,
-    "30min": 1800,
-    "1h":    3600,
-}
-
+WINDOWS = {"10min": 600, "20min": 1200, "30min": 1800, "1h": 3600}
 HORIZONS = [60, 180, 300, 600, 1800, 3600, 7200]
 
-# Growth / gap thresholds
-ACCEL_MIN        = 1.5    # growing side must be growing >= 1.5x
-DECAY_MAX        = 0.7    # dying side must be <= 0.7x
-GAP_MIN          = 2.0    # grow_growth / die_growth >= 2.0
-END_DOM_MIN      = 1.3    # Q4 dominance of growing side
-MIN_END_USD_BASE = 5000.0 # scaled by sqrt(W/600)
+ACCEL_MIN        = 1.5
+DECAY_MAX        = 0.7
+GAP_MIN          = 2.0
+END_DOM_MIN      = 1.3
+MIN_END_USD_BASE = 5000.0
 
-# Trade management
 TP_PCT        = 2.0
 SL_PCT        = 0.8
 MAX_HOLD_MULT = 2
 MAX_HOLD_CAP  = 4 * 3600
 
-# Infra
-BUCKET_SEC    = 10
-LOG_DIR       = Path("/tmp/paper_exhaustion")
+BUCKET_SEC          = 10
+LOG_DIR             = Path("/tmp/paper_exhaustion")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-CSV_PATH      = LOG_DIR / "trades.csv"
-SUMMARY_EVERY = 300
+CSV_PATH            = LOG_DIR / "trades.csv"
+SUMMARY_EVERY       = 300
+CSV_FLUSH_EVERY     = 300     # NEW: dump in-memory CSV to disk every 5 min
+WS_STALE_AFTER_SEC  = 180     # NEW: force reconnect if no trade in 3 min
+MAX_ACTIVE_TRADES   = 100     # NEW: memory guard
 
 
 def _min_end_for_window(W: int) -> float:
@@ -149,7 +123,6 @@ class PaperTrade:
         self.gap = gap
         self.grow_growth = grow_growth
         self.die_growth = die_growth
-
         self.horizon_marks = {h: None for h in HORIZONS}
         self.realistic_closed = False
         self.realistic_exit_px = None
@@ -189,9 +162,7 @@ class PaperTrade:
         return all(v is not None for v in self.horizon_marks.values())
 
     def pnl_pct(self):
-        if not self.realistic_closed:
-            return None
-        return self._pnl(self.realistic_exit_px)
+        return None if not self.realistic_closed else self._pnl(self.realistic_exit_px)
 
     def horizon_pnl_pct(self, h):
         p = self.horizon_marks.get(h)
@@ -211,6 +182,7 @@ class PaperBot:
         self.symbols = symbols
         self.buffers = {s: deque() for s in symbols}
         self.last_price = {s: 0.0 for s in symbols}
+        self.last_seen_ts = {s: 0.0 for s in symbols}  # NEW: feed watchdog
         self.active_trades = []
         self.closed_trades = []
         self.last_detect = {}
@@ -221,27 +193,28 @@ class PaperBot:
             "pnl_sum": 0.0, "horizon_pnls": defaultdict(list),
             "top_signals": [],
         })
-        self._init_csv()
+        self.csv_buffer = io.StringIO()  # NEW: in-memory CSV
+        self.csv_writer = csv.writer(self.csv_buffer)
+        self.csv_header_written = False
+        self.last_csv_flush = time.time()
 
-    def _init_csv(self):
-        if not CSV_PATH.exists():
-            with CSV_PATH.open("w", newline="") as f:
-                w = csv.writer(f)
-                headers = [
-                    "id", "entry_ts", "window", "symbol", "side",
-                    "entry_px", "tp_px", "sl_px", "max_hold_sec",
-                    "gap", "grow_growth", "die_growth",
-                    "end_dom", "end_vol",
-                    "q_buy_0", "q_buy_1", "q_buy_2", "q_buy_3",
-                    "q_sell_0", "q_sell_1", "q_sell_2", "q_sell_3",
-                    "exit_ts", "exit_reason", "exit_px", "realistic_pnl",
-                ]
-                for h in HORIZONS:
-                    headers.append(f"h_{h}s_px")
-                    headers.append(f"h_{h}s_pnl")
-                w.writerow(headers)
-
-    def _write_csv(self, t):
+    # --- CSV (in memory, flushed periodically) ---
+    def _write_csv_row(self, t):
+        if not self.csv_header_written:
+            headers = [
+                "id", "entry_ts", "window", "symbol", "side",
+                "entry_px", "tp_px", "sl_px", "max_hold_sec",
+                "gap", "grow_growth", "die_growth",
+                "end_dom", "end_vol",
+                "q_buy_0", "q_buy_1", "q_buy_2", "q_buy_3",
+                "q_sell_0", "q_sell_1", "q_sell_2", "q_sell_3",
+                "exit_ts", "exit_reason", "exit_px", "realistic_pnl",
+            ]
+            for h in HORIZONS:
+                headers.append(f"h_{h}s_px")
+                headers.append(f"h_{h}s_pnl")
+            self.csv_writer.writerow(headers)
+            self.csv_header_written = True
         f = t.feats
         row = [
             t.id, f"{t.entry_ts:.2f}", t.window, t.symbol, t.side,
@@ -266,14 +239,27 @@ class PaperBot:
             pnl = t.horizon_pnl_pct(h)
             row.append(f"{px:.8f}" if px else "")
             row.append(f"{pnl:.4f}" if pnl is not None else "")
-        with CSV_PATH.open("a", newline="") as fh:
-            csv.writer(fh).writerow(row)
+        self.csv_writer.writerow(row)
 
-    # ---------------- Buffer ----------------
+    def flush_csv(self):
+        """Write in-memory CSV to disk. Called every 5 min and on shutdown."""
+        try:
+            with CSV_PATH.open("w", newline="") as f:
+                f.write(self.csv_buffer.getvalue())
+            self.last_csv_flush = time.time()
+            log.info("csv flushed (%d bytes)", len(self.csv_buffer.getvalue()))
+        except Exception as e:
+            log.warning("csv flush failed: %s", e)
+
+    def get_csv_text(self) -> str:
+        return self.csv_buffer.getvalue()
+
+    # --- Buffer ---
     def add_trade(self, symbol, ts, px, qty, side):
         bucket_ts = int(ts // BUCKET_SEC) * BUCKET_SEC
         buf = self.buffers[symbol]
         usd = px * qty
+        self.last_seen_ts[symbol] = time.time()
         if buf and buf[-1][0] == bucket_ts:
             t, b, s, o, _ = buf[-1]
             if side == "buy":
@@ -325,18 +311,12 @@ class PaperBot:
         q0, q1, q2, q3 = quarters
         bf, bs = q0["buy"] + q1["buy"], q2["buy"] + q3["buy"]
         sf, ss = q0["sell"] + q1["sell"], q2["sell"] + q3["sell"]
-        bg = bs / bf if bf > 0 else (100.0 if bs > 0 else 1.0)
-        sg = ss / sf if sf > 0 else (100.0 if ss > 0 else 1.0)
-        bg = _cap_growth(bg)
-        sg = _cap_growth(sg)
+        bg = _cap_growth(bs / bf if bf > 0 else (100.0 if bs > 0 else 1.0))
+        sg = _cap_growth(ss / sf if sf > 0 else (100.0 if ss > 0 else 1.0))
         if q3["buy"] >= q3["sell"]:
-            end_side = "buy"
-            end_dom = q3["buy"] / max(q3["sell"], 1)
-            end_vol = q3["buy"]
+            end_side, end_dom, end_vol = "buy", q3["buy"] / max(q3["sell"], 1), q3["buy"]
         else:
-            end_side = "sell"
-            end_dom = q3["sell"] / max(q3["buy"], 1)
-            end_vol = q3["sell"]
+            end_side, end_dom, end_vol = "sell", q3["sell"] / max(q3["buy"], 1), q3["sell"]
         if q3["last"] <= 0:
             return None
         return {
@@ -349,32 +329,19 @@ class PaperBot:
 
     def _classify(self, f, W):
         bg, sg = f["buy_growth"], f["sell_growth"]
-
         if bg >= sg:
-            grow_side, die_side = "buy", "sell"
-            grow_growth, die_growth = bg, sg
+            grow_side, grow_growth, die_growth = "buy", bg, sg
         else:
-            grow_side, die_side = "sell", "buy"
-            grow_growth, die_growth = sg, bg
-
+            grow_side, grow_growth, die_growth = "sell", sg, bg
         gap = grow_growth / max(die_growth, 0.1)
-
-        if gap < GAP_MIN:
+        if gap < GAP_MIN or grow_growth < ACCEL_MIN or die_growth > DECAY_MAX:
             return None
-        if grow_growth < ACCEL_MIN:
-            return None
-        if die_growth > DECAY_MAX:
-            return None
-        if f["end_side"] != grow_side:
-            return None
-        if f["end_dom"] < END_DOM_MIN:
+        if f["end_side"] != grow_side or f["end_dom"] < END_DOM_MIN:
             return None
         if f["end_vol"] < _min_end_for_window(W):
             return None
-
         return grow_side, gap, grow_growth, die_growth
 
-    # ---------------- Detection ----------------
     def detect(self, now):
         if now < self.warmup_until:
             return
@@ -392,6 +359,11 @@ class PaperBot:
                     continue
                 decision = self._classify(f, W)
                 if decision is None:
+                    continue
+                # Memory cap
+                if len(self.active_trades) >= MAX_ACTIVE_TRADES:
+                    log.warning("MAX_ACTIVE_TRADES hit (%d), skipping new signal",
+                                MAX_ACTIVE_TRADES)
                     continue
                 side, gap, grow_growth, die_growth = decision
                 self.last_detect[key] = now
@@ -416,18 +388,15 @@ class PaperBot:
         s["top_signals"].append((gap, t.id, symbol, side, entry, now))
         s["top_signals"].sort(key=lambda x: -x[0])
         s["top_signals"] = s["top_signals"][:20]
-
         log.info(
             "OPEN #%d [%s] %s %s @ %.8f | gap=%.1fx "
-            "(grow %.2fx / die %.2fx) | end_dom=%.2fx | "
-            "q_buy=%s q_sell=%s",
+            "(grow %.2fx / die %.2fx) | end_dom=%.2fx | q_buy=%s q_sell=%s",
             t.id, wname, symbol, side.upper(), entry, gap,
             grow_growth, die_growth, f["end_dom"],
             [int(x) for x in f["q_buy"]],
             [int(x) for x in f["q_sell"]],
         )
 
-    # ---------------- Updates ----------------
     def on_trade(self, symbol, px, now):
         self.last_price[symbol] = px
         for t in list(self.active_trades):
@@ -438,8 +407,7 @@ class PaperBot:
                 t.update_realistic(px, now)
                 if t.realistic_closed:
                     log.info(
-                        "CLOSE #%d [%s] %s %s | %s | %.8f -> %.8f | "
-                        "pnl=%+.3f%%",
+                        "CLOSE #%d [%s] %s %s | %s | %.8f -> %.8f | pnl=%+.3f%%",
                         t.id, t.window, t.symbol, t.side.upper(),
                         t.realistic_reason, t.entry_px,
                         t.realistic_exit_px, t.pnl_pct(),
@@ -467,7 +435,7 @@ class PaperBot:
             hp = t.horizon_pnl_pct(h)
             if hp is not None:
                 s["horizon_pnls"][h].append(hp)
-        self._write_csv(t)
+        self._write_csv_row(t)
 
     def force_finalize_timeouts(self, now):
         for t in list(self.active_trades):
@@ -476,88 +444,114 @@ class PaperBot:
             if now - t.entry_ts > max(HORIZONS) + 300:
                 self._finalize(t)
 
-    # ---------------- Summary ----------------
-    def print_summary(self):
+    def get_stats_json(self):
         runtime_h = (time.time() - self.start_ts) / 3600
-        total_sig = sum(s["signals"] for s in self.stats.values())
-        total_cls = sum(s["closed"] for s in self.stats.values())
-        log.info("")
-        log.info("=" * 88)
-        log.info("SUMMARY | runtime=%.1fh | signals=%d | closed=%d | active=%d",
-                 runtime_h, total_sig, total_cls, len(self.active_trades))
-        log.info("-" * 88)
+        out = {
+            "runtime_hours": round(runtime_h, 2),
+            "signals": sum(s["signals"] for s in self.stats.values()),
+            "closed": len(self.closed_trades),
+            "active": len(self.active_trades),
+            "warmup_done": time.time() >= self.warmup_until,
+            "windows": {},
+            "feeds": {},
+        }
         for wname in WINDOWS:
             s = self.stats.get(wname)
             if not s:
                 continue
-            if s["signals"] == 0:
-                continue
-            if s["closed"] == 0:
-                log.info("[%s] signals=%d, no closes yet",
-                         wname, s["signals"])
-                continue
-            n = s["closed"]
-            wr = s["wins"] / n
-            avg = s["pnl_sum"] / n
-            log.info("[%s] n=%d WR=%.1f%% avg_pnl=%+.3f%% signals=%d",
-                     wname, n, wr * 100, avg, s["signals"])
-            rows = []
-            for h in HORIZONS:
-                hp = s["horizon_pnls"].get(h, [])
-                if len(hp) < 3:
-                    continue
-                rows.append((h, len(hp),
-                             sum(1 for x in hp if x > 0) / len(hp),
-                             mean(hp)))
-            if rows:
-                rows.sort(key=lambda x: -x[3])
-                for h, hn, hwr, havg in rows[:2]:
-                    log.info(
-                        "    best horizon: %ds n=%d WR=%.0f%% avg=%+.3f%%",
-                        h, hn, hwr * 100, havg,
-                    )
-        log.info("-" * 88)
-        log.info("TOP 10 GAPS SEEN (across all windows)")
-        log.info("-" * 88)
-        all_top = []
-        for wname in WINDOWS:
-            for entry in self.stats[wname]["top_signals"]:
-                gap, tid, sym, side, px, ts = entry
-                all_top.append((gap, tid, sym, side, wname, ts))
-        all_top.sort(key=lambda x: -x[0])
-        for gap, tid, sym, side, wname, ts in all_top[:10]:
-            when = time.strftime("%H:%M", time.localtime(ts))
-            log.info("  gap=%.1fx #%d [%s] %s %s @ %s",
-                     gap, tid, wname, sym, side.upper(), when)
-        log.info("=" * 88)
-        log.info("")
+            w = {"signals": s["signals"], "closed": s["closed"]}
+            if s["closed"] > 0:
+                w["win_rate"] = round(s["wins"] / s["closed"], 3)
+                w["avg_pnl_pct"] = round(s["pnl_sum"] / s["closed"], 3)
+            out["windows"][wname] = w
+        now = time.time()
+        for sym in self.symbols:
+            last = self.last_seen_ts.get(sym, 0)
+            out["feeds"][sym] = {
+                "last_seen_sec_ago": int(now - last) if last else None,
+                "stale": (now - last) > WS_STALE_AFTER_SEC if last else True,
+            }
+        return out
 
-    def finalize_all(self):
-        for t in list(self.active_trades):
-            if not t.finalized:
-                self._finalize(t)
+
+# ============================================================
+# HTTP SERVER (for UptimeRobot + data pull)
+# ============================================================
+async def start_http(bot):
+    async def health(req):
+        return web.json_response({"ok": True, "ts": time.time()})
+
+    async def stats(req):
+        return web.json_response(bot.get_stats_json())
+
+    async def csv_endpoint(req):
+        text = bot.get_csv_text()
+        return web.Response(
+            text=text if text else "id,entry_ts,window,symbol,side\n",
+            content_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=trades.csv"},
+        )
+
+    async def root(req):
+        return web.Response(text=(
+            "paper_exhaustion running.\n"
+            "/health  - uptime ping\n"
+            "/stats   - JSON stats\n"
+            "/csv     - download CSV\n"
+        ))
+
+    app = web.Application()
+    app.router.add_get("/", root)
+    app.router.add_get("/health", health)
+    app.router.add_get("/stats", stats)
+    app.router.add_get("/csv", csv_endpoint)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
+    await site.start()
+    log.info("HTTP server on :%d (/health /stats /csv)", HTTP_PORT)
+    return runner
 
 
 # ============================================================
 # LOOPS
 # ============================================================
 async def feed_symbol(ws, bot, symbol):
+    consecutive_errors = 0
     while True:
         try:
             trades = await ws.watch_trades(symbol)
+            consecutive_errors = 0
             now = time.time()
             for t in trades:
                 ts = t["timestamp"] / 1000.0
                 px = float(t["price"])
                 qty = float(t["amount"])
-                side = t["side"]
-                bot.add_trade(symbol, ts, px, qty, side)
+                bot.add_trade(symbol, ts, px, qty, t["side"])
                 bot.on_trade(symbol, px, now)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            log.warning("ws %s: %s", symbol, type(e).__name__)
-            await asyncio.sleep(3)
+            consecutive_errors += 1
+            log.warning("ws %s: %s (err #%d)", symbol,
+                        type(e).__name__, consecutive_errors)
+            await asyncio.sleep(min(30, 3 * consecutive_errors))
+
+
+async def ws_watchdog(bot):
+    """NEW: if a symbol has not seen a trade in WS_STALE_AFTER_SEC,
+    log it. The feed loop auto-reconnects on its own; this just tells us."""
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        stale = []
+        for sym in bot.symbols:
+            last = bot.last_seen_ts.get(sym, 0)
+            if last and now - last > WS_STALE_AFTER_SEC:
+                stale.append(f"{sym}({int(now - last)}s)")
+        if stale:
+            log.warning("stale feeds: %s", ", ".join(stale))
 
 
 async def detection_loop(bot):
@@ -575,43 +569,63 @@ async def summary_loop(bot):
     while True:
         await asyncio.sleep(SUMMARY_EVERY)
         try:
-            bot.print_summary()
+            runtime_h = (time.time() - bot.start_ts) / 3600
+            total_sig = sum(s["signals"] for s in bot.stats.values())
+            total_cls = len(bot.closed_trades)
+            log.info("SUMMARY runtime=%.1fh signals=%d closed=%d active=%d",
+                     runtime_h, total_sig, total_cls, len(bot.active_trades))
+            for wname in WINDOWS:
+                s = bot.stats.get(wname)
+                if not s or s["closed"] == 0:
+                    continue
+                n = s["closed"]
+                log.info("  [%s] n=%d WR=%.1f%% avg=%+.3f%%",
+                         wname, n, s["wins"] / n * 100, s["pnl_sum"] / n)
         except Exception as e:
             log.error("summary error: %s", e)
+
+
+async def csv_flush_loop(bot):
+    """NEW: flush in-memory CSV to disk every 5 min."""
+    while True:
+        await asyncio.sleep(CSV_FLUSH_EVERY)
+        try:
+            bot.flush_csv()
+        except Exception as e:
+            log.error("flush error: %s", e)
 
 
 # ============================================================
 # MAIN
 # ============================================================
 async def main():
-    log.info("=" * 88)
+    log.info("=" * 80)
     log.info("PAPER EXHAUSTION — growing vs dying side, biggest gap")
     log.info("  windows=%s", list(WINDOWS.keys()))
-    log.info("  thresholds: accel>=%.2fx decay<=%.2fx gap>=%.2fx "
-             "end_dom>=%.2fx", ACCEL_MIN, DECAY_MAX, GAP_MIN, END_DOM_MIN)
-    log.info("  min_end_usd: " + " ".join(
-        f"{w}=${_min_end_for_window(W):.0f}"
-        for w, W in WINDOWS.items()))
-    log.info("  trade: TP=%.1f%% SL=%.1f%% hold=%dx window (cap %ds)",
+    log.info("  gap>=%.1fx accel>=%.1fx decay<=%.1fx end_dom>=%.1fx",
+             GAP_MIN, ACCEL_MIN, DECAY_MAX, END_DOM_MIN)
+    log.info("  TP=%.1f%% SL=%.1f%% hold=%dx window (cap %ds)",
              TP_PCT, SL_PCT, MAX_HOLD_MULT, MAX_HOLD_CAP)
-    log.info("  horizons: %s", HORIZONS)
-    log.info("=" * 88)
+    log.info("=" * 80)
 
-    log.info("fetching universe (>= $%.0f 24h vol)...", MIN_VOL_USD)
     symbols = get_top_symbols(SYMBOLS_COUNT)
     if not symbols:
-        log.error("no symbols — check network")
+        log.error("no symbols")
         return
     log.info("symbols (%d): %s", len(symbols), symbols)
 
     bot = PaperBot(symbols)
     ws = ccxtpro.bitget({"enableRateLimit": True})
 
-    log.info("starting... (first 5 min = warmup, no signals)")
+    runner = await start_http(bot)   # NEW: HTTP server for Render
+    log.info("warmup: 5 min (no signals until buffers fill)")
+
     feeds = [asyncio.create_task(feed_symbol(ws, bot, s)) for s in symbols]
     tasks = [
         asyncio.create_task(detection_loop(bot)),
         asyncio.create_task(summary_loop(bot)),
+        asyncio.create_task(csv_flush_loop(bot)),    # NEW
+        asyncio.create_task(ws_watchdog(bot)),        # NEW
     ]
 
     try:
@@ -626,8 +640,12 @@ async def main():
         except Exception:
             pass
         bot.finalize_all()
-        bot.print_summary()
-        log.info("CSV: %s", CSV_PATH)
+        bot.flush_csv()
+        try:
+            await runner.cleanup()
+        except Exception:
+            pass
+        log.info("csv flushed to %s", CSV_PATH)
 
 
 if __name__ == "__main__":
