@@ -1,13 +1,15 @@
 """
 market_math.py
 ==============
-PREDICT strategy math — noise-filtered feature learning, signed metrics,
-duration × magnitude classification, per-feature live timeout.
-v2026.12.15
+PREDICT strategy math — noise-filtered features, duration×magnitude kinds,
+feature power scoring, strict crowd-backed acceleration gate, economic
+live gate, and per-tier ban/unban system.
+
+v2026.12.26
 """
 import math
 
-__version__ = "2026.12.15"
+__version__ = "2026.12.26"
 
 FEE_ROUND_TRIP_PCT = 0.22
 
@@ -49,12 +51,38 @@ FEATURE_EFFECT_MIN_MOVE_PCT = 0.20
 FEATURE_BIG_MOVE_PCT = 0.50
 FEATURE_NOISE_SIGNAL_RATIO = 0.25
 FEATURE_LEADERBOARD_MIN_SAMPLES = 3
+MIN_OBS_FOR_PATTERN = 3
 
 KIND_TIMEOUT_SEC = {
     "FLASH": 60.0, "FLASH_BIG": 90.0,
     "PULSE": 180.0, "PULSE_BIG": 240.0,
     "SUSTAINED": 600.0, "SUSTAINED_BIG": 900.0,
 }
+
+# ---- Coin filter (heavy absorber detection) ----
+MARKETCAP_VOLUME_MAX_RATIO = 10.0
+HEAVY_ABSORBER_MIN_VOL_USD = 100_000_000
+HEAVY_ABSORBER_MIN_FLUCT = 0.15
+RESPONSIVENESS_MIN = 0.02
+
+# ---- Rate-based entry (per BTC/ETH/ZEC insight) ----
+LIVE_ENTRY_MIN_FEATURE_RATE = 75.0
+LIVE_ENTRY_MAX_OPPONENT_RATE = 55.0
+LIVE_ENTRY_MIN_DELTA = 25.0
+LIVE_ENTRY_MIN_EXPECTED_GROSS_PCT = 0.40
+WIN_THRESHOLD_NET_PCT = 0.18
+RATE_BINS_DELTA = [(0, 10), (10, 20), (20, 30), (30, 40), (40, 100)]
+RATE_BINS_OPP = [(0, 30), (30, 50), (50, 70), (70, 100)]
+RATE_BINS_FEAT = [(0, 50), (50, 70), (70, 85), (85, 100)]
+
+# ---- Acceleration entry (strict two-layer gate) ----
+ACCEL_WINDOW_MIN = 3
+ACCEL_MIN_RATIO = 3.0
+ACCEL_MIN_FILL_RATIO = 2.0
+ACCEL_MIN_PER_MIN_VOL_RATIO = 2.0
+ACCEL_MIN_PER_MIN_FILL_RATIO = 1.5
+ACCEL_FEATURE_MIN_STEP_GROWTH = 1.15
+ACCEL_MIN_FEATURE_FILLS = 5
 
 # ---- Economic live gate ----
 LIVE_OBS_WINDOW = 20
@@ -124,6 +152,35 @@ def market_cap_tier_from_volume(vol_24h_usd):
         if lo <= vol_24h_usd < hi:
             return name
     return "unknown"
+
+
+def passes_marketcap_volume_rule(market_cap_usd, volume_24h_usd):
+    """Exclude if market cap >= 10x 24h volume, or if market cap is unknown."""
+    if not market_cap_usd or market_cap_usd <= 0:
+        return False, "no_mcap"
+    if not volume_24h_usd or volume_24h_usd <= 0:
+        return False, "no_volume"
+    ratio = market_cap_usd / volume_24h_usd
+    if ratio >= MARKETCAP_VOLUME_MAX_RATIO:
+        return False, f"ratio_{ratio:.1f}x"
+    return True, f"ratio_{ratio:.1f}x"
+
+
+def passes_coin_filter(feats):
+    """Reject coins that can't deliver momentum to beat fees."""
+    vol = feats.get("volume_24h_usd", 0.0)
+    if vol < PRED_VOLUME_MIN_USD:
+        return False, "low_volume"
+    fluct = feats.get("fluct_per_min", 0.0)
+    if fluct < PRED_MIN_FLUCTUATION_PCT_PER_MIN:
+        return False, "low_fluct"
+    if vol > HEAVY_ABSORBER_MIN_VOL_USD and fluct < HEAVY_ABSORBER_MIN_FLUCT:
+        return False, "heavy_absorber"
+    vol_m = vol / 1_000_000.0
+    responsiveness = fluct / (vol_m ** 0.5)
+    if responsiveness < RESPONSIVENESS_MIN:
+        return False, "low_responsiveness"
+    return True, "ok"
 
 
 # =========================================================================
@@ -290,12 +347,15 @@ def summarize_minute_window(ticks, start_ts, end_ts):
         b = buckets.setdefault(m, {
             "minute": m, "prices": [], "vol_usd": 0.0,
             "buy_usd": 0.0, "sell_usd": 0.0, "trades": 0,
+            "buy_fills": 0, "sell_fills": 0,
             "whale_buys": 0, "whale_sells": 0})
         b["prices"].append(t["price"])
         b["vol_usd"] += t.get("vol_usd", 0.0)
         b["buy_usd"] += t.get("taker_buy_usd", 0.0)
         b["sell_usd"] += t.get("taker_sell_usd", 0.0)
         b["trades"] += t.get("trades", 0)
+        b["buy_fills"] += t.get("taker_buy_fills", 0)
+        b["sell_fills"] += t.get("taker_sell_fills", 0)
         if t.get("taker_buy_usd", 0.0) >= WHALE_ORDER_USD:
             b["whale_buys"] += 1
         if t.get("taker_sell_usd", 0.0) >= WHALE_ORDER_USD:
@@ -310,6 +370,8 @@ def summarize_minute_window(ticks, start_ts, end_ts):
                     "high": max(b["prices"]), "low": min(b["prices"]),
                     "vol_usd": b["vol_usd"], "buy_usd": b["buy_usd"],
                     "sell_usd": b["sell_usd"], "trades": b["trades"],
+                    "buy_fills": b["buy_fills"],
+                    "sell_fills": b["sell_fills"],
                     "whale_buys": b["whale_buys"],
                     "whale_sells": b["whale_sells"]})
     return out
@@ -433,17 +495,40 @@ def measure_feature_instance(minute_buckets, i):
 
 
 # =========================================================================
-# NOISE vs SIGNAL CLASSIFICATION
+# SIDE RATES
 # =========================================================================
+def compute_side_rates(b, median_vol):
+    buy = b.get("buy_usd", 0.0)
+    sell = b.get("sell_usd", 0.0)
+    total = buy + sell
+    if total <= 0 or median_vol <= 0:
+        return {"buy": 0.0, "sell": 0.0, "delta_buy_sell": 0.0}
+    buy_rate = min(100.0,
+                   (buy / total) * 50.0
+                   + min(1.0, buy / (median_vol * 2.0)) * 50.0)
+    sell_rate = min(100.0,
+                    (sell / total) * 50.0
+                    + min(1.0, sell / (median_vol * 2.0)) * 50.0)
+    return {"buy": round(buy_rate, 1),
+            "sell": round(sell_rate, 1),
+            "delta_buy_sell": round(buy_rate - sell_rate, 1)}
+
+
+# =========================================================================
+# SIGNAL CLASSIFICATION
+# =========================================================================
+def signal_worked(peak_net_pct, direction):
+    sign = 1 if direction == "LONG" else -1
+    return peak_net_pct * sign >= WIN_THRESHOLD_NET_PCT
+
+
 def classify_feature_signal(observations, direction):
-    """Data-driven classification. Uses aligned net (LONG wants +, SHORT wants -)."""
     empty = {"kind": "NOISE", "signal_ratio": 0.0,
              "median_duration": 0.0, "median_magnitude": 0.0,
              "fired": 0, "moved": 0, "big_moved": 0,
              "direction_aligned": direction}
     if not observations or not direction:
         return empty
-
     sign = 1 if direction == "LONG" else -1
     aligned_nets = []
     durations_of_moves = []
@@ -490,6 +575,372 @@ def kind_priority(kind):
     return {"SUSTAINED_BIG": 6, "PULSE_BIG": 5, "FLASH_BIG": 4,
             "SUSTAINED": 3, "PULSE": 2, "FLASH": 1,
             "NOISE": 0}.get(kind, 0)
+
+
+# =========================================================================
+# FEATURE POWER
+# =========================================================================
+def compute_feature_power(observations, direction):
+    empty = {"power": 0.0, "magnitude": 0.0, "velocity": 0.0,
+             "directionality": 0.0, "cleanness": 0.0, "samples": 0}
+    if not observations:
+        return empty
+    sign = 1 if direction == "LONG" else -1
+    aligned = [o["peak_net_pct"] * sign for o in observations]
+    n = len(aligned)
+    if n == 0:
+        return empty
+    median_mag = sorted(abs(a) for a in aligned)[n // 2]
+    velocities = []
+    for o in observations:
+        pm_min = o.get("peak_minute") or 1
+        velocities.append(abs(o["peak_net_pct"]) / max(1, pm_min))
+    median_vel = sorted(velocities)[len(velocities) // 2] if velocities else 0
+    correct = sum(1 for a in aligned if a >= 0.18)
+    directionality = correct / n
+    if n >= 2:
+        mean_aligned = sum(aligned) / n
+        variance = sum((a - mean_aligned) ** 2 for a in aligned) / n
+        stdev = variance ** 0.5
+        abs_mean = abs(mean_aligned)
+        cleanness = abs_mean / (stdev + 0.01)
+        cleanness = min(1.0, cleanness)
+    else:
+        cleanness = 0.5
+    mag_score = min(40.0, median_mag * 8.0)
+    vel_score = min(20.0, median_vel * 10.0)
+    dir_score = directionality * 25.0
+    clean_score = cleanness * 15.0
+    power = mag_score + vel_score + dir_score + clean_score
+    return {"power": round(power, 1),
+            "magnitude": round(median_mag, 3),
+            "velocity": round(median_vel, 3),
+            "directionality": round(directionality, 2),
+            "cleanness": round(cleanness, 2),
+            "samples": n}
+
+
+def build_feature_power_table(global_tag_stats):
+    table = {}
+    for tag, samples in global_tag_stats.items():
+        if len(samples) < MIN_OBS_FOR_PATTERN:
+            continue
+        direction = _tag_direction(tag)
+        obs_for_power = []
+        for s in samples:
+            best_val = None
+            best_min = 1
+            for k, m in (("60", 1), ("120", 2), ("180", 3)):
+                v = s.get(k)
+                if v is not None and (best_val is None or abs(v) > abs(best_val)):
+                    best_val = v
+                    best_min = m
+            if best_val is None:
+                continue
+            obs_for_power.append({"peak_net_pct": best_val,
+                                   "peak_minute": best_min,
+                                   "direction": direction})
+        if not obs_for_power:
+            continue
+        p = compute_feature_power(obs_for_power, direction)
+        table[tag] = {**p, "direction": direction}
+    return table
+
+
+def get_opponent_power(feature_tag, opposite_tags_fired, power_table):
+    feature_dir = _tag_direction(feature_tag)
+    opp_dir = "SHORT" if feature_dir == "LONG" else "LONG"
+    best = None
+    for tag in opposite_tags_fired:
+        if tag == feature_tag:
+            continue
+        if _tag_direction(tag) != opp_dir:
+            continue
+        p = power_table.get(tag)
+        if p and (best is None or p["power"] > best["power"]):
+            best = p
+    return best
+
+
+def build_side_by_side(observations, direction):
+    if not observations:
+        return None
+    sign = 1 if direction == "LONG" else -1
+    worked, failed = [], []
+    for o in observations:
+        aligned = o.get("peak_net_pct", o.get("net_pct", 0.0)) * sign
+        o["_aligned"] = aligned
+        if aligned >= WIN_THRESHOLD_NET_PCT:
+            worked.append(o)
+        elif aligned < WIN_THRESHOLD_NET_PCT * 0.6:
+            failed.append(o)
+    if not worked:
+        return None
+    best_worked = max(worked, key=lambda x: x["_aligned"])
+    best_failed = max(failed, key=lambda x: -x["_aligned"]) if failed else None
+
+    def profile(o):
+        return {"coin": o.get("coin"),
+                "minute": o.get("minute"),
+                "feature_rate": round(o.get("feature_rate", 0.0), 1),
+                "opponent_rate": round(o.get("opponent_rate", 0.0), 1),
+                "delta": round(o.get("rate_delta", 0.0), 1),
+                "tier": o.get("tier"),
+                "tier_weight": o.get("tier_weight"),
+                "volume_class": o.get("volume_class"),
+                "aligned_net": round(o["_aligned"], 2),
+                "peak_minute": o.get("peak_minute"),
+                "reason": o.get("reason")}
+
+    result = {"worked": profile(best_worked), "failed": None, "why": ""}
+    if best_failed is not None:
+        result["failed"] = profile(best_failed)
+        w, f = result["worked"], result["failed"]
+        points = []
+        if w["delta"] > f["delta"] + 5:
+            points.append(f"delta {w['delta']:.0f} vs {f['delta']:.0f} "
+                          f"— worked case had far stronger side separation")
+        if w["opponent_rate"] < f["opponent_rate"] - 5:
+            points.append(f"opponent {w['opponent_rate']:.0f} vs "
+                          f"{f['opponent_rate']:.0f} — failed case faced "
+                          f"comparable opposition that absorbed the move")
+        if w["feature_rate"] > f["feature_rate"] + 5:
+            points.append(f"feature {w['feature_rate']:.0f} vs "
+                          f"{f['feature_rate']:.0f} — failed case had weaker "
+                          f"initial signal")
+        result["why"] = (" ; ".join(points) if points
+                         else "similar rate profiles — outcome divergence "
+                              "driven by factors outside rate")
+    return result
+
+
+def learn_rate_patterns(observations, direction):
+    if not observations:
+        return {}
+    from collections import defaultdict
+    sign = 1 if direction == "LONG" else -1
+    delta_stats = defaultdict(lambda: {"n": 0, "wins": 0})
+    opp_stats = defaultdict(lambda: {"n": 0, "wins": 0})
+    feat_stats = defaultdict(lambda: {"n": 0, "wins": 0})
+    for o in observations:
+        aligned = o.get("peak_net_pct", 0.0) * sign
+        worked = aligned >= WIN_THRESHOLD_NET_PCT
+        delta = abs(o.get("rate_delta", 0.0))
+        opp = o.get("opponent_rate", 0.0)
+        feat = o.get("feature_rate", 0.0)
+        for lo, hi in RATE_BINS_DELTA:
+            if lo <= delta < hi:
+                k = f"{lo}-{hi}"
+                delta_stats[k]["n"] += 1
+                if worked:
+                    delta_stats[k]["wins"] += 1
+                break
+        for lo, hi in RATE_BINS_OPP:
+            if lo <= opp < hi:
+                k = f"{lo}-{hi}"
+                opp_stats[k]["n"] += 1
+                if worked:
+                    opp_stats[k]["wins"] += 1
+                break
+        for lo, hi in RATE_BINS_FEAT:
+            if lo <= feat < hi:
+                k = f"{lo}-{hi}"
+                feat_stats[k]["n"] += 1
+                if worked:
+                    feat_stats[k]["wins"] += 1
+                break
+
+    def summarize(stats):
+        out = {}
+        for k, s in stats.items():
+            if s["n"] >= MIN_OBS_FOR_PATTERN:
+                out[k] = {"win_rate": round(s["wins"] / s["n"], 2),
+                          "n": s["n"]}
+        return out
+
+    return {"by_delta": summarize(delta_stats),
+            "by_opponent": summarize(opp_stats),
+            "by_feature": summarize(feat_stats)}
+
+
+# =========================================================================
+# RATE ENTRY
+# =========================================================================
+def check_live_entry_conditions(feature_rate, opponent_rate):
+    delta = feature_rate - opponent_rate
+    if feature_rate < LIVE_ENTRY_MIN_FEATURE_RATE:
+        return False, f"feature_rate {feature_rate:.0f} < {LIVE_ENTRY_MIN_FEATURE_RATE:.0f}"
+    if opponent_rate > LIVE_ENTRY_MAX_OPPONENT_RATE:
+        return False, f"opponent_rate {opponent_rate:.0f} > {LIVE_ENTRY_MAX_OPPONENT_RATE:.0f}"
+    if delta < LIVE_ENTRY_MIN_DELTA:
+        return False, f"delta {delta:.0f} < {LIVE_ENTRY_MIN_DELTA:.0f}"
+    return True, (f"OK feature={feature_rate:.0f} "
+                  f"opp={opponent_rate:.0f} delta={delta:.0f}")
+
+
+def check_live_entry_with_power(feature_rate, opponent_rate,
+                                 feature_power, opponent_power):
+    fr = feature_rate or 0
+    orr = opponent_rate or 0
+    fp = (feature_power or {}).get("power", 0)
+    op = (opponent_power or {}).get("power", 0)
+    if fp <= 0:
+        return False, "feature power unknown (need 3+ obs)"
+    if op <= 0:
+        if fr >= LIVE_ENTRY_MIN_FEATURE_RATE:
+            return True, f"no known opponent power; feature_rate={fr:.0f}"
+        return False, f"no opponent power data, rate {fr:.0f} too low"
+    power_ratio = fp / max(1.0, op)
+    if power_ratio >= 2.0 and fr >= 40:
+        return True, (f"power dominance {fp:.0f}/{op:.0f} "
+                      f"(ratio {power_ratio:.1f}x); rate {fr:.0f} ok")
+    if power_ratio <= 0.5 and orr >= 50:
+        return False, (f"opponent power {op:.0f} >> feature {fp:.0f}; "
+                       f"rate {fr:.0f} insufficient")
+    return check_live_entry_conditions(fr, orr)
+
+
+# =========================================================================
+# ACCELERATION (strict two-layer gate)
+# =========================================================================
+def detect_acceleration_signal(minute_buckets, direction):
+    """Strict gate. All six must pass:
+
+    1. feature total fills >= 5 (blocks 1-whale crowd)
+    2. 3-min total volume ratio >= 3.0x
+    3. 3-min total fill ratio >= 2.0x
+    4. each minute: volume ratio >= 2.0x
+    5. each minute: fill ratio >= 1.5x
+    6. feature accelerating every step (>= 1.15x growth)
+    """
+    empty = {"signal": False, "reason": "insufficient data",
+             "feature_vols": [], "opponent_vols": [],
+             "feature_total": 0.0, "opponent_total": 0.0,
+             "ratio": 0.0, "feature_growth": [], "opponent_growth": [],
+             "feature_fills": [], "opponent_fills": [],
+             "feature_fill_total": 0, "opponent_fill_total": 0,
+             "fill_ratio": 0.0,
+             "per_minute_vol_ratios": [],
+             "per_minute_fill_ratios": [],
+             "feature_avg_order": 0.0, "opponent_avg_order": 0.0,
+             "path": None}
+    if not minute_buckets or len(minute_buckets) < ACCEL_WINDOW_MIN:
+        return empty
+
+    window = minute_buckets[-ACCEL_WINDOW_MIN:]
+    if direction == "LONG":
+        feat_vols = [b["buy_usd"] for b in window]
+        opp_vols = [b["sell_usd"] for b in window]
+        feat_fills_arr = [b.get("buy_fills", 0) for b in window]
+        opp_fills_arr = [b.get("sell_fills", 0) for b in window]
+    else:
+        feat_vols = [b["sell_usd"] for b in window]
+        opp_vols = [b["buy_usd"] for b in window]
+        feat_fills_arr = [b.get("sell_fills", 0) for b in window]
+        opp_fills_arr = [b.get("buy_fills", 0) for b in window]
+
+    feat_total = sum(feat_vols)
+    opp_total = sum(opp_vols)
+    feat_fill_total = sum(feat_fills_arr)
+    opp_fill_total = sum(opp_fills_arr)
+
+    pm_vol_ratios = []
+    pm_fill_ratios = []
+    for i in range(len(window)):
+        fv, ov = feat_vols[i], opp_vols[i]
+        ff, of = feat_fills_arr[i], opp_fills_arr[i]
+        pm_vol_ratios.append(round(fv / ov, 2) if ov > 0 else 999.0)
+        pm_fill_ratios.append(round(ff / of, 2) if of > 0 else 999.0)
+
+    result = {**empty,
+              "feature_vols": [round(v, 0) for v in feat_vols],
+              "opponent_vols": [round(v, 0) for v in opp_vols],
+              "feature_total": round(feat_total, 0),
+              "opponent_total": round(opp_total, 0),
+              "feature_fills": feat_fills_arr,
+              "opponent_fills": opp_fills_arr,
+              "feature_fill_total": feat_fill_total,
+              "opponent_fill_total": opp_fill_total,
+              "per_minute_vol_ratios": pm_vol_ratios,
+              "per_minute_fill_ratios": pm_fill_ratios}
+
+    if feat_fill_total < ACCEL_MIN_FEATURE_FILLS:
+        result["reason"] = (f"feature fills {feat_fill_total} < "
+                            f"{ACCEL_MIN_FEATURE_FILLS} — whale-dominated")
+        return result
+    if feat_total <= 0:
+        result["reason"] = "no feature-side volume"
+        return result
+    if opp_total <= 0:
+        result["signal"] = True
+        result["ratio"] = 999.0
+        result["fill_ratio"] = 999.0
+        result["path"] = "ZERO_OPPONENT"
+        result["reason"] = (f"opponent volume zero, feature crowd "
+                            f"{feat_fill_total} fills totaling ${feat_total:.0f}")
+        return result
+
+    ratio = feat_total / opp_total
+    result["ratio"] = round(ratio, 2)
+
+    if opp_fill_total > 0:
+        result["fill_ratio"] = round(feat_fill_total / opp_fill_total, 2)
+        if result["fill_ratio"] < ACCEL_MIN_FILL_RATIO:
+            result["reason"] = (f"3-min fill ratio {result['fill_ratio']:.2f}x < "
+                                f"{ACCEL_MIN_FILL_RATIO}x")
+            return result
+    else:
+        result["fill_ratio"] = 999.0
+
+    if ratio < ACCEL_MIN_RATIO:
+        result["reason"] = (f"3-min volume ratio {ratio:.2f}x < "
+                            f"{ACCEL_MIN_RATIO}x")
+        return result
+
+    for i in range(len(window)):
+        if pm_vol_ratios[i] < ACCEL_MIN_PER_MIN_VOL_RATIO:
+            result["reason"] = (f"minute {i+1} volume ratio "
+                                f"{pm_vol_ratios[i]:.2f}x < "
+                                f"{ACCEL_MIN_PER_MIN_VOL_RATIO}x")
+            return result
+        if pm_fill_ratios[i] < ACCEL_MIN_PER_MIN_FILL_RATIO:
+            result["reason"] = (f"minute {i+1} fill ratio "
+                                f"{pm_fill_ratios[i]:.2f}x < "
+                                f"{ACCEL_MIN_PER_MIN_FILL_RATIO}x")
+            return result
+
+    feat_growth = []
+    for i in range(1, len(feat_vols)):
+        prev = feat_vols[i - 1]
+        curr = feat_vols[i]
+        feat_growth.append(round(curr / prev, 2) if prev > 0 else 0.0)
+    opp_growth = []
+    for i in range(1, len(opp_vols)):
+        prev = opp_vols[i - 1]
+        curr = opp_vols[i]
+        opp_growth.append(round(curr / prev, 2) if prev > 0 else 0.0)
+    result["feature_growth"] = feat_growth
+    result["opponent_growth"] = opp_growth
+    result["feature_avg_order"] = round(
+        feat_total / max(1, feat_fill_total), 0)
+    result["opponent_avg_order"] = round(
+        opp_total / max(1, opp_fill_total), 0)
+
+    if not feat_growth:
+        result["reason"] = "no growth data"
+        return result
+    if not all(g >= ACCEL_FEATURE_MIN_STEP_GROWTH for g in feat_growth):
+        result["reason"] = (f"feature not accelerating each step "
+                            f"({feat_growth}, need all >= "
+                            f"{ACCEL_FEATURE_MIN_STEP_GROWTH}x)")
+        return result
+
+    result["signal"] = True
+    result["path"] = "CROWD_BACKED_MOMENTUM"
+    result["reason"] = (f"3-min: {ratio:.1f}x vol + {result['fill_ratio']:.1f}x fills | "
+                        f"per-min vol {pm_vol_ratios} fills {pm_fill_ratios} | "
+                        f"accelerating {feat_growth}")
+    return result
 
 
 # =========================================================================
@@ -591,7 +1042,7 @@ def infer_move_reason(category, opposite_state, volume_class,
 
 
 # =========================================================================
-# CYCLE FEATURE RANKING (signed, with kind)
+# CYCLE-LEVEL RANKING
 # =========================================================================
 def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
     tier_map = tier_map or {}
@@ -617,32 +1068,48 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
             net = measurement["immediate_net_pct"]
             moved = abs(net) >= FEATURE_EFFECT_MIN_MOVE_PCT
             vol_class = classify_volume(b, med_vol)
+            rates = compute_side_rates(b, med_vol)
             for t in tags:
-                side = _feature_side_of_tag(t["tag"])
+                tag = t["tag"]
+                side = _feature_side_of_tag(tag)
+                if side == "buy":
+                    feature_rate = rates["buy"]
+                    opponent_rate = rates["sell"]
+                else:
+                    feature_rate = rates["sell"]
+                    opponent_rate = rates["buy"]
+                rate_delta = feature_rate - opponent_rate
                 opp_state = classify_opposite_side(b, side) if side else "unknown"
                 cat = classify_reason_category(opp_state, vol_class,
                                                  tier_weight, moved)
                 reason = infer_move_reason(cat, opp_state, vol_class,
                                              tier_weight, net)
-                all_obs.setdefault(t["tag"], []).append({
+                all_obs.setdefault(tag, []).append({
                     "coin": sym, "minute": b["minute"] + 1,
                     "net_pct": net, "moved": moved,
                     "immediate_move_pct": measurement["immediate_move_pct"],
                     "peak_move_pct": measurement["peak_move_pct"],
                     "peak_net_pct": measurement["peak_net_pct"],
                     "peak_minute": measurement["peak_minute"],
+                    "feature_rate": feature_rate,
+                    "opponent_rate": opponent_rate,
+                    "rate_delta": rate_delta,
                     "opposite_state": opp_state,
                     "volume_class": vol_class,
                     "tier": tier, "tier_weight": tier_weight,
                     "reason_category": cat, "reason": reason,
-                    "was_best_mover": sym == winner_sym})
+                    "was_best_mover": sym == winner_sym,
+                    "opposite_tags_fired": [
+                        t2["tag"] for t2 in tags
+                        if t2["tag"] != tag
+                        and _tag_direction(t2["tag"]) != _tag_direction(tag)
+                    ]})
 
     result = {}
     for tag, obs in all_obs.items():
         direction = _tag_direction(tag)
         sign = 1 if direction == "LONG" else -1
         cls = classify_feature_signal(obs, direction)
-
         winner_inst = next((o for o in obs if o["coin"] == winner_sym), None)
         best = None
         best_aligned = -1e9
@@ -651,7 +1118,6 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
             if aligned > best_aligned:
                 best_aligned = aligned
                 best = o
-
         better = []
         if winner_inst:
             w_aligned = winner_inst["peak_net_pct"] * sign
@@ -659,11 +1125,11 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
                 better = [o for o in obs
                           if o["coin"] != winner_sym
                           and o["peak_net_pct"] * sign > w_aligned + 0.10]
-
         reasons = {c: 0 for c in REASON_CATEGORIES}
         for o in obs:
             reasons[o["reason_category"]] += 1
-
+        side_by_side = build_side_by_side(obs, direction)
+        patterns = learn_rate_patterns(obs, direction)
         result[tag] = {"direction": direction,
                        "kind": cls["kind"],
                        "signal_ratio": cls["signal_ratio"],
@@ -674,12 +1140,14 @@ def rank_cycle_features(watch_ticks, winner_sym, start_ts, tier_map=None):
                        "big_moved": cls["big_moved"],
                        "winner_instance": winner_inst,
                        "best": best, "better": better,
+                       "side_by_side": side_by_side,
+                       "patterns": patterns,
                        "reasons": reasons, "raw_obs": obs}
     return result
 
 
 # =========================================================================
-# TIER GATES
+# TIER GATES / ECONOMIC / BAN
 # =========================================================================
 def _window_check(raw_values, gate):
     if len(raw_values) < 5:
@@ -722,9 +1190,6 @@ def tier_paper_eligible(tier, samples):
     return _window_check(raws, gate)["pass"], _window_check(raws, gate)
 
 
-# =========================================================================
-# ECONOMIC LIVE GATE
-# =========================================================================
 def feature_tier_live_ready(tag, tier, live_history):
     th = (live_history.get(tag) or {}).get(tier)
     if not th:
@@ -749,9 +1214,6 @@ def feature_tier_live_ready(tag, tier, live_history):
     return True, f"OK ({wins}/20, avg {avg:+.3f}%)", stats
 
 
-# =========================================================================
-# BAN SYSTEM
-# =========================================================================
 def tier_should_ban(live_trades):
     if len(live_trades) < LIVE_BAN_CONSECUTIVE_LOSSES:
         return False, f"{len(live_trades)}/{LIVE_BAN_CONSECUTIVE_LOSSES} live trades"
@@ -780,7 +1242,7 @@ def tier_unban_check(observations, banned_at):
 
 
 # =========================================================================
-# GLOBAL RANK (signed)
+# GLOBAL RANK
 # =========================================================================
 def rank_features(global_tag_stats, tag_descriptions=None,
                   live_history=None, new_features=None):
@@ -794,7 +1256,6 @@ def rank_features(global_tag_stats, tag_descriptions=None,
         if len(samples) < FEATURE_LEADERBOARD_MIN_SAMPLES:
             continue
         direction = _tag_direction(tag)
-        sign = 1 if direction == "LONG" else -1
         obs_for_cls = []
         for s in samples:
             best_val = None
@@ -837,7 +1298,7 @@ def rank_features(global_tag_stats, tag_descriptions=None,
 
 
 # =========================================================================
-# STORY BUILDER
+# STORY BUILDERS
 # =========================================================================
 def build_behaviour_story(ticks, start_price, end_price, start_ts):
     empty = {"story": "no data", "peak_pct": 0.0, "trough_pct": 0.0,
