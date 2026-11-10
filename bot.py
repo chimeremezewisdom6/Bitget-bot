@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- 1. Keep-Alive Server ---
+# --- 1. Keep-Alive Server (Render Free Tier) ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -24,7 +24,7 @@ def run_keepalive():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
-# --- 2. State Management (Saves Streak to Disk) ---
+# --- 2. State Management (8-Win Streak) ---
 STATE_FILE = "state.json"
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -36,7 +36,7 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-# --- 3. AI Coin Selector (OpenRouter) ---
+# --- 3. AI Coin Selector (Bulletproof) ---
 def get_ai_target_coin():
     print("🧠 Asking AI to find the best high-beta altcoin...", flush=True)
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -44,7 +44,7 @@ def get_ai_target_coin():
         return "PEPE/USDT:USDT"
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    prompt = "I am running a high-frequency momentum bot on Bitget Futures. Reply with ONLY the ticker symbol of a highly volatile altcoin (e.g., SOL, WIF, PEPE, DOGE). Format it exactly like this: 'PEPE/USDT:USDT'. Do not include any other text."
+    prompt = "Output ONLY the ticker symbol of a volatile altcoin. Format: PEPE/USDT:USDT. No explanation. Valid options: PEPE, SOL, DOGE, WIF, SHIB."
     payload = {"model": "openrouter/free", "messages": [{"role": "user", "content": prompt}]}
 
     try:
@@ -53,32 +53,62 @@ def get_ai_target_coin():
         if isinstance(data, dict) and 'choices' in data and len(data['choices']) > 0:
             symbol = data['choices'][0]['message']['content'].strip()
             symbol = symbol.replace('"', '').replace("'", "").split('\n')[0].strip()
+            
+            # Fallback validation: If AI refuses or formats wrong, use PEPE
+            if not symbol.endswith("USDT:USDT") or " " in symbol or len(symbol) > 20:
+                print(f"⚠️ AI gave invalid response: '{symbol}'. Defaulting to PEPE.", flush=True)
+                return "PEPE/USDT:USDT"
+                
             print(f"🎯 AI Selected: {symbol}", flush=True)
             return symbol
     except Exception:
         pass
     return "PEPE/USDT:USDT"
 
-# --- 4. Dynamic Leverage Calculator ---
-async def set_safe_leverage(exchange, symbol, balance_usdt):
-    market = await exchange.load_markets()
-    min_amount = market[symbol]['limits']['amount']['min']
-    
-    # Get current price to calculate minimum cost
-    ticker = await exchange.fetch_ticker(symbol)
-    price = ticker['last']
-    
-    min_cost = min_amount * price
-    required_leverage = math.ceil(min_cost / balance_usdt)
-    
-    # Cap leverage at 20x for safety
-    final_leverage = max(5, min(required_leverage, 20))
-    
-    print(f"⚙️ Balance: ${balance_usdt:.2f} | Min Order: ${min_cost:.2f} | Setting Leverage to {final_leverage}x", flush=True)
-    await exchange.set_leverage(final_leverage, symbol)
-    return final_leverage
+# --- 4. 4-Hour Behavior Analyzer ---
+async def get_4h_dynamic_trigger(exchange, symbol):
+    print(f"🔬 Analyzing last 4 hours of {symbol} to find its natural breakout...", flush=True)
+    try:
+        # Fetch 240 1-minute candles
+        candles = await exchange.fetch_ohlcv(symbol, '1m', limit=240)
+        moves = []
+        for i in range(1, len(candles)):
+            prev_close = candles[i-1][4]
+            current_close = candles[i][4]
+            move = abs(current_close - prev_close) / prev_close
+            moves.append(move)
 
-# --- 5. Main Execution Loop ---
+        avg_move = sum(moves) / len(moves)
+        
+        # Trigger is 3x the normal 1-minute move
+        dynamic_trigger = max(0.001, avg_move * 3.0) 
+        print(f"📊 Normal 1m move: {avg_move*100:.4f}% | Dynamic Trigger: {dynamic_trigger*100:.4f}%", flush=True)
+        return dynamic_trigger
+    except Exception as e:
+        print(f"⚠️ 4H Analysis Failed: {e}. Using 0.5% fallback.", flush=True)
+        return 0.005
+
+# --- 5. Dynamic Leverage Calculator ---
+async def set_safe_leverage(exchange, symbol, balance_usdt):
+    try:
+        market = await exchange.load_markets()
+        min_amount = market[symbol]['limits']['amount']['min']
+        ticker = await exchange.fetch_ticker(symbol)
+        price = ticker['last']
+        
+        min_cost = min_amount * price
+        required_leverage = math.ceil(min_cost / balance_usdt)
+        
+        final_leverage = max(5, min(required_leverage, 20)) # Cap at 20x
+        
+        print(f"⚙️ Balance: ${balance_usdt:.2f} | Min Order: ${min_cost:.2f} | Leverage: {final_leverage}x", flush=True)
+        await exchange.set_leverage(final_leverage, symbol)
+        return final_leverage
+    except Exception as e:
+        print(f"⚠️ Leverage calculation failed: {e}", flush=True)
+        return 5
+
+# --- 6. Main Execution Loop ---
 async def main():
     state = load_state()
     if state["is_live"]:
@@ -96,7 +126,9 @@ async def main():
         'options': {'defaultType': 'swap', 'adjustForTimeDifference': True}
     })
 
-    strategy = MicroMomentumStrategy(target_coin)
+    dynamic_trigger = await get_4h_dynamic_trigger(exchange, target_coin)
+    strategy = MicroMomentumStrategy(target_coin, dynamic_trigger)
+    
     last_summary_time = time.time()
 
     while True:
@@ -125,14 +157,13 @@ async def main():
                         balance = await exchange.fetch_balance()
                         usdt_free = balance['USDT']['free']
                         
-                        lev = await set_safe_leverage(exchange, target_coin, usdt_free)
-                        
-                        # Use 90% of available margin
-                        cost = usdt_free * 0.90
-                        amount = cost / current_price
-                        
-                        order = await exchange.create_market_buy_order(target_coin, amount)
-                        print(f"✅ REAL BUY EXECUTED: {order['id']}", flush=True)
+                        if usdt_free > 1.0:
+                            await set_safe_leverage(exchange, target_coin, usdt_free)
+                            cost = usdt_free * 0.90
+                            amount = cost / current_price
+                            
+                            order = await exchange.create_market_buy_order(target_coin, amount)
+                            print(f"✅ REAL BUY EXECUTED: {order['id']}", flush=True)
                     except Exception as e:
                         print(f"❌ Buy Order Failed: {e}", flush=True)
 
@@ -140,7 +171,7 @@ async def main():
             elif signal in ["SELL_MOMENTUM_DIED", "SELL_TRAILING_STOP"]:
                 print(f"📉 {signal} at {current_price} | Gross PnL: {gross_pnl*100:.3f}%", flush=True)
                 
-                # Calculate NET PnL (Subtracting ~0.12% for trading fees & spread)
+                # Calculate NET PnL (Subtracting 0.12% for fees/spread)
                 net_pnl = gross_pnl - 0.0012 
                 
                 # Update Streak Logic
