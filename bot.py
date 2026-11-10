@@ -3,8 +3,9 @@ import ccxt.pro as ccxtpro
 import os
 import time
 import threading
+import requests
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from strategies import ScalpingStrategy, TrendFollowingStrategy
+from strategies import MicroMomentumStrategy
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,70 +22,48 @@ def run_keepalive():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
-# --- 2. Strategy Manager with Metrics Tracking ---
-class StrategyManager:
-    def __init__(self):
-        self.strategies = [ScalpingStrategy(), TrendFollowingStrategy()]
-        self.current_strategy_index = 0
-        self.loss_streak = 0
-        self.max_loss_streak = 3 
+# --- 2. AI Coin Selector (OpenRouter) ---
+def get_ai_target_coin():
+    print("🧠 Asking AI to find the best high-beta altcoin...", flush=True)
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        print("⚠️ No OpenRouter Key found. Defaulting to SOL/USDT:USDT", flush=True)
+        return "SOL/USDT:USDT"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    prompt = "I am running a high-frequency momentum bot on Bitget Futures. Reply with ONLY the ticker symbol of a highly volatile altcoin (e.g., SOL, WIF, PEPE, DOGE). Format it exactly like this: 'SOL/USDT:USDT'. Do not include any other text."
+    
+    payload = {
+        "model": "openrouter/free", 
+        "messages": [{"role": "user", "content": prompt}]
+    }
+
+    try:
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=10)
+        data = response.json()
         
-        # Metrics for the 10-minute summary
-        self.trades_count = 0
-        self.wins = 0
-        self.losses = 0
-        self.switches_count = 0
-
-    def get_current_strategy(self):
-        return self.strategies[self.current_strategy_index]
-
-    def record_trade_result(self, profit_loss):
-        self.trades_count += 1
-        if profit_loss < 0:
-            self.losses += 1
-            self.loss_streak += 1
-            if self.loss_streak >= self.max_loss_streak:
-                self.switch_strategy()
+        if 'choices' in data and len(data['choices']) > 0:
+            symbol = data['choices'][0]['message']['content'].strip()
+            symbol = symbol.replace('"', '').replace("'", "").split('\n')[0].strip()
+            print(f"🎯 AI Selected: {symbol}", flush=True)
+            return symbol
         else:
-            self.wins += 1
-            self.loss_streak = 0
-
-    def switch_strategy(self):
-        self.loss_streak = 0
-        self.switches_count += 1
-        self.current_strategy_index = (self.current_strategy_index + 1) % len(self.strategies)
-
-    def generate_summary(self, current_price, spread):
-        strat = self.get_current_strategy()
-        win_rate = (self.wins / self.trades_count * 100) if self.trades_count > 0 else 0
-        
-        summary = f"""
-==================================================
-📊 10-MINUTE BOT SUMMARY
-==================================================
-🧠 Active Strategy : {strat.name}
-🔄 Strategy Switches: {self.switches_count}
---------------------------------------------------
-💰 BTC Price       : ${current_price:.2f} (Spread: ${spread:.2f})
-📈 Total Trades    : {self.trades_count}
-✅ Wins            : {self.wins}
-❌ Losses          : {self.losses}
-🎯 Win Rate        : {win_rate:.1f}%
-==================================================
-"""
-        print(summary, flush=True)
-        
-        # Reset interval metrics (optional: keep totals, reset 10-min window)
-        self.trades_count = 0
-        self.wins = 0
-        self.losses = 0
-        self.switches_count = 0
-
+            print(f"⚠️ AI returned unexpected format: {data}", flush=True)
+            return "SOL/USDT:USDT"
+            
+    except Exception as e:
+        print(f"⚠️ AI Failed: {e}. Defaulting to SOL.", flush=True)
+        return "SOL/USDT:USDT"
 
 # --- 3. Main Execution Loop ---
 async def main():
-    print("🚀 Starting Bitget connection...", flush=True)
-    
+    target_coin = get_ai_target_coin()
+
+    print("🚀 Starting Bitget Connection...", flush=True)
     exchange = ccxtpro.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
         'secret': os.environ.get("BITGET_SECRET"),
@@ -93,55 +72,45 @@ async def main():
         'options': {'defaultType': 'swap'}
     })
 
-    symbol = 'BTC/USDT:USDT'
-    manager = StrategyManager()
-    
-    print(f"🔗 Bot Started. Initial Strategy: {manager.get_current_strategy().name}", flush=True)
+    strategy = MicroMomentumStrategy(target_coin)
+    print(f"🔗 Bot Started. Strategy: {strategy.name}", flush=True)
 
     last_summary_time = time.time()
-    SUMMARY_INTERVAL = 600 # 10 minutes in seconds (600s)
-
-    current_price = 0
-    current_spread = 0
+    trades = 0
 
     while True:
         try:
-            # 1. Check if 10 minutes have passed
-            if time.time() - last_summary_time >= SUMMARY_INTERVAL:
-                manager.generate_summary(current_price, current_spread)
-                last_summary_time = time.time() # Reset timer
+            if time.time() - last_summary_time >= 600:
+                print(f"\n📊 10-MIN SUMMARY | Trades: {trades} | Current Price: {strategy.peak_price}", flush=True)
+                last_summary_time = time.time()
 
-            # 2. Get Live Data
-            orderbook = await exchange.watch_order_book(symbol)
-            candles = await exchange.fetch_ohlcv(symbol, '1m', limit=30)
+            # FIXED: Use watch_ticker instead of watch_trades to avoid list/dict errors
+            ticker = await exchange.watch_ticker(target_coin)
             
-            best_bid = orderbook['bids'][0][0] if orderbook['bids'] else 0
-            best_ask = orderbook['asks'][0][0] if orderbook['asks'] else 0
-            current_price = best_bid
-            current_spread = best_ask - best_bid
-            
-            # 3. Analyze
-            active_strategy = manager.get_current_strategy()
-            signal = active_strategy.analyze(orderbook, candles)
-            
-            # 4. Execute (Simulated for now)
-            if signal == "BUY":
-                print(f"🟢 [{active_strategy.name}] Signal: BUY at {best_bid}", flush=True)
-                import random
-                simulated_pnl = random.choice([0.5, -0.5, 0.2, -0.8]) 
-                manager.record_trade_result(simulated_pnl)
+            if 'last' not in ticker or ticker['last'] is None:
+                continue
                 
-            elif signal == "SELL":
-                print(f"🔴 [{active_strategy.name}] Signal: SELL at {best_bid}", flush=True)
-                import random
-                simulated_pnl = random.choice([0.5, -0.5, 0.2, -0.8])
-                manager.record_trade_result(simulated_pnl)
+            current_price = ticker['last']
+            signal = strategy.analyze(current_price)
+            
+            if signal == "BUY":
+                print(f"🚀 IGNITION! BUY {target_coin} at {current_price}", flush=True)
+                trades += 1
+                # -> ADD REAL EXCHANGE BUY ORDER HERE
+                
+            elif signal == "SELL_MOMENTUM_DIED":
+                print(f"📉 MOMENTUM DIED. SELL at {current_price}", flush=True)
+                # -> ADD REAL EXCHANGE SELL ORDER HERE
 
-            await asyncio.sleep(1)
+            elif signal == "SELL_TRAILING_STOP":
+                print(f"🛑 PEAK DROP. SELL at {current_price}", flush=True)
+                # -> ADD REAL EXCHANGE SELL ORDER HERE
+
+            await asyncio.sleep(0.05) # 50 milliseconds loop speed
 
         except Exception as e:
             print(f"⚠️ Connection Error: {e}", flush=True)
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
 
 if __name__ == "__main__":
     threading.Thread(target=run_keepalive, daemon=True).start()
