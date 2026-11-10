@@ -1,12 +1,10 @@
 """
-exam_core.py — v3-corrected final:
-  - Orderbook keys: a = asks, b = bids
-  - Open interest: parsed from data["list"][0]["openInterest"]
-  - Leverage: default crossed; isolated is NOT available via UTA API
-  - Candles: 3m is NOT supported by V3; using 1m / 5m / 15m
-  - reduceOnly null orderId handled; clientOid always sent
-  - Ticker fields: lastPrice, turnover24h, fundingRate, openInterest
-  - Error 40762 correctly described as "order size > max open size"
+exam_core.py — v3 final (limit=100 pagination, OI threshold relaxed):
+  - history-candles paginated at 100 bars per request (V3 max)
+  - OI/4H ratio threshold raised; OI parsed from data["list"][0]["openInterest"]
+  - Orderbook keys a=asks, b=bids
+  - Leverage default crossed; isolated needs posSide (omitted for one-way)
+  - V3 order placement with clientOid + reduceOnly
 """
 
 import os, json, time, hmac, hashlib, base64, logging
@@ -18,10 +16,7 @@ import requests
 BASE_URL = "https://api.bitget.com"
 DEMO_HEADER = {"paptrading": "1"}
 CATEGORY = "USDT-FUTURES"
-
-# Isolated margin is NOT available via UTA API (expected Q1 2026).
-# Use crossed, or omit marginMode entirely.
-MARGIN_MODE = os.environ.get("MARGIN_MODE", "crossed")
+MARGIN_MODE = os.environ.get("MARGIN_MODE", "crossed")  # isolated needs posSide; crossed is safe for one-way
 
 API_KEY = os.environ["API_KEY"]
 SECRET_KEY = os.environ["SECRET_KEY"]
@@ -36,7 +31,7 @@ REQUIRED_STREAK = 8
 
 MIN_BITGET_4H_USDT = 50_000
 MIN_4H_GROWTH = 1.15
-MAX_OI_TO_4H_RATIO = 8.0
+MAX_OI_TO_4H_RATIO = 100.0   # raised: OI is stock, 4H turnover is flow — normal coins sit high
 
 SCORE_THRESHOLD = float(os.environ.get("SCORE_THRESHOLD", "0.55"))
 DYING_SCORE_THRESHOLD = float(os.environ.get("DYING_SCORE_THRESHOLD", "0.60"))
@@ -44,11 +39,9 @@ TOP_N_CANDIDATES = int(os.environ.get("TOP_N_CANDIDATES", "20"))
 
 WEAKEST_SCAN_INTERVAL_S = 600
 
-# 3m is NOT supported by V3 candles.
-# Use 1m (short), 5m (medium), 15m (long) instead.
-WIN_1M = 10      # 10 × 1m = 10 min
-WIN_5M = 6       # 6 × 5m = 30 min
-WIN_15M = 4      # 4 × 15m = 60 min
+WIN_1M = 10
+WIN_5M = 6
+WIN_15M = 4
 
 RATE_LIMIT_S = 0.20
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
@@ -122,16 +115,31 @@ def get_ticker(symbol):
     return None
 
 
-def get_history_candles(symbol, interval="1m", limit=200, end_time=None):
-    p = {"category": CATEGORY, "symbol": symbol,
-         "interval": interval, "limit": str(limit)}
-    if end_time:
-        p["endTime"] = str(end_time)
-    return _request("GET", "/api/v3/market/history-candles", params=p).get("data", [])
+def get_history_candles(symbol, interval="1m", total_needed=200):
+    """
+    V3 history-candles: limit max = 100 per request.
+    Paginate backwards until total_needed collected.
+    """
+    all_candles = []
+    end_time = None
+    while len(all_candles) < total_needed:
+        p = {"category": CATEGORY, "symbol": symbol,
+             "interval": interval, "limit": "100"}
+        if end_time:
+            p["endTime"] = str(end_time)
+        batch = _request("GET", "/api/v3/market/history-candles", params=p).get("data", [])
+        if not batch:
+            break
+        all_candles.extend(batch)
+        end_time = int(batch[0][0]) - 1
+        time.sleep(RATE_LIMIT_S)
+        if len(batch) < 100:
+            break
+    return all_candles[:total_needed]
 
 
 def get_orderbook(symbol, limit=50):
-    """V3 orderbook returns a=asks, b=bids."""
+    """V3 orderbook: a=asks, b=bids."""
     p = {"category": CATEGORY, "symbol": symbol, "limit": str(limit)}
     return _request("GET", "/api/v3/market/orderbook", params=p).get("data", {})
 
@@ -142,7 +150,7 @@ def get_recent_fills(symbol, limit=100):
 
 
 def get_open_interest_value(symbol):
-    """V3 open-interest wraps data inside data['list']."""
+    """V3 open-interest: data['list'][0]['openInterest'] — unit is base coin."""
     p = {"category": CATEGORY, "symbol": symbol}
     data = _request("GET", "/api/v3/market/open-interest", params=p).get("data", {})
     lst = data.get("list", [])
@@ -156,7 +164,7 @@ def get_open_interest_value(symbol):
 
 # ==================== Real 4H volume + conviction ====================
 def get_real_4h_volumes(symbol):
-    candles = get_history_candles(symbol, "4H", limit=2)
+    candles = get_history_candles(symbol, "4H", total_needed=2)
     if not candles or len(candles) < 1:
         return 0.0, 0.0
     try:
@@ -169,14 +177,12 @@ def get_real_4h_volumes(symbol):
 
 def bitget_conviction(symbol, ticker):
     cur_4h, prev_4h = get_real_4h_volumes(symbol)
-    time.sleep(RATE_LIMIT_S)
     if cur_4h < MIN_BITGET_4H_USDT:
         return None
     if prev_4h > 0 and cur_4h < prev_4h * MIN_4H_GROWTH:
         return None
 
     oi_coin = get_open_interest_value(symbol)
-    time.sleep(RATE_LIMIT_S)
     try:
         px = float(ticker.get("lastPrice", 0))
         oi_usdt = oi_coin * px
@@ -203,7 +209,6 @@ def snapshot_depth(symbol, samples=3, gap=2.0):
     for i in range(samples):
         ob = get_orderbook(symbol, 50)
         try:
-            # V3: a = asks, b = bids
             bids = {b[0]: float(b[1]) for b in ob.get("b", [])[:20]}
             asks = {a[0]: float(a[1]) for a in ob.get("a", [])[:20]}
         except (ValueError, IndexError):
@@ -379,7 +384,6 @@ def crowding_state(symbol, ticker):
         oi_usdt_now = 0.0
 
     oi_coin_endpoint = get_open_interest_value(symbol)
-    time.sleep(RATE_LIMIT_S)
     try:
         oi_now = oi_coin_endpoint * float(ticker.get("lastPrice", 0))
     except (ValueError, TypeError):
@@ -453,8 +457,7 @@ def verify_global_dying(symbol, ticker, dying_side):
     else:
         checks["crowd_oi"] = 0.0
 
-    c1 = get_history_candles(symbol, "1m", 15)
-    time.sleep(RATE_LIMIT_S)
+    c1 = get_history_candles(symbol, "1m", total_needed=15)
     vel_ok = False
     if len(c1) >= 10:
         try:
@@ -477,7 +480,6 @@ def verify_global_dying(symbol, ticker, dying_side):
         checks["orderbook"] = 0.0
 
     cvd, _, _, whales, whale_usdt = cvd_usdt(get_recent_fills(symbol, 100))
-    time.sleep(RATE_LIMIT_S)
     want_neg = dying_side == "buy"
     if (want_neg and cvd < -0.10) or (not want_neg and cvd > 0.10):
         checks["cvd"] = min(abs(cvd) / 0.30, 1.0); score += 0.15 * checks["cvd"]
@@ -489,20 +491,9 @@ def verify_global_dying(symbol, ticker, dying_side):
 
 # ==================== Regular MTF setup ====================
 def detect_setup(symbol, ticker):
-    # 3m is NOT supported by V3; using 1m / 5m / 15m
-    c1 = get_history_candles(symbol, "1m", 200); time.sleep(RATE_LIMIT_S)
-    c5, end = [], None
-    for _ in range(2):
-        batch = get_history_candles(symbol, "5m", 200, end_time=end)
-        if not batch:
-            break
-        c5.extend(batch)
-        end = int(batch[0][0]) - 1
-        if len(c5) >= 288:
-            break
-        time.sleep(RATE_LIMIT_S)
-    c5 = c5[:288]
-    c15 = get_history_candles(symbol, "15m", 200); time.sleep(RATE_LIMIT_S)
+    c1 = get_history_candles(symbol, "1m", total_needed=200)
+    c5 = get_history_candles(symbol, "5m", total_needed=288)
+    c15 = get_history_candles(symbol, "15m", total_needed=200)
 
     if len(c1) < WIN_1M or len(c5) < WIN_5M or len(c15) < WIN_15M:
         return None
@@ -526,7 +517,6 @@ def detect_setup(symbol, ticker):
         return None
 
     cvd, _, _, whales, whale_usdt = cvd_usdt(get_recent_fills(symbol, 100))
-    time.sleep(RATE_LIMIT_S)
 
     cr = crowding_state(symbol, ticker)
 
@@ -615,8 +605,7 @@ def find_weakest_dying(candidates):
     verified = []
     for c in candidates:
         try:
-            c1 = get_history_candles(c["symbol"], "1m", 30)
-            time.sleep(RATE_LIMIT_S)
+            c1 = get_history_candles(c["symbol"], "1m", total_needed=30)
             side, decay = detect_dying_side(c1)
             if side is None or decay < 0.30:
                 continue
@@ -677,7 +666,6 @@ def healthy():
     return _load(HEALTH_FILE, {"score": 100}).get("score", 100) > 40
 
 
-# Corrected: 40762 = order size > max open size (not "too small")
 ERROR_BOOK = {
     "40762": ("order size > max open size", "shrink notional", "reduce"),
     "40034": ("symbol unavailable", "quarantine", "skip"),
@@ -805,13 +793,15 @@ class ExamTrader:
         _save(STATE_FILE, s)
 
     def _ensure_lev(self, sym):
-        """UTA leverage: marginMode isolated NOT supported. Crossed only."""
+        """UTA leverage. Isolated needs posSide; crossed omits it. Default crossed."""
         body = {
             "category": CATEGORY,
             "symbol": sym,
             "leverage": LEVERAGE,
             "marginMode": MARGIN_MODE,
         }
+        if MARGIN_MODE == "isolated":
+            body["posSide"] = "long"  # required for isolated on UTA
         r = _request("POST", "/api/v3/account/set-leverage", body=body)
         self.healer.check(r)
         time.sleep(RATE_LIMIT_S)
@@ -851,11 +841,10 @@ class ExamTrader:
         p = self.position
         cs = "sell" if p["side"] == "buy" else "buy"
         resp = self._place_v3(p["symbol"], cs, p["qty"], "yes")
-        # reduceOnly may return orderId null; do NOT treat as failure blindly
         if resp and str(resp.get("code")) == "00000":
             data = resp.get("data") or {}
             if isinstance(data, dict) and data.get("orderId") is None:
-                log.warning("reduceOnly returned null orderId — order replaced/cancelled; verify manually")
+                log.warning("reduceOnly returned null orderId — verify manually")
         pnl = (price - p["entry"]) / p["entry"] if p["side"] == "buy" \
               else (p["entry"] - price) / p["entry"]
         self.validator.record(pnl)
