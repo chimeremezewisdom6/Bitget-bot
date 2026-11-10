@@ -9,19 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ==========================================
-# ⚙️ CONFIGURATION
-# ==========================================
-SYMBOL = 'BTC/USDT:USDT'
-PAPER_TRADING = True  # ⚠️ SET TO False TO USE REAL MONEY
-TRADE_SIZE_USDT = 2.0 # Amount per trade
-MAX_LOSS_STREAK = 3   # Switch strategy after 3 losses in a row
-TAKE_PROFIT_PCT = 0.0042 # 0.42%
-STOP_LOSS_PCT = 0.0042   # 0.42%
-
-# ==========================================
-# 1. KEEP-ALIVE SERVER (For Render Free Tier)
-# ==========================================
+# --- 1. Keep-Alive Server ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -31,43 +19,40 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def run_keepalive():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+    print(f"🌐 Keep-Alive Server running on port {port}...", flush=True)
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
-# ==========================================
-# 2. STRATEGY MANAGER (The Genius Fallback)
-# ==========================================
+# --- 2. Strategy Manager ---
 class StrategyManager:
     def __init__(self):
         self.strategies = [ScalpingStrategy(), TrendFollowingStrategy()]
-        self.current_index = 0
+        self.current_strategy_index = 0
         self.loss_streak = 0
+        self.max_loss_streak = 3
 
-    def get_active_strategy(self):
-        return self.strategies[self.current_index]
+    def get_current_strategy(self):
+        return self.strategies[self.current_strategy_index]
 
-    def record_trade(self, profit_loss_pct):
-        if profit_loss_pct < 0:
+    def record_trade_result(self, profit_loss):
+        if profit_loss < 0:
             self.loss_streak += 1
-            print(f"🔴 LOSS! Streak: {self.loss_streak}/{MAX_LOSS_STREAK}")
-            
-            if self.loss_streak >= MAX_LOSS_STREAK:
+            print(f"⚠️ Loss detected. Streak: {self.loss_streak}/{self.max_loss_streak}", flush=True)
+            if self.loss_streak >= self.max_loss_streak:
                 self.switch_strategy()
         else:
-            print(f"🟢 WIN! Profit: {profit_loss_pct*100:.2f}%. Resetting streak.")
+            print("✅ Win detected. Resetting loss streak.", flush=True)
             self.loss_streak = 0
 
     def switch_strategy(self):
         self.loss_streak = 0
-        old_strategy = self.get_active_strategy().name
-        self.current_index = (self.current_index + 1) % len(self.strategies)
-        new_strategy = self.get_active_strategy().name
-        print(f"\n🚨 BLEEDING DETECTED! Firing {old_strategy}... Hiring {new_strategy}!\n")
+        self.current_strategy_index = (self.current_strategy_index + 1) % len(self.strategies)
+        new_strategy = self.get_current_strategy()
+        print(f"\n🔄 BLEEDING DETECTED. SWITCHING TO ALTERNATIVE STYLE: {new_strategy.name}\n", flush=True)
 
-# ==========================================
-# 3. MAIN EXECUTION ENGINE
-# ==========================================
+# --- 3. Main Execution Loop ---
 async def main():
+    print("🚀 Starting Bitget connection...", flush=True)
+    
     exchange = ccxtpro.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
         'secret': os.environ.get("BITGET_SECRET"),
@@ -76,66 +61,47 @@ async def main():
         'options': {'defaultType': 'swap'}
     })
 
+    symbol = 'BTC/USDT:USDT'
     manager = StrategyManager()
-    position = None 
     
-    print(f"🚀 Bot Started | Paper Trading: {PAPER_TRADING}")
-    print(f"🧠 Active Strategy: {manager.get_active_strategy().name}")
+    print(f"🔗 Bot Started. Initial Strategy: {manager.get_current_strategy().name}", flush=True)
+
+    last_heartbeat = time.time()
 
     while True:
         try:
-            # 1. Get live millisecond order book & 1m candles
-            orderbook = await exchange.watch_order_book(SYMBOL)
-            candles = await exchange.fetch_ohlcv(SYMBOL, '1m', limit=30)
-            
-            current_price = (orderbook['bids'][0][0] + orderbook['asks'][0][0]) / 2
-            
-            # 2. Manage Open Position
-            if position:
-                entry_price = position['entry']
-                side = position['side']
-                
-                if side == "BUY":
-                    pnl_pct = (current_price - entry_price) / entry_price
-                else:
-                    pnl_pct = (entry_price - current_price) / entry_price
+            # 1. Heartbeat Log (Proves the bot is alive even if no trades happen)
+            if time.time() - last_heartbeat > 10:
+                print(f"💓 Heartbeat: Bot is alive and waiting for signals...", flush=True)
+                last_heartbeat = time.time()
 
-                if pnl_pct >= TAKE_PROFIT_PCT or pnl_pct <= -STOP_LOSS_PCT:
-                    print(f"🚪 Closing {side} position at {current_price:.2f} | PnL: {pnl_pct*100:.2f}%")
-                    
-                    if not PAPER_TRADING:
-                        close_side = 'sell' if side == 'BUY' else 'buy'
-                        await exchange.create_market_order(SYMBOL, close_side, position['amount'])
-                    
-                    manager.record_trade(pnl_pct)
-                    position = None 
-                    
-                await asyncio.sleep(0.5) 
-                continue
-
-            # 3. Look for New Entries
-            active_strategy = manager.get_active_strategy()
+            # 2. Get Live Data
+            orderbook = await exchange.watch_order_book(symbol)
+            candles = await exchange.fetch_ohlcv(symbol, '1m', limit=30)
+            
+            # 3. Ask the active strategy what to do
+            active_strategy = manager.get_current_strategy()
             signal = active_strategy.analyze(orderbook, candles)
             
-            if signal in ["BUY", "SELL"]:
-                print(f"🎯 [{active_strategy.name}] Signal: {signal} at {current_price:.2f}")
+            best_bid = orderbook['bids'][0][0] if orderbook['bids'] else 0
+            
+            if signal == "BUY":
+                print(f"🟢 [{active_strategy.name}] Signal: BUY at {best_bid}", flush=True)
+                import random
+                simulated_pnl = random.choice([0.5, -0.5, 0.2, -0.8]) 
+                manager.record_trade_result(simulated_pnl)
                 
-                amount = TRADE_SIZE_USDT / current_price
-                
-                if not PAPER_TRADING:
-                    await exchange.create_market_order(SYMBOL, signal.lower(), amount)
-                
-                position = {
-                    "side": signal,
-                    "entry": current_price,
-                    "amount": amount
-                }
+            elif signal == "SELL":
+                print(f"🔴 [{active_strategy.name}] Signal: SELL at {best_bid}", flush=True)
+                import random
+                simulated_pnl = random.choice([0.5, -0.5, 0.2, -0.8])
+                manager.record_trade_result(simulated_pnl)
 
-            await asyncio.sleep(0.1) 
+            await asyncio.sleep(2)
 
         except Exception as e:
-            print(f"⚠️ Error: {e}")
-            await asyncio.sleep(2)
+            print(f"⚠️ Connection Error: {e}", flush=True)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     threading.Thread(target=run_keepalive, daemon=True).start()
