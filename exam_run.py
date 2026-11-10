@@ -1,17 +1,19 @@
 """
-exam_run.py — entry point. Loads R_BASE_MAP, starts loop, paper/live auto.
+exam_run.py — entry point with keep-alive server so Render Web Service stays up.
+Runs the trading loop in a background thread, serves /health on $PORT.
 """
 
 import os
 import json
 import time
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import exam_core as core
 
 log = logging.getLogger("exam")
 
-# Inject per-coin R base if provided (JSON string in env)
 r_map_raw = os.environ.get("R_BASE_MAP", "")
 if r_map_raw:
     try:
@@ -21,7 +23,26 @@ if r_map_raw:
         log.warning(f"R_BASE_MAP parse failed: {e}")
 
 
-def main():
+# ---------- Keep-alive HTTP server (Render Web Service needs a port) ----------
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"ok")
+    def log_message(self, *args):
+        pass  # silence access logs
+
+
+def start_keepalive():
+    port = int(os.environ.get("PORT", "10000"))
+    srv = HTTPServer(("0.0.0.0", port), Health)
+    log.info(f"keep-alive listening on :{port}")
+    srv.serve_forever()
+
+
+# ---------- Trading loop ----------
+def trading_loop():
     log.info(
         f"starting | paper={core.PAPER} | leverage={core.LEVERAGE}x "
         f"| streak={core.REQUIRED_STREAK} | win={core.WIN_THRESHOLD:.4f} "
@@ -38,4 +59,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=start_keepalive, daemon=True).start()
+    trading_loop()
