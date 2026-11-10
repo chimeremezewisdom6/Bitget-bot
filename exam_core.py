@@ -1,12 +1,12 @@
 """
-exam_core.py — fully v3-corrected:
-  - Leverage via /api/v3/account/set-leverage (category, marginMode)
-  - Market data via /api/v3/market/* (tickers, candles, fills, orderbook, open-interest)
-  - Candle parameter is `interval`, not `granularity`
-  - Orders via /api/v3/trade/place-order with clientOid always provided
-  - One-way mode: open long side=buy, close long side=sell & reduceOnly=yes
-  - Bitget conviction filter, spoof-resistant depth, USDT-denominated whales,
-    funding+OI crowding, volume-confirmed candle patterns
+exam_core.py — v3-corrected final:
+  - Orderbook keys: a = asks, b = bids
+  - Open interest: parsed from data["list"][0]["openInterest"]
+  - Leverage: default crossed; isolated is NOT available via UTA API
+  - Candles: 3m is NOT supported by V3; using 1m / 5m / 15m
+  - reduceOnly null orderId handled; clientOid always sent
+  - Ticker fields: lastPrice, turnover24h, fundingRate, openInterest
+  - Error 40762 correctly described as "order size > max open size"
 """
 
 import os, json, time, hmac, hashlib, base64, logging
@@ -18,7 +18,10 @@ import requests
 BASE_URL = "https://api.bitget.com"
 DEMO_HEADER = {"paptrading": "1"}
 CATEGORY = "USDT-FUTURES"
-MARGIN_MODE = "isolated"
+
+# Isolated margin is NOT available via UTA API (expected Q1 2026).
+# Use crossed, or omit marginMode entirely.
+MARGIN_MODE = os.environ.get("MARGIN_MODE", "crossed")
 
 API_KEY = os.environ["API_KEY"]
 SECRET_KEY = os.environ["SECRET_KEY"]
@@ -40,9 +43,12 @@ DYING_SCORE_THRESHOLD = float(os.environ.get("DYING_SCORE_THRESHOLD", "0.60"))
 TOP_N_CANDIDATES = int(os.environ.get("TOP_N_CANDIDATES", "20"))
 
 WEAKEST_SCAN_INTERVAL_S = 600
-WIN_1M = 10
-WIN_3M = 6
-WIN_5M = 4
+
+# 3m is NOT supported by V3 candles.
+# Use 1m (short), 5m (medium), 15m (long) instead.
+WIN_1M = 10      # 10 × 1m = 10 min
+WIN_5M = 6       # 6 × 5m = 30 min
+WIN_15M = 4      # 4 × 15m = 60 min
 
 RATE_LIMIT_S = 0.20
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
@@ -125,6 +131,7 @@ def get_history_candles(symbol, interval="1m", limit=200, end_time=None):
 
 
 def get_orderbook(symbol, limit=50):
+    """V3 orderbook returns a=asks, b=bids."""
     p = {"category": CATEGORY, "symbol": symbol, "limit": str(limit)}
     return _request("GET", "/api/v3/market/orderbook", params=p).get("data", {})
 
@@ -134,9 +141,17 @@ def get_recent_fills(symbol, limit=100):
     return _request("GET", "/api/v3/market/fills", params=p).get("data", [])
 
 
-def get_open_interest(symbol):
+def get_open_interest_value(symbol):
+    """V3 open-interest wraps data inside data['list']."""
     p = {"category": CATEGORY, "symbol": symbol}
-    return _request("GET", "/api/v3/market/open-interest", params=p).get("data", {})
+    data = _request("GET", "/api/v3/market/open-interest", params=p).get("data", {})
+    lst = data.get("list", [])
+    if not lst:
+        return 0.0
+    try:
+        return float(lst[0].get("openInterest", 0))
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # ==================== Real 4H volume + conviction ====================
@@ -160,10 +175,11 @@ def bitget_conviction(symbol, ticker):
     if prev_4h > 0 and cur_4h < prev_4h * MIN_4H_GROWTH:
         return None
 
-    oi = get_open_interest(symbol)
+    oi_coin = get_open_interest_value(symbol)
     time.sleep(RATE_LIMIT_S)
     try:
-        oi_usdt = float(oi.get("openInterest", 0)) * float(ticker.get("lastPrice", 0))
+        px = float(ticker.get("lastPrice", 0))
+        oi_usdt = oi_coin * px
     except (ValueError, TypeError):
         oi_usdt = 0.0
 
@@ -187,8 +203,9 @@ def snapshot_depth(symbol, samples=3, gap=2.0):
     for i in range(samples):
         ob = get_orderbook(symbol, 50)
         try:
-            bids = {b[0]: float(b[1]) for b in ob.get("bids", [])[:20]}
-            asks = {a[0]: float(a[1]) for a in ob.get("asks", [])[:20]}
+            # V3: a = asks, b = bids
+            bids = {b[0]: float(b[1]) for b in ob.get("b", [])[:20]}
+            asks = {a[0]: float(a[1]) for a in ob.get("a", [])[:20]}
         except (ValueError, IndexError):
             bids, asks = {}, {}
         snapshots.append((bids, asks))
@@ -355,16 +372,16 @@ def basis_snapshot(ticker):
 def crowding_state(symbol, ticker):
     funding = float(ticker.get("fundingRate", 0))
     try:
-        holding = float(ticker.get("openInterest", 0))
+        oi_coin_ticker = float(ticker.get("openInterest", 0))
         px = float(ticker.get("lastPrice", 0))
-        oi_usdt_now = holding * px
+        oi_usdt_now = oi_coin_ticker * px
     except (ValueError, TypeError):
         oi_usdt_now = 0.0
 
-    oi = get_open_interest(symbol)
+    oi_coin_endpoint = get_open_interest_value(symbol)
     time.sleep(RATE_LIMIT_S)
     try:
-        oi_now = float(oi.get("openInterest", 0))
+        oi_now = oi_coin_endpoint * float(ticker.get("lastPrice", 0))
     except (ValueError, TypeError):
         oi_now = 0.0
 
@@ -472,8 +489,8 @@ def verify_global_dying(symbol, ticker, dying_side):
 
 # ==================== Regular MTF setup ====================
 def detect_setup(symbol, ticker):
+    # 3m is NOT supported by V3; using 1m / 5m / 15m
     c1 = get_history_candles(symbol, "1m", 200); time.sleep(RATE_LIMIT_S)
-    c3 = get_history_candles(symbol, "3m", 200); time.sleep(RATE_LIMIT_S)
     c5, end = [], None
     for _ in range(2):
         batch = get_history_candles(symbol, "5m", 200, end_time=end)
@@ -485,19 +502,20 @@ def detect_setup(symbol, ticker):
             break
         time.sleep(RATE_LIMIT_S)
     c5 = c5[:288]
+    c15 = get_history_candles(symbol, "15m", 200); time.sleep(RATE_LIMIT_S)
 
-    if len(c1) < WIN_1M or len(c3) < WIN_3M or len(c5) < WIN_5M:
+    if len(c1) < WIN_1M or len(c5) < WIN_5M or len(c15) < WIN_15M:
         return None
 
     s1, n1, d1, v1 = candle_pattern_vol(c1, WIN_1M, "1m")
     if d1 is None or v1 < 1.2:
         return None
 
-    s3, n3, d3, _ = candle_pattern_vol(c3, WIN_3M, "3m")
     s5, n5, d5, _ = candle_pattern_vol(c5, WIN_5M, "5m")
-    if d3 is not None and d3 != d1:
-        return None
+    s15, n15, d15, _ = candle_pattern_vol(c15, WIN_15M, "15m")
     if d5 is not None and d5 != d1:
+        return None
+    if d15 is not None and d15 != d1:
         return None
 
     cont, cont_n = forward_continuation(c1)
@@ -521,8 +539,8 @@ def detect_setup(symbol, ticker):
 
     score = (
         s1 * 0.20 +
-        (s3 if d3 == d1 else 0.0) * 0.10 +
-        (s5 if d5 == d1 else 0.0) * 0.08 +
+        (s5 if d5 == d1 else 0.0) * 0.10 +
+        (s15 if d15 == d1 else 0.0) * 0.08 +
         min(ob_ratio / 2.5, 1.0) * 0.15 +
         min(abs(cvd) / 0.30, 1.0) * 0.12 +
         min(whale_usdt / 20000, 1.0) * 0.08 +
@@ -536,7 +554,7 @@ def detect_setup(symbol, ticker):
 
     return {
         "symbol": symbol, "side": "sell" if cr["crowd"] == "long" else "buy",
-        "score": round(score, 4), "p1m": n1, "p3m": n3, "p5m": n5,
+        "score": round(score, 4), "p1m": n1, "p5m": n5, "p15m": n15,
         "ob_ratio": round(ob_ratio, 2), "tightness": round(tight, 2),
         "stability": round(stability, 2), "cvd": round(cvd, 4),
         "whales": whales, "whale_usdt": round(whale_usdt, 2),
@@ -659,8 +677,9 @@ def healthy():
     return _load(HEALTH_FILE, {"score": 100}).get("score", 100) > 40
 
 
+# Corrected: 40762 = order size > max open size (not "too small")
 ERROR_BOOK = {
-    "40762": ("min size / balance", "shrink notional", "reduce"),
+    "40762": ("order size > max open size", "shrink notional", "reduce"),
     "40034": ("symbol unavailable", "quarantine", "skip"),
     "400171": ("param error", "retry clean", "retry"),
     "40109": ("balance low", "pause 5m", "pause"),
@@ -759,7 +778,7 @@ class StreakValidator:
         return self.accepted
 
 
-# ==================== Engine (V3-only) ====================
+# ==================== Engine ====================
 class ExamTrader:
     def __init__(self):
         self.validator = StreakValidator()
@@ -786,7 +805,7 @@ class ExamTrader:
         _save(STATE_FILE, s)
 
     def _ensure_lev(self, sym):
-        """V3 account leverage — category-based, no productType/marginCoin."""
+        """UTA leverage: marginMode isolated NOT supported. Crossed only."""
         body = {
             "category": CATEGORY,
             "symbol": sym,
@@ -805,7 +824,6 @@ class ExamTrader:
             "side": side,
             "orderType": "market",
             "reduceOnly": reduce,
-            "marginMode": MARGIN_MODE,
             "clientOid": f"ex{int(time.time()*1000)}",
         }
         r = _request("POST", "/api/v3/trade/place-order", body=body)
@@ -832,7 +850,12 @@ class ExamTrader:
             return None
         p = self.position
         cs = "sell" if p["side"] == "buy" else "buy"
-        self._place_v3(p["symbol"], cs, p["qty"], "yes")
+        resp = self._place_v3(p["symbol"], cs, p["qty"], "yes")
+        # reduceOnly may return orderId null; do NOT treat as failure blindly
+        if resp and str(resp.get("code")) == "00000":
+            data = resp.get("data") or {}
+            if isinstance(data, dict) and data.get("orderId") is None:
+                log.warning("reduceOnly returned null orderId — order replaced/cancelled; verify manually")
         pnl = (price - p["entry"]) / p["entry"] if p["side"] == "buy" \
               else (p["entry"] - price) / p["entry"]
         self.validator.record(pnl)
