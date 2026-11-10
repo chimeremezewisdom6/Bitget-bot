@@ -27,7 +27,6 @@ def get_ai_target_coin():
     print("🧠 Asking AI to find the best high-beta altcoin...", flush=True)
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("⚠️ No OpenRouter Key found. Defaulting to SOL/USDT:USDT", flush=True)
         return "SOL/USDT:USDT"
 
     headers = {
@@ -46,14 +45,18 @@ def get_ai_target_coin():
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=10)
         data = response.json()
         
-        if 'choices' in data and len(data['choices']) > 0:
+        # Bulletproof parsing: Handle both dict and list responses from OpenRouter
+        if isinstance(data, dict) and 'choices' in data and len(data['choices']) > 0:
             symbol = data['choices'][0]['message']['content'].strip()
-            symbol = symbol.replace('"', '').replace("'", "").split('\n')[0].strip()
-            print(f"🎯 AI Selected: {symbol}", flush=True)
-            return symbol
+        elif isinstance(data, list) and len(data) > 0:
+            symbol = data[0]['message']['content'].strip()
         else:
             print(f"⚠️ AI returned unexpected format: {data}", flush=True)
             return "SOL/USDT:USDT"
+
+        symbol = symbol.replace('"', '').replace("'", "").split('\n')[0].strip()
+        print(f"🎯 AI Selected: {symbol}", flush=True)
+        return symbol
             
     except Exception as e:
         print(f"⚠️ AI Failed: {e}. Defaulting to SOL.", flush=True)
@@ -84,26 +87,36 @@ async def main():
                 print(f"\n📊 10-MIN SUMMARY | Trades: {trades} | Current Price: {strategy.peak_price}", flush=True)
                 last_summary_time = time.time()
 
-            ticker = await exchange.watch_ticker(target_coin)
+            # --- THE FIX IS HERE ---
+            raw_ticker = await exchange.watch_ticker(target_coin)
             
-            if 'last' not in ticker or ticker['last'] is None:
+            # If CCXT returns a list, grab the first item
+            if isinstance(raw_ticker, list):
+                if len(raw_ticker) > 0:
+                    ticker = raw_ticker[0]
+                else:
+                    continue
+            else:
+                ticker = raw_ticker
+
+            # Safely extract the price
+            if isinstance(ticker, dict) and 'last' in ticker and ticker['last'] is not None:
+                current_price = float(ticker['last'])
+            else:
                 continue
-                
-            current_price = ticker['last']
+            # -----------------------
+
             signal = strategy.analyze(current_price)
             
             if signal == "BUY":
                 print(f"🚀 IGNITION! BUY {target_coin} at {current_price}", flush=True)
                 trades += 1
-                # -> ADD REAL EXCHANGE BUY ORDER HERE
                 
             elif signal == "SELL_MOMENTUM_DIED":
                 print(f"📉 MOMENTUM DIED. SELL at {current_price}", flush=True)
-                # -> ADD REAL EXCHANGE SELL ORDER HERE
 
             elif signal == "SELL_TRAILING_STOP":
                 print(f"🛑 PEAK DROP. SELL at {current_price}", flush=True)
-                # -> ADD REAL EXCHANGE SELL ORDER HERE
 
             await asyncio.sleep(0.05)
 
