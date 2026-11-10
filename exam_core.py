@@ -1,12 +1,12 @@
 """
-exam_core.py — corrected:
-  - V3-only order endpoints for UTA one-way mode
-  - Volume filter = Bitget conviction (4H candle + growth + OI sanity), not fake global projection
-  - Depth requires persistence across snapshots (spoof-resistant)
-  - Whale sells measured in USDT notional (base coin size × price)
-  - Crowding = funding + OI change, not funding alone
-  - Candle pattern requires volume confirmation
-  - 10-min dying-side scan verified by multi-signal global method
+exam_core.py — fully v3-corrected:
+  - Leverage via /api/v3/account/set-leverage (category, marginMode)
+  - Market data via /api/v3/market/* (tickers, candles, fills, orderbook, open-interest)
+  - Candle parameter is `interval`, not `granularity`
+  - Orders via /api/v3/trade/place-order with clientOid always provided
+  - One-way mode: open long side=buy, close long side=sell & reduceOnly=yes
+  - Bitget conviction filter, spoof-resistant depth, USDT-denominated whales,
+    funding+OI crowding, volume-confirmed candle patterns
 """
 
 import os, json, time, hmac, hashlib, base64, logging
@@ -17,7 +17,7 @@ import requests
 # ==================== Config ====================
 BASE_URL = "https://api.bitget.com"
 DEMO_HEADER = {"paptrading": "1"}
-PRODUCT_TYPE = "USDT-FUTURES"
+CATEGORY = "USDT-FUTURES"
 MARGIN_MODE = "isolated"
 
 API_KEY = os.environ["API_KEY"]
@@ -31,10 +31,9 @@ INTERVAL_S = int(os.environ.get("INTERVAL_S", "30"))
 WIN_THRESHOLD = 0.0042
 REQUIRED_STREAK = 8
 
-# Bitget conviction filters (no fake global projection)
-MIN_BITGET_4H_USDT = 50_000       # real 4H candle turnover
-MIN_4H_GROWTH = 1.15              # current 4H >= 1.15× previous 4H
-MAX_OI_TO_4H_RATIO = 8.0          # OI/turnover sanity: high = suspicious
+MIN_BITGET_4H_USDT = 50_000
+MIN_4H_GROWTH = 1.15
+MAX_OI_TO_4H_RATIO = 8.0
 
 SCORE_THRESHOLD = float(os.environ.get("SCORE_THRESHOLD", "0.55"))
 DYING_SCORE_THRESHOLD = float(os.environ.get("DYING_SCORE_THRESHOLD", "0.60"))
@@ -104,9 +103,10 @@ def _request(method, path, params=None, body=None):
     return {"code": "unknown", "msg": str(last) if last else "failed", "data": None}
 
 
+# ==================== V3 Market Data ====================
 def get_all_tickers():
-    return _request("GET", "/api/v2/mix/market/tickers",
-                    params={"productType": PRODUCT_TYPE}).get("data", [])
+    return _request("GET", "/api/v3/market/tickers",
+                    params={"category": CATEGORY}).get("data", [])
 
 
 def get_ticker(symbol):
@@ -116,32 +116,31 @@ def get_ticker(symbol):
     return None
 
 
-def get_history_candles(symbol, granularity="1m", limit=200, end_time=None):
-    p = {"symbol": symbol, "productType": PRODUCT_TYPE,
-         "granularity": granularity, "limit": str(limit)}
+def get_history_candles(symbol, interval="1m", limit=200, end_time=None):
+    p = {"category": CATEGORY, "symbol": symbol,
+         "interval": interval, "limit": str(limit)}
     if end_time:
         p["endTime"] = str(end_time)
-    return _request("GET", "/api/v2/mix/market/history-candles", params=p).get("data", [])
+    return _request("GET", "/api/v3/market/history-candles", params=p).get("data", [])
 
 
 def get_orderbook(symbol, limit=50):
-    p = {"symbol": symbol, "productType": PRODUCT_TYPE, "limit": str(limit)}
-    return _request("GET", "/api/v2/mix/market/merge-depth", params=p).get("data", {})
+    p = {"category": CATEGORY, "symbol": symbol, "limit": str(limit)}
+    return _request("GET", "/api/v3/market/orderbook", params=p).get("data", {})
 
 
 def get_recent_fills(symbol, limit=100):
-    p = {"symbol": symbol, "productType": PRODUCT_TYPE, "limit": str(limit)}
-    return _request("GET", "/api/v2/mix/market/fills", params=p).get("data", [])
+    p = {"category": CATEGORY, "symbol": symbol, "limit": str(limit)}
+    return _request("GET", "/api/v3/market/fills", params=p).get("data", [])
 
 
 def get_open_interest(symbol):
-    p = {"symbol": symbol, "productType": PRODUCT_TYPE}
-    return _request("GET", "/api/v2/mix/market/open-interest", params=p).get("data", {})
+    p = {"category": CATEGORY, "symbol": symbol}
+    return _request("GET", "/api/v3/market/open-interest", params=p).get("data", {})
 
 
-# ==================== Real 4H volume + conviction filter ====================
+# ==================== Real 4H volume + conviction ====================
 def get_real_4h_volumes(symbol):
-    """Return (current_4h_turnover, previous_4h_turnover) in USDT."""
     candles = get_history_candles(symbol, "4H", limit=2)
     if not candles or len(candles) < 1:
         return 0.0, 0.0
@@ -154,12 +153,6 @@ def get_real_4h_volumes(symbol):
 
 
 def bitget_conviction(symbol, ticker):
-    """
-    Returns dict or None. No global projection — only Bitget-local conviction:
-      1. Real 4H turnover >= MIN_BITGET_4H_USDT
-      2. Current 4H >= previous 4H × MIN_4H_GROWTH
-      3. OI/turnover ratio sane (not wash-traded)
-    """
     cur_4h, prev_4h = get_real_4h_volumes(symbol)
     time.sleep(RATE_LIMIT_S)
     if cur_4h < MIN_BITGET_4H_USDT:
@@ -170,7 +163,7 @@ def bitget_conviction(symbol, ticker):
     oi = get_open_interest(symbol)
     time.sleep(RATE_LIMIT_S)
     try:
-        oi_usdt = float(oi.get("openInterest", 0)) * float(ticker.get("lastPr", 0))
+        oi_usdt = float(oi.get("openInterest", 0)) * float(ticker.get("lastPrice", 0))
     except (ValueError, TypeError):
         oi_usdt = 0.0
 
@@ -190,10 +183,6 @@ def bitget_conviction(symbol, ticker):
 
 # ==================== Spoof-resistant order book ====================
 def snapshot_depth(symbol, samples=3, gap=2.0):
-    """
-    Take `samples` order book snapshots spaced `gap` seconds apart.
-    Return persistent depth: only levels present in ALL snapshots count.
-    """
     snapshots = []
     for i in range(samples):
         ob = get_orderbook(symbol, 50)
@@ -226,7 +215,6 @@ def snapshot_depth(symbol, samples=3, gap=2.0):
     tightness = min(persistent_bid, persistent_ask) / max(persistent_bid, persistent_ask)
     side = "bid" if persistent_bid > persistent_ask else "ask"
 
-    # stability = how much of the raw top-20 depth survived the persistence filter
     raw_bid = sum(s[0].values() for s in snapshots) / len(snapshots)
     raw_ask = sum(s[1].values() for s in snapshots) / len(snapshots)
     raw_total = raw_bid + raw_ask
@@ -237,11 +225,6 @@ def snapshot_depth(symbol, samples=3, gap=2.0):
 
 # ==================== USDT-denominated CVD + whales ====================
 def cvd_usdt(fills):
-    """
-    fills: list from /api/v2/mix/market/fills. size is BASE coin.
-    Convert to USDT: size × price.
-    Returns (cvd_pct, buy_usdt, sell_usdt, whale_sell_count, whale_sell_usdt).
-    """
     buy = sell = 0.0
     notionals = []
     for f in fills:
@@ -279,11 +262,6 @@ def cvd_usdt(fills):
 
 # ==================== Candles + pattern with volume confirmation ====================
 def candle_pattern_vol(candles, window, label):
-    """
-    Returns (strength, pattern_name, direction, vol_ratio).
-    vol_ratio = avg volume of dominant-side candles / avg volume of opposite-side.
-    A pattern is only valid if vol_ratio >= 1.2.
-    """
     if len(candles) < window:
         return 0.0, f"{label}_short", None, 1.0
     last = candles[-window:]
@@ -365,7 +343,7 @@ def three_min_after(candles):
 
 def basis_snapshot(ticker):
     try:
-        last = float(ticker.get("lastPr", 0))
+        last = float(ticker.get("lastPrice", 0))
         idx = float(ticker.get("indexPrice", last)) or last
         b = (last - idx) / idx
         return abs(b), ("premium" if b > 0 else "discount"), b
@@ -375,20 +353,14 @@ def basis_snapshot(ticker):
 
 # ==================== Crowding: funding + OI ====================
 def crowding_state(symbol, ticker):
-    """
-    Returns dict with crowd_side and oi_change_pct.
-    Rising OI + positive funding = crowded longs.
-    Falling OI + positive funding = longs de-crowding.
-    """
     funding = float(ticker.get("fundingRate", 0))
     try:
-        holding = float(ticker.get("holdingAmount", 0))  # in coin units
-        px = float(ticker.get("lastPr", 0))
+        holding = float(ticker.get("openInterest", 0))
+        px = float(ticker.get("lastPrice", 0))
         oi_usdt_now = holding * px
     except (ValueError, TypeError):
         oi_usdt_now = 0.0
 
-    # approximate OI change via open-interest endpoint (current vs previous snapshot unavailable)
     oi = get_open_interest(symbol)
     time.sleep(RATE_LIMIT_S)
     try:
@@ -396,7 +368,6 @@ def crowding_state(symbol, ticker):
     except (ValueError, TypeError):
         oi_now = 0.0
 
-    # Use holdingAmount as the second sample when endpoint lacks history
     if oi_usdt_now > 0 and oi_now > 0:
         oi_change = (oi_now - oi_usdt_now) / oi_usdt_now
     else:
@@ -447,7 +418,6 @@ def detect_dying_side(candles):
 
 
 def verify_global_dying(symbol, ticker, dying_side):
-    """Bitget-only multi-signal verification. Returns (score, checks)."""
     checks, score = {}, 0.0
 
     basis_pct, basis_dir, _ = basis_snapshot(ticker)
@@ -461,7 +431,6 @@ def verify_global_dying(symbol, ticker, dying_side):
 
     cr = crowding_state(symbol, ticker)
     want_crowd = "long" if dying_side == "buy" else "short"
-    # Require crowd on dying side AND OI not collapsing
     if cr["crowd"] == want_crowd and abs(cr["funding"]) > 0.00005 and cr["oi_change"] > -0.02:
         checks["crowd_oi"] = 1.0; score += 0.25
     else:
@@ -503,11 +472,8 @@ def verify_global_dying(symbol, ticker, dying_side):
 
 # ==================== Regular MTF setup ====================
 def detect_setup(symbol, ticker):
-    # 1m
     c1 = get_history_candles(symbol, "1m", 200); time.sleep(RATE_LIMIT_S)
-    # 3m
     c3 = get_history_candles(symbol, "3m", 200); time.sleep(RATE_LIMIT_S)
-    # 5m
     c5, end = [], None
     for _ in range(2):
         batch = get_history_candles(symbol, "5m", 200, end_time=end)
@@ -524,9 +490,7 @@ def detect_setup(symbol, ticker):
         return None
 
     s1, n1, d1, v1 = candle_pattern_vol(c1, WIN_1M, "1m")
-    if d1 is None:
-        return None
-    if v1 < 1.2:   # volume confirmation required
+    if d1 is None or v1 < 1.2:
         return None
 
     s3, n3, d3, _ = candle_pattern_vol(c3, WIN_3M, "3m")
@@ -541,14 +505,13 @@ def detect_setup(symbol, ticker):
 
     ob_ratio, tight, _, stability = snapshot_depth(symbol, samples=3, gap=2.0)
     if stability < 0.5:
-        return None   # book too flickery = spoofed
+        return None
 
     cvd, _, _, whales, whale_usdt = cvd_usdt(get_recent_fills(symbol, 100))
     time.sleep(RATE_LIMIT_S)
 
     cr = crowding_state(symbol, ticker)
 
-    # Crowd must oppose candle direction
     if cr["crowd"] == "long" and d1 != "sell":
         return None
     if cr["crowd"] == "short" and d1 != "buy":
@@ -596,10 +559,9 @@ def scan_market(top_n=TOP_N_CANDIDATES):
         if not sym.endswith("USDT"):
             continue
         try:
-            qv = float(t.get("quoteVolume", 0))
+            qv = float(t.get("turnover24h", 0))
         except (ValueError, TypeError):
             continue
-        # cheap pre-filter: skip coins with almost no 24h activity
         if qv / 6 < MIN_BITGET_4H_USDT * 0.5:
             continue
 
@@ -706,7 +668,7 @@ ERROR_BOOK = {
     "429": ("rate limit", "backoff 30s", "backoff"),
     "50001": ("venue down", "backoff 30s", "backoff"),
     "50011": ("IP blocked", "pause 5m", "pause"),
-    "40085": ("UTA gate", "check V3 payload", "pause"),
+    "40085": ("UTA gate", "check v3 payload", "pause"),
 }
 
 
@@ -797,7 +759,7 @@ class StreakValidator:
         return self.accepted
 
 
-# ==================== Engine (V3-only orders) ====================
+# ==================== Engine (V3-only) ====================
 class ExamTrader:
     def __init__(self):
         self.validator = StreakValidator()
@@ -824,22 +786,27 @@ class ExamTrader:
         _save(STATE_FILE, s)
 
     def _ensure_lev(self, sym):
-        body = {"symbol": sym, "productType": PRODUCT_TYPE, "marginCoin": "USDT",
-                "leverage": LEVERAGE, "marginMode": MARGIN_MODE}
-        r = _request("POST", "/api/v2/mix/account/set-leverage", body=body)
+        """V3 account leverage — category-based, no productType/marginCoin."""
+        body = {
+            "category": CATEGORY,
+            "symbol": sym,
+            "leverage": LEVERAGE,
+            "marginMode": MARGIN_MODE,
+        }
+        r = _request("POST", "/api/v3/account/set-leverage", body=body)
         self.healer.check(r)
         time.sleep(RATE_LIMIT_S)
 
     def _place_v3(self, sym, side, qty, reduce="no"):
-        """UTA one-way mode: open long side=buy reduceOnly=no; close long side=sell reduceOnly=yes."""
         body = {
-            "category": PRODUCT_TYPE,
+            "category": CATEGORY,
             "symbol": sym,
             "qty": str(qty),
             "side": side,
             "orderType": "market",
             "reduceOnly": reduce,
             "marginMode": MARGIN_MODE,
+            "clientOid": f"ex{int(time.time()*1000)}",
         }
         r = _request("POST", "/api/v3/trade/place-order", body=body)
         self.healer.check(r)
@@ -849,7 +816,7 @@ class ExamTrader:
         t = get_ticker(sym)
         if not t:
             return
-        price = float(t["lastPr"])
+        price = float(t["lastPrice"])
         qty = round(self.usdt_notional / price, 6)
         if qty <= 0:
             return
@@ -883,7 +850,7 @@ class ExamTrader:
             t = get_ticker(self.position["symbol"])
             if not t:
                 return
-            px = float(t["lastPr"])
+            px = float(t["lastPrice"])
             e = self.position["entry"]
             ch = (px - e) / e if self.position["side"] == "buy" else (e - px) / e
             if ch >= WIN_THRESHOLD or ch <= -WIN_THRESHOLD:
