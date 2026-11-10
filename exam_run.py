@@ -1,5 +1,5 @@
 """
-exam_run.py — entry point with keep-alive server so Render Web Service stays up.
+exam_run.py — entry point with keep-alive server for Render.
 Runs the trading loop in a background thread, serves /health on $PORT.
 """
 
@@ -23,7 +23,6 @@ if r_map_raw:
         log.warning(f"R_BASE_MAP parse failed: {e}")
 
 
-# ---------- Keep-alive HTTP server (Render Web Service needs a port) ----------
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -31,7 +30,7 @@ class Health(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"ok")
     def log_message(self, *args):
-        pass  # silence access logs
+        pass
 
 
 def start_keepalive():
@@ -41,7 +40,6 @@ def start_keepalive():
     srv.serve_forever()
 
 
-# ---------- Trading loop ----------
 def trading_loop():
     log.info(
         f"starting | paper={core.PAPER} | leverage={core.LEVERAGE}x "
