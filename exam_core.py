@@ -1,21 +1,15 @@
 """
-exam_core.py — everything the bot needs:
-  - Bitget UTA API client (signed, rate-limited, retried)
-  - Global 4h volume estimator (Bitget-only)
-  - 8-streak validator (>= 0.42% per trade)
-  - Self-healing layer (diagnosis + medicine + health score)
-  - State persistence (streak survives restarts)
-  - Trading engine (paper/live, one-way, 5x isolated, reduceOnly closes)
+exam_core.py — full setup:
+  - Scans all USDT-FUTURES for 4h volume >= 300k (Bitget approximation)
+  - Deep 24h behaviour scan: 1m candle patterns, order-book imbalance,
+    taker CVD exhaustion, whale-sell footprint, basis convergence
+  - Only trades when every condition aligns
+  - 8-streak gate, healer, paper/live switch, UTA-ready
 """
 
-import os
-import json
-import time
-import hmac
-import hashlib
-import base64
-import logging
+import os, json, time, hmac, hashlib, base64, logging
 from datetime import datetime, timezone
+from collections import defaultdict
 
 import requests
 
@@ -32,21 +26,27 @@ PASSPHRASE = os.environ["PASSPHRASE"]
 PAPER = os.environ.get("PAPER", "true").lower() == "true"
 LEVERAGE = os.environ.get("LEVERAGE", "5")
 INTERVAL_S = int(os.environ.get("INTERVAL_S", "30"))
+USE_V3_ORDERS = os.environ.get("USE_V3_ORDERS", "false").lower() == "true"
 
 WIN_THRESHOLD = 0.0042
 REQUIRED_STREAK = 8
 
-R_DEFAULT = 12.0
 GLOBAL_4H_TARGET = 300_000
+MIN_BITGET_4H = 15_000
+R_DEFAULT = 12.0
 RATE_LIMIT_S = 0.25
+
+# Deep-scan thresholds (tunable)
+MIN_CANDLE_MATCH = 0.60        # 60% of last 10 candles same colour
+MIN_ORDERBOOK_RATIO = 1.8      # bid/ask or ask/bid >= 1.8
+MIN_CVD_DIVERGENCE = 0.15      # |CVD|/total >= 15% divergence
+MIN_WHALE_SELL_COUNT = 2       # at least 2 large sell fills
+BASIS_CONVERGE_THRESHOLD = 0.0015  # 0.15% gap counts as converged
 
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 HEALTH_FILE = os.environ.get("HEALTH_FILE", "health.json")
-
-# Injected at runtime via env R_BASE_MAP (JSON)
 R_BASE_MAP = {}
 
-# ==================== Logging ====================
 log = logging.getLogger("exam")
 log.setLevel(logging.INFO)
 if not log.handlers:
@@ -55,24 +55,22 @@ if not log.handlers:
     log.addHandler(h)
 
 
-# ==================== API ====================
+# ==================== API layer ====================
 def _ts():
     return str(int(time.time() * 1000))
 
 
-def _sign(timestamp, method, path, body_str=""):
-    prehash = timestamp + method + path + body_str
+def _sign(ts, method, path, body_str=""):
+    prehash = ts + method + path + body_str
     return base64.b64encode(
         hmac.new(SECRET_KEY.encode(), prehash.encode(), hashlib.sha256).digest()
     ).decode()
 
 
-def _headers(timestamp, signature):
+def _headers(ts, sig):
     h = {
-        "ACCESS-KEY": API_KEY,
-        "ACCESS-SIGN": signature,
-        "ACCESS-TIMESTAMP": timestamp,
-        "ACCESS-PASSPHRASE": PASSPHRASE,
+        "ACCESS-KEY": API_KEY, "ACCESS-SIGN": sig,
+        "ACCESS-TIMESTAMP": ts, "ACCESS-PASSPHRASE": PASSPHRASE,
         "Content-Type": "application/json",
     }
     if PAPER:
@@ -81,7 +79,7 @@ def _headers(timestamp, signature):
 
 
 def _request(method, path, params=None, body=None):
-    last_err = None
+    last = None
     for attempt in range(3):
         try:
             ts = _ts()
@@ -89,29 +87,24 @@ def _request(method, path, params=None, body=None):
             sig = _sign(ts, method, path, body_str)
             url = BASE_URL + path
             if method == "GET":
-                resp = requests.get(url, params=params, headers=_headers(ts, sig), timeout=15)
+                r = requests.get(url, params=params, headers=_headers(ts, sig), timeout=15)
             else:
-                resp = requests.post(url, data=body_str, headers=_headers(ts, sig), timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
+                r = requests.post(url, data=body_str, headers=_headers(ts, sig), timeout=15)
+            r.raise_for_status()
+            data = r.json()
             if data.get("code") != "00000":
                 log.warning(f"API non-success: {data}")
             return data
         except Exception as e:
-            last_err = e
-            log.error(f"request {method} {path} attempt {attempt+1} failed: {e}")
-            time.sleep(1.5)
-    return {"code": "unknown", "msg": str(last_err) if last_err else "request_failed", "data": None}
+            last = e
+            log.error(f"request {method} {path} try {attempt+1}: {e}")
+            time.sleep(1.2)
+    return {"code": "unknown", "msg": str(last) if last else "failed", "data": None}
 
 
-# ==================== Market data ====================
 def get_all_tickers():
-    return _request("GET", "/api/v2/mix/market/tickers", params={"productType": PRODUCT_TYPE}).get("data", [])
-
-
-def get_candles(symbol, granularity="4H", limit=2):
-    params = {"symbol": symbol, "productType": PRODUCT_TYPE, "granularity": granularity, "limit": str(limit)}
-    return _request("GET", "/api/v2/mix/market/candles", params=params).get("data", [])
+    return _request("GET", "/api/v2/mix/market/tickers",
+                    params={"productType": PRODUCT_TYPE}).get("data", [])
 
 
 def get_ticker(symbol):
@@ -121,40 +114,211 @@ def get_ticker(symbol):
     return None
 
 
-# ==================== Global estimator ====================
-def estimate_global_4h_volume(symbol, ticker=None):
-    candles = get_candles(symbol, "4H", limit=1)
-    if not candles:
-        return None
+def get_history_candles(symbol, granularity="1m", limit=200, end_time=None):
+    p = {"symbol": symbol, "productType": PRODUCT_TYPE,
+         "granularity": granularity, "limit": str(limit)}
+    if end_time:
+        p["endTime"] = str(end_time)
+    return _request("GET", "/api/v2/mix/market/history-candles", params=p).get("data", [])
+
+
+def get_orderbook(symbol, limit=50):
+    p = {"symbol": symbol, "productType": PRODUCT_TYPE, "limit": str(limit)}
+    return _request("GET", "/api/v2/mix/market/merge-depth", params=p).get("data", {})
+
+
+def get_recent_fills(symbol, limit=100):
+    p = {"symbol": symbol, "productType": PRODUCT_TYPE, "limit": str(limit)}
+    return _request("GET", "/api/v2/mix/market/fills", params=p).get("data", [])
+
+
+# ==================== 24h candle fetcher ====================
+def fetch_24h_1m(symbol):
+    """Paginate 1m candles backwards until 24h collected (max 1440)."""
+    all_c = []
+    end = None
+    for _ in range(8):  # 8 × 200 = 1600 max
+        batch = get_history_candles(symbol, "1m", 200, end_time=end)
+        if not batch:
+            break
+        all_c.extend(batch)
+        end = int(batch[0][0]) - 1
+        if len(all_c) >= 1440:
+            break
+        time.sleep(RATE_LIMIT_S)
+    return all_c[:1440]
+
+
+# ==================== Analysis helpers ====================
+def candle_pattern_score(candles):
+    """Return (score, pattern_name, direction). Last 10 candles."""
+    if len(candles) < 10:
+        return 0.0, "short", None
+    last10 = candles[-10:]
+    greens = 0
+    for c in last10:
+        try:
+            o, cl = float(c[1]), float(c[4])
+        except (ValueError, IndexError):
+            continue
+        if cl > o:
+            greens += 1
+    ratio = greens / 10.0
+    if ratio >= 0.8:
+        return ratio, "9g1r_or_more", "buy"
+    if ratio <= 0.2:
+        return (1 - ratio), "9r1g_or_more", "sell"
+    return ratio, "mixed", None
+
+
+def forward_continuation(candles):
+    """
+    Find all 9g1r-like windows in 24h and measure next 10m green ratio.
+    Returns (avg_next_ratio, sample_count).
+    """
+    wins, outcomes = 0, []
+    for i in range(10, len(candles) - 10):
+        window = candles[i-10:i]
+        g = sum(1 for c in window if float(c[4]) > float(c[1]))
+        if g >= 9:
+            nxt = candles[i:i+10]
+            if len(nxt) < 10:
+                continue
+            ng = sum(1 for c in nxt if float(c[4]) > float(c[1]))
+            outcomes.append(ng / 10.0)
+    if not outcomes:
+        return 0.0, 0
+    return sum(outcomes) / len(outcomes), len(outcomes)
+
+
+def orderbook_imbalance(ob):
+    """Return (ratio, tightness, side). Higher ratio = one side much deeper."""
     try:
-        bitget_4h = float(candles[0][6])
-    except (IndexError, TypeError, ValueError):
-        return None
-    if bitget_4h <= 0:
+        bids = ob.get("bids", [])
+        asks = ob.get("asks", [])
+        if not bids or not asks:
+            return 0.0, 0.0, None
+        bid_vol = sum(float(b[1]) for b in bids[:20])
+        ask_vol = sum(float(a[1]) for a in asks[:20])
+        if ask_vol <= 0 or bid_vol <= 0:
+            return 0.0, 0.0, None
+        if bid_vol > ask_vol:
+            return bid_vol / ask_vol, min(bid_vol, ask_vol) / max(bid_vol, ask_vol), "bid"
+        return ask_vol / bid_vol, min(bid_vol, ask_vol) / max(bid_vol, ask_vol), "ask"
+    except Exception:
+        return 0.0, 0.0, None
+
+
+def cvd_from_fills(fills):
+    """Return (cvd_pct, buy_vol, sell_vol, whale_sells)."""
+    buy = sell = 0.0
+    sizes = []
+    whale = 0
+    for f in fills:
+        try:
+            sz = float(f["size"])
+            side = f["side"].lower()
+        except (KeyError, ValueError):
+            continue
+        sizes.append(sz)
+        if side == "buy":
+            buy += sz
+        else:
+            sell += sz
+    total = buy + sell
+    if total <= 0:
+        return 0.0, 0.0, 0.0, 0
+    if sizes:
+        cutoff = sorted(sizes)[int(len(sizes) * 0.9)]
+        whale = sum(1 for f in fills
+                    if f.get("side") == "sell" and float(f.get("size", 0)) >= cutoff)
+    return (buy - sell) / total, buy, sell, whale
+
+
+def basis_snapshot(ticker):
+    """Return (basis_pct, direction) of last vs index."""
+    try:
+        last = float(ticker.get("lastPr", 0))
+        idx = float(ticker.get("indexPrice", last)) or last
+        b = (last - idx) / idx
+        return abs(b), ("premium" if b > 0 else "discount")
+    except Exception:
+        return 0.0, None
+
+
+# ==================== Deep setup detector ====================
+def detect_setup(symbol, ticker):
+    """
+    Returns dict with score + details if setup passes all filters, else None.
+    """
+    candles = fetch_24h_1m(symbol)
+    if len(candles) < 30:
         return None
 
-    if ticker is None:
-        ticker = get_ticker(symbol)
-    if not ticker:
+    c_score, c_name, c_dir = candle_pattern_score(candles)
+    if c_score < MIN_CANDLE_MATCH or c_dir is None:
         return None
 
-    last = float(ticker.get("lastPr", 0))
-    index = float(ticker.get("indexPrice", last)) or last
+    cont_ratio, cont_samples = forward_continuation(candles)
+    if cont_samples < 3 or cont_ratio < 0.65:
+        return None  # not enough historical continuation
+
+    ob = get_orderbook(symbol, 50)
+    ob_ratio, tightness, ob_side = orderbook_imbalance(ob)
+    if ob_ratio < MIN_ORDERBOOK_RATIO:
+        return None
+    if tightness < 0.35:
+        return None  # book too balanced
+
+    fills = get_recent_fills(symbol, 100)
+    cvd, bvol, svol, whales = cvd_from_fills(fills)
+    if abs(cvd) < MIN_CVD_DIVERGENCE:
+        return None
+    if whales < MIN_WHALE_SELL_COUNT:
+        return None
+
+    basis_pct, basis_dir = basis_snapshot(ticker)
+    if basis_pct > BASIS_CONVERGE_THRESHOLD:
+        return None  # not converged enough
+
+    # Direction: if crowd is long (funding positive) and price failing -> sell
     funding = float(ticker.get("fundingRate", 0))
-    oi = float(ticker.get("holdingAmount", 0))
+    crowd_side = "long" if funding > 0 else "short"
+    trade_side = "sell" if crowd_side == "long" else "buy"
 
-    basis_pct = abs(last - index) / index if index else 0
-    basis_factor = 1.0 + min(basis_pct * 50, 0.3)
-    funding_factor = 1.0 + min(abs(funding) * 200, 0.15)
-    oi_ratio = (oi * last) / bitget_4h
-    oi_factor = 1.0 + min(oi_ratio * 0.1, 0.1)
+    # Confirm disagreement: pattern direction vs crowd
+    if crowd_side == "long" and c_dir != "sell":
+        return None
+    if crowd_side == "short" and c_dir != "buy":
+        return None
 
-    r_base = R_BASE_MAP.get(symbol, R_DEFAULT)
-    r_adj = r_base * basis_factor * funding_factor * oi_factor
-    return bitget_4h * r_adj, {"bitget_4h": bitget_4h, "r_adj": r_adj}
+    score = (c_score * 0.25 + (1 - abs(cvd)) * 0.15 +
+             (ob_ratio / 3.0) * 0.25 + (1 - basis_pct) * 0.15 +
+             min(whales / 5.0, 1.0) * 0.10 + cont_ratio * 0.10)
+
+    return {
+        "symbol": symbol,
+        "side": trade_side,
+        "score": round(score, 4),
+        "candle_pattern": c_name,
+        "ob_ratio": round(ob_ratio, 2),
+        "tightness": round(tightness, 2),
+        "cvd": round(cvd, 4),
+        "whale_sells": whales,
+        "basis_pct": round(basis_pct, 6),
+        "cont_ratio": round(cont_ratio, 3),
+        "cont_samples": cont_samples,
+        "funding": funding,
+    }
 
 
-def rank_candidates(min_bitget_4h=15_000):
+# ==================== Market scanner ====================
+def scan_market(top_n=25):
+    """
+    1. All tickers -> filter 4h volume >= MIN_BITGET_4H (approx via 24h/6)
+    2. Estimate global 4h >= 300k
+    3. Sort by estimated global volume, return top_n
+    """
     tickers = get_all_tickers()
     if not tickers:
         return []
@@ -166,135 +330,146 @@ def rank_candidates(min_bitget_4h=15_000):
             continue
         try:
             qv = float(t.get("quoteVolume", 0))
-        except (TypeError, ValueError):
+        except (ValueError, TypeError):
             continue
-        if qv / 6 < min_bitget_4h:
+        if qv / 6 < MIN_BITGET_4H:
             continue
         coarse.append(t)
 
-    log.info(f"coarse candidates: {len(coarse)}")
-
+    log.info(f"coarse liquid symbols: {len(coarse)}")
     scored = []
     for t in coarse:
-        est = estimate_global_4h_volume(t["symbol"], ticker=t)
-        if est is None:
+        try:
+            bitget_4h = float(t.get("quoteVolume", 0)) / 6
+        except (ValueError, TypeError):
             continue
-        global_est, meta = est
+        r = R_BASE_MAP.get(t["symbol"], R_DEFAULT)
+        global_est = bitget_4h * r
         if global_est >= GLOBAL_4H_TARGET * 0.67:
-            scored.append({"symbol": t["symbol"], "global_est": global_est, **meta})
-        time.sleep(RATE_LIMIT_S)
+            scored.append({**t, "_global_est": global_est})
+        time.sleep(RATE_LIMIT_S * 0.5)
 
-    scored.sort(key=lambda x: x["global_est"], reverse=True)
-    confident = [s for s in scored if s["global_est"] >= GLOBAL_4H_TARGET * 1.5]
-    uncertain = [s for s in scored if GLOBAL_4H_TARGET * 0.67 <= s["global_est"] < GLOBAL_4H_TARGET * 1.5]
-    log.info(f"confident={len(confident)} uncertain={len(uncertain)}")
-    return confident + uncertain
+    scored.sort(key=lambda x: x["_global_est"], reverse=True)
+    log.info(f"volume-qualified: {len(scored)} — returning top {top_n}")
+    return scored[:top_n]
+
+
+def find_best_setup():
+    """Run deep scan on top liquid candidates, return highest-scoring setup."""
+    candidates = scan_market(top_n=25)
+    if not candidates:
+        return None
+    results = []
+    for c in candidates:
+        sym = c["symbol"]
+        try:
+            s = detect_setup(sym, c)
+            if s:
+                results.append(s)
+                log.info(f"SETUP {sym} score={s['score']} side={s['side']} "
+                         f"pattern={s['candle_pattern']} ob={s['ob_ratio']} "
+                         f"cvd={s['cvd']} whales={s['whale_sells']}")
+        except Exception as e:
+            log.warning(f"deep scan {sym} failed: {e}")
+        time.sleep(RATE_LIMIT_S)
+    if not results:
+        return None
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[0]
 
 
 # ==================== State + health ====================
-def _load_json(path, default):
+def _load(path, default):
     if not os.path.exists(path):
         return default
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return json.load(f)
-    except Exception as e:
-        log.warning(f"{path} load failed: {e}")
+    except Exception:
         return default
 
 
-def _save_json(path, obj):
+def _save(path, obj):
     try:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(obj, f, indent=2)
         os.replace(tmp, path)
     except Exception as e:
-        log.error(f"{path} save failed: {e}")
+        log.error(f"save {path}: {e}")
 
 
 def mark_ok():
-    h = _load_json(HEALTH_FILE, {"score": 100})
-    h["last_ok_ts"] = datetime.now(timezone.utc).isoformat()
+    h = _load(HEALTH_FILE, {"score": 100})
+    h["last_ok"] = datetime.now(timezone.utc).isoformat()
     h["score"] = min(100, h.get("score", 100) + 1)
-    _save_json(HEALTH_FILE, h)
+    _save(HEALTH_FILE, h)
 
 
-def mark_error(code, detail=""):
-    h = _load_json(HEALTH_FILE, {"score": 100})
+def mark_err(code, detail=""):
+    h = _load(HEALTH_FILE, {"score": 100})
     h["score"] = max(0, h.get("score", 100) - 5)
-    h["last_error"] = {"code": code, "detail": detail, "ts": datetime.now(timezone.utc).isoformat()}
-    _save_json(HEALTH_FILE, h)
+    h["last_error"] = {"code": code, "detail": detail}
+    _save(HEALTH_FILE, h)
 
 
-def is_healthy():
-    return _load_json(HEALTH_FILE, {"score": 100}).get("score", 100) > 40
+def healthy():
+    return _load(HEALTH_FILE, {"score": 100}).get("score", 100) > 40
 
 
 # ==================== Healer ====================
 ERROR_BOOK = {
-    "40762":   ("size below min or balance too small", "shrink notional 25%", "reduce_notional"),
-    "40034":   ("symbol not tradable", "quarantine symbol", "skip_symbol"),
-    "400171":  ("parameter error (posSide leak)", "retry clean", "retry"),
-    "40109":   ("insufficient balance", "pause 5 min", "pause"),
-    "43012":   ("no position to close", "resync local position", "resync"),
-    "429":     ("rate limit", "backoff 30s", "backoff"),
-    "50001":   ("exchange unavailable", "backoff 30s", "backoff"),
-    "50011":   ("IP not whitelisted", "pause 5 min", "pause"),
-    "30001":   ("order not found", "resync local position", "resync"),
+    "40762": ("min size / balance", "shrink notional", "reduce"),
+    "40034": ("symbol unavailable", "quarantine", "skip"),
+    "400171": ("param error", "retry clean", "retry"),
+    "40109": ("balance low", "pause 5m", "pause"),
+    "43012": ("no position", "resync", "resync"),
+    "429": ("rate limit", "backoff 30s", "backoff"),
+    "50001": ("venue down", "backoff 30s", "backoff"),
+    "50011": ("IP blocked", "pause 5m", "pause"),
+    "40085": ("UTA gate — use v3", "switch endpoints", "pause"),
 }
 
 
 class Healer:
     def __init__(self, trader):
         self.trader = trader
-        self.cooldown_until = 0
+        self.cool_until = 0
 
-    def _cool(self, seconds):
-        self.cooldown_until = time.time() + seconds
-        log.info(f"cooldown {seconds}s")
+    def _cool(self, s):
+        self.cool_until = time.time() + s
 
-    def _in_cooldown(self):
-        return time.time() < self.cooldown_until
+    def _cooling(self):
+        return time.time() < self.cool_until
 
-    def treat(self, payload):
-        if self._in_cooldown():
-            return "cooldown"
-
-        code = str(payload.get("code", "")).strip()
-        msg = str(payload.get("msg", "")) or str(payload.get("detail", ""))
-        log.warning(f"symptom code={code} msg={msg}")
-        mark_error(code, msg)
-
-        entry = ERROR_BOOK.get(code)
-        if entry is None:
-            log.info("unknown symptom — generic backoff 5s")
+    def treat(self, p):
+        if self._cooling():
+            return "cooling"
+        code = str(p.get("code", "")).strip()
+        msg = str(p.get("msg", "")) or str(p.get("detail", ""))
+        log.warning(f"symptom {code}: {msg}")
+        mark_err(code, msg)
+        e = ERROR_BOOK.get(code)
+        if not e:
             self._cool(5)
             return "generic"
-
-        diagnosis, medicine, action = entry
-        log.info(f"diagnosis: {diagnosis} | medicine: {medicine}")
-
-        if action == "reduce_notional":
-            cur = self.trader.usdt_notional
-            self.trader.usdt_notional = max(0.5, round(cur * 0.75, 3))
-            log.info(f"usdt_notional {cur} -> {self.trader.usdt_notional}")
+        _, _, action = e
+        if action == "reduce":
+            self.trader.usdt_notional = max(0.5, round(self.trader.usdt_notional * 0.75, 3))
             self._cool(10)
-        elif action == "skip_symbol":
+        elif action == "skip":
             sym = self.trader.position.get("symbol") if self.trader.position else None
             if sym:
-                s = _load_json(STATE_FILE, {})
-                s.setdefault("skipped_symbols", [])
-                if sym not in s["skipped_symbols"]:
-                    s["skipped_symbols"].append(sym)
-                _save_json(STATE_FILE, s)
-                log.info(f"symbol quarantined: {sym}")
+                s = _load(STATE_FILE, {})
+                s.setdefault("skipped", [])
+                if sym not in s["skipped"]:
+                    s["skipped"].append(sym)
+                _save(STATE_FILE, s)
             self.trader.position = None
             self._cool(5)
         elif action == "retry":
             time.sleep(1.5)
         elif action == "pause":
-            log.error("PAUSE — human needed")
             self._cool(300)
         elif action == "backoff":
             self._cool(30)
@@ -303,54 +478,43 @@ class Healer:
             self._cool(5)
         return action
 
-    def check_response(self, resp):
+    def check(self, resp):
         if not resp:
             return None
-        code = str(resp.get("code", "00000"))
-        if code == "00000":
+        if str(resp.get("code")) == "00000":
             mark_ok()
             return None
         return self.treat(resp)
 
-    def check_exception(self, exc):
+    def check_exc(self, exc):
         d = str(exc).lower()
-        if "timeout" in d or "connection" in d:
-            code = "50001"
-        elif "429" in d:
-            code = "429"
-        elif "401" in d or "auth" in d:
-            code = "50011"
-        else:
-            code = "unknown"
+        code = "50001" if ("timeout" in d or "connection" in d) else \
+               "429" if "429" in d else \
+               "50011" if ("401" in d or "auth" in d) else "unknown"
         return self.treat({"code": code, "msg": str(exc)})
 
 
-# ==================== Streak validator ====================
+# ==================== Streak ====================
 class StreakValidator:
     def __init__(self):
         self.streak = 0
         self.accepted = False
         self.history = []
 
-    def record(self, pnl_pct):
-        win = pnl_pct >= WIN_THRESHOLD
-        self.history.append((datetime.now(timezone.utc).isoformat(), round(pnl_pct, 6), win))
+    def record(self, pnl):
+        win = pnl >= WIN_THRESHOLD
+        self.history.append((datetime.now(timezone.utc).isoformat(), round(pnl, 6), win))
         self.history = self.history[-50:]
-        if win:
-            self.streak += 1
-        else:
-            self.streak = 0
-            self.accepted = False
-        if self.streak >= REQUIRED_STREAK:
-            self.accepted = True
-        log.info(f"streak={self.streak}/{REQUIRED_STREAK} accepted={self.accepted} pnl={pnl_pct:.5f}")
+        self.streak = self.streak + 1 if win else 0
+        self.accepted = self.streak >= REQUIRED_STREAK
+        log.info(f"streak={self.streak}/{REQUIRED_STREAK} accepted={self.accepted} pnl={pnl:.5f}")
         return win
 
     def can_trade(self):
         return self.accepted
 
 
-# ==================== Trading engine ====================
+# ==================== Engine ====================
 class ExamTrader:
     def __init__(self):
         self.validator = StreakValidator()
@@ -360,93 +524,95 @@ class ExamTrader:
         self._restore()
 
     def _restore(self):
-        s = _load_json(STATE_FILE, {})
+        s = _load(STATE_FILE, {})
         self.validator.streak = s.get("streak", 0)
         self.validator.accepted = s.get("accepted", False)
         self.validator.history = s.get("history", [])
         self.usdt_notional = s.get("usdt_notional", 2.0)
-        log.info(f"restored streak={self.validator.streak} accepted={self.validator.accepted}")
 
     def _persist(self):
-        s = _load_json(STATE_FILE, {})
-        s["streak"] = self.validator.streak
-        s["accepted"] = self.validator.accepted
-        s["history"] = self.validator.history
-        s["usdt_notional"] = self.usdt_notional
-        _save_json(STATE_FILE, s)
+        s = _load(STATE_FILE, {})
+        s.update({"streak": self.validator.streak, "accepted": self.validator.accepted,
+                  "history": self.validator.history, "usdt_notional": self.usdt_notional})
+        _save(STATE_FILE, s)
 
-    def _ensure_leverage(self, symbol):
-        body = {"symbol": symbol, "productType": PRODUCT_TYPE, "marginCoin": "USDT",
+    def _order_path(self):
+        return "/api/v3/trade/place-order" if USE_V3_ORDERS else "/api/v2/mix/order/place-order"
+
+    def _ensure_lev(self, sym):
+        body = {"symbol": sym, "productType": PRODUCT_TYPE, "marginCoin": "USDT",
                 "leverage": LEVERAGE, "marginMode": MARGIN_MODE}
-        resp = _request("POST", "/api/v2/mix/account/set-leverage", body=body)
-        self.healer.check_response(resp)
+        r = _request("POST", "/api/v2/mix/account/set-leverage", body=body)
+        self.healer.check(r)
         time.sleep(RATE_LIMIT_S)
 
-    def _place_order(self, symbol, side, qty, reduce_only="no"):
-        body = {
-            "symbol": symbol, "productType": PRODUCT_TYPE, "marginMode": MARGIN_MODE,
-            "marginCoin": "USDT", "size": str(qty), "side": side, "orderType": "market",
-            "reduceOnly": "YES" if reduce_only == "yes" else "NO",
-            "clientOid": f"exam{int(time.time()*1000)}",
-        }
-        resp = _request("POST", "/api/v2/mix/order/place-order", body=body)
-        log.info(f"order resp: {resp}")
-        self.healer.check_response(resp)
-        return resp
+    def _place(self, sym, side, qty, reduce="no"):
+        if USE_V3_ORDERS:
+            body = {"category": PRODUCT_TYPE, "symbol": sym, "qty": str(qty),
+                    "side": side, "orderType": "market",
+                    "reduceOnly": reduce, "marginMode": MARGIN_MODE}
+        else:
+            body = {"symbol": sym, "productType": PRODUCT_TYPE, "marginMode": MARGIN_MODE,
+                    "marginCoin": "USDT", "size": str(qty), "side": side,
+                    "orderType": "market", "reduceOnly": "YES" if reduce == "yes" else "NO",
+                    "clientOid": f"ex{int(time.time()*1000)}"}
+        r = _request("POST", self._order_path(), body=body)
+        self.healer.check(r)
+        return r
 
-    def open_position(self, symbol, side):
-        ticker = get_ticker(symbol)
-        if not ticker:
-            return None
-        price = float(ticker["lastPr"])
+    def open(self, sym, side):
+        t = get_ticker(sym)
+        if not t:
+            return
+        price = float(t["lastPr"])
         qty = round(self.usdt_notional / price, 6)
         if qty <= 0:
-            return None
-        self._ensure_leverage(symbol)
-        self._place_order(symbol, side, qty, reduce_only="no")
-        self.position = {"symbol": symbol, "side": side, "qty": qty, "entry": price, "opened_at": time.time()}
-        log.info(f"OPENED {side} {symbol} qty={qty} @ {price}")
+            return
+        self._ensure_lev(sym)
+        self._place(sym, side, qty, "no")
+        self.position = {"symbol": sym, "side": side, "qty": qty, "entry": price, "ts": time.time()}
+        log.info(f"OPEN {side} {sym} qty={qty} @ {price}")
         self._persist()
 
-    def close_position(self, current_price):
+    def close(self, price):
         if not self.position:
             return None
-        sym = self.position["symbol"]
-        close_side = "sell" if self.position["side"] == "buy" else "buy"
-        self._place_order(sym, close_side, self.position["qty"], reduce_only="yes")
-        entry = self.position["entry"]
-        pnl = (current_price - entry) / entry if self.position["side"] == "buy" else (entry - current_price) / entry
+        p = self.position
+        cs = "sell" if p["side"] == "buy" else "buy"
+        self._place(p["symbol"], cs, p["qty"], "yes")
+        pnl = (price - p["entry"]) / p["entry"] if p["side"] == "buy" else (p["entry"] - price) / p["entry"]
         self.validator.record(pnl)
         self.position = None
         self._persist()
         return pnl
 
     def step(self):
-        if not is_healthy():
+        if not healthy():
             log.warning("health low — resting 60s")
             time.sleep(60)
             return
 
         if self.position:
-            ticker = get_ticker(self.position["symbol"])
-            if not ticker:
+            t = get_ticker(self.position["symbol"])
+            if not t:
                 return
-            price = float(ticker["lastPr"])
-            entry = self.position["entry"]
-            ch = (price - entry) / entry if self.position["side"] == "buy" else (entry - price) / entry
+            px = float(t["lastPr"])
+            e = self.position["entry"]
+            ch = (px - e) / e if self.position["side"] == "buy" else (e - px) / e
             if ch >= WIN_THRESHOLD or ch <= -WIN_THRESHOLD:
-                pnl = self.close_position(price)
-                log.info(f"CLOSED pnl={pnl:.5f}")
+                pnl = self.close(px)
+                log.info(f"CLOSE pnl={pnl:.5f}")
             return
 
         if not self.validator.can_trade():
             log.info("streak not accepted — scanning only")
-            rank_candidates()  # keeps estimator warm, logs candidates
+            find_best_setup()
             return
 
-        cands = rank_candidates()
-        if not cands:
+        setup = find_best_setup()
+        if not setup:
+            log.info("no aligned setup this cycle")
             return
-        target = cands[0]
-        log.info(f"top candidate: {target['symbol']} est_global_4h={target['global_est']:.0f}")
-        self.open_position(target["symbol"], "buy")
+
+        log.info(f"TRADE {setup['symbol']} {setup['side']} score={setup['score']}")
+        self.open(setup["symbol"], setup["side"])
