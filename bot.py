@@ -84,7 +84,6 @@ async def main():
                 print(f"\n📊 10-MIN SUMMARY | Trades: {trades} | Current Price: {strategy.peak_price}", flush=True)
                 last_summary_time = time.time()
 
-            # FIXED: Use watch_ticker instead of watch_trades to avoid list/dict errors
             ticker = await exchange.watch_ticker(target_coin)
             
             if 'last' not in ticker or ticker['last'] is None:
@@ -106,7 +105,7 @@ async def main():
                 print(f"🛑 PEAK DROP. SELL at {current_price}", flush=True)
                 # -> ADD REAL EXCHANGE SELL ORDER HERE
 
-            await asyncio.sleep(0.05) # 50 milliseconds loop speed
+            await asyncio.sleep(0.05)
 
         except Exception as e:
             print(f"⚠️ Connection Error: {e}", flush=True)
