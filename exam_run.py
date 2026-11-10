@@ -32,9 +32,10 @@ def start_keepalive():
 
 def trading_loop():
     log.info(
-        f"starting | paper={core.PAPER} | leverage={core.LEVERAGE}x "
+        f"starting {core.VERSION} | paper={core.PAPER} | leverage={core.LEVERAGE}x "
         f"| margin={core.MARGIN_MODE} | streak={core.REQUIRED_STREAK} "
-        f"| win={core.WIN_THRESHOLD:.4f} | interval={core.INTERVAL_S}s"
+        f"| win={core.WIN_THRESHOLD:.4f} | interval={core.INTERVAL_S}s "
+        f"| candle_limit={core.CANDLE_PAGE_LIMIT}"
     )
     trader = core.ExamTrader()
     while True:
