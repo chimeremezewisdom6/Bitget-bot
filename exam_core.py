@@ -1,10 +1,5 @@
 """
-exam_core.py — v3 final (limit=100 pagination, OI threshold relaxed):
-  - history-candles paginated at 100 bars per request (V3 max)
-  - OI/4H ratio threshold raised; OI parsed from data["list"][0]["openInterest"]
-  - Orderbook keys a=asks, b=bids
-  - Leverage default crossed; isolated needs posSide (omitted for one-way)
-  - V3 order placement with clientOid + reduceOnly
+exam_core.py — v4.2 (pagination + version proof)
 """
 
 import os, json, time, hmac, hashlib, base64, logging
@@ -12,11 +7,13 @@ from datetime import datetime, timezone
 
 import requests
 
+VERSION = "v4.2-pagination-proof"
+
 # ==================== Config ====================
 BASE_URL = "https://api.bitget.com"
 DEMO_HEADER = {"paptrading": "1"}
 CATEGORY = "USDT-FUTURES"
-MARGIN_MODE = os.environ.get("MARGIN_MODE", "crossed")  # isolated needs posSide; crossed is safe for one-way
+MARGIN_MODE = os.environ.get("MARGIN_MODE", "crossed")
 
 API_KEY = os.environ["API_KEY"]
 SECRET_KEY = os.environ["SECRET_KEY"]
@@ -31,17 +28,18 @@ REQUIRED_STREAK = 8
 
 MIN_BITGET_4H_USDT = 50_000
 MIN_4H_GROWTH = 1.15
-MAX_OI_TO_4H_RATIO = 100.0   # raised: OI is stock, 4H turnover is flow — normal coins sit high
+MAX_OI_TO_4H_RATIO = float(os.environ.get("MAX_OI_TO_4H_RATIO", "100.0"))
 
-SCORE_THRESHOLD = float(os.environ.get("SCORE_THRESHOLD", "0.55"))
+SCORE_THRESHOLD = float(os.environ.get("SCORE_THRESHOLD", "0.50"))
 DYING_SCORE_THRESHOLD = float(os.environ.get("DYING_SCORE_THRESHOLD", "0.60"))
 TOP_N_CANDIDATES = int(os.environ.get("TOP_N_CANDIDATES", "20"))
 
 WEAKEST_SCAN_INTERVAL_S = 600
-
 WIN_1M = 10
 WIN_5M = 6
 WIN_15M = 4
+
+CANDLE_PAGE_LIMIT = 100   # Bitget V3 hard max — never change this
 
 RATE_LIMIT_S = 0.20
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
@@ -53,6 +51,9 @@ if not log.handlers:
     h = logging.StreamHandler()
     h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
     log.addHandler(h)
+
+log.info(f"===== exam_core {VERSION} loaded =====")
+log.info(f"===== candle page limit = {CANDLE_PAGE_LIMIT} =====")
 
 
 # ==================== API layer ====================
@@ -117,29 +118,36 @@ def get_ticker(symbol):
 
 def get_history_candles(symbol, interval="1m", total_needed=200):
     """
-    V3 history-candles: limit max = 100 per request.
-    Paginate backwards until total_needed collected.
+    V3 history-candles: hard max 100 per request. Paginate until total_needed.
+    Every request URL is logged so you can prove what's being sent.
     """
     all_candles = []
     end_time = None
+    pages = 0
     while len(all_candles) < total_needed:
+        pages += 1
         p = {"category": CATEGORY, "symbol": symbol,
-             "interval": interval, "limit": "100"}
+             "interval": interval, "limit": str(CANDLE_PAGE_LIMIT)}
         if end_time:
             p["endTime"] = str(end_time)
-        batch = _request("GET", "/api/v3/market/history-candles", params=p).get("data", [])
+
+        log.info(f"[CANDLE] {VERSION} {symbol} {interval} "
+                 f"limit={CANDLE_PAGE_LIMIT} page={pages} endTime={end_time}")
+
+        batch = _request("GET", "/api/v3/market/history-candles",
+                         params=p).get("data", [])
         if not batch:
             break
         all_candles.extend(batch)
+        if len(batch) < CANDLE_PAGE_LIMIT:
+            break
         end_time = int(batch[0][0]) - 1
         time.sleep(RATE_LIMIT_S)
-        if len(batch) < 100:
-            break
+
     return all_candles[:total_needed]
 
 
 def get_orderbook(symbol, limit=50):
-    """V3 orderbook: a=asks, b=bids."""
     p = {"category": CATEGORY, "symbol": symbol, "limit": str(limit)}
     return _request("GET", "/api/v3/market/orderbook", params=p).get("data", {})
 
@@ -150,7 +158,6 @@ def get_recent_fills(symbol, limit=100):
 
 
 def get_open_interest_value(symbol):
-    """V3 open-interest: data['list'][0]['openInterest'] — unit is base coin."""
     p = {"category": CATEGORY, "symbol": symbol}
     data = _request("GET", "/api/v3/market/open-interest", params=p).get("data", {})
     lst = data.get("list", [])
@@ -282,7 +289,7 @@ def cvd_usdt(fills):
     return (buy - sell) / total, buy, sell, whale_sells, whale_sell_usdt
 
 
-# ==================== Candles + pattern with volume confirmation ====================
+# ==================== Candles + pattern ====================
 def candle_pattern_vol(candles, window, label):
     if len(candles) < window:
         return 0.0, f"{label}_short", None, 1.0
@@ -373,7 +380,7 @@ def basis_snapshot(ticker):
         return 0.0, None, 0.0
 
 
-# ==================== Crowding: funding + OI ====================
+# ==================== Crowding ====================
 def crowding_state(symbol, ticker):
     funding = float(ticker.get("fundingRate", 0))
     try:
@@ -793,7 +800,6 @@ class ExamTrader:
         _save(STATE_FILE, s)
 
     def _ensure_lev(self, sym):
-        """UTA leverage. Isolated needs posSide; crossed omits it. Default crossed."""
         body = {
             "category": CATEGORY,
             "symbol": sym,
@@ -801,7 +807,7 @@ class ExamTrader:
             "marginMode": MARGIN_MODE,
         }
         if MARGIN_MODE == "isolated":
-            body["posSide"] = "long"  # required for isolated on UTA
+            body["posSide"] = "long"
         r = _request("POST", "/api/v3/account/set-leverage", body=body)
         self.healer.check(r)
         time.sleep(RATE_LIMIT_S)
