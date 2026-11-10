@@ -1,10 +1,8 @@
 """
 exam_run.py — entry point with keep-alive server for Render.
-Runs the trading loop in a background thread, serves /health on $PORT.
 """
 
 import os
-import json
 import time
 import logging
 import threading
@@ -13,14 +11,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import exam_core as core
 
 log = logging.getLogger("exam")
-
-r_map_raw = os.environ.get("R_BASE_MAP", "")
-if r_map_raw:
-    try:
-        core.R_BASE_MAP.update(json.loads(r_map_raw))
-        log.info(f"R_BASE_MAP loaded: {len(core.R_BASE_MAP)} entries")
-    except Exception as e:
-        log.warning(f"R_BASE_MAP parse failed: {e}")
 
 
 class Health(BaseHTTPRequestHandler):
@@ -43,8 +33,8 @@ def start_keepalive():
 def trading_loop():
     log.info(
         f"starting | paper={core.PAPER} | leverage={core.LEVERAGE}x "
-        f"| streak={core.REQUIRED_STREAK} | win={core.WIN_THRESHOLD:.4f} "
-        f"| interval={core.INTERVAL_S}s"
+        f"| margin={core.MARGIN_MODE} | streak={core.REQUIRED_STREAK} "
+        f"| win={core.WIN_THRESHOLD:.4f} | interval={core.INTERVAL_S}s"
     )
     trader = core.ExamTrader()
     while True:
