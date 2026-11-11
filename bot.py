@@ -3,13 +3,12 @@ import ccxt.pro as ccxtpro
 import os
 import time
 import threading
-import requests
 import json
 import math
 import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from strategies import OrderFlowImbalanceStrategy
-from aggregated_depth import get_aggregated_ratio, passes_volume_check
+from aggregated_depth import get_aggregated_ratio, passes_volume_check, fetch_coins_above_1m_volume
 from dotenv import load_dotenv
 
 try:
@@ -18,6 +17,12 @@ except ImportError:
     BrowserUse = None
 
 load_dotenv()
+
+# --- SILENCE HTTP NOISE ---
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger("main")
 
@@ -85,23 +90,35 @@ async def main():
         'options': {'defaultType': 'swap', 'adjustForTimeDifference': True}
     })
 
-    SCAN_COINS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "DOGE/USDT:USDT"]
-    strategies = {coin: OrderFlowImbalanceStrategy(coin) for coin in SCAN_COINS}
+    # --- DYNAMIC COIN LIST ---
+    dynamic_coins = fetch_coins_above_1m_volume()
+    strategies = {coin: OrderFlowImbalanceStrategy(coin) for coin in dynamic_coins}
 
     active_trade = None
     active_strategy = None
     current_price = 0.0
     last_scan_time = 0
     last_summary_time = time.time()
+    last_coin_refresh_time = time.time()
 
     while True:
         try:
             current_time = time.time()
 
+            # REFRESH COIN LIST EVERY 30 MINUTES
+            if current_time - last_coin_refresh_time >= 1800:
+                logger.info("🔄 Refreshing dynamic coin list...")
+                new_coins = fetch_coins_above_1m_volume()
+                for c in new_coins:
+                    if c not in strategies:
+                        strategies[c] = OrderFlowImbalanceStrategy(c)
+                last_coin_refresh_time = current_time
+
             # 10-MINUTE DASHBOARD
             if current_time - last_summary_time >= 600:
                 logger.info("="*50)
                 logger.info(f"📊 10-MIN SUMMARY | Mode: {'🔥 LIVE' if state['is_live'] else '📝 PAPER'} | Streak: {state['streak']}/8")
+                logger.info(f"🔭 Scanning {len(strategies)} coins (>$1M volume)")
                 if active_trade and active_strategy:
                     pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price if active_trade["direction"] == "LONG" else (active_strategy.entry_price - current_price) / active_strategy.entry_price
                     logger.info(f"💼 Active: {active_trade['symbol']} ({active_trade['direction']}) | Net PnL: {(pnl - 0.0012)*100:+.3f}%")
@@ -110,35 +127,38 @@ async def main():
                 logger.info("="*50)
                 last_summary_time = current_time
 
-            # SCAN MARKET
+            # SCAN MARKET EVERY 15 SECONDS
             if current_time - last_scan_time >= 15:
-                check_coins = [active_trade["symbol"]] if active_trade else SCAN_COINS
+                logger.info(f"🔭 Scanning {len(strategies)} coins for order flow imbalance...")
+                
+                # If in a trade, only check the active trade
+                check_coins = [active_trade["symbol"]] if active_trade else list(strategies.keys())
 
                 for coin in check_coins:
-                    ticker = await exchange.fetch_ticker(coin)
-                    if not ticker or 'last' not in ticker: continue
-                    current_price = ticker['last']
+                    try:
+                        # Skip if exchange doesn't have the market
+                        market = exchange.market(coin)
+                        if not market: continue
+                        
+                        ticker = await exchange.fetch_ticker(coin)
+                        if not ticker or 'last' not in ticker: continue
+                        current_price = ticker['last']
 
-                    # 1. Get the 5x Imbalance Ratio
-                    ratio = await get_aggregated_ratio(coin)
-                    
-                    # 2. Check if volume is trustworthy ONLY if a signal is present
-                    if (ratio >= 4.0 or ratio <= 0.25) and not active_trade:
-                        if not await passes_volume_check(coin):
-                            continue # Skip if the global view contradicts our local view
+                        ratio = await get_aggregated_ratio(coin)
+                        
+                        if (ratio >= 4.0 or ratio <= 0.25) and not active_trade:
+                            if not await passes_volume_check(coin):
+                                continue
 
-                    # 3. Analyze
-                    signal, gross_pnl = strategies[coin].analyze(ratio, current_price)
+                        signal, gross_pnl = strategies[coin].analyze(ratio, current_price)
 
-                    # ENTRY
-                    if signal in ["BUY_LONG", "SELL_SHORT"] and not active_trade:
-                        direction = "LONG" if signal == "BUY_LONG" else "SHORT"
-                        active_trade = {"symbol": coin, "direction": direction}
-                        active_strategy = strategies[coin]
-                        logger.info(f"🎯 ENTERED {direction} {coin} at {current_price} (Ratio: {ratio:.2f})")
+                        if signal in ["BUY_LONG", "SELL_SHORT"] and not active_trade:
+                            direction = "LONG" if signal == "BUY_LONG" else "SHORT"
+                            active_trade = {"symbol": coin, "direction": direction}
+                            active_strategy = strategies[coin]
+                            logger.info(f"🎯 ENTERED {direction} {coin} at {current_price} (Ratio: {ratio:.2f})")
 
-                        if state["is_live"]:
-                            try:
+                            if state["is_live"]:
                                 balance = await exchange.fetch_balance()
                                 usdt_free = balance['USDT']['free']
                                 if usdt_free > 1.0:
@@ -146,44 +166,42 @@ async def main():
                                     amount = (usdt_free * 0.90) / current_price
                                     if direction == "LONG": await exchange.create_market_buy_order(coin, amount)
                                     else: await exchange.create_market_sell_order(coin, amount)
-                            except Exception as e: logger.error(f"Order Error: {e}")
 
-                    # EXIT & 8-WIN GATE
-                    elif signal in ["CLOSE_LONG", "CLOSE_SHORT"] and active_trade and active_trade["symbol"] == coin:
-                        net_pnl = gross_pnl - 0.0012
-                        logger.info(f"📉 CLOSED {coin} | Gross: {gross_pnl*100:.3f}% | Net: {net_pnl*100:.3f}%")
+                        elif signal in ["CLOSE_LONG", "CLOSE_SHORT"] and active_trade and active_trade["symbol"] == coin:
+                            net_pnl = gross_pnl - 0.0012
+                            logger.info(f"📉 CLOSED {coin} | Gross: {gross_pnl*100:.3f}% | Net: {net_pnl*100:.3f}%")
 
-                        if net_pnl >= 0.0042:
-                            state["streak"] += 1
-                            logger.info(f"✅ WIN! Streak: {state['streak']}/8")
-                        elif net_pnl < 0.0022:
-                            state["streak"] = 0
-                            logger.info(f"❌ LOSS. Streak Reset to 0")
-                        else:
-                            logger.info(f"⚖️ SCRATCH. Streak Unchanged")
+                            if net_pnl >= 0.0042:
+                                state["streak"] += 1
+                                logger.info(f"✅ WIN! Streak: {state['streak']}/8")
+                            elif net_pnl < 0.0022:
+                                state["streak"] = 0
+                                logger.info(f"❌ LOSS. Streak Reset to 0")
+                            else:
+                                logger.info(f"⚖️ SCRATCH. Streak Unchanged")
 
-                        if state["streak"] >= 8 and not state["is_live"]:
-                            state["is_live"] = True
-                            logger.info("\n🔥🔥🔥 8 WINS! SWITCHING TO LIVE TRADING. 🔥🔥🔥\n")
-                        
-                        save_state(state)
+                            if state["streak"] >= 8 and not state["is_live"]:
+                                state["is_live"] = True
+                                logger.info("\n🔥🔥🔥 8 WINS! SWITCHING TO LIVE TRADING. 🔥🔥🔥\n")
+                            
+                            save_state(state)
 
-                        if state["is_live"]:
-                            try:
+                            if state["is_live"]:
                                 balance = await exchange.fetch_balance()
                                 held = balance[coin.split('/')[0]]['free']
                                 if held > 0:
                                     if active_trade["direction"] == "LONG": await exchange.create_market_sell_order(coin, held)
                                     else: await exchange.create_market_buy_order(coin, held)
-                            except Exception as e: logger.error(f"Close Error: {e}")
 
-                        active_trade = None
-                        active_strategy = None
+                            active_trade = None
+                            active_strategy = None
+                    except Exception as inner_e:
+                        logger.error(f"Error processing {coin}: {inner_e}")
 
                 last_scan_time = current_time
 
         except Exception as e:
-            logger.error(f"Connection Error: {e}")
+            logger.error(f"CRITICAL LOOP ERROR: {e}")
             await asyncio.sleep(2)
 
 if __name__ == "__main__":
