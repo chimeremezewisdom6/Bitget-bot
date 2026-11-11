@@ -61,26 +61,25 @@ def fetch_macro_data():
         
         time.sleep(3600)
 
-# --- 4. Market-Wide Scanner (Finds Pumps and Dumps) ---
+# --- 4. Market-Wide Scanner ---
 async def scan_market_for_reversals(exchange):
-    print("🔭 Scanning market for slow-bleed drops AND slow-pump exhaustions...", flush=True)
+    print("🔭 Scanning market for 4H stable ranges + 20% structural retracements...", flush=True)
     try:
         tickers = await exchange.fetch_tickers()
         candidates = []
         for symbol, ticker in tickers.items():
             if symbol.endswith(":USDT") and ticker['percentage'] is not None:
-                # Look for coins that moved 5%+ today (up or down)
-                if abs(ticker['percentage']) >= 5.0:
+                if abs(ticker['percentage']) >= 3.0: # Look for coins that stretched today
                     candidates.append((symbol, ticker['percentage']))
                     
-        # Sort by biggest absolute movers
         candidates.sort(key=lambda x: abs(x[1]), reverse=True)
-        top_movers = [c[0] for c in candidates[:20]]
+        top_movers = [c[0] for c in candidates[:15]]
         
         valid_setups = []
         for symbol in top_movers:
-            candles = await exchange.fetch_ohlcv(symbol, '1m', limit=60)
-            if len(candles) < 60: continue
+            # WE MUST FETCH 240 MINUTES (4 HOURS)
+            candles = await exchange.fetch_ohlcv(symbol, '1m', limit=240)
+            if len(candles) < 240: continue
             
             temp_strat = ReversalStrategy(symbol)
             for c in candles:
@@ -92,7 +91,7 @@ async def scan_market_for_reversals(exchange):
             if signal in ["BUY_LONG", "SELL_SHORT"]:
                 valid_setups.append(symbol)
                 
-        print(f"🎯 Found {len(valid_setups)} coins with valid exhaustion setups.", flush=True)
+        print(f"🎯 Found {len(valid_setups)} coins with valid structural retracements.", flush=True)
         return valid_setups
     except Exception as e:
         print(f"⚠️ Scanner Error: {e}", flush=True)
@@ -126,7 +125,7 @@ async def main():
     })
 
     strategies = {}
-    active_trade = None # Will store dict: {"symbol": coin, "direction": "LONG" or "SHORT"}
+    active_trade = None
     active_strategy = None
     current_price = 0.0
     
@@ -144,7 +143,7 @@ async def main():
                 print("="*50, flush=True)
                 print(f"🛡️ Mode      : {'🔥 LIVE TRADING' if state['is_live'] else '📝 PAPER TRADING'}", flush=True)
                 print(f"🏆 Win Streak: {state['streak']}/8 (Needs +0.42% NET)", flush=True)
-                print(f"🔭 Watching  : {len(strategies)} coins for exhaustion reversals", flush=True)
+                print(f"🔭 Watching  : {len(strategies)} coins for structural reversals", flush=True)
                 
                 if active_trade and active_strategy:
                     if active_trade["direction"] == "LONG":
@@ -170,7 +169,8 @@ async def main():
                 for coin in top_coins:
                     if coin not in strategies:
                         strategies[coin] = ReversalStrategy(coin)
-                        candles = await exchange.fetch_ohlcv(coin, '1m', limit=60)
+                        # Pre-load 240 minutes (4 hours)
+                        candles = await exchange.fetch_ohlcv(coin, '1m', limit=240)
                         for c in candles:
                             strategies[coin].history.append((c[0] / 1000, c[4]))
                 last_scan_time = current_time
@@ -204,7 +204,6 @@ async def main():
 
                 # SWITCHING LOGIC
                 if signal in ["BUY_LONG", "SELL_SHORT"] and active_trade and active_trade["symbol"] != coin:
-                    # Calculate current PnL of the active trade
                     if active_trade["direction"] == "LONG":
                         active_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
                     else:
@@ -213,7 +212,6 @@ async def main():
                     if active_pnl < 0:
                         print(f"🔄 SWITCHING! Dumping {active_trade['symbol']} at a loss to catch {coin}!", flush=True)
                         
-                        # Close existing trade
                         if state["is_live"]:
                             try:
                                 balance = await exchange.fetch_balance()
@@ -229,7 +227,6 @@ async def main():
                         active_strategy.position = None
                         active_trade = None
                         
-                        # Enter new trade
                         direction = "LONG" if signal == "BUY_LONG" else "SHORT"
                         active_trade = {"symbol": coin, "direction": direction}
                         active_strategy = strategies[coin]
@@ -287,7 +284,6 @@ async def main():
                                 if held > 0:
                                     await exchange.create_market_sell_order(coin, held)
                             else:
-                                # For shorts, we need to buy back the borrowed amount
                                 if held > 0:
                                     await exchange.create_market_buy_order(coin, held)
                         except Exception as e: print(f"❌ Close Error: {e}")
