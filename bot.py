@@ -54,7 +54,6 @@ def get_ai_target_coin():
             symbol = data['choices'][0]['message']['content'].strip()
             symbol = symbol.replace('"', '').replace("'", "").split('\n')[0].strip()
             
-            # Fallback validation: If AI refuses or formats wrong, use PEPE
             if not symbol.endswith("USDT:USDT") or " " in symbol or len(symbol) > 20:
                 print(f"⚠️ AI gave invalid response: '{symbol}'. Defaulting to PEPE.", flush=True)
                 return "PEPE/USDT:USDT"
@@ -69,7 +68,6 @@ def get_ai_target_coin():
 async def get_4h_dynamic_trigger(exchange, symbol):
     print(f"🔬 Analyzing last 4 hours of {symbol} to find its natural breakout...", flush=True)
     try:
-        # Fetch 240 1-minute candles
         candles = await exchange.fetch_ohlcv(symbol, '1m', limit=240)
         moves = []
         for i in range(1, len(candles)):
@@ -79,8 +77,6 @@ async def get_4h_dynamic_trigger(exchange, symbol):
             moves.append(move)
 
         avg_move = sum(moves) / len(moves)
-        
-        # Trigger is 3x the normal 1-minute move
         dynamic_trigger = max(0.001, avg_move * 3.0) 
         print(f"📊 Normal 1m move: {avg_move*100:.4f}% | Dynamic Trigger: {dynamic_trigger*100:.4f}%", flush=True)
         return dynamic_trigger
@@ -98,8 +94,7 @@ async def set_safe_leverage(exchange, symbol, balance_usdt):
         
         min_cost = min_amount * price
         required_leverage = math.ceil(min_cost / balance_usdt)
-        
-        final_leverage = max(5, min(required_leverage, 20)) # Cap at 20x
+        final_leverage = max(5, min(required_leverage, 20))
         
         print(f"⚙️ Balance: ${balance_usdt:.2f} | Min Order: ${min_cost:.2f} | Leverage: {final_leverage}x", flush=True)
         await exchange.set_leverage(final_leverage, symbol)
@@ -130,11 +125,13 @@ async def main():
     strategy = MicroMomentumStrategy(target_coin, dynamic_trigger)
     
     last_summary_time = time.time()
+    current_price = 0.0
 
     while True:
         try:
+            # 10-Minute Summary (Prints every 600 seconds)
             if time.time() - last_summary_time >= 600:
-                print(f"\n📊 10-MIN SUMMARY | Streak: {state['streak']}/8 | Live: {state['is_live']} | Price: {strategy.peak_price}", flush=True)
+                print(f"\n📊 10-MIN SUMMARY | Streak: {state['streak']}/8 | Live: {state['is_live']} | Current Price: {current_price}", flush=True)
                 last_summary_time = time.time()
 
             raw_ticker = await exchange.watch_ticker(target_coin)
@@ -171,25 +168,21 @@ async def main():
             elif signal in ["SELL_MOMENTUM_DIED", "SELL_TRAILING_STOP"]:
                 print(f"📉 {signal} at {current_price} | Gross PnL: {gross_pnl*100:.3f}%", flush=True)
                 
-                # Calculate NET PnL (Subtracting 0.12% for fees/spread)
                 net_pnl = gross_pnl - 0.0012 
                 
-                # Update Streak Logic
-                if net_pnl >= 0.0042: # 0.42% NET win
+                if net_pnl >= 0.0042: 
                     state["streak"] += 1
                     print(f"✅ WIN! (+{net_pnl*100:.3f}%) | Streak: {state['streak']}/8", flush=True)
                 else:
                     print(f"❌ NOT ACCEPTED (Below 0.42% NET) | Streak Reset to 0", flush=True)
                     state["streak"] = 0
 
-                # Check if we unlock Live Trading
                 if state["streak"] >= 8 and not state["is_live"]:
                     state["is_live"] = True
                     print("\n🔥🔥🔥 8 WINS IN A ROW! SWITCHING TO LIVE TRADING. 🔥🔥🔥\n", flush=True)
                 
                 save_state(state)
 
-                # Execute Live Sell if applicable
                 if state["is_live"]:
                     try:
                         balance = await exchange.fetch_balance()
