@@ -7,10 +7,9 @@ import requests
 import json
 import math
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from strategies import RubberBandStrategy
+from strategies import GradualReversalStrategy
 from dotenv import load_dotenv
 
-# Try to import BrowserUse, handle if missing
 try:
     from browser_use_sdk.v4 import BrowserUse
 except ImportError:
@@ -42,12 +41,11 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-# --- 3. AI Background Worker (Macro Data) ---
+# --- 3. AI Background Worker ---
 def fetch_macro_data():
-    """Runs in a separate thread. Uses AI to check CoinGlass every 60 minutes."""
     api_key = os.environ.get("BROWSER_USE_API_KEY")
     if not api_key or BrowserUse is None:
-        print("⚠️ No Browser Use API Key or SDK missing. Skipping AI macro data.", flush=True)
+        print("⚠️ No Browser Use API Key. Skipping AI macro data.", flush=True)
         return
 
     while True:
@@ -61,40 +59,39 @@ def fetch_macro_data():
         except Exception as e:
             print(f"⚠️ AI Agent Error: {e}", flush=True)
         
-        # Wait 1 hour before checking again
-        time.sleep(3600)
+        time.sleep(3600) # Check every hour
 
 # --- 4. Market-Wide Scanner ---
 async def scan_market_for_reversals(exchange):
-    print("🔭 Scanning entire market for stretched rubber bands...", flush=True)
+    print("🔭 Scanning entire market for slow-bleed reversals...", flush=True)
     try:
         tickers = await exchange.fetch_tickers()
         candidates = []
         for symbol, ticker in tickers.items():
             if symbol.endswith(":USDT") and ticker['percentage'] is not None:
-                if ticker['percentage'] < -5.0: # Dropped more than 5% today
+                if ticker['percentage'] < -4.0: # Dropped more than 4% today
                     candidates.append((symbol, ticker['percentage']))
                     
         candidates.sort(key=lambda x: x[1])
-        top_losers = [c[0] for c in candidates[:15]]
+        top_losers = [c[0] for c in candidates[:15]] # Scan top 15 losers
         
-        best_setups = []
+        valid_setups = []
         for symbol in top_losers:
-            candles = await exchange.fetch_ohlcv(symbol, '1m', limit=20)
-            if len(candles) < 20: continue
+            candles = await exchange.fetch_ohlcv(symbol, '1m', limit=60)
+            if len(candles) < 60: continue
             
-            prices = [c[4] for c in candles]
-            sma = sum(prices) / 20
-            variance = sum((p - sma) ** 2 for p in prices) / 20
-            std_dev = math.sqrt(variance)
-            lower_band = sma - (2.5 * std_dev)
+            temp_strat = GradualReversalStrategy(symbol)
+            for c in candles:
+                temp_strat.history.append((c[0] / 1000, c[4])) 
             
-            current_price = prices[-1]
-            if current_price <= lower_band * 1.002: 
-                best_setups.append(symbol)
+            current_price = candles[-1][4]
+            signal, _ = temp_strat.analyze(current_price)
+            
+            if signal == "BUY_REVERSION":
+                valid_setups.append(symbol)
                 
-        print(f"🎯 Found {len(best_setups)} coins currently touching extreme lower bands.", flush=True)
-        return best_setups
+        print(f"🎯 Found {len(valid_setups)} coins with valid 1.0-1.6% slow-bleed exhaustion.", flush=True)
+        return valid_setups
     except Exception as e:
         print(f"⚠️ Scanner Error: {e}", flush=True)
         return []
@@ -145,7 +142,7 @@ async def main():
                 print("="*50, flush=True)
                 print(f"🛡️ Mode      : {'🔥 LIVE TRADING' if state['is_live'] else '📝 PAPER TRADING'}", flush=True)
                 print(f"🏆 Win Streak: {state['streak']}/8 (Needs +0.42% NET)", flush=True)
-                print(f"🔭 Watching  : {len(strategies)} coins for extreme rubber band bounces", flush=True)
+                print(f"🔭 Watching  : {len(strategies)} coins for exhaustion reversals", flush=True)
                 
                 if active_trade and active_strategy:
                     current_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
@@ -166,10 +163,10 @@ async def main():
                 
                 for coin in top_coins:
                     if coin not in strategies:
-                        strategies[coin] = RubberBandStrategy(coin)
-                        candles = await exchange.fetch_ohlcv(coin, '1m', limit=20)
+                        strategies[coin] = GradualReversalStrategy(coin)
+                        candles = await exchange.fetch_ohlcv(coin, '1m', limit=60)
                         for c in candles:
-                            strategies[coin].prices.append(c[4])
+                            strategies[coin].history.append((c[0] / 1000, c[4]))
                 last_scan_time = current_time
 
             # WATCH ACTIVE TRADE & CANDIDATES
@@ -187,7 +184,7 @@ async def main():
             tasks = [exchange.watch_ticker(coin) for coin in watch_list]
             tickers = await asyncio.gather(*tasks)
 
-            # OPPORTUNITY COST SWITCHING LOGIC
+            # OPPORTUNITY COST SWITCHING & TRADING
             for i, coin in enumerate(watch_list):
                 ticker = tickers[i]
                 if isinstance(ticker, list):
@@ -199,7 +196,7 @@ async def main():
                 current_price = float(ticker['last'])
                 signal, gross_pnl = strategies[coin].analyze(current_price)
 
-                # SWITCHING LOGIC (Dump losing trade for a better setup)
+                # SWITCHING LOGIC
                 if signal == "BUY_REVERSION" and active_trade and active_trade != coin:
                     active_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
                     
@@ -228,7 +225,7 @@ async def main():
 
                 # NORMAL BUY ENTRY
                 if signal == "BUY_REVERSION" and not active_trade:
-                    print(f"🪀 RUBBER BAND BOUNCE! Bought {coin} at {current_price}", flush=True)
+                    print(f"🪀 ENTERED TRADE! Bought {coin} at {current_price}", flush=True)
                     active_trade = coin
                     active_strategy = strategies[coin]
                     
@@ -246,9 +243,8 @@ async def main():
                 elif signal in ["SELL_TARGET", "SELL_STOP"] and active_trade == coin:
                     print(f"📉 {signal} on {coin} at {current_price} | Gross PnL: {gross_pnl*100:.3f}%", flush=True)
                     
-                    net_pnl = gross_pnl - 0.0012 # Deduct 0.12% for fees
+                    net_pnl = gross_pnl - 0.0012 
                     
-                    # --- STRICT RULES APPLIED HERE ---
                     if net_pnl >= 0.0042:
                         state["streak"] += 1
                         print(f"✅ WIN! (+{net_pnl*100:.3f}%) | Streak: {state['streak']}/8", flush=True)
@@ -258,7 +254,6 @@ async def main():
                     else:
                         print(f"⚖️ SCRATCH (Between 0.22% and 0.42%) ({net_pnl*100:+.3f}%) | Streak Unchanged", flush=True)
 
-                    # Unlock Live Trading
                     if state["streak"] >= 8 and not state["is_live"]:
                         state["is_live"] = True
                         print("\n🔥🔥🔥 8 WINS IN A ROW! SWITCHING TO LIVE TRADING. 🔥🔥🔥\n", flush=True)
@@ -282,9 +277,6 @@ async def main():
             await asyncio.sleep(2)
 
 if __name__ == "__main__":
-    # Start the AI macro data worker
     threading.Thread(target=fetch_macro_data, daemon=True).start()
-    # Start the keep-alive server
     threading.Thread(target=run_keepalive, daemon=True).start()
-    # Start the trading engine
     asyncio.run(main())
