@@ -5,6 +5,9 @@ import logging
 import signal
 import time
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+import os
 
 from backtester import optimize
 from coinglass import CoinGlassClient
@@ -15,6 +18,19 @@ from models import ScanResult, SharedState
 from scanner import build_universe, measure, prefilter, stage1, stage2
 
 log = logging.getLogger("main")
+
+# --- KEEP ALIVE SERVER (So Render doesn't kill the bot) ---
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+    def log_message(self, format, *args): pass
+
+def run_keepalive():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+# -----------------------------------------------------------
 
 async def scan_worker(hub: ExchangeHub, cfg: Config, state: SharedState, cg) -> None:
     seq = 0
@@ -102,6 +118,11 @@ async def reporter(hub, cfg, state, gate) -> None:
 
 async def amain() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    
+    # Start the web server for Render
+    threading.Thread(target=run_keepalive, daemon=True).start()
+    log.info("Keep-alive server started on port %s", os.environ.get("PORT", 10000))
+    
     cfg = Config.from_env()
     hub = ExchangeHub(cfg)
     await hub.start()
