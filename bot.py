@@ -7,7 +7,7 @@ import requests
 import json
 import math
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from strategies import GradualReversalStrategy
+from strategies import ReversalStrategy
 from dotenv import load_dotenv
 
 try:
@@ -59,38 +59,40 @@ def fetch_macro_data():
         except Exception as e:
             print(f"⚠️ AI Agent Error: {e}", flush=True)
         
-        time.sleep(3600) # Check every hour
+        time.sleep(3600)
 
-# --- 4. Market-Wide Scanner ---
+# --- 4. Market-Wide Scanner (Finds Pumps and Dumps) ---
 async def scan_market_for_reversals(exchange):
-    print("🔭 Scanning entire market for slow-bleed reversals...", flush=True)
+    print("🔭 Scanning market for slow-bleed drops AND slow-pump exhaustions...", flush=True)
     try:
         tickers = await exchange.fetch_tickers()
         candidates = []
         for symbol, ticker in tickers.items():
             if symbol.endswith(":USDT") and ticker['percentage'] is not None:
-                if ticker['percentage'] < -4.0: # Dropped more than 4% today
+                # Look for coins that moved 5%+ today (up or down)
+                if abs(ticker['percentage']) >= 5.0:
                     candidates.append((symbol, ticker['percentage']))
                     
-        candidates.sort(key=lambda x: x[1])
-        top_losers = [c[0] for c in candidates[:15]] # Scan top 15 losers
+        # Sort by biggest absolute movers
+        candidates.sort(key=lambda x: abs(x[1]), reverse=True)
+        top_movers = [c[0] for c in candidates[:20]]
         
         valid_setups = []
-        for symbol in top_losers:
+        for symbol in top_movers:
             candles = await exchange.fetch_ohlcv(symbol, '1m', limit=60)
             if len(candles) < 60: continue
             
-            temp_strat = GradualReversalStrategy(symbol)
+            temp_strat = ReversalStrategy(symbol)
             for c in candles:
                 temp_strat.history.append((c[0] / 1000, c[4])) 
             
             current_price = candles[-1][4]
             signal, _ = temp_strat.analyze(current_price)
             
-            if signal == "BUY_REVERSION":
+            if signal in ["BUY_LONG", "SELL_SHORT"]:
                 valid_setups.append(symbol)
                 
-        print(f"🎯 Found {len(valid_setups)} coins with valid 1.0-1.6% slow-bleed exhaustion.", flush=True)
+        print(f"🎯 Found {len(valid_setups)} coins with valid exhaustion setups.", flush=True)
         return valid_setups
     except Exception as e:
         print(f"⚠️ Scanner Error: {e}", flush=True)
@@ -124,7 +126,7 @@ async def main():
     })
 
     strategies = {}
-    active_trade = None
+    active_trade = None # Will store dict: {"symbol": coin, "direction": "LONG" or "SHORT"}
     active_strategy = None
     current_price = 0.0
     
@@ -145,9 +147,13 @@ async def main():
                 print(f"🔭 Watching  : {len(strategies)} coins for exhaustion reversals", flush=True)
                 
                 if active_trade and active_strategy:
-                    current_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
+                    if active_trade["direction"] == "LONG":
+                        current_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
+                    else:
+                        current_pnl = (active_strategy.entry_price - current_price) / active_strategy.entry_price
+                        
                     net_pnl = current_pnl - 0.0012
-                    print(f"💼 Active Trade: {active_trade}", flush=True)
+                    print(f"💼 Active Trade: {active_trade['symbol']} ({active_trade['direction']})", flush=True)
                     print(f"   ├─ Entry Price: {active_strategy.entry_price}", flush=True)
                     print(f"   ├─ Current Px : {current_price}", flush=True)
                     print(f"   └─ Live PnL   : {net_pnl*100:+.3f}% (Net)", flush=True)
@@ -163,7 +169,7 @@ async def main():
                 
                 for coin in top_coins:
                     if coin not in strategies:
-                        strategies[coin] = GradualReversalStrategy(coin)
+                        strategies[coin] = ReversalStrategy(coin)
                         candles = await exchange.fetch_ohlcv(coin, '1m', limit=60)
                         for c in candles:
                             strategies[coin].history.append((c[0] / 1000, c[4]))
@@ -172,9 +178,9 @@ async def main():
             # WATCH ACTIVE TRADE & CANDIDATES
             watch_list = []
             if active_trade:
-                watch_list.append(active_trade)
+                watch_list.append(active_trade["symbol"])
             for coin in strategies.keys():
-                if coin != active_trade:
+                if not active_trade or coin != active_trade["symbol"]:
                     watch_list.append(coin)
 
             if not watch_list:
@@ -197,36 +203,43 @@ async def main():
                 signal, gross_pnl = strategies[coin].analyze(current_price)
 
                 # SWITCHING LOGIC
-                if signal == "BUY_REVERSION" and active_trade and active_trade != coin:
-                    active_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
+                if signal in ["BUY_LONG", "SELL_SHORT"] and active_trade and active_trade["symbol"] != coin:
+                    # Calculate current PnL of the active trade
+                    if active_trade["direction"] == "LONG":
+                        active_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
+                    else:
+                        active_pnl = (active_strategy.entry_price - current_price) / active_strategy.entry_price
                     
                     if active_pnl < 0:
-                        print(f"🔄 SWITCHING! Dumping {active_trade} at a loss to catch {coin}!", flush=True)
+                        print(f"🔄 SWITCHING! Dumping {active_trade['symbol']} at a loss to catch {coin}!", flush=True)
                         
+                        # Close existing trade
                         if state["is_live"]:
                             try:
                                 balance = await exchange.fetch_balance()
-                                c_sym = active_trade.split('/')[0]
+                                c_sym = active_trade["symbol"].split('/')[0]
                                 held = balance[c_sym]['free']
                                 if held > 0:
-                                    await exchange.create_market_sell_order(active_trade, held)
+                                    if active_trade["direction"] == "LONG":
+                                        await exchange.create_market_sell_order(active_trade["symbol"], held)
+                                    else:
+                                        await exchange.create_market_buy_order(active_trade["symbol"], held)
                             except Exception: pass
                         
-                        active_strategy.in_position = False
+                        active_strategy.position = None
                         active_trade = None
                         
-                        active_trade = coin
+                        # Enter new trade
+                        direction = "LONG" if signal == "BUY_LONG" else "SHORT"
+                        active_trade = {"symbol": coin, "direction": direction}
                         active_strategy = strategies[coin]
-                        active_strategy.in_position = True
-                        active_strategy.entry_price = current_price
-                        active_strategy.peak_price = current_price
-                        print(f"🪀 IMMEDIATE RE-ENTRY! Bought {coin} at {current_price}", flush=True)
+                        print(f"🎯 IMMEDIATE RE-ENTRY! {direction} {coin} at {current_price}", flush=True)
                         continue
 
-                # NORMAL BUY ENTRY
-                if signal == "BUY_REVERSION" and not active_trade:
-                    print(f"🪀 ENTERED TRADE! Bought {coin} at {current_price}", flush=True)
-                    active_trade = coin
+                # NORMAL BUY/SHORT ENTRY
+                if signal in ["BUY_LONG", "SELL_SHORT"] and not active_trade:
+                    direction = "LONG" if signal == "BUY_LONG" else "SHORT"
+                    active_trade = {"symbol": coin, "direction": direction}
                     active_strategy = strategies[coin]
                     
                     if state["is_live"]:
@@ -236,11 +249,15 @@ async def main():
                             if usdt_free > 1.0:
                                 await set_safe_leverage(exchange, coin, usdt_free)
                                 amount = (usdt_free * 0.90) / current_price
-                                await exchange.create_market_buy_order(coin, amount)
-                        except Exception as e: print(f"❌ Buy Error: {e}")
+                                
+                                if direction == "LONG":
+                                    await exchange.create_market_buy_order(coin, amount)
+                                else:
+                                    await exchange.create_market_sell_order(coin, amount)
+                        except Exception as e: print(f"❌ Order Error: {e}")
 
-                # STRICT SELL LOGIC & 8-WIN GATE
-                elif signal in ["SELL_TARGET", "SELL_STOP"] and active_trade == coin:
+                # STRICT SELL/CLOSE LOGIC & 8-WIN GATE
+                elif signal in ["CLOSE_LONG", "CLOSE_SHORT"] and active_trade and active_trade["symbol"] == coin:
                     print(f"📉 {signal} on {coin} at {current_price} | Gross PnL: {gross_pnl*100:.3f}%", flush=True)
                     
                     net_pnl = gross_pnl - 0.0012 
@@ -265,9 +282,15 @@ async def main():
                             balance = await exchange.fetch_balance()
                             c_sym = coin.split('/')[0]
                             held = balance[c_sym]['free']
-                            if held > 0:
-                                await exchange.create_market_sell_order(coin, held)
-                        except Exception as e: print(f"❌ Sell Error: {e}")
+                            
+                            if active_trade["direction"] == "LONG":
+                                if held > 0:
+                                    await exchange.create_market_sell_order(coin, held)
+                            else:
+                                # For shorts, we need to buy back the borrowed amount
+                                if held > 0:
+                                    await exchange.create_market_buy_order(coin, held)
+                        except Exception as e: print(f"❌ Close Error: {e}")
 
                     active_trade = None
                     active_strategy = None
