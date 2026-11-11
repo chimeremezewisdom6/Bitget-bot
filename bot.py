@@ -10,6 +10,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from strategies import RubberBandStrategy
 from dotenv import load_dotenv
 
+# Try to import BrowserUse, handle if missing
+try:
+    from browser_use_sdk.v4 import BrowserUse
+except ImportError:
+    BrowserUse = None
+
 load_dotenv()
 
 # --- 1. Keep-Alive Server ---
@@ -36,7 +42,29 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-# --- 3. Market-Wide Scanner ---
+# --- 3. AI Background Worker (Macro Data) ---
+def fetch_macro_data():
+    """Runs in a separate thread. Uses AI to check CoinGlass every 60 minutes."""
+    api_key = os.environ.get("BROWSER_USE_API_KEY")
+    if not api_key or BrowserUse is None:
+        print("⚠️ No Browser Use API Key or SDK missing. Skipping AI macro data.", flush=True)
+        return
+
+    while True:
+        print("🤖 AI Agent: Opening cloud browser to check CoinGlass liquidations...", flush=True)
+        try:
+            with BrowserUse(api_key=api_key) as client:
+                task = "Go to CoinGlass.com, find the total 24-hour liquidations for Bitcoin, and tell me the number in millions."
+                run = client.runs.create(task)
+                result = client.runs.wait_for_completion(run.id)
+                print(f"\n📊 AI MACRO DATA: BTC Liquidations -> {result.result}\n", flush=True)
+        except Exception as e:
+            print(f"⚠️ AI Agent Error: {e}", flush=True)
+        
+        # Wait 1 hour before checking again
+        time.sleep(3600)
+
+# --- 4. Market-Wide Scanner ---
 async def scan_market_for_reversals(exchange):
     print("🔭 Scanning entire market for stretched rubber bands...", flush=True)
     try:
@@ -71,7 +99,7 @@ async def scan_market_for_reversals(exchange):
         print(f"⚠️ Scanner Error: {e}", flush=True)
         return []
 
-# --- 4. Dynamic Leverage ---
+# --- 5. Dynamic Leverage ---
 async def set_safe_leverage(exchange, symbol, balance_usdt):
     try:
         market = await exchange.load_markets()
@@ -85,7 +113,7 @@ async def set_safe_leverage(exchange, symbol, balance_usdt):
     except Exception:
         return 5
 
-# --- 5. Main Engine ---
+# --- 6. Main Engine ---
 async def main():
     state = load_state()
     print(f"🛡️ PAPER TRADING MODE. Win Streak: {state['streak']}/8", flush=True)
@@ -218,7 +246,7 @@ async def main():
                 elif signal in ["SELL_TARGET", "SELL_STOP"] and active_trade == coin:
                     print(f"📉 {signal} on {coin} at {current_price} | Gross PnL: {gross_pnl*100:.3f}%", flush=True)
                     
-                    net_pnl = gross_pnl - 0.0012 # Deduct 0.12% for trading fees and spread
+                    net_pnl = gross_pnl - 0.0012 # Deduct 0.12% for fees
                     
                     # --- STRICT RULES APPLIED HERE ---
                     if net_pnl >= 0.0042:
@@ -230,14 +258,13 @@ async def main():
                     else:
                         print(f"⚖️ SCRATCH (Between 0.22% and 0.42%) ({net_pnl*100:+.3f}%) | Streak Unchanged", flush=True)
 
-                    # Unlock Live Trading only at 8
+                    # Unlock Live Trading
                     if state["streak"] >= 8 and not state["is_live"]:
                         state["is_live"] = True
                         print("\n🔥🔥🔥 8 WINS IN A ROW! SWITCHING TO LIVE TRADING. 🔥🔥🔥\n", flush=True)
                     
                     save_state(state)
 
-                    # Execute real sell if live
                     if state["is_live"]:
                         try:
                             balance = await exchange.fetch_balance()
@@ -255,5 +282,9 @@ async def main():
             await asyncio.sleep(2)
 
 if __name__ == "__main__":
+    # Start the AI macro data worker
+    threading.Thread(target=fetch_macro_data, daemon=True).start()
+    # Start the keep-alive server
     threading.Thread(target=run_keepalive, daemon=True).start()
+    # Start the trading engine
     asyncio.run(main())
