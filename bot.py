@@ -7,12 +7,12 @@ import requests
 import json
 import math
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from strategies import MicroMomentumStrategy
+from strategies import RubberBandStrategy
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- 1. Keep-Alive Server (Render Free Tier) ---
+# --- 1. Keep-Alive Server ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -24,7 +24,7 @@ def run_keepalive():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
-# --- 2. State Management (8-Win Streak) ---
+# --- 2. State Management ---
 STATE_FILE = "state.json"
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -36,82 +36,59 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
-# --- 3. AI Coin Selector (Bulletproof) ---
-def get_ai_target_coin():
-    print("🧠 Asking AI to find the best high-beta altcoin...", flush=True)
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return "PEPE/USDT:USDT"
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    prompt = "Output ONLY the ticker symbol of a volatile altcoin. Format: PEPE/USDT:USDT. No explanation. Valid options: PEPE, SOL, DOGE, WIF, SHIB."
-    payload = {"model": "openrouter/free", "messages": [{"role": "user", "content": prompt}]}
-
+# --- 3. Market-Wide Scanner ---
+async def scan_market_for_reversals(exchange):
+    print("🔭 Scanning entire market for stretched rubber bands...", flush=True)
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=10)
-        data = response.json()
-        if isinstance(data, dict) and 'choices' in data and len(data['choices']) > 0:
-            symbol = data['choices'][0]['message']['content'].strip()
-            symbol = symbol.replace('"', '').replace("'", "").split('\n')[0].strip()
+        tickers = await exchange.fetch_tickers()
+        candidates = []
+        for symbol, ticker in tickers.items():
+            if symbol.endswith(":USDT") and ticker['percentage'] is not None:
+                if ticker['percentage'] < -5.0: # Dropped more than 5% today
+                    candidates.append((symbol, ticker['percentage']))
+                    
+        candidates.sort(key=lambda x: x[1])
+        top_losers = [c[0] for c in candidates[:15]]
+        
+        best_setups = []
+        for symbol in top_losers:
+            candles = await exchange.fetch_ohlcv(symbol, '1m', limit=20)
+            if len(candles) < 20: continue
             
-            if not symbol.endswith("USDT:USDT") or " " in symbol or len(symbol) > 20:
-                print(f"⚠️ AI gave invalid response: '{symbol}'. Defaulting to PEPE.", flush=True)
-                return "PEPE/USDT:USDT"
+            prices = [c[4] for c in candles]
+            sma = sum(prices) / 20
+            variance = sum((p - sma) ** 2 for p in prices) / 20
+            std_dev = math.sqrt(variance)
+            lower_band = sma - (2.5 * std_dev)
+            
+            current_price = prices[-1]
+            if current_price <= lower_band * 1.002: 
+                best_setups.append(symbol)
                 
-            print(f"🎯 AI Selected: {symbol}", flush=True)
-            return symbol
-    except Exception:
-        pass
-    return "PEPE/USDT:USDT"
-
-# --- 4. 4-Hour Behavior Analyzer ---
-async def get_4h_dynamic_trigger(exchange, symbol):
-    print(f"🔬 Analyzing last 4 hours of {symbol} to find its natural breakout...", flush=True)
-    try:
-        candles = await exchange.fetch_ohlcv(symbol, '1m', limit=240)
-        moves = []
-        for i in range(1, len(candles)):
-            prev_close = candles[i-1][4]
-            current_close = candles[i][4]
-            move = abs(current_close - prev_close) / prev_close
-            moves.append(move)
-
-        avg_move = sum(moves) / len(moves)
-        dynamic_trigger = max(0.001, avg_move * 3.0) 
-        print(f"📊 Normal 1m move: {avg_move*100:.4f}% | Dynamic Trigger: {dynamic_trigger*100:.4f}%", flush=True)
-        return dynamic_trigger
+        print(f"🎯 Found {len(best_setups)} coins currently touching extreme lower bands.", flush=True)
+        return best_setups
     except Exception as e:
-        print(f"⚠️ 4H Analysis Failed: {e}. Using 0.5% fallback.", flush=True)
-        return 0.005
+        print(f"⚠️ Scanner Error: {e}", flush=True)
+        return []
 
-# --- 5. Dynamic Leverage Calculator ---
+# --- 4. Dynamic Leverage ---
 async def set_safe_leverage(exchange, symbol, balance_usdt):
     try:
         market = await exchange.load_markets()
         min_amount = market[symbol]['limits']['amount']['min']
         ticker = await exchange.fetch_ticker(symbol)
-        price = ticker['last']
-        
-        min_cost = min_amount * price
-        required_leverage = math.ceil(min_cost / balance_usdt)
-        final_leverage = max(5, min(required_leverage, 20))
-        
-        print(f"⚙️ Balance: ${balance_usdt:.2f} | Min Order: ${min_cost:.2f} | Leverage: {final_leverage}x", flush=True)
-        await exchange.set_leverage(final_leverage, symbol)
-        return final_leverage
-    except Exception as e:
-        print(f"⚠️ Leverage calculation failed: {e}", flush=True)
+        min_cost = min_amount * ticker['last']
+        req_lev = math.ceil(min_cost / balance_usdt)
+        final_lev = max(5, min(req_lev, 20))
+        await exchange.set_leverage(final_lev, symbol)
+        return final_lev
+    except Exception:
         return 5
 
-# --- 6. Main Execution Loop ---
+# --- 5. Main Engine ---
 async def main():
     state = load_state()
-    if state["is_live"]:
-        print("🔥 SYSTEM IS LIVE. EXECUTING REAL TRADES.", flush=True)
-    else:
-        print(f"🛡️ PAPER TRADING MODE. Win Streak: {state['streak']}/8", flush=True)
-
-    target_coin = get_ai_target_coin()
+    print(f"🛡️ PAPER TRADING MODE. Win Streak: {state['streak']}/8", flush=True)
 
     exchange = ccxtpro.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
@@ -121,80 +98,157 @@ async def main():
         'options': {'defaultType': 'swap', 'adjustForTimeDifference': True}
     })
 
-    dynamic_trigger = await get_4h_dynamic_trigger(exchange, target_coin)
-    strategy = MicroMomentumStrategy(target_coin, dynamic_trigger)
-    
-    last_summary_time = time.time()
+    strategies = {}
+    active_trade = None
+    active_strategy = None
     current_price = 0.0
+    
+    last_scan_time = 0
+    last_summary_time = time.time()
 
     while True:
         try:
-            # 10-Minute Summary (Prints every 600 seconds)
-            if time.time() - last_summary_time >= 600:
-                print(f"\n📊 10-MIN SUMMARY | Streak: {state['streak']}/8 | Live: {state['is_live']} | Current Price: {current_price}", flush=True)
-                last_summary_time = time.time()
+            current_time = time.time()
 
-            raw_ticker = await exchange.watch_ticker(target_coin)
-            if isinstance(raw_ticker, list):
-                ticker = raw_ticker[0] if len(raw_ticker) > 0 else None
-            else:
-                ticker = raw_ticker
-
-            if not ticker or 'last' not in ticker or ticker['last'] is None:
-                continue
+            # 📊 10-MINUTE DASHBOARD SUMMARY
+            if current_time - last_summary_time >= 600:
+                print("\n" + "="*50, flush=True)
+                print("📊 10-MINUTE BOT SUMMARY", flush=True)
+                print("="*50, flush=True)
+                print(f"🛡️ Mode      : {'🔥 LIVE TRADING' if state['is_live'] else '📝 PAPER TRADING'}", flush=True)
+                print(f"🏆 Win Streak: {state['streak']}/8 (Needs +0.42% NET)", flush=True)
+                print(f"🔭 Watching  : {len(strategies)} coins for extreme rubber band bounces", flush=True)
                 
-            current_price = float(ticker['last'])
-            signal, gross_pnl = strategy.analyze(current_price)
-            
-            # --- BUY SIGNAL ---
-            if signal == "BUY":
-                print(f"🚀 IGNITION! BUY {target_coin} at {current_price}", flush=True)
-                if state["is_live"]:
-                    try:
-                        balance = await exchange.fetch_balance()
-                        usdt_free = balance['USDT']['free']
-                        
-                        if usdt_free > 1.0:
-                            await set_safe_leverage(exchange, target_coin, usdt_free)
-                            cost = usdt_free * 0.90
-                            amount = cost / current_price
-                            
-                            order = await exchange.create_market_buy_order(target_coin, amount)
-                            print(f"✅ REAL BUY EXECUTED: {order['id']}", flush=True)
-                    except Exception as e:
-                        print(f"❌ Buy Order Failed: {e}", flush=True)
-
-            # --- SELL SIGNALS ---
-            elif signal in ["SELL_MOMENTUM_DIED", "SELL_TRAILING_STOP"]:
-                print(f"📉 {signal} at {current_price} | Gross PnL: {gross_pnl*100:.3f}%", flush=True)
-                
-                net_pnl = gross_pnl - 0.0012 
-                
-                if net_pnl >= 0.0042: 
-                    state["streak"] += 1
-                    print(f"✅ WIN! (+{net_pnl*100:.3f}%) | Streak: {state['streak']}/8", flush=True)
+                if active_trade and active_strategy:
+                    current_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
+                    net_pnl = current_pnl - 0.0012
+                    print(f"💼 Active Trade: {active_trade}", flush=True)
+                    print(f"   ├─ Entry Price: {active_strategy.entry_price}", flush=True)
+                    print(f"   ├─ Current Px : {current_price}", flush=True)
+                    print(f"   └─ Live PnL   : {net_pnl*100:+.3f}% (Net)", flush=True)
                 else:
-                    print(f"❌ NOT ACCEPTED (Below 0.42% NET) | Streak Reset to 0", flush=True)
-                    state["streak"] = 0
-
-                if state["streak"] >= 8 and not state["is_live"]:
-                    state["is_live"] = True
-                    print("\n🔥🔥🔥 8 WINS IN A ROW! SWITCHING TO LIVE TRADING. 🔥🔥🔥\n", flush=True)
+                    print(f"💼 Active Trade: None (Waiting for setup)", flush=True)
+                print("="*50 + "\n", flush=True)
                 
-                save_state(state)
+                last_summary_time = current_time
 
-                if state["is_live"]:
-                    try:
-                        balance = await exchange.fetch_balance()
-                        coin_symbol = target_coin.split('/')[0]
-                        amount_held = balance[coin_symbol]['free']
-                        if amount_held > 0:
-                            order = await exchange.create_market_sell_order(target_coin, amount_held)
-                            print(f"✅ REAL SELL EXECUTED: {order['id']}", flush=True)
-                    except Exception as e:
-                        print(f"❌ Sell Order Failed: {e}", flush=True)
+            # SCAN MARKET
+            if current_time - last_scan_time >= 120 and active_trade is None:
+                top_coins = await scan_market_for_reversals(exchange)
+                
+                for coin in top_coins:
+                    if coin not in strategies:
+                        strategies[coin] = RubberBandStrategy(coin)
+                        candles = await exchange.fetch_ohlcv(coin, '1m', limit=20)
+                        for c in candles:
+                            strategies[coin].prices.append(c[4])
+                last_scan_time = current_time
 
-            await asyncio.sleep(0.05)
+            # WATCH ACTIVE TRADE & CANDIDATES
+            watch_list = []
+            if active_trade:
+                watch_list.append(active_trade)
+            for coin in strategies.keys():
+                if coin != active_trade:
+                    watch_list.append(coin)
+
+            if not watch_list:
+                await asyncio.sleep(2)
+                continue
+
+            tasks = [exchange.watch_ticker(coin) for coin in watch_list]
+            tickers = await asyncio.gather(*tasks)
+
+            # OPPORTUNITY COST SWITCHING LOGIC
+            for i, coin in enumerate(watch_list):
+                ticker = tickers[i]
+                if isinstance(ticker, list):
+                    ticker = ticker[0] if len(ticker) > 0 else None
+                
+                if not ticker or 'last' not in ticker or ticker['last'] is None:
+                    continue
+
+                current_price = float(ticker['last'])
+                signal, gross_pnl = strategies[coin].analyze(current_price)
+
+                # SWITCHING LOGIC (Dump losing trade for a better setup)
+                if signal == "BUY_REVERSION" and active_trade and active_trade != coin:
+                    active_pnl = (current_price - active_strategy.entry_price) / active_strategy.entry_price
+                    
+                    if active_pnl < 0:
+                        print(f"🔄 SWITCHING! Dumping {active_trade} at a loss to catch {coin}!", flush=True)
+                        
+                        if state["is_live"]:
+                            try:
+                                balance = await exchange.fetch_balance()
+                                c_sym = active_trade.split('/')[0]
+                                held = balance[c_sym]['free']
+                                if held > 0:
+                                    await exchange.create_market_sell_order(active_trade, held)
+                            except Exception: pass
+                        
+                        active_strategy.in_position = False
+                        active_trade = None
+                        
+                        active_trade = coin
+                        active_strategy = strategies[coin]
+                        active_strategy.in_position = True
+                        active_strategy.entry_price = current_price
+                        active_strategy.peak_price = current_price
+                        print(f"🪀 IMMEDIATE RE-ENTRY! Bought {coin} at {current_price}", flush=True)
+                        continue
+
+                # NORMAL BUY ENTRY
+                if signal == "BUY_REVERSION" and not active_trade:
+                    print(f"🪀 RUBBER BAND BOUNCE! Bought {coin} at {current_price}", flush=True)
+                    active_trade = coin
+                    active_strategy = strategies[coin]
+                    
+                    if state["is_live"]:
+                        try:
+                            balance = await exchange.fetch_balance()
+                            usdt_free = balance['USDT']['free']
+                            if usdt_free > 1.0:
+                                await set_safe_leverage(exchange, coin, usdt_free)
+                                amount = (usdt_free * 0.90) / current_price
+                                await exchange.create_market_buy_order(coin, amount)
+                        except Exception as e: print(f"❌ Buy Error: {e}")
+
+                # STRICT SELL LOGIC & 8-WIN GATE
+                elif signal in ["SELL_TARGET", "SELL_STOP"] and active_trade == coin:
+                    print(f"📉 {signal} on {coin} at {current_price} | Gross PnL: {gross_pnl*100:.3f}%", flush=True)
+                    
+                    net_pnl = gross_pnl - 0.0012 # Deduct 0.12% for trading fees and spread
+                    
+                    # --- STRICT RULES APPLIED HERE ---
+                    if net_pnl >= 0.0042:
+                        state["streak"] += 1
+                        print(f"✅ WIN! (+{net_pnl*100:.3f}%) | Streak: {state['streak']}/8", flush=True)
+                    elif net_pnl < 0.0022:
+                        state["streak"] = 0
+                        print(f"❌ LOSS (Below 0.22%) ({net_pnl*100:+.3f}%) | Streak Reset to 0", flush=True)
+                    else:
+                        print(f"⚖️ SCRATCH (Between 0.22% and 0.42%) ({net_pnl*100:+.3f}%) | Streak Unchanged", flush=True)
+
+                    # Unlock Live Trading only at 8
+                    if state["streak"] >= 8 and not state["is_live"]:
+                        state["is_live"] = True
+                        print("\n🔥🔥🔥 8 WINS IN A ROW! SWITCHING TO LIVE TRADING. 🔥🔥🔥\n", flush=True)
+                    
+                    save_state(state)
+
+                    # Execute real sell if live
+                    if state["is_live"]:
+                        try:
+                            balance = await exchange.fetch_balance()
+                            c_sym = coin.split('/')[0]
+                            held = balance[c_sym]['free']
+                            if held > 0:
+                                await exchange.create_market_sell_order(coin, held)
+                        except Exception as e: print(f"❌ Sell Error: {e}")
+
+                    active_trade = None
+                    active_strategy = None
 
         except Exception as e:
             print(f"⚠️ Connection Error: {e}", flush=True)
