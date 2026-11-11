@@ -1,3 +1,4 @@
 ccxt
 requests
 python-dotenv
+browser-use-sdk
