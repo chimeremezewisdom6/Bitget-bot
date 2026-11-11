@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass, field
 
 DEFAULT_EXCHANGES = (
-    "binance", "bybit", "okx", "bitget", "hyperliquid", "kucoin", "coinbase", "bingx",
+    "bybit", "okx", "bitget", "kucoin", "coinbase", "bingx",
 )
 
 DEFAULT_RPS = {
