@@ -222,7 +222,7 @@ async def supervisor(ctx: dict) -> None:
 
 # ====================================================================== entry point
 async def amain() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     ctx: dict = {"started": time.time(), "phase": "starting", "cfg": Config.from_env(),
                  "state": SharedState(), "hub": None, "gate": None}
 

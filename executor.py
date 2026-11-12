@@ -180,7 +180,7 @@ class TradeManager:
         if pos is None:
             log.warning("[%s] could not open %s %s", mode, obs.side, coin.base)
             return False
-        log.info("[%s] OPEN %s %s @ %.6g (dominance %.1fx, strength %.0f%%) | %s", mode, obs.side, coin.base, pos.entry, obs.dominance, obs.strength * 100, params)
+        print("[%s] OPEN %s %s @ %.6g (dominance %.1fx, strength %.0f%%) | %s" % (mode, obs.side, coin.base, pos.entry, obs.dominance, obs.strength * 100, params), flush=True)
         act = ActiveTrade(coin.base, side, mode, pos.entry, time.time(), pos.entry, 0.0, obs.side_ratio(side), params.fade_trigger)
         self.state.active = act
 
@@ -250,7 +250,7 @@ class TradeManager:
         s.session_net += net
         if mode == "PAPER":
             self.gate.record_paper(net)
-        log.info("[%s] CLOSE %s %s %s in %.0fs | gross %+.2f%% net %+.2f%% | gate %s", mode, side, base, reason, dur, gross * 100, net * 100, self.gate.status())
+        print("[%s] CLOSE %s %s %s in %.0fs | gross %+.2f%% net %+.2f%% | gate %s" % (mode, side, base, reason, dur, gross * 100, net * 100, self.gate.status()), flush=True)
         try:
             os.makedirs(os.path.dirname(self.cfg.trades_path) or ".", exist_ok=True)
             with open(self.cfg.trades_path, "a") as f:
