@@ -33,12 +33,50 @@ async def get_bitget_tradable_symbols():
     finally:
         await exchange.close()
 
+async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
+    """Each bot analyzes its assigned coins and returns the best swing."""
+    best_in_chunk = None
+    highest_score = -1
+
+    for sym in symbols_chunk:
+        candles = await fetch_okx_candles(session, sem, sym)
+        if not candles: continue
+        
+        last_10 = candles[-10:]
+        open_price = last_10[0][1]
+        high_price = max(c[2] for c in last_10)
+        low_price = min(c[3] for c in last_10)
+        close_price = last_10[-1][4]
+        
+        up_move = ((high_price - open_price) / open_price) * 100
+        down_move = ((open_price - low_price) / open_price) * 100
+        
+        direction = None
+        
+        # Priority 1: The strict 2% up / 1% down rule (or vice versa)
+        if up_move >= 2.0 and down_move >= 1.0 and close_price > open_price:
+            direction = "LONG"
+            score = up_move * down_move * 2 # Give a bonus to strict matches
+        elif down_move >= 2.0 and up_move >= 1.0 and close_price < open_price:
+            direction = "SHORT"
+            score = up_move * down_move * 2 # Give a bonus to strict matches
+        # Fallback: Just pick the highest two-sided volatility
+        elif up_move > 0.5 and down_move > 0.5:
+            direction = "LONG" if close_price > open_price else "SHORT"
+            score = up_move * down_move
+
+        if direction and score > highest_score:
+            highest_score = score
+            best_in_chunk = {"symbol": sym, "direction": direction, "score": score}
+
+    return best_in_chunk
+
 async def run_market_scan():
     print("🌐 Fetching global volume (CoinGecko)...")
     valid_coins = []
     
     try:
-        for page in range(1, 4): 
+        for page in range(1, 5): # Fetch top 1000 coins
             url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}"
             res = requests.get(url, timeout=15)
             if res.status_code != 200: break
@@ -52,53 +90,37 @@ async def run_market_scan():
         return None
 
     bitget_bases = await get_bitget_tradable_symbols()
-    tradable_coins = list(set([c for c in valid_coins if c in bitget_bases]))[:60] # Check top 60
+    final_symbols = list(set([c for c in valid_coins if c in bitget_bases]))
     
-    print(f"🔎 Analyzing {len(tradable_coins)} coins for massive two-sided swings...")
+    print(f"📊 Found {len(final_symbols)} tradable coins with >$1M volume.")
 
-    best_swing = None
-    highest_score = -1
-    sem = asyncio.Semaphore(5)
-    
+    if not final_symbols:
+        return None
+
+    # DIVIDE INTO 50 BOTS
+    chunk_size = max(1, len(final_symbols) // 50)
+    chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
+    print(f"👨‍🎓 Spawned {len(chunks)} bots to analyze their coins.")
+
+    sem = asyncio.Semaphore(20) # 20 concurrent requests to OKX to avoid rate limits
     async with aiohttp.ClientSession() as session:
-        for sym in tradable_coins:
-            candles = await fetch_okx_candles(session, sem, sym)
-            if not candles: continue
-            
-            last_10 = candles[-10:]
-            open_price = last_10[0][1]
-            high_price = max(c[2] for c in last_10)
-            low_price = min(c[3] for c in last_10)
-            close_price = last_10[-1][4]
-            
-            # Calculate moves from the open price
-            up_move = ((high_price - open_price) / open_price) * 100
-            down_move = ((open_price - low_price) / open_price) * 100
-            total_range = ((high_price - low_price) / low_price) * 100
-            
-            direction = None
-            
-            # Scenario 1: 2% Up Move and 1% Down Move
-            if up_move >= 2.0 and down_move >= 1.0 and close_price > open_price:
-                direction = "LONG"
-                score = up_move * down_move
-                
-            # Scenario 2: 2% Down Move and 1% Up Move
-            elif down_move >= 2.0 and up_move >= 1.0 and close_price < open_price:
-                direction = "SHORT"
-                score = up_move * down_move
+        tasks = [process_bot_chunk(i, chunk, session, sem) for i, chunk in enumerate(chunks)]
+        winners = await asyncio.gather(*tasks)
 
-            if direction and score > highest_score:
-                highest_score = score
-                best_swing = {"symbol": sym, "direction": direction, "score": score}
-                print(f"⚡ Found Swing: {sym} ({direction}) | Up: {up_move:.2f}% | Down: {down_move:.2f}% | Range: {total_range:.2f}%")
+    valid_winners = [w for w in winners if w is not None]
+    
+    if not valid_winners:
+        print("❌ All bots failed to find a valid swing.")
+        return None
 
-    if best_swing:
-        print(f"🔥 THE BEST SWING IS: {best_swing['symbol']} ({best_swing['direction']}) Score: {best_swing['score']:.4f}")
-    else:
-        print("❌ No coins met the 2%-1% swing criteria in this scan.")
-        
-    return best_swing
+    print(f"🏆 Gathered {len(valid_winners)} winners. The bots are voting...")
+
+    # MAIN PATH VOTE: Pick the absolute best fingerprint
+    valid_winners.sort(key=lambda x: x['score'], reverse=True)
+    best = valid_winners[0]
+    
+    print(f"🔥 THE WINNER IS: {best['symbol']} ({best['direction']}) Score: {best['score']:.4f}")
+    return best
 
 if __name__ == "__main__":
     best_coin = asyncio.run(run_market_scan())
