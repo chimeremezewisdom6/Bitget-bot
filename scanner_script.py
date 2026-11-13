@@ -13,11 +13,11 @@ MEGA_COINS = {
 async def fetch_okx_candles(session, sem, sym):
     async with sem:
         try:
-            url = f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1m&limit=15"
+            url = f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1m&limit=12"
             async with session.get(url) as resp:
                 if resp.status != 200: return None
                 data = (await resp.json()).get('data', [])
-                if len(data) < 12: return None
+                if len(data) < 10: return None
                 data.reverse()
                 return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
         except Exception:
@@ -52,11 +52,11 @@ async def run_market_scan():
         return None
 
     bitget_bases = await get_bitget_tradable_symbols()
-    tradable_coins = list(set([c for c in valid_coins if c in bitget_bases]))[:50] # Check top 50
+    tradable_coins = list(set([c for c in valid_coins if c in bitget_bases]))[:60] # Check top 60
     
-    print(f"🔎 Analyzing {len(tradable_coins)} tradable coins for aggressive dumps...")
+    print(f"🔎 Analyzing {len(tradable_coins)} coins for massive two-sided swings...")
 
-    best_dump = None
+    best_swing = None
     highest_score = -1
     sem = asyncio.Semaphore(5)
     
@@ -66,47 +66,39 @@ async def run_market_scan():
             if not candles: continue
             
             last_10 = candles[-10:]
+            open_price = last_10[0][1]
+            high_price = max(c[2] for c in last_10)
+            low_price = min(c[3] for c in last_10)
+            close_price = last_10[-1][4]
             
-            # 1. Calculate Volume & Red Candle Dominance
-            total_vol = sum(c[5] for c in last_10)
-            red_vol = sum(c[5] for c in last_10 if c[4] < c[1]) # Close < Open
+            # Calculate moves from the open price
+            up_move = ((high_price - open_price) / open_price) * 100
+            down_move = ((open_price - low_price) / open_price) * 100
+            total_range = ((high_price - low_price) / low_price) * 100
             
-            if total_vol == 0 or (red_vol / total_vol) < 0.6:
-                continue # Skip if sellers don't dominate volume
+            direction = None
+            
+            # Scenario 1: 2% Up Move and 1% Down Move
+            if up_move >= 2.0 and down_move >= 1.0 and close_price > open_price:
+                direction = "LONG"
+                score = up_move * down_move
                 
-            # 2. Calculate Drop & Ensure it's NOT going up
-            start_price = last_10[0][1]
-            end_price = last_10[-1][4]
-            
-            if end_price >= start_price:
-                continue # Exclude Longs! Must be dumping.
-                
-            drop_pct = ((start_price - end_price) / start_price) * 100
-            
-            # 3. Check Volatility (Average fluctuation > 0.1%)
-            fluctuations = [((c[2] - c[3]) / c[3]) * 100 for c in last_10]
-            if (sum(fluctuations) / len(fluctuations)) < 0.1:
-                continue
-                
-            # 4. Calculate Dump Efficiency (How straight is the dump?)
-            total_distance = sum(abs(last_10[i][4] - last_10[i-1][4]) for i in range(1, len(last_10)))
-            net_distance = start_price - end_price
-            efficiency = net_distance / total_distance if total_distance > 0 else 0
-            
-            # Final Score: Big drop, straight line, heavy red volume
-            score = drop_pct * efficiency * (red_vol / total_vol)
+            # Scenario 2: 2% Down Move and 1% Up Move
+            elif down_move >= 2.0 and up_move >= 1.0 and close_price < open_price:
+                direction = "SHORT"
+                score = up_move * down_move
 
-            if score > highest_score:
+            if direction and score > highest_score:
                 highest_score = score
-                best_dump = {"symbol": sym, "direction": "SHORT", "score": score}
-                print(f"🩸 Found strong dump: {sym} | Drop: {drop_pct:.2f}% | Score: {score:.2f}")
+                best_swing = {"symbol": sym, "direction": direction, "score": score}
+                print(f"⚡ Found Swing: {sym} ({direction}) | Up: {up_move:.2f}% | Down: {down_move:.2f}% | Range: {total_range:.2f}%")
 
-    if best_dump:
-        print(f"🔥 THE STRONGEST DUMP IS: {best_dump['symbol']} (Score: {best_dump['score']:.4f})")
+    if best_swing:
+        print(f"🔥 THE BEST SWING IS: {best_swing['symbol']} ({best_swing['direction']}) Score: {best_swing['score']:.4f}")
     else:
-        print("❌ No valid dumps found.")
+        print("❌ No coins met the 2%-1% swing criteria in this scan.")
         
-    return best_dump
+    return best_swing
 
 if __name__ == "__main__":
     best_coin = asyncio.run(run_market_scan())
