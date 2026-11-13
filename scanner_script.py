@@ -3,6 +3,7 @@ import json
 import os
 import asyncio
 import aiohttp
+import ccxt
 
 async def fetch_binance_candles(session, sem, sym):
     async with sem:
@@ -17,105 +18,113 @@ async def fetch_binance_candles(session, sem, sym):
             return None
 
 async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
-    """Each bot analyzes its 10 coins and picks the best price fingerprint."""
     best_in_chunk = None
     highest_score = -1
-
     for sym in symbols_chunk:
         candles = await fetch_binance_candles(session, sem, sym)
         if not candles: continue
         
-        # Look at the last 10 minutes (11 candles to get the open of the 1st minute)
         last_10 = candles[-11:]
-        start_price = last_10[0][1] # Open of first candle
-        end_price = last_10[-1][4]  # Close of last candle
+        start_price = last_10[0][1]
+        end_price = last_10[-1][4]
         
-        # 1. Total Percentage Move
         total_move_pct = abs((end_price - start_price) / start_price) * 100
-        
-        # 2. Efficiency (Smoothness of the move)
-        # Sum of absolute movements between each minute's close
         total_distance = sum(abs(last_10[i][4] - last_10[i-1][4]) for i in range(1, len(last_10)))
-        net_distance = abs(end_price - start_price)
         
-        # If there's no movement at all, skip
         if total_distance == 0: continue
-            
-        efficiency = net_distance / total_distance # 1.0 = perfectly straight line
+        efficiency = abs(end_price - start_price) / total_distance
         
-        # 3. The Fingerprint Score
         score = total_move_pct * efficiency
 
         if score > highest_score:
             highest_score = score
             best_in_chunk = {
                 "bot_id": bot_id,
-                "symbol": sym, 
+                "symbol": sym,
                 "direction": "LONG" if end_price > start_price else "SHORT",
-                "move_pct": total_move_pct,
-                "efficiency": efficiency,
                 "score": score
             }
-            
     return best_in_chunk
 
+async def get_bitget_tradable_symbols():
+    exchange = ccxt.bitget({
+        'options': {'defaultType': 'swap', 'uta': True}
+    })
+    markets = await exchange.load_markets()
+    tradable = set()
+    for sym, m in markets.items():
+        if m.get('active') and m.get('swap') and m.get('linear'):
+            if m.get('quote') == 'USDT':
+                tradable.add(m['base'])
+    await exchange.close()
+    return tradable
+
 async def run_market_scan():
-    print("🌐 Fetching 500+ coins globally...")
+    print("🌐 Fetching up to 5,000 coins from CoinMarketCap (Keyless API)...")
+    
+    # CMC Keyless Public API allows up to 5000 results
+    url = "https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/listings/latest"
+    params = {
+        "start": "1",
+        "limit": "5000",  # Fetch maximum allowed
+        "convert": "USD"
+    }
+    
     try:
-        res = requests.get("https://api.coinpaprika.com/v1/tickers", timeout=15)
-        tickers = res.json()
+        # No API key or special headers needed
+        res = requests.get(url, params=params, timeout=30)
+        data = res.json().get('data', [])
     except Exception as e:
-        print(f"CoinPaprika failed: {e}")
+        print(f"CoinMarketCap failed: {e}")
         return None
 
-    valid_symbols = []
-    for t in tickers:
-        vol = t.get('quotes', {}).get('USD', {}).get('volume_24h', 0)
-        if vol and vol >= 1_000_000:
-            valid_symbols.append(t['symbol'])
+    if not data:
+        print("❌ No data returned from CMC.")
+        return None
 
-    print(f"📊 Found {len(valid_symbols)} coins. Dividing into 50 bots...")
-
-    # DIVIDE INTO 50 CHUNKS
-    chunk_size = max(1, len(valid_symbols) // 50)
-    chunks = [valid_symbols[i:i + chunk_size] for i in range(0, len(valid_symbols), chunk_size)]
+    # FILTER: 24-HOUR VOLUME >= $1,000,000
+    valid_bases = set()
+    for coin in data:
+        vol_24h = coin.get('quote', {}).get('USD', {}).get('volume_24h', 0)
+        if vol_24h and vol_24h >= 1_000_000:
+            valid_bases.add(coin['symbol'])
     
-    print(f"👨‍🎓 Spawned {len(chunks)} bots to analyze their 10 coins.")
+    print(f"📊 CoinMarketCap: Found {len(valid_bases)} bases with >= $1M 24h volume (from {len(data)} total coins).")
+    
+    # FILTER: MUST BE ON BITGET
+    bitget_bases = await get_bitget_tradable_symbols()
+    final_symbols = [b for b in valid_bases if b in bitget_bases]
+    print(f"🏦 Bitget filter: {len(final_symbols)} tradable bases remain.")
+    
+    if not final_symbols:
+        print("❌ No tradable coins found after filtering.")
+        return None
 
-    sem = asyncio.Semaphore(20) # Limit to 20 concurrent requests to Binance
+    # DIVIDE INTO 50 BOTS
+    chunk_size = max(1, len(final_symbols) // 50)
+    chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
+    print(f"👨‍🎓 Spawned {len(chunks)} bots to analyze the coins.")
+    
+    sem = asyncio.Semaphore(20) # Keep concurrent requests safe
     async with aiohttp.ClientSession() as session:
         tasks = [process_bot_chunk(i, chunk, session, sem) for i, chunk in enumerate(chunks)]
         winners = await asyncio.gather(*tasks)
-
-    valid_winners = [w for w in winners if w is not None]
     
+    valid_winners = [w for w in winners if w is not None]
     if not valid_winners:
         print("❌ No valid winners found.")
         return None
-
-    print(f"🏆 Gathered {len(valid_winners)} winners. The bots are voting...")
-
-    # MAIN PATH: Pick the absolute best fingerprint from the 50 winners
+    
+    # MAIN PATH VOTE: Pick the absolute best fingerprint
     valid_winners.sort(key=lambda x: x['score'], reverse=True)
-    absolute_best = valid_winners[0]
-
-    print(f"🔥 THE VOTED BEST FINGERPRINT IS: {absolute_best['symbol']} ({absolute_best['direction']})")
-    print(f"   Move: {absolute_best['move_pct']:.2f}% | Efficiency: {absolute_best['efficiency']:.2f} | Score: {absolute_best['score']:.2f}")
-    return absolute_best
+    best = valid_winners[0]
+    print(f"🔥 THE WINNER IS: {best['symbol']} ({best['direction']}) Score: {best['score']:.4f}")
+    return best
 
 if __name__ == "__main__":
-    try:
-        best_coin = asyncio.run(run_market_scan())
+    best_coin = asyncio.run(run_market_scan())
+    with open("candidate.json", "w") as f:
         if best_coin:
-            with open("candidate.json", "w") as f:
-                json.dump({
-                    "symbol": best_coin['symbol'],
-                    "direction": best_coin['direction'],
-                    "score": best_coin['score']
-                }, f, indent=2)
-            print("✅ Saved to candidate.json")
+            json.dump({"symbol": best_coin['symbol'], "direction": best_coin['direction'], "score": best_coin['score']}, f, indent=2)
         else:
-            with open("candidate.json", "w") as f: json.dump({}, f)
-    except Exception as e:
-        print(f"❌ CRASHED: {e}")
-        with open("candidate.json", "w") as f: json.dump({}, f)
+            json.dump({}, f)
