@@ -54,7 +54,8 @@ def save_state(state):
 def ask_ai(prompt):
     if not POLLINATIONS_KEY: return "AI key missing."
     try:
-        url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai"
+        # FIXED: Added token parameter to bypass rate limits
+        url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai&token={POLLINATIONS_KEY}"
         return requests.get(url, timeout=15).text.strip()
     except Exception as e:
         return f"AI failed: {e}"
@@ -62,11 +63,14 @@ def ask_ai(prompt):
 async def ai_reporter(state):
     while True:
         await asyncio.sleep(600)
-        status = f"Currently holding {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for the GitHub scanner to find a new 50-bot consensus."
+        status = f"Currently holding {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for the GitHub scanner."
+        
+        # FIXED: Made the prompt strict to stop the AI from hallucinating
         prompt = (
-            f"You are my trading AI. Give me a 10-minute status report. Win streak: {state['streak']}/8. "
-            f"Live mode: {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. Status: {status}. Last action: {CURRENT_ACTION}. "
-            f"Write exactly 2 professional sentences."
+            f"Give a brief report. Facts: Win streak is exactly {state['streak']} out of 8. "
+            f"Live mode is {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. "
+            f"Status: {status} Last action: {CURRENT_ACTION}. "
+            f"Write exactly 2 sentences using ONLY these facts. Do not invent any numbers."
         )
         log.info("🧠 Generating 10-minute AI summary...")
         ai_summary = await asyncio.to_thread(ask_ai, prompt)
@@ -96,14 +100,12 @@ async def execute_trade(exchange, candidate, state):
     direction = candidate['direction']
     market_sym = f"{sym}/USDT:USDT"
 
-    # 1. Verify market exists
     market = exchange.market(market_sym)
     if not market:
         log.info(f"❌ {sym} not found on Bitget execution markets. Skipping.")
         CURRENT_CANDIDATE = None
         return
 
-    # 2. Fetch balance & price (UTA Mode)
     try:
         balance = await exchange.fetch_balance(params={'uta': True})
         usdt_free = balance['USDT']['free']
@@ -114,10 +116,8 @@ async def execute_trade(exchange, candidate, state):
         CURRENT_CANDIDATE = None
         return
 
-    # 3. Small Balance Check ($1.58 Logic)
     min_amt = market['limits']['amount']['min']
     min_notional = min_amt * price
-    
     required_leverage = math.ceil(min_notional / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
     if required_leverage > MAX_LEVERAGE:
@@ -125,7 +125,6 @@ async def execute_trade(exchange, candidate, state):
         CURRENT_CANDIDATE = None
         return
 
-    # 4. Set Leverage (UTA Mode)
     try:
         await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
         log.info(f"⚙️ Leverage set to {required_leverage}x for {sym}.")
@@ -134,7 +133,6 @@ async def execute_trade(exchange, candidate, state):
         CURRENT_CANDIDATE = None
         return
 
-    # 5. Calculate Order Size
     side = "buy" if direction == "LONG" else "sell"
     amount = (usdt_free * 0.90 * required_leverage) / price
     amount = float(exchange.amount_to_precision(market_sym, amount))
@@ -149,7 +147,6 @@ async def execute_trade(exchange, candidate, state):
     CURRENT_ACTION = f"Opened {direction} {sym} at {price}."
     log.info(f"🚀 [{mode}] Opening {direction} on {sym} | Size: {amount} @ {price}")
 
-    # 6. Open Order (UTA Mode, One-Way)
     if is_live:
         try:
             await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
@@ -158,7 +155,6 @@ async def execute_trade(exchange, candidate, state):
             CURRENT_CANDIDATE = None
             return
 
-    # 7. Monitor Trade (Max 10 Minutes)
     start_time = time.time()
     peak = price
     exit_reason = "timeout"
@@ -194,7 +190,6 @@ async def execute_trade(exchange, candidate, state):
         except Exception as e:
             log.error(f"Monitoring error: {e}")
 
-    # 8. Close Order
     final = current
     gross = (final - price) / price if direction == "LONG" else (price - final) / price
     net = gross - FEE_ROUND_TRIP
@@ -209,7 +204,6 @@ async def execute_trade(exchange, candidate, state):
         except Exception as e:
             log.critical(f"🚨 [LIVE] FAILED TO CLOSE POSITION! CLOSE MANUALLY! Error: {e}")
 
-    # 9. Update the 8-Win Gate
     if net >= GATE_MIN_NET:
         state["streak"] += 1
         log.info(f"✅ WIN! Streak: {state['streak']}/8")
@@ -236,7 +230,6 @@ async def main_loop():
         'options': {'defaultType': 'swap', 'uta': True}
     })
     
-    # FIX: Tell Bitget to download the markets before we start the loop
     try:
         log.info("📥 Loading Bitget markets...")
         await exchange.load_markets()
