@@ -69,7 +69,7 @@ async def github_pinger():
             res = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
             if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new 100-bot scan.")
         except Exception: pass
-        await asyncio.sleep(600) # Ping every 10 minutes as requested
+        await asyncio.sleep(600) # Ping every 10 minutes
 
 async def ai_reporter(state):
     while True:
@@ -79,10 +79,6 @@ async def ai_reporter(state):
         log.info("🧠 Generating 10-minute AI summary...")
         ai_summary = await asyncio.to_thread(ask_ai, prompt)
         log.info(f"\n📊 10-MIN AI REPORT:\n{ai_summary}\n")
-
-def ask_ai_risk_manager(symbol, direction, current_pnl):
-    prompt = f"I am in a {direction} trade on {symbol}, losing {current_pnl*100:.2f}%. Explain in 1 sentence what is going wrong. End with '[ACTION: CUT]' or '[ACTION: HOLD]'."
-    return ask_ai(prompt)
 
 async def check_for_candidate():
     try:
@@ -194,7 +190,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received EXTREME candidate: {candidate['symbol']} ({candidate['direction']})")
+                log.info(f"🎯 Received WEAKEST SIDE candidate: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
