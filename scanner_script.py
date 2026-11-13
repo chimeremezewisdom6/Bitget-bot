@@ -7,10 +7,9 @@ import ccxt.async_support as ccxt_async
 
 MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
 
-# THE GOLDEN STANDARD (Based on ZRO)
-TARGET_MOVE = 0.73    # 0.73% price move
-TARGET_DOMINANCE = 0.608 # 60.8% volume dominance
-MIN_SIMILARITY = 0.90 # Must be at least 90% similar to the target
+# THE TARGET: Price Move >= 0.73% AND Volume Dominance <= 60.8%
+MIN_PRICE_MOVE = 0.73
+MAX_VOLUME_DOMINANCE = 0.608
 
 async def fetch_okx_candles(session, sem, sym):
     async with sem:
@@ -52,7 +51,6 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         
         if total_vol == 0: continue
         
-        red_dominance = red_vol / total_vol
         green_dominance = green_vol / total_vol
         
         # 2. Calculate Price Change
@@ -60,42 +58,27 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         close_price = last_10[-1][4]
         price_change_pct = ((close_price - open_price) / open_price) * 100
         
-        direction = None
-        similarity_score = 0
-        score = 0
-        
-        # --- LONG SETUP (Weak Sell Side) ---
-        if price_change_pct > 0:
-            # Calculate similarity to Target (how close are we to 0.73% and 60.8%?)
-            # We cap it at 1.0 so a 2% move isn't penalized for being "too good"
-            move_sim = min(price_change_pct / TARGET_MOVE, 1.0)
-            dom_sim = min(green_dominance / TARGET_DOMINANCE, 1.0)
-            similarity_score = (move_sim + dom_sim) / 2
+        # --- YOUR STRICT RULES ---
+        # 1. Must be going UP (LONG)
+        # 2. Price Move must be >= 0.73%
+        # 3. Volume Dominance must be <= 60.8%
+        if price_change_pct >= MIN_PRICE_MOVE and green_dominance <= MAX_VOLUME_DOMINANCE:
             
-            if similarity_score >= MIN_SIMILARITY:
-                direction = "LONG"
-                score = similarity_score
-                
-        # --- SHORT SETUP (Weak Buy Side) ---
-        elif price_change_pct < 0:
-            move_sim = min(abs(price_change_pct) / TARGET_MOVE, 1.0)
-            dom_sim = min(red_dominance / TARGET_DOMINANCE, 1.0)
-            similarity_score = (move_sim + dom_sim) / 2
+            # To find the best of the best, we want the HIGHEST move with the LOWEST dominance.
+            # So we divide the move by the dominance. 
+            # Example: 1.5% move / 0.55 dominance = Score of 2.72 (Better)
+            # Example: 0.8% move / 0.60 dominance = Score of 1.33 (Worse)
+            score = price_change_pct / green_dominance
             
-            if similarity_score >= MIN_SIMILARITY:
-                direction = "SHORT"
-                score = similarity_score
-
-        if direction and score > highest_score:
-            highest_score = score
-            best_in_chunk = {
-                "symbol": sym, 
-                "direction": direction, 
-                "score": score,
-                "move": price_change_pct,
-                "dominance": green_dominance if direction == "LONG" else red_dominance,
-                "similarity": similarity_score
-            }
+            if score > highest_score:
+                highest_score = score
+                best_in_chunk = {
+                    "symbol": sym, 
+                    "direction": "LONG", 
+                    "score": score,
+                    "move": price_change_pct,
+                    "dominance": green_dominance
+                }
 
     return best_in_chunk
 
@@ -127,7 +110,7 @@ async def run_market_scan():
     # DIVIDE INTO 100 BOTS
     chunk_size = max(1, len(final_symbols) // 100)
     chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
-    print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for 90%+ matches.")
+    print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for Thin-Book Pumps (>0.73% Move, <60.8% Vol).")
 
     sem = asyncio.Semaphore(30)
     async with aiohttp.ClientSession() as session:
@@ -137,16 +120,17 @@ async def run_market_scan():
     valid_winners = [w for w in winners if w is not None]
     
     if not valid_winners:
-        print("❌ No coins met the 90% similarity threshold. No trade.")
+        print("❌ No coins met the Thin-Book Pump criteria. No trade.")
         return None
 
-    print(f"🏆 Gathered {len(valid_winners)} 90%+ matches. The bots are voting...")
+    print(f"🏆 Gathered {len(valid_winners)} perfect matches. The bots are voting...")
 
     valid_winners.sort(key=lambda x: x['score'], reverse=True)
     best = valid_winners[0]
     
     print(f"🔥 THE WINNER IS: {best['symbol']} ({best['direction']})")
-    print(f"   Move: {best['move']:.2f}% | Dominance: {best['dominance']*100:.1f}% | Similarity: {best['similarity']*100:.1f}%")
+    print(f"   Price Move: {best['move']:.2f}% (Target: 0.73%+)")
+    print(f"   Volume Dominance: {best['dominance']*100:.1f}% (Target: 60.8%-)")
     return best
 
 if __name__ == "__main__":
