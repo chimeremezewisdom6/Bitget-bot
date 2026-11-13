@@ -80,6 +80,10 @@ async def ai_reporter(state):
         ai_summary = await asyncio.to_thread(ask_ai, prompt)
         log.info(f"\n📊 10-MIN AI REPORT:\n{ai_summary}\n")
 
+def ask_ai_risk_manager(symbol, direction, current_pnl):
+    prompt = f"I am in a {direction} trade on {symbol}, losing {current_pnl*100:.2f}%. Explain in 1 sentence what is going wrong. End with '[ACTION: CUT]' or '[ACTION: HOLD]'."
+    return ask_ai(prompt)
+
 async def check_for_candidate():
     try:
         res = requests.get("https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json", timeout=10)
@@ -138,7 +142,6 @@ async def execute_trade(exchange, candidate, state):
             if direction == "LONG": pnl = (current - price) / price
             else: pnl = (price - current) / price
 
-            # Quick safety stop loss at -1.5%
             if pnl <= -0.015: 
                 exit_reason = "stop_loss"
                 break
@@ -190,7 +193,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received WEAKEST SIDE candidate: {candidate['symbol']} ({candidate['direction']})")
+                log.info(f"🎯 Received DAVID candidate: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
