@@ -31,7 +31,6 @@ async def get_bitget_tradable_symbols():
         await exchange.close()
 
 async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
-    """Each bot analyzes its assigned coins and returns the most extreme scenario."""
     best_in_chunk = None
     highest_score = -1
 
@@ -42,29 +41,25 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         last_10 = candles[-10:]
         open_price = last_10[0][1]
         close_price = last_10[-1][4]
-        high_price = max(c[2] for c in last_10)
-        low_price = min(c[3] for c in last_10)
         
-        # Calculate Total Volume in the last 10 minutes
         total_vol = sum(c[5] for c in last_10)
-        
         price_change_pct = ((close_price - open_price) / open_price) * 100
         
-        # Scenario A: Aggressive Dump (Price down, HUGE volume)
+        # Scenario A: Aggressive Dump
         if price_change_pct < -1.0 and total_vol > 0:
-            score = abs(price_change_pct) * (total_vol / 1000) # Volume multiplier
+            score = abs(price_change_pct) * (total_vol / 1000) 
             if score > highest_score:
                 highest_score = score
                 best_in_chunk = {"symbol": sym, "direction": "SHORT", "score": score, "type": "Aggressive Dump"}
                 
-        # Scenario B: Quiet Dump (Price down, tiny volume)
+        # Scenario B: Quiet Dump
         elif price_change_pct < -0.5 and price_change_pct > -3.0 and total_vol > 0:
-            score = abs(price_change_pct) / (total_vol / 1000) # Inverse volume (quiet)
+            score = abs(price_change_pct) / (total_vol / 1000) 
             if score > highest_score:
                 highest_score = score
                 best_in_chunk = {"symbol": sym, "direction": "SHORT", "score": score, "type": "Quiet Dump"}
                 
-        # Scenario C: Aggressive Buy (Price up, HUGE volume)
+        # Scenario C: Aggressive Buy
         elif price_change_pct > 1.0 and total_vol > 0:
             score = abs(price_change_pct) * (total_vol / 1000)
             if score > highest_score:
@@ -74,24 +69,46 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
     return best_in_chunk
 
 async def run_market_scan():
-    print("🌐 Fetching Top 2000 coins (CoinMarketCap)...")
     valid_coins = []
     
-    # CMC Keyless API limit is 5000, we fetch 2000
+    # TRY COINMARKETCAP FIRST
+    print("🌐 Fetching Top 2000 coins (CoinMarketCap)...")
     url = "https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/listings/latest"
     params = {"start": "1", "limit": "2000", "convert": "USD"}
     
     try:
-        res = requests.get(url, params=params, timeout=30)
-        data = res.json().get('data', [])
-        for coin in data:
-            sym = coin['symbol'].upper()
-            if sym in MEGA_COINS or coin.get('quote', {}).get('USD', {}).get('price', 0) > 10.0: continue
-            if coin.get('quote', {}).get('USD', {}).get('volume_24h', 0) >= 1_000_000:
-                valid_coins.append(sym)
+        res = requests.get(url, params=params, timeout=20)
+        res_json = res.json()
+        
+        # FIX: Check if it's a dictionary before calling .get()
+        if isinstance(res_json, dict):
+            data = res_json.get('data', [])
+            for coin in data:
+                sym = coin['symbol'].upper()
+                if sym in MEGA_COINS or coin.get('quote', {}).get('USD', {}).get('price', 0) > 10.0: continue
+                if coin.get('quote', {}).get('USD', {}).get('volume_24h', 0) >= 1_000_000:
+                    valid_coins.append(sym)
+        else:
+            print(f"⚠️ CMC returned a list (likely rate limit). Falling back to CoinGecko...")
     except Exception as e:
-        print(f"CMC failed: {e}")
-        return None
+        print(f"⚠️ CMC failed: {e}. Falling back to CoinGecko...")
+
+    # FALLBACK TO COINGECKO IF CMC FAILS
+    if not valid_coins:
+        try:
+            for page in range(1, 5): # Fetch top 1000 coins
+                cg_url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}"
+                cg_res = requests.get(cg_url, timeout=15)
+                if cg_res.status_code != 200: break
+                for coin in cg_res.json():
+                    sym = coin['symbol'].upper()
+                    if sym in MEGA_COINS or coin.get('current_price', 0) > 10.0: continue
+                    if coin.get('total_volume', 0) >= 1_000_000:
+                        valid_coins.append(sym)
+            print(f"✅ Successfully fetched {len(valid_coins)} coins from CoinGecko.")
+        except Exception as e:
+            print(f"❌ CoinGecko also failed: {e}")
+            return None
 
     bitget_bases = await get_bitget_tradable_symbols()
     final_symbols = list(set([c for c in valid_coins if c in bitget_bases]))
@@ -105,7 +122,7 @@ async def run_market_scan():
     chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
     print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for extremes.")
 
-    sem = asyncio.Semaphore(30) # Higher concurrency for 100 bots
+    sem = asyncio.Semaphore(30)
     async with aiohttp.ClientSession() as session:
         tasks = [process_bot_chunk(i, chunk, session, sem) for i, chunk in enumerate(chunks)]
         winners = await asyncio.gather(*tasks)
