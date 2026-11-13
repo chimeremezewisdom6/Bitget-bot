@@ -23,8 +23,6 @@ FEE_ROUND_TRIP = 0.0012
 GATE_WINS_REQUIRED = 8
 GATE_MIN_NET = 0.0042
 STATE_FILE = "state.json"
-
-# --- LEVERAGE CAP ---
 MAX_LEVERAGE = 5 
 
 CURRENT_CANDIDATE = None
@@ -62,7 +60,6 @@ def ask_ai(prompt):
         return f"AI failed: {e}"
 
 async def ai_reporter(state):
-    """Generates a human-like summary every 10 minutes."""
     while True:
         await asyncio.sleep(600)
         status = f"Currently holding {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for the GitHub scanner to find a new 50-bot consensus."
@@ -76,7 +73,6 @@ async def ai_reporter(state):
         log.info(f"\n📊 10-MIN AI REPORT:\n{ai_summary}\n")
 
 def ask_ai_risk_manager(symbol, direction, current_pnl):
-    """Asks the AI to decide whether to cut a losing trade early."""
     prompt = (
         f"I am in a {direction} trade on {symbol}, losing {current_pnl*100:.2f}%. "
         f"Explain in 1 sentence what is going wrong. End with '[ACTION: CUT]' or '[ACTION: HOLD]'."
@@ -85,7 +81,6 @@ def ask_ai_risk_manager(symbol, direction, current_pnl):
 
 async def check_for_candidate():
     try:
-        # Make sure this URL matches your exact GitHub repo
         url = "https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json"
         res = requests.get(url, timeout=10)
         data = res.json()
@@ -123,11 +118,8 @@ async def execute_trade(exchange, candidate, state):
     min_amt = market['limits']['amount']['min']
     min_notional = min_amt * price
     
-    # We use 90% of balance to avoid margin errors. 
-    # How much leverage do we need to afford the minimum order?
     required_leverage = math.ceil(min_notional / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
-    # STRICT 5X LEVERAGE CAP
     if required_leverage > MAX_LEVERAGE:
         log.info(f"❌ Balance ${usdt_free:.2f} too small for {sym} (min notional ${min_notional:.2f}, requires {required_leverage}x leverage). Max allowed is {MAX_LEVERAGE}x. Skipping.")
         CURRENT_CANDIDATE = None
@@ -160,7 +152,6 @@ async def execute_trade(exchange, candidate, state):
     # 6. Open Order (UTA Mode, One-Way)
     if is_live:
         try:
-            # One-way mode: no posSide, reduceOnly='no'
             await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception as e:
             log.error(f"❌ [LIVE] Failed to open order: {e}")
@@ -182,7 +173,6 @@ async def execute_trade(exchange, candidate, state):
 
             if direction == "LONG":
                 peak = max(peak, current)
-                # AI Risk Manager check if bleeding
                 if pnl < -0.005 and pnl > -0.015:
                     ai_decision = await asyncio.to_thread(ask_ai_risk_manager, sym, direction, pnl)
                     if "CUT" in ai_decision.upper():
@@ -204,7 +194,7 @@ async def execute_trade(exchange, candidate, state):
         except Exception as e:
             log.error(f"Monitoring error: {e}")
 
-    # 8. Close Order (UTA Mode, One-Way, ReduceOnly)
+    # 8. Close Order
     final = current
     gross = (final - price) / price if direction == "LONG" else (price - final) / price
     net = gross - FEE_ROUND_TRIP
@@ -214,7 +204,6 @@ async def execute_trade(exchange, candidate, state):
     if is_live:
         close_side = "sell" if direction == "LONG" else "buy"
         try:
-            # One-way mode: no posSide, reduceOnly='yes'
             await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
             log.info(f"✅ [LIVE] Position closed safely.")
         except Exception as e:
@@ -247,6 +236,15 @@ async def main_loop():
         'options': {'defaultType': 'swap', 'uta': True}
     })
     
+    # FIX: Tell Bitget to download the markets before we start the loop
+    try:
+        log.info("📥 Loading Bitget markets...")
+        await exchange.load_markets()
+        log.info(f"✅ Loaded {len(exchange.markets)} markets from Bitget.")
+    except Exception as e:
+        log.error(f"❌ Failed to load Bitget markets: {e}")
+        return
+
     last_candidate = None
     while True:
         try:
