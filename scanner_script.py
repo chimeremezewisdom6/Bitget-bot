@@ -3,7 +3,7 @@ import json
 import os
 import asyncio
 import aiohttp
-import ccxt
+import ccxt.async_support as ccxt_async
 
 async def fetch_okx_candles(session, sem, sym):
     async with sem:
@@ -18,56 +18,87 @@ async def fetch_okx_candles(session, sem, sym):
         except Exception:
             return None
 
-async def run_market_scan():
-    print("🌐 Fetching 24h global volume from CoinMarketCap...")
-    url = "https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/listings/latest"
-    params = {"start": "1", "limit": "5000", "convert": "USD"}
-    
+async def get_bitget_tradable_symbols():
+    # FIXED: Using ccxt_async for await support
+    exchange = ccxt_async.bitget({'options': {'defaultType': 'swap', 'uta': True}})
     try:
-        res = requests.get(url, params=params, timeout=30)
-        data = res.json().get('data', [])
+        markets = await exchange.load_markets()
+        tradable = set()
+        for sym, m in markets.items():
+            if m.get('active') and m.get('swap') and m.get('linear') and m.get('quote') == 'USDT':
+                tradable.add(m['base'])
+        return tradable
     except Exception as e:
-        print(f"CoinMarketCap failed: {e}")
+        print(f"Failed to load Bitget markets: {e}")
+        return set()
+    finally:
+        await exchange.close()
+
+async def run_market_scan():
+    print("🌐 Fetching global 24h volume (CoinGecko)...")
+    valid_coins = []
+    
+    # Use CoinGecko API (Free, Cloud-friendly, 250 coins per page)
+    try:
+        for page in range(1, 5): # Fetch top 1000 coins
+            url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}"
+            res = requests.get(url, timeout=15)
+            if res.status_code != 200: break
+            
+            data = res.json()
+            if not data: break
+            
+            for coin in data:
+                vol = coin.get('total_volume', 0)
+                if vol and vol >= 1_000_000:
+                    valid_coins.append({
+                        "symbol": coin['symbol'].upper(),
+                        "vol_24h": vol,
+                        "change_1h": coin.get('price_change_percentage_1h_in_currency', 0)
+                    })
+    except Exception as e:
+        print(f"CoinGecko failed: {e}")
+
+    # FALLBACK: If CoinGecko fails, use CoinPaprika
+    if not valid_coins:
+        print("🔄 CoinGecko failed. Falling back to CoinPaprika...")
+        try:
+            res = requests.get("https://api.coinpaprika.com/v1/tickers", timeout=15)
+            for t in res.json():
+                vol = t.get('quotes', {}).get('USD', {}).get('volume_24h', 0)
+                if vol and vol >= 1_000_000:
+                    valid_coins.append({
+                        "symbol": t['symbol'].upper(),
+                        "vol_24h": vol,
+                        "change_1h": t.get('quotes', {}).get('USD', {}).get('percent_change_1h', 0)
+                    })
+        except Exception as e:
+            print(f"CoinPaprika failed: {e}")
+
+    if not valid_coins:
+        print("❌ Could not fetch any coin data from APIs.")
         return None
 
-    # 1. Filter for >$1M volume
-    valid_coins = []
-    for coin in data:
-        quote = coin.get('quote', {}).get('USD', {})
-        vol_24h = quote.get('volume_24h', 0)
-        change_1h = quote.get('percent_change_1h', 0)
-        
-        if vol_24h and vol_24h >= 1_000_000:
-            valid_coins.append({
-                "symbol": coin['symbol'],
-                "vol_24h": vol_24h,
-                "change_1h": change_1h
-            })
-            
     print(f"📊 Found {len(valid_coins)} coins with >= $1M volume.")
 
-    # 2. Instantly sort to find the Top 10 biggest 1-hour movers (No candles needed!)
+    # Sort by 1-hour change to get top 10 movers
     valid_coins.sort(key=lambda x: abs(x['change_1h']), reverse=True)
     top_10_movers = valid_coins[:10]
 
-    # 3. Filter to ensure they are on Bitget
-    exchange = ccxt.bitget({'options': {'defaultType': 'swap', 'uta': True}})
-    markets = await exchange.load_markets()
-    bitget_bases = set(m['base'] for m in markets.values() if m.get('swap') and m.get('linear') and m.get('quote') == 'USDT')
-    await exchange.close()
-
+    # Filter to Bitget
+    bitget_bases = await get_bitget_tradable_symbols()
     top_bitget_movers = [c for c in top_10_movers if c['symbol'] in bitget_bases]
     
     if not top_bitget_movers:
-        print("❌ None of the top movers are tradable on Bitget.")
+        print("❌ None of the top 10 movers are on Bitget.")
         return None
 
     print(f"🎯 Top 10 movers on Bitget: {[c['symbol'] for c in top_bitget_movers]}")
 
-    # 4. Now we ONLY fetch candles for these Top 10 to calculate the 10-min fingerprint
+    # Fetch candles ONLY for the top 10 to calculate the 10-min fingerprint
     best_winner = None
     highest_score = -1
-    sem = asyncio.Semaphore(5) # Only 10 coins, so 5 concurrent is plenty
+    sem = asyncio.Semaphore(5)
     
     async with aiohttp.ClientSession() as session:
         for coin in top_bitget_movers:
@@ -94,9 +125,9 @@ async def run_market_scan():
                 }
 
     if best_winner:
-        print(f"🔥 THE ABSOLUTE BEST: {best_winner['symbol']} ({best_winner['direction']}) Score: {best_winner['score']:.4f}")
+        print(f"🔥 THE WINNER IS: {best_winner['symbol']} ({best_winner['direction']}) Score: {best_winner['score']:.4f}")
     else:
-        print("❌ No valid winners found among the top 10.")
+        print("❌ No valid candles found for the top movers.")
         
     return best_winner
 
