@@ -69,12 +69,12 @@ async def github_pinger():
             res = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
             if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new scan.")
         except Exception: pass
-        await asyncio.sleep(300)
+        await asyncio.sleep(300) # Ping every 5 minutes
 
 async def ai_reporter(state):
     while True:
         await asyncio.sleep(600)
-        status = f"Holding SHORT on {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for GitHub scanner."
+        status = f"Holding {CURRENT_CANDIDATE['direction']} on {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for GitHub scanner."
         prompt = f"Facts: Win streak {state['streak']}/8. Mode {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. Status: {status}. Last action: {CURRENT_ACTION}. Write exactly 2 sentences."
         log.info("🧠 Generating 10-minute AI summary...")
         ai_summary = await asyncio.to_thread(ask_ai, prompt)
@@ -120,50 +120,39 @@ async def execute_trade(exchange, candidate, state):
     is_live = LIVE_TRADING and state["unlocked"]
     mode = "LIVE" if is_live else "PAPER"
     
-    CURRENT_ACTION = f"Opened SHORT on {sym} at {price}."
-    log.info(f"🚀 [{mode}] Opening SHORT on {sym} | Size: {amount} @ {price}")
+    CURRENT_ACTION = f"Opened {direction} on {sym} at {price}."
+    log.info(f"🚀 [{mode}] Opening {direction} on {sym} | Size: {amount} @ {price}")
 
     if is_live:
-        try: await exchange.create_order(market_sym, "market", "sell", amount, params={'uta': True, 'reduceOnly': 'no'})
+        side = "buy" if direction == "LONG" else "sell"
+        try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception: CURRENT_CANDIDATE = None; return
 
     # MONITOR FOR 10 MINUTES
     start_time = time.time()
-    lowest_price = price # We want the price to go DOWN
     exit_reason = "timeout"
     current = price
-    
-    # Track stagnation
-    last_low_time = time.time()
+    extreme_price = price 
 
     while time.time() - start_time < 600:
         await asyncio.sleep(5)
         try:
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
             current = ticker['last']
-            pnl = (price - current) / price # SHORT math
+            
+            if direction == "LONG":
+                pnl = (current - price) / price
+                extreme_price = max(extreme_price, current)
+                # Exit if it drops 0.5% from the peak
+                if current < extreme_price * 0.995: exit_reason = "reversal"; break
+                if pnl <= -0.015: exit_reason = "stop_loss"; break
+            else:
+                pnl = (price - current) / price
+                extreme_price = min(extreme_price, current)
+                # Exit if it bounces 0.5% from the bottom
+                if current > extreme_price * 1.005: exit_reason = "reversal"; break
+                if pnl <= -0.015: exit_reason = "stop_loss"; break
 
-            # Update lowest price (peak profit)
-            if current < lowest_price:
-                lowest_price = current
-                last_low_time = time.time()
-
-            # 1. Reversal Exit (Moving against us by 0.5% from the low)
-            if current > lowest_price * 1.005:
-                exit_reason = "reversal_against_us"
-                break
-                
-            # 2. Stagnation Exit (Price hasn't made a new low in 3 minutes)
-            if time.time() - last_low_time > 180:
-                exit_reason = "stagnation"
-                break
-
-            # 3. Hard Stop Loss (Up 1.5% from entry)
-            if pnl <= -0.015:
-                exit_reason = "stop_loss"
-                break
-
-            # 4. AI Risk Manager check if bleeding
             if pnl < -0.005 and pnl > -0.015:
                 ai_decision = await asyncio.to_thread(ask_ai_risk_manager, sym, direction, pnl)
                 if "CUT" in ai_decision.upper():
@@ -175,14 +164,15 @@ async def execute_trade(exchange, candidate, state):
 
     # CLOSE TRADE
     final = current
-    gross = (price - final) / price # SHORT math
+    gross = (final - price) / price if direction == "LONG" else (price - final) / price
     net = gross - FEE_ROUND_TRIP
-    CURRENT_ACTION = f"Closed SHORT {sym} ({exit_reason}). Net: {net*100:.2f}%"
+    CURRENT_ACTION = f"Closed {direction} {sym} ({exit_reason}). Net: {net*100:.2f}%"
     log.info(f"📉 [{mode}] {CURRENT_ACTION}")
 
     if is_live:
-        try: await exchange.create_order(market_sym, "market", "buy", amount, params={'uta': True, 'reduceOnly': 'yes'})
-        except Exception: log.critical(f"🚨 [LIVE] FAILED TO CLOSE! Error: {e}")
+        close_side = "sell" if direction == "LONG" else "buy"
+        try: await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
+        except Exception as e: log.critical(f"🚨 [LIVE] FAILED TO CLOSE! Error: {e}")
 
     if net >= GATE_MIN_NET:
         state["streak"] += 1
@@ -218,7 +208,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received candidate: {candidate['symbol']}")
+                log.info(f"🎯 Received candidate: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
