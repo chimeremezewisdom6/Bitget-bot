@@ -60,173 +60,129 @@ def ask_ai(prompt):
     except Exception as e:
         return f"AI failed: {e}"
 
-# ==========================================
-# THE GITHUB PINGER (Forces the scan)
-# ==========================================
 async def github_pinger():
-    """Pings GitHub Actions every 5 minutes to force a scan."""
-    if not GITHUB_TOKEN:
-        log.warning("⚠️ No GITHUB_TOKEN provided. GitHub Pinger is disabled.")
-        return
-        
+    if not GITHUB_TOKEN: return
     url = "https://api.github.com/repos/chimeremezewisdom6/Bitget-bot/actions/workflows/scanner.yml/dispatches"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    payload = {"ref": "main"}
-    
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     while True:
         try:
-            res = requests.post(url, headers=headers, json=payload, timeout=10)
-            if res.status_code == 204:
-                log.info("🔔 Successfully pinged GitHub to run a new scan.")
-            else:
-                log.warning(f"⚠️ GitHub ping failed: {res.status_code} - {res.text}")
-        except Exception as e:
-            log.error(f"⚠️ GitHub Pinger error: {e}")
-            
-        # Wait 5 minutes before pinging again
+            res = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
+            if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new scan.")
+        except Exception: pass
         await asyncio.sleep(300)
 
-# ==========================================
-# THE TRADING ENGINE
-# ==========================================
 async def ai_reporter(state):
     while True:
         await asyncio.sleep(600)
-        status = f"Currently holding {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for the GitHub scanner."
-        prompt = (
-            f"Give a brief report. Facts: Win streak is exactly {state['streak']} out of 8. "
-            f"Live mode is {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. "
-            f"Status: {status} Last action: {CURRENT_ACTION}. "
-            f"Write exactly 2 sentences using ONLY these facts."
-        )
+        status = f"Holding SHORT on {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for GitHub scanner."
+        prompt = f"Facts: Win streak {state['streak']}/8. Mode {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. Status: {status}. Last action: {CURRENT_ACTION}. Write exactly 2 sentences."
         log.info("🧠 Generating 10-minute AI summary...")
         ai_summary = await asyncio.to_thread(ask_ai, prompt)
         log.info(f"\n📊 10-MIN AI REPORT:\n{ai_summary}\n")
 
 def ask_ai_risk_manager(symbol, direction, current_pnl):
-    prompt = (
-        f"I am in a {direction} trade on {symbol}, losing {current_pnl*100:.2f}%. "
-        f"Explain in 1 sentence what is going wrong. End with '[ACTION: CUT]' or '[ACTION: HOLD]'."
-    )
+    prompt = f"I am in a {direction} trade on {symbol}, losing {current_pnl*100:.2f}%. Explain in 1 sentence what is going wrong. End with '[ACTION: CUT]' or '[ACTION: HOLD]'."
     return ask_ai(prompt)
 
 async def check_for_candidate():
     try:
-        url = "https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json"
-        res = requests.get(url, timeout=10)
+        res = requests.get("https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json", timeout=10)
         data = res.json()
-        if "symbol" in data: return data
-        return None
-    except Exception:
-        return None
+        return data if "symbol" in data else None
+    except Exception: return None
 
 async def execute_trade(exchange, candidate, state):
     global CURRENT_CANDIDATE, CURRENT_ACTION
     CURRENT_CANDIDATE = candidate
-    sym = candidate['symbol']
-    direction = candidate['direction']
+    sym, direction = candidate['symbol'], candidate['direction']
     market_sym = f"{sym}/USDT:USDT"
 
     market = exchange.market(market_sym)
-    if not market:
-        CURRENT_CANDIDATE = None
-        return
+    if not market: CURRENT_CANDIDATE = None; return
 
     try:
         balance = await exchange.fetch_balance(params={'uta': True})
         usdt_free = balance['USDT']['free']
         ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
         price = ticker['last']
-    except Exception as e:
-        log.error(f"❌ Failed to fetch balance/price: {e}")
-        CURRENT_CANDIDATE = None
-        return
+    except Exception: CURRENT_CANDIDATE = None; return
 
     min_amt = market['limits']['amount']['min']
-    min_notional = min_amt * price
-    required_leverage = math.ceil(min_notional / (usdt_free * 0.90)) if usdt_free > 0 else 999
+    required_leverage = math.ceil((min_amt * price) / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
     if required_leverage > MAX_LEVERAGE:
-        log.info(f"❌ Balance ${usdt_free:.2f} too small for {sym} (requires {required_leverage}x). Skipping.")
-        CURRENT_CANDIDATE = None
-        return
+        log.info(f"❌ Balance too small for {sym} (requires {required_leverage}x). Skipping.")
+        CURRENT_CANDIDATE = None; return
 
-    try:
-        await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
-    except Exception as e:
-        log.error(f"❌ Failed to set leverage: {e}")
-        CURRENT_CANDIDATE = None
-        return
-
-    side = "buy" if direction == "LONG" else "sell"
-    amount = (usdt_free * 0.90 * required_leverage) / price
-    amount = float(exchange.amount_to_precision(market_sym, amount))
-
+    await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
+    
+    amount = float(exchange.amount_to_precision(market_sym, (usdt_free * 0.90 * required_leverage) / price))
     is_live = LIVE_TRADING and state["unlocked"]
     mode = "LIVE" if is_live else "PAPER"
-    CURRENT_ACTION = f"Opened {direction} {sym} at {price}."
-    log.info(f"🚀 [{mode}] Opening {direction} on {sym} | Size: {amount} @ {price}")
+    
+    CURRENT_ACTION = f"Opened SHORT on {sym} at {price}."
+    log.info(f"🚀 [{mode}] Opening SHORT on {sym} | Size: {amount} @ {price}")
 
     if is_live:
-        try:
-            await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
-        except Exception as e:
-            log.error(f"❌ [LIVE] Failed to open order: {e}")
-            CURRENT_CANDIDATE = None
-            return
+        try: await exchange.create_order(market_sym, "market", "sell", amount, params={'uta': True, 'reduceOnly': 'no'})
+        except Exception: CURRENT_CANDIDATE = None; return
 
-    # HOLD FOR EXACTLY 10 MINUTES MAX
+    # MONITOR FOR 10 MINUTES
     start_time = time.time()
-    peak = price
+    lowest_price = price # We want the price to go DOWN
     exit_reason = "timeout"
     current = price
+    
+    # Track stagnation
+    last_low_time = time.time()
 
     while time.time() - start_time < 600:
         await asyncio.sleep(5)
         try:
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
             current = ticker['last']
-            pnl = (current - price) / price if direction == "LONG" else (price - current) / price
+            pnl = (price - current) / price # SHORT math
 
-            if direction == "LONG":
-                peak = max(peak, current)
-                if pnl < -0.005 and pnl > -0.015:
-                    ai_decision = await asyncio.to_thread(ask_ai_risk_manager, sym, direction, pnl)
-                    if "CUT" in ai_decision.upper():
-                        log.info(f"\n🤖 AI RISK MANAGER:\n{ai_decision}\n")
-                        exit_reason = "ai_cut"
-                        break
-                if current < peak * 0.995: exit_reason = "fade"; break
-                if pnl <= -0.015: exit_reason = "stop_loss"; break
-            else:
-                peak = min(peak, current)
-                if pnl < -0.005 and pnl > -0.015:
-                    ai_decision = await asyncio.to_thread(ask_ai_risk_manager, sym, direction, pnl)
-                    if "CUT" in ai_decision.upper():
-                        log.info(f"\n🤖 AI RISK MANAGER:\n{ai_decision}\n")
-                        exit_reason = "ai_cut"
-                        break
-                if current > peak * 1.005: exit_reason = "fade"; break
-                if pnl <= -0.015: exit_reason = "stop_loss"; break
-        except Exception as e:
-            log.error(f"Monitoring error: {e}")
+            # Update lowest price (peak profit)
+            if current < lowest_price:
+                lowest_price = current
+                last_low_time = time.time()
 
+            # 1. Reversal Exit (Moving against us by 0.5% from the low)
+            if current > lowest_price * 1.005:
+                exit_reason = "reversal_against_us"
+                break
+                
+            # 2. Stagnation Exit (Price hasn't made a new low in 3 minutes)
+            if time.time() - last_low_time > 180:
+                exit_reason = "stagnation"
+                break
+
+            # 3. Hard Stop Loss (Up 1.5% from entry)
+            if pnl <= -0.015:
+                exit_reason = "stop_loss"
+                break
+
+            # 4. AI Risk Manager check if bleeding
+            if pnl < -0.005 and pnl > -0.015:
+                ai_decision = await asyncio.to_thread(ask_ai_risk_manager, sym, direction, pnl)
+                if "CUT" in ai_decision.upper():
+                    log.info(f"\n🤖 AI RISK MANAGER:\n{ai_decision}\n")
+                    exit_reason = "ai_cut"
+                    break
+                    
+        except Exception: pass
+
+    # CLOSE TRADE
     final = current
-    gross = (final - price) / price if direction == "LONG" else (price - final) / price
+    gross = (price - final) / price # SHORT math
     net = gross - FEE_ROUND_TRIP
-    CURRENT_ACTION = f"Closed {direction} {sym} ({exit_reason}). Net: {net*100:.2f}%"
+    CURRENT_ACTION = f"Closed SHORT {sym} ({exit_reason}). Net: {net*100:.2f}%"
     log.info(f"📉 [{mode}] {CURRENT_ACTION}")
 
     if is_live:
-        close_side = "sell" if direction == "LONG" else "buy"
-        try:
-            await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
-        except Exception as e:
-            log.critical(f"🚨 [LIVE] FAILED TO CLOSE POSITION! CLOSE MANUALLY! Error: {e}")
+        try: await exchange.create_order(market_sym, "market", "buy", amount, params={'uta': True, 'reduceOnly': 'yes'})
+        except Exception: log.critical(f"🚨 [LIVE] FAILED TO CLOSE! Error: {e}")
 
     if net >= GATE_MIN_NET:
         state["streak"] += 1
@@ -246,47 +202,29 @@ async def main_loop():
     state = load_state()
     log.info(f"Executor starting | Mode: {'LIVE' if LIVE_TRADING and state['unlocked'] else 'PAPER'} | Streak: {state['streak']}/8")
     
-    exchange = ccxtpro.bitget({
-        'apiKey': BITGET_API_KEY,
-        'secret': BITGET_SECRET,
-        'password': BITGET_PASSPHRASE,
-        'enableRateLimit': True,
-        'options': {'defaultType': 'swap', 'uta': True}
-    })
+    exchange = ccxtpro.bitget({'apiKey': BITGET_API_KEY, 'secret': BITGET_SECRET, 'password': BITGET_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'swap', 'uta': True}})
     
     try:
         log.info("📥 Loading Bitget markets...")
         await exchange.load_markets()
-        log.info(f"✅ Loaded {len(exchange.markets)} markets from Bitget.")
-    except Exception as e:
-        log.error(f"❌ Failed to load Bitget markets: {e}")
-        return
+        log.info(f"✅ Loaded {len(exchange.markets)} markets.")
+    except Exception: return
 
-    # Start the GitHub Pinger in the background
     asyncio.create_task(github_pinger())
-    # Start the AI Reporter in the background
     asyncio.create_task(ai_reporter(state))
 
-    last_traded_symbol = None
-
+    last_traded = None
     while True:
         try:
             candidate = await check_for_candidate()
-            
-            # If there is a candidate AND we aren't holding it right now
-            if candidate and candidate['symbol'] != last_traded_symbol:
-                log.info(f"🎯 Received new candidate from GitHub: {candidate['symbol']}")
-                last_traded_symbol = candidate['symbol']
+            if candidate and candidate['symbol'] != last_traded:
+                log.info(f"🎯 Received candidate: {candidate['symbol']}")
+                last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
                 await asyncio.sleep(30)
-        except Exception as e:
-            log.error(f"Executor loop error: {e}")
-            await asyncio.sleep(10)
-
-async def main():
-    threading.Thread(target=run_keepalive, daemon=True).start()
-    await main_loop()
+        except Exception: await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    threading.Thread(target=run_keepalive, daemon=True).start()
+    asyncio.run(main_loop())
