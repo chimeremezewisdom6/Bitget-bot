@@ -3,7 +3,10 @@ import json
 import os
 import asyncio
 import aiohttp
+import time
 import ccxt.async_support as ccxt_async
+
+MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
 
 # THE DAVID RULES
 MIN_PRICE_MOVE = 0.22
@@ -23,36 +26,53 @@ async def fetch_okx_candles(session, sem, sym):
         except Exception:
             return None
 
-async def get_bitget_full_universe():
-    """Fetches ALL Bitget markets via CCXT and filters for >$1M volume."""
+async def get_bitget_tradable_symbols():
     exchange = ccxt_async.bitget({'options': {'defaultType': 'swap', 'uta': True}})
     try:
-        print("📥 Loading all Bitget markets via CCXT...")
         markets = await exchange.load_markets()
-        
-        print("📊 Fetching all tickers from Bitget...")
-        tickers = await exchange.fetch_tickers()
-        
-        valid_coins = []
-        for sym, ticker in tickers.items():
-            # Only USDT perpetuals
-            if not sym.endswith("USDT"): continue
-            market = markets.get(sym)
-            if not market or not market.get('swap') or not market.get('linear'): continue
-            
-            # Volume filter: >$1M 24h quote volume
-            vol = ticker.get('quoteVolume', 0) or 0
-            if vol >= 1_000_000:
-                base = sym.split("/")[0]
-                valid_coins.append(base)
-                
-        print(f"✅ Found {len(valid_coins)} Bitget coins with >$1M volume.")
-        return list(set(valid_coins)) # Remove duplicates
-    except Exception as e:
-        print(f"❌ Bitget CCXT failed: {e}")
-        return []
+        return set(m['base'] for m in markets.values() if m.get('active') and m.get('swap') and m.get('linear') and m.get('quote') == 'USDT')
+    except Exception:
+        return set()
     finally:
         await exchange.close()
+
+async def get_global_universe():
+    """Fetches ALL coins from CoinLore and filters for >$1M global 24h volume."""
+    print("🌐 Fetching full global universe from CoinLore (14,000+ coins)...")
+    all_coins = []
+    start = 0
+    limit = 100
+    
+    try:
+        while True:
+            url = f"https://api.coinlore.net/api/tickers/?start={start}&limit={limit}"
+            res = requests.get(url, timeout=15)
+            data = res.json().get('data', [])
+            
+            if not data:
+                break
+                
+            for coin in data:
+                sym = coin.get('symbol', '').upper()
+                vol = coin.get('volume24', 0) or 0
+                
+                # Filter: Global 24h volume >= $1M
+                if vol >= 1_000_000 and sym not in MEGA_COINS:
+                    all_coins.append(sym)
+                    
+            start += limit
+            time.sleep(1) # CoinLore recommends ~1 req/sec
+            
+            # Safety break to avoid infinite loops
+            if start > 20000:
+                break
+                
+    except Exception as e:
+        print(f"CoinLore failed: {e}")
+        return []
+        
+    print(f"✅ Found {len(set(all_coins))} global coins with >$1M 24h volume.")
+    return list(set(all_coins))
 
 async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
     best_in_chunk = None
@@ -109,14 +129,23 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
     return best_in_chunk
 
 async def run_market_scan():
-    # Use CCXT to get the full Bitget universe
-    final_symbols = await get_bitget_full_universe()
-    
-    if not final_symbols: 
-        print("❌ No tradable coins found.")
+    # 1. Get global universe (>$1M volume across all exchanges)
+    global_coins = await get_global_universe()
+    if not global_coins:
+        print("❌ No global coins found.")
         return None
 
-    # DIVIDE INTO 100 BOTS
+    # 2. Get Bitget tradable symbols
+    bitget_bases = await get_bitget_tradable_symbols()
+    print(f"🏦 Bitget lists {len(bitget_bases)} tradable USDT perpetuals.")
+
+    # 3. Intersect: Coins that are BOTH globally >$1M AND on Bitget
+    final_symbols = list(set([c for c in global_coins if c in bitget_bases]))
+    print(f"📊 Intersection: {len(final_symbols)} coins are >$1M globally AND tradable on Bitget.")
+
+    if not final_symbols: return None
+
+    # 4. Divide into 100 bots
     chunk_size = max(1, len(final_symbols) // 100)
     chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
     print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for DAVID setups.")
