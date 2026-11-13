@@ -5,21 +5,19 @@ import asyncio
 import aiohttp
 import ccxt.async_support as ccxt_async
 
-# Skip the top 20 coins by market cap (BTC, ETH, etc.) and stablecoins
 MEGA_COINS = {
     'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 
-    'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC', 
-    'ICP', 'UNI', 'DAI', 'LEO', 'APT'
+    'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'
 }
 
 async def fetch_okx_candles(session, sem, sym):
     async with sem:
         try:
-            url = f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1m&limit=60"
+            url = f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1m&limit=15"
             async with session.get(url) as resp:
                 if resp.status != 200: return None
                 data = (await resp.json()).get('data', [])
-                if len(data) < 60: return None
+                if len(data) < 12: return None
                 data.reverse()
                 return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
         except Exception:
@@ -29,125 +27,89 @@ async def get_bitget_tradable_symbols():
     exchange = ccxt_async.bitget({'options': {'defaultType': 'swap', 'uta': True}})
     try:
         markets = await exchange.load_markets()
-        tradable = set()
-        for sym, m in markets.items():
-            if m.get('active') and m.get('swap') and m.get('linear') and m.get('quote') == 'USDT':
-                tradable.add(m['base'])
-        return tradable
-    except Exception as e:
-        print(f"Failed to load Bitget markets: {e}")
+        return set(m['base'] for m in markets.values() if m.get('active') and m.get('swap') and m.get('linear') and m.get('quote') == 'USDT')
+    except Exception:
         return set()
     finally:
         await exchange.close()
 
 async def run_market_scan():
-    print("🌐 Fetching global 24h volume (CoinGecko)...")
+    print("🌐 Fetching global volume (CoinGecko)...")
     valid_coins = []
     
     try:
-        for page in range(1, 5): 
+        for page in range(1, 4): 
             url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}"
             res = requests.get(url, timeout=15)
             if res.status_code != 200: break
-            
-            data = res.json()
-            if not data: break
-            
-            for coin in data:
+            for coin in res.json():
                 sym = coin['symbol'].upper()
-                vol = coin.get('total_volume', 0)
-                price = coin.get('current_price', 0)
-                
-                # Skip Mega Coins
-                if sym in MEGA_COINS:
-                    continue
-                    
-                # Skip coins with price > $10 (your $1.58 balance can't afford them)
-                if price > 10.0:
-                    continue
-
-                if vol and vol >= 1_000_000:
-                    valid_coins.append({
-                        "symbol": sym,
-                        "vol_24h": vol,
-                        "change_1h": coin.get('price_change_percentage_1h_in_currency', 0) or 0
-                    })
+                if sym in MEGA_COINS or coin.get('current_price', 0) > 10.0: continue
+                if coin.get('total_volume', 0) >= 1_000_000:
+                    valid_coins.append(sym)
     except Exception as e:
         print(f"CoinGecko failed: {e}")
-
-    if not valid_coins:
-        print("❌ Could not fetch any coin data.")
         return None
 
-    print(f"📊 Found {len(valid_coins)} small/medium coins with >= $1M volume.")
-
-    # Sort by 1-hour change to get top 10 movers
-    valid_coins.sort(key=lambda x: abs(x['change_1h']), reverse=True)
-    top_10_movers = valid_coins[:10]
-
-    # Filter to Bitget
     bitget_bases = await get_bitget_tradable_symbols()
-    top_bitget_movers = [c for c in top_10_movers if c['symbol'] in bitget_bases]
+    tradable_coins = list(set([c for c in valid_coins if c in bitget_bases]))[:50] # Check top 50
     
-    if not top_bitget_movers:
-        print("❌ None of the top 10 movers are on Bitget.")
-        return None
+    print(f"🔎 Analyzing {len(tradable_coins)} tradable coins for aggressive dumps...")
 
-    print(f"🎯 Top 10 movers on Bitget: {[c['symbol'] for c in top_bitget_movers]}")
-
-    best_winner = None
+    best_dump = None
     highest_score = -1
     sem = asyncio.Semaphore(5)
     
     async with aiohttp.ClientSession() as session:
-        for coin in top_bitget_movers:
-            candles = await fetch_okx_candles(session, sem, coin['symbol'])
+        for sym in tradable_coins:
+            candles = await fetch_okx_candles(session, sem, sym)
             if not candles: continue
             
-            last_10 = candles[-11:-1] # Get exactly the last 10 completed minutes
+            last_10 = candles[-10:]
             
-            # 1. Calculate Average Fluctuation per minute (High - Low) / Low * 100
-            fluctuations = [((c[2] - c[3]) / c[3]) * 100 for c in last_10]
-            avg_fluctuation = sum(fluctuations) / len(fluctuations)
+            # 1. Calculate Volume & Red Candle Dominance
+            total_vol = sum(c[5] for c in last_10)
+            red_vol = sum(c[5] for c in last_10 if c[4] < c[1]) # Close < Open
             
-            # REQUIREMENT: Average fluctuation must be >= 0.1%
-            if avg_fluctuation < 0.1:
-                print(f"   ❌ {coin['symbol']} skipped: Average fluctuation {avg_fluctuation:.3f}% is below 0.1%")
-                continue
-
-            # 2. Calculate the Fingerprint Score
+            if total_vol == 0 or (red_vol / total_vol) < 0.6:
+                continue # Skip if sellers don't dominate volume
+                
+            # 2. Calculate Drop & Ensure it's NOT going up
             start_price = last_10[0][1]
             end_price = last_10[-1][4]
             
-            total_move_pct = abs((end_price - start_price) / start_price) * 100
-            total_distance = sum(abs(last_10[i][4] - last_10[i-1][4]) for i in range(1, len(last_10)))
+            if end_price >= start_price:
+                continue # Exclude Longs! Must be dumping.
+                
+            drop_pct = ((start_price - end_price) / start_price) * 100
             
-            if total_distance == 0: continue
-            efficiency = abs(end_price - start_price) / total_distance
-            score = total_move_pct * efficiency
-
-            print(f"   ✅ {coin['symbol']} passed! Fluct: {avg_fluctuation:.3f}% | Move: {total_move_pct:.2f}% | Score: {score:.2f}")
+            # 3. Check Volatility (Average fluctuation > 0.1%)
+            fluctuations = [((c[2] - c[3]) / c[3]) * 100 for c in last_10]
+            if (sum(fluctuations) / len(fluctuations)) < 0.1:
+                continue
+                
+            # 4. Calculate Dump Efficiency (How straight is the dump?)
+            total_distance = sum(abs(last_10[i][4] - last_10[i-1][4]) for i in range(1, len(last_10)))
+            net_distance = start_price - end_price
+            efficiency = net_distance / total_distance if total_distance > 0 else 0
+            
+            # Final Score: Big drop, straight line, heavy red volume
+            score = drop_pct * efficiency * (red_vol / total_vol)
 
             if score > highest_score:
                 highest_score = score
-                best_winner = {
-                    "symbol": coin['symbol'],
-                    "direction": "LONG" if end_price > start_price else "SHORT",
-                    "score": score,
-                    "fluctuation": avg_fluctuation
-                }
+                best_dump = {"symbol": sym, "direction": "SHORT", "score": score}
+                print(f"🩸 Found strong dump: {sym} | Drop: {drop_pct:.2f}% | Score: {score:.2f}")
 
-    if best_winner:
-        print(f"🔥 THE WINNER IS: {best_winner['symbol']} ({best_winner['direction']}) Score: {best_winner['score']:.4f}")
+    if best_dump:
+        print(f"🔥 THE STRONGEST DUMP IS: {best_dump['symbol']} (Score: {best_dump['score']:.4f})")
     else:
-        print("❌ No valid winners found (all top movers failed the 0.1% fluctuation test).")
+        print("❌ No valid dumps found.")
         
-    return best_winner
+    return best_dump
 
 if __name__ == "__main__":
     best_coin = asyncio.run(run_market_scan())
     with open("candidate.json", "w") as f:
-        if best_coin:
-            json.dump({"symbol": best_coin['symbol'], "direction": best_coin['direction'], "score": best_coin['score']}, f, indent=2)
-        else:
-            json.dump({}, f)
+        if best_coin: json.dump({"symbol": best_coin['symbol'], "direction": best_coin['direction'], "score": best_coin['score']}, f, indent=2)
+        else: json.dump({}, f)
