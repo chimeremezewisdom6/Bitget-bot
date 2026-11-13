@@ -18,6 +18,7 @@ BITGET_SECRET = os.environ.get("BITGET_SECRET", "")
 BITGET_PASSPHRASE = os.environ.get("BITGET_PASSPHRASE", "")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "NO") == "YES"
 POLLINATIONS_KEY = os.environ.get("POLLINATIONS_API_KEY", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 FEE_ROUND_TRIP = 0.0012
 GATE_WINS_REQUIRED = 8
@@ -26,7 +27,7 @@ STATE_FILE = "state.json"
 MAX_LEVERAGE = 5 
 
 CURRENT_CANDIDATE = None
-CURRENT_ACTION = "Waiting for the GitHub scanner to find the best fingerprint..."
+CURRENT_ACTION = "Waiting for the GitHub scanner..."
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -54,23 +55,53 @@ def save_state(state):
 def ask_ai(prompt):
     if not POLLINATIONS_KEY: return "AI key missing."
     try:
-        # FIXED: Added token parameter to bypass rate limits
         url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai&token={POLLINATIONS_KEY}"
         return requests.get(url, timeout=15).text.strip()
     except Exception as e:
         return f"AI failed: {e}"
 
+# ==========================================
+# THE GITHUB PINGER (Forces the scan)
+# ==========================================
+async def github_pinger():
+    """Pings GitHub Actions every 5 minutes to force a scan."""
+    if not GITHUB_TOKEN:
+        log.warning("⚠️ No GITHUB_TOKEN provided. GitHub Pinger is disabled.")
+        return
+        
+    url = "https://api.github.com/repos/chimeremezewisdom6/Bitget-bot/actions/workflows/scanner.yml/dispatches"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    payload = {"ref": "main"}
+    
+    while True:
+        try:
+            res = requests.post(url, headers=headers, json=payload, timeout=10)
+            if res.status_code == 204:
+                log.info("🔔 Successfully pinged GitHub to run a new scan.")
+            else:
+                log.warning(f"⚠️ GitHub ping failed: {res.status_code} - {res.text}")
+        except Exception as e:
+            log.error(f"⚠️ GitHub Pinger error: {e}")
+            
+        # Wait 5 minutes before pinging again
+        await asyncio.sleep(300)
+
+# ==========================================
+# THE TRADING ENGINE
+# ==========================================
 async def ai_reporter(state):
     while True:
         await asyncio.sleep(600)
         status = f"Currently holding {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for the GitHub scanner."
-        
-        # FIXED: Made the prompt strict to stop the AI from hallucinating
         prompt = (
             f"Give a brief report. Facts: Win streak is exactly {state['streak']} out of 8. "
             f"Live mode is {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. "
             f"Status: {status} Last action: {CURRENT_ACTION}. "
-            f"Write exactly 2 sentences using ONLY these facts. Do not invent any numbers."
+            f"Write exactly 2 sentences using ONLY these facts."
         )
         log.info("🧠 Generating 10-minute AI summary...")
         ai_summary = await asyncio.to_thread(ask_ai, prompt)
@@ -102,7 +133,6 @@ async def execute_trade(exchange, candidate, state):
 
     market = exchange.market(market_sym)
     if not market:
-        log.info(f"❌ {sym} not found on Bitget execution markets. Skipping.")
         CURRENT_CANDIDATE = None
         return
 
@@ -112,7 +142,7 @@ async def execute_trade(exchange, candidate, state):
         ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
         price = ticker['last']
     except Exception as e:
-        log.error(f"❌ Failed to fetch UTA balance/price: {e}")
+        log.error(f"❌ Failed to fetch balance/price: {e}")
         CURRENT_CANDIDATE = None
         return
 
@@ -121,13 +151,12 @@ async def execute_trade(exchange, candidate, state):
     required_leverage = math.ceil(min_notional / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
     if required_leverage > MAX_LEVERAGE:
-        log.info(f"❌ Balance ${usdt_free:.2f} too small for {sym} (min notional ${min_notional:.2f}, requires {required_leverage}x leverage). Max allowed is {MAX_LEVERAGE}x. Skipping.")
+        log.info(f"❌ Balance ${usdt_free:.2f} too small for {sym} (requires {required_leverage}x). Skipping.")
         CURRENT_CANDIDATE = None
         return
 
     try:
         await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
-        log.info(f"⚙️ Leverage set to {required_leverage}x for {sym}.")
     except Exception as e:
         log.error(f"❌ Failed to set leverage: {e}")
         CURRENT_CANDIDATE = None
@@ -136,11 +165,6 @@ async def execute_trade(exchange, candidate, state):
     side = "buy" if direction == "LONG" else "sell"
     amount = (usdt_free * 0.90 * required_leverage) / price
     amount = float(exchange.amount_to_precision(market_sym, amount))
-
-    if amount < min_amt:
-        log.info(f"❌ Calculated amount {amount} below minimum {min_amt}. Skipping.")
-        CURRENT_CANDIDATE = None
-        return
 
     is_live = LIVE_TRADING and state["unlocked"]
     mode = "LIVE" if is_live else "PAPER"
@@ -155,6 +179,7 @@ async def execute_trade(exchange, candidate, state):
             CURRENT_CANDIDATE = None
             return
 
+    # HOLD FOR EXACTLY 10 MINUTES MAX
     start_time = time.time()
     peak = price
     exit_reason = "timeout"
@@ -200,7 +225,6 @@ async def execute_trade(exchange, candidate, state):
         close_side = "sell" if direction == "LONG" else "buy"
         try:
             await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
-            log.info(f"✅ [LIVE] Position closed safely.")
         except Exception as e:
             log.critical(f"🚨 [LIVE] FAILED TO CLOSE POSITION! CLOSE MANUALLY! Error: {e}")
 
@@ -238,13 +262,21 @@ async def main_loop():
         log.error(f"❌ Failed to load Bitget markets: {e}")
         return
 
-    last_candidate = None
+    # Start the GitHub Pinger in the background
+    asyncio.create_task(github_pinger())
+    # Start the AI Reporter in the background
+    asyncio.create_task(ai_reporter(state))
+
+    last_traded_symbol = None
+
     while True:
         try:
             candidate = await check_for_candidate()
-            if candidate and candidate != last_candidate:
-                log.info(f"🎯 Received candidate from GitHub: {candidate['symbol']}")
-                last_candidate = candidate
+            
+            # If there is a candidate AND we aren't holding it right now
+            if candidate and candidate['symbol'] != last_traded_symbol:
+                log.info(f"🎯 Received new candidate from GitHub: {candidate['symbol']}")
+                last_traded_symbol = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
                 await asyncio.sleep(30)
@@ -254,7 +286,7 @@ async def main_loop():
 
 async def main():
     threading.Thread(target=run_keepalive, daemon=True).start()
-    await asyncio.gather(main_loop(), ai_reporter(load_state()))
+    await main_loop()
 
 if __name__ == "__main__":
     asyncio.run(main())
