@@ -24,7 +24,7 @@ GATE_MIN_NET = 0.0042
 STATE_FILE = "state.json"
 
 CURRENT_CANDIDATE = None
-CURRENT_ACTION = "Waiting for the 50 bots to vote on the best price fingerprint..."
+CURRENT_ACTION = "Waiting for the 50 bots to vote..."
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -62,9 +62,10 @@ async def ai_reporter(state):
         await asyncio.sleep(600)
         status = f"Currently holding {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for a new vote consensus."
         prompt = (
-            f"You are my trading AI. 10-minute report: Win streak {state['streak']}/8. "
-            f"Live mode: {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. "
-            f"Status: {status}. Last action: {CURRENT_ACTION}. Give a 2-sentence professional summary."
+            f"You are my trading AI. Give me a brief 10-minute update. "
+            f"Win streak: {state['streak']} out of 8. Live mode: {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. "
+            f"Status: {status}. Last action: {CURRENT_ACTION}. "
+            f"Write exactly 2 sentences. Do not invent numbers."
         )
         log.info("🧠 Generating AI summary...")
         ai_summary = await asyncio.to_thread(ask_ai, prompt)
@@ -82,9 +83,14 @@ async def check_for_candidate():
         url = "https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json"
         res = requests.get(url, timeout=10)
         data = res.json()
+        
+        # DEBUG PRINT: Shows exactly what Render sees in candidate.json
+        print(f"🔍 GitHub Sync: Received data: {data}")
+        
         if "symbol" in data: return data
         return None
-    except Exception:
+    except Exception as e:
+        print(f"🔍 GitHub Sync Error: {e}")
         return None
 
 async def execute_trade(exchange, candidate, state):
@@ -107,7 +113,7 @@ async def execute_trade(exchange, candidate, state):
     peak_px = entry_px
     exit_reason = "timeout"
     
-    while time.time() - start_time < 600: # Hold for 10 minutes
+    while time.time() - start_time < 600:
         await asyncio.sleep(5)
         try:
             ticker = await exchange.fetch_ticker(f"{sym}/USDT:USDT")
