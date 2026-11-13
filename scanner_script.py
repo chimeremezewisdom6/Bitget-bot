@@ -7,6 +7,11 @@ import ccxt.async_support as ccxt_async
 
 MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
 
+# THE GOLDEN STANDARD (Based on ZRO)
+TARGET_MOVE = 0.73    # 0.73% price move
+TARGET_DOMINANCE = 0.608 # 60.8% volume dominance
+MIN_SIMILARITY = 0.90 # Must be at least 90% similar to the target
+
 async def fetch_okx_candles(session, sem, sym):
     async with sem:
         try:
@@ -31,9 +36,8 @@ async def get_bitget_tradable_symbols():
         await exchange.close()
 
 async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
-    """Each bot analyzes its coins and finds the one with the weakest side."""
     best_in_chunk = None
-    highest_weakness = -1
+    highest_score = -1
 
     for sym in symbols_chunk:
         candles = await fetch_okx_candles(session, sem, sym)
@@ -42,8 +46,8 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         last_10 = candles[-10:]
         
         # 1. Calculate Volume Dominance
-        green_vol = sum(c[5] for c in last_10 if c[4] > c[1]) # Close > Open
-        red_vol = sum(c[5] for c in last_10 if c[4] < c[1])   # Close < Open
+        green_vol = sum(c[5] for c in last_10 if c[4] > c[1])
+        red_vol = sum(c[5] for c in last_10 if c[4] < c[1])
         total_vol = green_vol + red_vol
         
         if total_vol == 0: continue
@@ -51,35 +55,46 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         red_dominance = red_vol / total_vol
         green_dominance = green_vol / total_vol
         
-        # 2. Calculate Price Change (Last 10 mins)
+        # 2. Calculate Price Change
         open_price = last_10[0][1]
         close_price = last_10[-1][4]
         price_change_pct = ((close_price - open_price) / open_price) * 100
         
         direction = None
-        weakness_score = 0
+        similarity_score = 0
+        score = 0
         
-        # Scenario A: Weak Buy Side (Price dropping, Red volume dominating)
-        # If red dominance is >60% and price is down, the buy side is collapsing.
-        if price_change_pct < -0.5 and red_dominance > 0.60:
-            direction = "SHORT"
-            # The higher the red dominance and the steeper the drop, the weaker the buy side.
-            weakness_score = abs(price_change_pct) * red_dominance 
+        # --- LONG SETUP (Weak Sell Side) ---
+        if price_change_pct > 0:
+            # Calculate similarity to Target (how close are we to 0.73% and 60.8%?)
+            # We cap it at 1.0 so a 2% move isn't penalized for being "too good"
+            move_sim = min(price_change_pct / TARGET_MOVE, 1.0)
+            dom_sim = min(green_dominance / TARGET_DOMINANCE, 1.0)
+            similarity_score = (move_sim + dom_sim) / 2
             
-        # Scenario B: Weak Sell Side (Price pumping, Green volume dominating)
-        # If green dominance is >60% and price is up, the sell side is collapsing.
-        elif price_change_pct > 0.5 and green_dominance > 0.60:
-            direction = "LONG"
-            weakness_score = abs(price_change_pct) * green_dominance
+            if similarity_score >= MIN_SIMILARITY:
+                direction = "LONG"
+                score = similarity_score
+                
+        # --- SHORT SETUP (Weak Buy Side) ---
+        elif price_change_pct < 0:
+            move_sim = min(abs(price_change_pct) / TARGET_MOVE, 1.0)
+            dom_sim = min(red_dominance / TARGET_DOMINANCE, 1.0)
+            similarity_score = (move_sim + dom_sim) / 2
+            
+            if similarity_score >= MIN_SIMILARITY:
+                direction = "SHORT"
+                score = similarity_score
 
-        if direction and weakness_score > highest_weakness:
-            highest_weakness = weakness_score
+        if direction and score > highest_score:
+            highest_score = score
             best_in_chunk = {
                 "symbol": sym, 
                 "direction": direction, 
-                "score": weakness_score,
-                "price_change": price_change_pct,
-                "dominance": red_dominance if direction == "SHORT" else green_dominance
+                "score": score,
+                "move": price_change_pct,
+                "dominance": green_dominance if direction == "LONG" else red_dominance,
+                "similarity": similarity_score
             }
 
     return best_in_chunk
@@ -88,7 +103,6 @@ async def run_market_scan():
     print("🌐 Fetching Top 1000 coins (CoinGecko)...")
     valid_coins = []
     
-    # Using CoinGecko to avoid CMC API blocks
     try:
         for page in range(1, 5): 
             url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}"
@@ -113,7 +127,7 @@ async def run_market_scan():
     # DIVIDE INTO 100 BOTS
     chunk_size = max(1, len(final_symbols) // 100)
     chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
-    print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for the weakest side.")
+    print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for 90%+ matches.")
 
     sem = asyncio.Semaphore(30)
     async with aiohttp.ClientSession() as session:
@@ -123,16 +137,16 @@ async def run_market_scan():
     valid_winners = [w for w in winners if w is not None]
     
     if not valid_winners:
-        print("❌ No weak sides found. The market is balanced.")
+        print("❌ No coins met the 90% similarity threshold. No trade.")
         return None
 
-    print(f"🏆 Gathered {len(valid_winners)} weak sides. The bots are voting...")
+    print(f"🏆 Gathered {len(valid_winners)} 90%+ matches. The bots are voting...")
 
     valid_winners.sort(key=lambda x: x['score'], reverse=True)
     best = valid_winners[0]
     
-    print(f"🔥 THE WEAKEST SIDE IS: {best['symbol']} ({best['direction']})")
-    print(f"   Price Move: {best['price_change']:.2f}% | Volume Dominance: {best['dominance']*100:.1f}%")
+    print(f"🔥 THE WINNER IS: {best['symbol']} ({best['direction']})")
+    print(f"   Move: {best['move']:.2f}% | Dominance: {best['dominance']*100:.1f}% | Similarity: {best['similarity']*100:.1f}%")
     return best
 
 if __name__ == "__main__":
