@@ -67,9 +67,9 @@ async def github_pinger():
     while True:
         try:
             res = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
-            if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new scan.")
+            if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new 100-bot scan.")
         except Exception: pass
-        await asyncio.sleep(300) # Ping every 5 minutes
+        await asyncio.sleep(600) # Ping every 10 minutes as requested
 
 async def ai_reporter(state):
     while True:
@@ -128,11 +128,10 @@ async def execute_trade(exchange, candidate, state):
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception: CURRENT_CANDIDATE = None; return
 
-    # MONITOR FOR 10 MINUTES
+    # MONITOR FOR EXACTLY 10 MINUTES (600 SECONDS)
     start_time = time.time()
-    exit_reason = "timeout"
+    exit_reason = "timeout_10min"
     current = price
-    extreme_price = price 
 
     while time.time() - start_time < 600:
         await asyncio.sleep(5)
@@ -140,26 +139,13 @@ async def execute_trade(exchange, candidate, state):
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
             current = ticker['last']
             
-            if direction == "LONG":
-                pnl = (current - price) / price
-                extreme_price = max(extreme_price, current)
-                # Exit if it drops 0.5% from the peak
-                if current < extreme_price * 0.995: exit_reason = "reversal"; break
-                if pnl <= -0.015: exit_reason = "stop_loss"; break
-            else:
-                pnl = (price - current) / price
-                extreme_price = min(extreme_price, current)
-                # Exit if it bounces 0.5% from the bottom
-                if current > extreme_price * 1.005: exit_reason = "reversal"; break
-                if pnl <= -0.015: exit_reason = "stop_loss"; break
+            if direction == "LONG": pnl = (current - price) / price
+            else: pnl = (price - current) / price
 
-            if pnl < -0.005 and pnl > -0.015:
-                ai_decision = await asyncio.to_thread(ask_ai_risk_manager, sym, direction, pnl)
-                if "CUT" in ai_decision.upper():
-                    log.info(f"\n🤖 AI RISK MANAGER:\n{ai_decision}\n")
-                    exit_reason = "ai_cut"
-                    break
-                    
+            # Quick safety stop loss at -1.5%
+            if pnl <= -0.015: 
+                exit_reason = "stop_loss"
+                break
         except Exception: pass
 
     # CLOSE TRADE
@@ -208,7 +194,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received candidate: {candidate['symbol']} ({candidate['direction']})")
+                log.info(f"🎯 Received EXTREME candidate: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
