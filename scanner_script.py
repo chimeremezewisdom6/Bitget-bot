@@ -5,121 +5,100 @@ import asyncio
 import aiohttp
 import ccxt
 
-async def fetch_binance_candles(session, sem, sym):
+async def fetch_okx_candles(session, sem, sym):
     async with sem:
         try:
-            url = f"https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval=1m&limit=60"
+            url = f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1m&limit=60"
             async with session.get(url) as resp:
                 if resp.status != 200: return None
-                data = await resp.json()
+                data = (await resp.json()).get('data', [])
                 if len(data) < 60: return None
+                data.reverse()
                 return [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in data]
         except Exception:
             return None
 
-async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
-    best_in_chunk = None
-    highest_score = -1
-    for sym in symbols_chunk:
-        candles = await fetch_binance_candles(session, sem, sym)
-        if not candles: continue
-        
-        last_10 = candles[-11:]
-        start_price = last_10[0][1]
-        end_price = last_10[-1][4]
-        
-        total_move_pct = abs((end_price - start_price) / start_price) * 100
-        total_distance = sum(abs(last_10[i][4] - last_10[i-1][4]) for i in range(1, len(last_10)))
-        
-        if total_distance == 0: continue
-        efficiency = abs(end_price - start_price) / total_distance
-        
-        score = total_move_pct * efficiency
-
-        if score > highest_score:
-            highest_score = score
-            best_in_chunk = {
-                "bot_id": bot_id,
-                "symbol": sym,
-                "direction": "LONG" if end_price > start_price else "SHORT",
-                "score": score
-            }
-    return best_in_chunk
-
-async def get_bitget_tradable_symbols():
-    exchange = ccxt.bitget({
-        'options': {'defaultType': 'swap', 'uta': True}
-    })
-    markets = await exchange.load_markets()
-    tradable = set()
-    for sym, m in markets.items():
-        if m.get('active') and m.get('swap') and m.get('linear'):
-            if m.get('quote') == 'USDT':
-                tradable.add(m['base'])
-    await exchange.close()
-    return tradable
-
 async def run_market_scan():
-    print("🌐 Fetching up to 5,000 coins from CoinMarketCap (Keyless API)...")
-    
-    # CMC Keyless Public API allows up to 5000 results
+    print("🌐 Fetching 24h global volume from CoinMarketCap...")
     url = "https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/listings/latest"
-    params = {
-        "start": "1",
-        "limit": "5000",  # Fetch maximum allowed
-        "convert": "USD"
-    }
+    params = {"start": "1", "limit": "5000", "convert": "USD"}
     
     try:
-        # No API key or special headers needed
         res = requests.get(url, params=params, timeout=30)
         data = res.json().get('data', [])
     except Exception as e:
         print(f"CoinMarketCap failed: {e}")
         return None
 
-    if not data:
-        print("❌ No data returned from CMC.")
-        return None
-
-    # FILTER: 24-HOUR VOLUME >= $1,000,000
-    valid_bases = set()
+    # 1. Filter for >$1M volume
+    valid_coins = []
     for coin in data:
-        vol_24h = coin.get('quote', {}).get('USD', {}).get('volume_24h', 0)
+        quote = coin.get('quote', {}).get('USD', {})
+        vol_24h = quote.get('volume_24h', 0)
+        change_1h = quote.get('percent_change_1h', 0)
+        
         if vol_24h and vol_24h >= 1_000_000:
-            valid_bases.add(coin['symbol'])
+            valid_coins.append({
+                "symbol": coin['symbol'],
+                "vol_24h": vol_24h,
+                "change_1h": change_1h
+            })
+            
+    print(f"📊 Found {len(valid_coins)} coins with >= $1M volume.")
+
+    # 2. Instantly sort to find the Top 10 biggest 1-hour movers (No candles needed!)
+    valid_coins.sort(key=lambda x: abs(x['change_1h']), reverse=True)
+    top_10_movers = valid_coins[:10]
+
+    # 3. Filter to ensure they are on Bitget
+    exchange = ccxt.bitget({'options': {'defaultType': 'swap', 'uta': True}})
+    markets = await exchange.load_markets()
+    bitget_bases = set(m['base'] for m in markets.values() if m.get('swap') and m.get('linear') and m.get('quote') == 'USDT')
+    await exchange.close()
+
+    top_bitget_movers = [c for c in top_10_movers if c['symbol'] in bitget_bases]
     
-    print(f"📊 CoinMarketCap: Found {len(valid_bases)} bases with >= $1M 24h volume (from {len(data)} total coins).")
-    
-    # FILTER: MUST BE ON BITGET
-    bitget_bases = await get_bitget_tradable_symbols()
-    final_symbols = [b for b in valid_bases if b in bitget_bases]
-    print(f"🏦 Bitget filter: {len(final_symbols)} tradable bases remain.")
-    
-    if not final_symbols:
-        print("❌ No tradable coins found after filtering.")
+    if not top_bitget_movers:
+        print("❌ None of the top movers are tradable on Bitget.")
         return None
 
-    # DIVIDE INTO 50 BOTS
-    chunk_size = max(1, len(final_symbols) // 50)
-    chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
-    print(f"👨‍🎓 Spawned {len(chunks)} bots to analyze the coins.")
+    print(f"🎯 Top 10 movers on Bitget: {[c['symbol'] for c in top_bitget_movers]}")
+
+    # 4. Now we ONLY fetch candles for these Top 10 to calculate the 10-min fingerprint
+    best_winner = None
+    highest_score = -1
+    sem = asyncio.Semaphore(5) # Only 10 coins, so 5 concurrent is plenty
     
-    sem = asyncio.Semaphore(20) # Keep concurrent requests safe
     async with aiohttp.ClientSession() as session:
-        tasks = [process_bot_chunk(i, chunk, session, sem) for i, chunk in enumerate(chunks)]
-        winners = await asyncio.gather(*tasks)
-    
-    valid_winners = [w for w in winners if w is not None]
-    if not valid_winners:
-        print("❌ No valid winners found.")
-        return None
-    
-    # MAIN PATH VOTE: Pick the absolute best fingerprint
-    valid_winners.sort(key=lambda x: x['score'], reverse=True)
-    best = valid_winners[0]
-    print(f"🔥 THE WINNER IS: {best['symbol']} ({best['direction']}) Score: {best['score']:.4f}")
-    return best
+        for coin in top_bitget_movers:
+            candles = await fetch_okx_candles(session, sem, coin['symbol'])
+            if not candles: continue
+            
+            last_10 = candles[-11:]
+            start_price = last_10[0][1]
+            end_price = last_10[-1][4]
+            
+            total_move_pct = abs((end_price - start_price) / start_price) * 100
+            total_distance = sum(abs(last_10[i][4] - last_10[i-1][4]) for i in range(1, len(last_10)))
+            
+            if total_distance == 0: continue
+            efficiency = abs(end_price - start_price) / total_distance
+            score = total_move_pct * efficiency
+
+            if score > highest_score:
+                highest_score = score
+                best_winner = {
+                    "symbol": coin['symbol'],
+                    "direction": "LONG" if end_price > start_price else "SHORT",
+                    "score": score
+                }
+
+    if best_winner:
+        print(f"🔥 THE ABSOLUTE BEST: {best_winner['symbol']} ({best_winner['direction']}) Score: {best_winner['score']:.4f}")
+    else:
+        print("❌ No valid winners found among the top 10.")
+        
+    return best_winner
 
 if __name__ == "__main__":
     best_coin = asyncio.run(run_market_scan())
