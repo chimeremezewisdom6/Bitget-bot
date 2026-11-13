@@ -3,7 +3,6 @@ import json
 import os
 import asyncio
 import aiohttp
-import time
 import ccxt.async_support as ccxt_async
 
 MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
@@ -60,12 +59,12 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         price_change_pct = ((close_price - open_price) / open_price) * 100
         
         # --- YOUR STRICT RULES ---
-        # 1. Must be going UP (LONG)
-        # 2. Price Move must be >= 0.73%
-        # 3. Volume Dominance must be <= 60.8%
         if price_change_pct >= MIN_PRICE_MOVE and green_dominance <= MAX_VOLUME_DOMINANCE:
             
-            # Find the best: Highest move with the lowest dominance
+            # FIXED: Prevent ZeroDivisionError
+            if green_dominance == 0:
+                green_dominance = 0.0001 # Give it a massive score if there was zero buying volume but price went up
+                
             score = price_change_pct / green_dominance
             
             if score > highest_score:
@@ -81,39 +80,33 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
     return best_in_chunk
 
 async def run_market_scan():
-    print("🌐 Fetching Top 3000 coins (CoinGecko)...")
+    print("🌐 Fetching ALL coins from CoinPaprika (No Rate Limits)...")
     valid_coins = []
     
     try:
-        # EXPANDED: 12 pages of 250 coins = 3000 coins
-        for page in range(1, 13): 
-            url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page={page}"
-            res = requests.get(url, timeout=15)
+        # CoinPaprika returns 14,000+ coins in ONE request
+        res = requests.get("https://api.coinpaprika.com/v1/tickers", timeout=30)
+        data = res.json()
+        
+        # Sort by rank (Top 3000)
+        data = [c for c in data if c.get('rank') and c.get('rank') <= 3000]
+        
+        for coin in data:
+            sym = coin['symbol'].upper()
+            if sym in MEGA_COINS: continue
             
-            if res.status_code != 200: 
-                print(f"⚠️ CoinGecko page {page} failed: {res.status_code}")
-                time.sleep(2)
-                continue
-                
-            for coin in res.json():
-                sym = coin['symbol'].upper()
-                
-                # Filters: Skip Mega Coins, skip expensive coins (for $1.58 balance)
-                if sym in MEGA_COINS or coin.get('current_price', 0) > 10.0: continue
-                
-                # Filter: Must have >$1M volume
-                if coin.get('total_volume', 0) >= 1_000_000:
-                    valid_coins.append(sym)
-                    
-            time.sleep(1) # Delay to respect CoinGecko rate limits
+            usd_data = coin.get('quotes', {}).get('USD', {})
+            price = usd_data.get('price', 0)
+            vol = usd_data.get('volume_24h', 0)
             
+            # Filter: Price under $10 (for your $1.58 balance) and Volume > $1M
+            if price <= 10.0 and vol >= 1_000_000:
+                valid_coins.append(sym)
+                
     except Exception as e:
-        print(f"CoinGecko failed: {e}")
+        print(f"CoinPaprika failed: {e}")
         return None
 
-    # Remove duplicates
-    valid_coins = list(set(valid_coins))
-    
     bitget_bases = await get_bitget_tradable_symbols()
     final_symbols = list(set([c for c in valid_coins if c in bitget_bases]))
     
