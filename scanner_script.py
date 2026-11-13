@@ -5,12 +5,10 @@ import asyncio
 import aiohttp
 import ccxt.async_support as ccxt_async
 
-MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
-
 # THE DAVID RULES
-MIN_PRICE_MOVE = 0.22          # Must move at least 0.22%
-MAX_WINNING_DOMINANCE = 0.50   # The winning side must have LESS than 50% volume
-MIN_AVG_FLUCTUATION = 0.10     # Average fluctuation per minute must be >= 0.1%
+MIN_PRICE_MOVE = 0.22
+MAX_WINNING_DOMINANCE = 0.50
+MIN_AVG_FLUCTUATION = 0.10
 
 async def fetch_okx_candles(session, sem, sym):
     async with sem:
@@ -25,13 +23,34 @@ async def fetch_okx_candles(session, sem, sym):
         except Exception:
             return None
 
-async def get_bitget_tradable_symbols():
+async def get_bitget_full_universe():
+    """Fetches ALL Bitget markets via CCXT and filters for >$1M volume."""
     exchange = ccxt_async.bitget({'options': {'defaultType': 'swap', 'uta': True}})
     try:
+        print("📥 Loading all Bitget markets via CCXT...")
         markets = await exchange.load_markets()
-        return set(m['base'] for m in markets.values() if m.get('active') and m.get('swap') and m.get('linear') and m.get('quote') == 'USDT')
-    except Exception:
-        return set()
+        
+        print("📊 Fetching all tickers from Bitget...")
+        tickers = await exchange.fetch_tickers()
+        
+        valid_coins = []
+        for sym, ticker in tickers.items():
+            # Only USDT perpetuals
+            if not sym.endswith("USDT"): continue
+            market = markets.get(sym)
+            if not market or not market.get('swap') or not market.get('linear'): continue
+            
+            # Volume filter: >$1M 24h quote volume
+            vol = ticker.get('quoteVolume', 0) or 0
+            if vol >= 1_000_000:
+                base = sym.split("/")[0]
+                valid_coins.append(base)
+                
+        print(f"✅ Found {len(valid_coins)} Bitget coins with >$1M volume.")
+        return list(set(valid_coins)) # Remove duplicates
+    except Exception as e:
+        print(f"❌ Bitget CCXT failed: {e}")
+        return []
     finally:
         await exchange.close()
 
@@ -45,11 +64,10 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         
         last_10 = candles[-10:]
         
-        # 1. Check Average Fluctuation (Must be >= 0.1% per minute)
+        # 1. Check Average Fluctuation (>= 0.1% per minute)
         fluctuations = [((c[2] - c[3]) / c[3]) * 100 for c in last_10]
         avg_fluctuation = sum(fluctuations) / len(fluctuations)
-        if avg_fluctuation < MIN_AVG_FLUCTUATION:
-            continue 
+        if avg_fluctuation < MIN_AVG_FLUCTUATION: continue
             
         # 2. Calculate Volume Dominance
         green_vol = sum(c[5] for c in last_10 if c[4] > c[1])
@@ -68,65 +86,35 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         direction = None
         winning_dominance = 0
         
-        # --- DAVID SETUP 1: Long (Buyers are aggressive minority) ---
+        # DAVID SETUP 1: Long (Aggressive Buyers)
         if price_change_pct >= MIN_PRICE_MOVE and green_dominance <= MAX_WINNING_DOMINANCE and green_dominance > 0:
             direction = "LONG"
             winning_dominance = green_dominance
             
-        # --- DAVID SETUP 2: Short (Sellers are aggressive minority) ---
+        # DAVID SETUP 2: Short (Aggressive Sellers)
         elif price_change_pct <= -MIN_PRICE_MOVE and red_dominance <= MAX_WINNING_DOMINANCE and red_dominance > 0:
             direction = "SHORT"
             winning_dominance = red_dominance
 
         if direction:
-            # SCORE: Price Move divided by the minority volume
             score = abs(price_change_pct) / winning_dominance
-            
             if score > highest_score:
                 highest_score = score
                 best_in_chunk = {
-                    "symbol": sym, 
-                    "direction": direction, 
-                    "score": score,
-                    "move": price_change_pct,
-                    "volume_pct": winning_dominance,
+                    "symbol": sym, "direction": direction, "score": score,
+                    "move": price_change_pct, "volume_pct": winning_dominance,
                     "avg_fluct": avg_fluctuation
                 }
 
     return best_in_chunk
 
 async def run_market_scan():
-    print("🌐 Fetching complete global universe from CoinPaprika (No pagination limits)...")
-    valid_coins = []
+    # Use CCXT to get the full Bitget universe
+    final_symbols = await get_bitget_full_universe()
     
-    try:
-        # CoinPaprika returns 10,000+ assets in ONE request. No 429 rate limits.
-        res = requests.get("https://api.coinpaprika.com/v1/tickers", timeout=30)
-        data = res.json()
-        
-        # Filter for >$1M volume and no price cap (to capture the full 600+ universe)
-        for coin in data:
-            sym = coin['symbol'].upper()
-            if sym in MEGA_COINS: continue
-            
-            usd_data = coin.get('quotes', {}).get('USD', {})
-            vol = usd_data.get('volume_24h', 0)
-            price = usd_data.get('price', 0)
-            
-            # Only filter by volume and ensure it has a valid price
-            if vol >= 1_000_000 and price > 0:
-                valid_coins.append(sym)
-                
-    except Exception as e:
-        print(f"CoinPaprika failed: {e}")
+    if not final_symbols: 
+        print("❌ No tradable coins found.")
         return None
-
-    bitget_bases = await get_bitget_tradable_symbols()
-    final_symbols = list(set([c for c in valid_coins if c in bitget_bases]))
-    
-    print(f"📊 Found {len(final_symbols)} tradable coins on Bitget with >$1M volume.")
-
-    if not final_symbols: return None
 
     # DIVIDE INTO 100 BOTS
     chunk_size = max(1, len(final_symbols) // 100)
@@ -141,7 +129,7 @@ async def run_market_scan():
     valid_winners = [w for w in winners if w is not None]
     
     if not valid_winners:
-        print("❌ No David setups found in this scan. The market is behaving normally.")
+        print("❌ No David setups found. The market is behaving normally.")
         return None
 
     print(f"🏆 Gathered {len(valid_winners)} David setups. The bots are voting...")
