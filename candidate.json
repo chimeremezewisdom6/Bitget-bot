@@ -1,11 +1,11 @@
 {
-  "symbol": "JCT",
+  "symbol": "BARD",
   "direction": "LONG",
-  "score": 13.672230459448425,
-  "move": 0.8863097233527976,
-  "win_vol": 0.1852146067225974,
-  "lose_vol": 0.8147853932774026,
-  "exchanges_used": 6,
-  "vol_captured": 100.00000000000003,
-  "entry_price": 0.002037
+  "score": 7.2916048042244075,
+  "move": 0.4702714014396773,
+  "win_vol": 0.18521964289146167,
+  "lose_vol": 0.8147803571085384,
+  "exchanges_used": 5,
+  "vol_captured": 100.0,
+  "entry_price": 0.1315
 }
