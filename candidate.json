@@ -1,38 +1,44 @@
 {
-  "symbol": "PURR",
+  "symbol": "BTW",
   "direction": "SHORT",
-  "duration": 5,
-  "avg_fluct": 0.213,
+  "duration": 6,
+  "avg_fluct": 0.325,
   "timeline": [
     {
       "minute": 1,
-      "move_pct": -0.05,
-      "body_ratio": 0.21,
-      "volume": 13.52
+      "move_pct": -0.101,
+      "body_ratio": 0.79,
+      "volume": 196.0
     },
     {
       "minute": 2,
-      "move_pct": -0.037,
-      "body_ratio": 0.18,
-      "volume": 28.39
+      "move_pct": -0.077,
+      "body_ratio": 0.32,
+      "volume": 138.0
     },
     {
       "minute": 3,
-      "move_pct": -0.037,
-      "body_ratio": 1.0,
-      "volume": 2.4
+      "move_pct": -0.187,
+      "body_ratio": 0.73,
+      "volume": 150.0
     },
     {
       "minute": 4,
-      "move_pct": -0.162,
-      "body_ratio": 0.36,
-      "volume": 135.3
+      "move_pct": -0.558,
+      "body_ratio": 0.76,
+      "volume": 12376.0
     },
     {
       "minute": 5,
-      "move_pct": -0.199,
-      "body_ratio": 0.64,
-      "volume": 246.55
+      "move_pct": -0.183,
+      "body_ratio": 0.31,
+      "volume": 5070.0
+    },
+    {
+      "minute": 6,
+      "move_pct": -0.379,
+      "body_ratio": 0.91,
+      "volume": 451.0
     }
   ],
   "vol_captured": 100.0
