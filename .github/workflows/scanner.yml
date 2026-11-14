@@ -1,7 +1,7 @@
 name: Global Market Scanner
 
 on:
-  workflow_dispatch: {} # Only run when Render pings it
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -12,20 +12,31 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install dependencies
         run: pip install requests aiohttp ccxt
+
       - name: Run scanner
         env:
           POLLINATIONS_KEY: ${{ secrets.POLLINATIONS_KEY }}
         run: python scanner_script.py
+
       - name: Commit and push candidate
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Fetch the latest changes from the remote repository
+          git fetch origin main
+          # Reset the local repo to match the remote (this keeps your latest code)
+          git reset --soft origin/main
+          # Add the new candidate file
           git add candidate.json
+          # Commit the changes
           git commit -m "Update candidate [skip ci]" || echo "No changes to commit"
+          # Push the update
           git push
