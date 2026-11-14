@@ -52,7 +52,7 @@ def save_state(state):
         with open(STATE_FILE, "w") as f: json.dump(state, f)
     except Exception: pass
 
-def ask_ai(prompt, max_retries=3):
+def ask_ai(prompt, max_retries=5):
     if not POLLINATIONS_KEY: return "AI key missing."
     url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai&token={POLLINATIONS_KEY}"
     for attempt in range(max_retries):
@@ -73,7 +73,7 @@ async def github_pinger():
     while True:
         try:
             res = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
-            if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new 100-bot scan.")
+            if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new scan.")
         except Exception: pass
         await asyncio.sleep(600) 
 
@@ -89,20 +89,18 @@ async def execute_trade(exchange, candidate, state):
     CURRENT_CANDIDATE = candidate
     sym, direction = candidate['symbol'], candidate['direction']
     
-    # 1. AI entry analysis (Purely informational, not execution)
-    log.info("🧠 AI is analyzing the entry 10-minute price sequence...")
+    log.info("🧠 AI is analyzing the entry candle sequence...")
     sequence_str = json.dumps(candidate['sequence'])
     entry_prompt = (
-        f"You are an expert crypto trader. The price of {sym} moved {candidate['move']:.2f}% in the last 10 minutes. "
-        f"Candle sequence: {sequence_str}. Winning volume: {candidate['win_vol']*100:.1f}%, Losing volume: {candidate['lose_vol']*100:.1f}%. "
-        f"Tell me in 2 sentences exactly what moved the price."
+        f"You are an expert crypto trader. The price of {sym} just made an efficient move {direction}. "
+        f"Candle sequence: {sequence_str}. "
+        f"Look at the bodies and wicks. Tell me in 2 sentences exactly what caused this price movement. Was it a liquidity vacuum?"
     )
     entry_analysis = await asyncio.to_thread(ask_ai, entry_prompt)
     log.info(f"==================================================")
     log.info(f"🧠 ENTRY ANALYSIS:\n{entry_analysis}")
     log.info(f"==================================================")
 
-    # 2. Open the trade
     market_sym = f"{sym}/USDT:USDT"
     market = exchange.market(market_sym)
     if not market: CURRENT_CANDIDATE = None; return
@@ -118,7 +116,7 @@ async def execute_trade(exchange, candidate, state):
     required_leverage = math.ceil((min_amt * entry_px) / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
     if required_leverage > MAX_LEVERAGE:
-        log.info(f"❌ Balance too small for {sym} (requires {required_leverage}x). Skipping.")
+        log.info(f"❌ Balance too small for {sym}. Skipping.")
         CURRENT_CANDIDATE = None; return
 
     await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
@@ -135,15 +133,15 @@ async def execute_trade(exchange, candidate, state):
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception: CURRENT_CANDIDATE = None; return
 
-    # 3. THE NEW EXECUTION ENGINE: Breakeven Lock + Trailing Stop
+    # THE SQUEEZE ENGINE
     start_time = time.time()
     exit_reason = "timeout_20min"
     current_px = entry_px
     peak_px = entry_px
     breakeven_locked = False
 
-    while time.time() - start_time < 1200: # 20 Minutes max hold
-        await asyncio.sleep(2) # Check every 2 seconds
+    while time.time() - start_time < 1200: # 20 mins
+        await asyncio.sleep(2)
         try:
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
             current_px = ticker['last']
@@ -155,50 +153,30 @@ async def execute_trade(exchange, candidate, state):
                 pnl = (entry_px - current_px) / entry_px
                 peak_px = min(peak_px, current_px)
 
-            # Rule A: Hard Stop Loss at -2.5%
-            if pnl <= -0.025: 
+            if pnl <= -0.030: 
                 exit_reason = "hard_stop_loss"
                 break
                 
-            # Rule B: Lock Breakeven when profit hits +0.25%
-            if pnl >= 0.0025:
+            if pnl >= 0.005:
                 breakeven_locked = True
 
-            # Rule C: Trailing Stop (Only active after breakeven is locked)
             if breakeven_locked:
                 if direction == "LONG":
-                    drawdown = (peak_px - current_px) / peak_px
-                    if drawdown >= 0.004: # Drops 0.4% from peak
-                        exit_reason = "trailing_stop_profit"
-                        break
-                    if pnl <= 0: # Hit breakeven
-                        exit_reason = "breakeven_stop"
-                        break
-                else:
-                    drawdown = (current_px - peak_px) / peak_px
-                    if drawdown >= 0.004:
+                    if (peak_px - current_px) / peak_px >= 0.005:
                         exit_reason = "trailing_stop_profit"
                         break
                     if pnl <= 0:
                         exit_reason = "breakeven_stop"
                         break
-
-        except Exception: pass
-
-    # 4. Close Trade
-    close_win_vol, close_lose_vol = 0, 0
-    try:
-        ohlcv = await exchange.fetch_ohlcv(market_sym, timeframe='1m', limit=10)
-        if ohlcv and len(ohlcv) >= 10:
-            green = sum(c[5] for c in ohlcv if c[4] > c[1] and c[5] is not None)
-            red = sum(c[5] for c in ohlcv if c[4] < c[1] and c[5] is not None)
-            total = green + red
-            if total > 0:
-                if direction == "LONG":
-                    close_win_vol, close_lose_vol = (green / total) * 100, (red / total) * 100
                 else:
-                    close_win_vol, close_lose_vol = (red / total) * 100, (green / total) * 100
-    except Exception: pass
+                    if (current_px - peak_px) / peak_px >= 0.005:
+                        exit_reason = "trailing_stop_profit"
+                        break
+                    if pnl <= 0:
+                        exit_reason = "breakeven_stop"
+                        break
+                        
+        except Exception: pass
 
     final = current_px
     gross = (final - entry_px) / entry_px if direction == "LONG" else (entry_px - final) / entry_px
@@ -206,19 +184,14 @@ async def execute_trade(exchange, candidate, state):
     
     log.info(f"==================================================")
     log.info(f"📉 [{mode}] CLOSED {direction} ON {sym} ({exit_reason})")
-    log.info(f"   Closing Price: {final:.6f}")
-    log.info(f"   Closing Volumes: Winning {close_win_vol:.1f}% | Losing {close_lose_vol:.1f}%")
     log.info(f"   Net PnL: {net*100:+.2f}%")
     log.info(f"==================================================")
     
-    CURRENT_ACTION = f"Closed {direction} {sym} ({exit_reason}). Net: {net*100:.2f}%"
-
     if is_live:
         close_side = "sell" if direction == "LONG" else "buy"
         try: await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
         except Exception as e: log.critical(f"🚨 [LIVE] FAILED TO CLOSE! Error: {e}")
 
-    # 5. Update Gate
     if net >= GATE_MIN_NET:
         state["streak"] += 1
         log.info(f"✅ WIN! Streak: {state['streak']}/8")
@@ -252,7 +225,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received candidate from GitHub: {candidate['symbol']} ({candidate['direction']})")
+                log.info(f"🎯 Received Efficiency Candle candidate: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
