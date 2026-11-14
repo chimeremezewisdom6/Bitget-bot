@@ -41,24 +41,39 @@ def fetch_coinmetrics_24h_volume(assets):
         time.sleep(0.5)
     return volumes
 
+def build_momentum_timeline(candles, duration):
+    """Extracts the minute-by-minute data for the duration of the run."""
+    if duration == 0: return []
+    
+    run_candles = candles[-duration:]
+    timeline = []
+    
+    for i, c in enumerate(run_candles):
+        open_p, high_p, low_p, close_p, vol = c[1], c[2], c[3], c[4], c[5]
+        move_pct = ((close_p - open_p) / open_p) * 100
+        total_range = high_p - low_p
+        body_ratio = abs(close_p - open_p) / total_range if total_range > 0 else 0
+        
+        timeline.append({
+            "minute": i + 1,
+            "move_pct": round(move_pct, 3),
+            "body_ratio": round(body_ratio, 2),
+            "volume": round(vol, 2)
+        })
+        
+    return timeline
+
 def calculate_momentum_duration(candles):
-    """
-    Counts consecutive candles in the same direction to find the true duration.
-    Returns (duration_minutes, direction, avg_volatility)
-    """
     if len(candles) < 20: return 0, None, 0
     
-    # 1. Check Volatility Requirement
     fluct = [((c[2] - c[3]) / c[3]) * 100 for c in candles[-10:]]
     avg_fluct = sum(fluct) / len(fluct)
     if avg_fluct < MIN_AVG_VOLATILITY:
         return 0, None, avg_fluct
         
-    # 2. Count Consecutive Candles (Duration)
     current_dir = None
     duration = 0
     
-    # Loop backwards from the most recent candle
     for c in reversed(candles):
         is_green = c[4] > c[1]
         is_red = c[4] < c[1]
@@ -66,49 +81,16 @@ def calculate_momentum_duration(candles):
         if current_dir is None:
             if is_green: current_dir = "LONG"
             elif is_red: current_dir = "SHORT"
-            else: continue # Doji
+            else: continue
             
         if current_dir == "LONG" and is_green:
             duration += 1
         elif current_dir == "SHORT" and is_red:
             duration += 1
         else:
-            break # Momentum direction changed
+            break 
             
     return duration, current_dir, round(avg_fluct, 3)
-
-def analyze_lifecycle_record(candles, direction):
-    """Maps how the momentum started and died."""
-    if len(candles) < 40: return {}
-    
-    # Analyze the run that just finished
-    prior_run = candles[-40:-20]
-    prior_bodies = [abs(c[4] - c[1]) for c in prior_run]
-    prior_avg_body = sum(prior_bodies) / len(prior_bodies) if prior_bodies else 1
-    
-    death_type = "Normal Death"
-    if prior_bodies:
-        if prior_bodies[-1] > prior_avg_body * 2:
-            death_type = "Acceleration Death (Blow-off)"
-        elif prior_bodies[-1] < prior_avg_body * 0.5:
-            death_type = "Deceleration Death (Fade)"
-            
-    # Analyze the current run
-    current_run = candles[-20:]
-    current_bodies = [abs(c[4] - c[1]) for c in current_run]
-    current_avg_body = sum(current_bodies) / len(current_bodies) if current_bodies else 1
-    
-    start_type = "Normal Start"
-    if current_bodies:
-        if current_bodies[0] > current_avg_body * 1.5:
-            start_type = "Accelerating Start"
-        elif current_bodies[0] < current_avg_body * 0.5:
-            start_type = "Slower Start"
-            
-    return {
-        "start_type": start_type,
-        "death_type": death_type,
-    }
 
 async def run_market_scan():
     start_time = time.time()
@@ -158,14 +140,12 @@ async def run_market_scan():
             if not candles or len(candles) < 20: return None
             
             duration, direction, avg_fluct = calculate_momentum_duration(candles)
-            if duration >= 3 and direction: # Must be lasting at least 3 minutes
-                record = analyze_lifecycle_record(candles, direction)
+            if duration >= 3 and direction:
                 return {
                     "symbol": sym, 
                     "direction": direction, 
                     "duration": duration,
-                    "avg_fluct": avg_fluct,
-                    "record": record
+                    "avg_fluct": avg_fluct
                 }
             return None
 
@@ -176,11 +156,9 @@ async def run_market_scan():
             print(f"❌ No sustained momentum found. (Scan took {time.time() - start_time:.1f}s)")
             return None
             
-        # SORT BY DURATION (Longest lasting momentum wins)
         winners.sort(key=lambda x: (x["duration"], x["avg_fluct"]), reverse=True)
         best = winners[0]
         
-        # Deep Verification
         sym = best["symbol"]
         market_sym = f"{sym}/USDT:USDT"
         
@@ -199,16 +177,22 @@ async def run_market_scan():
             print("❌ Deep verification failed.")
             return None
 
-        best_seq = (await fetch_ccxt_candles(exchanges.get('bitget'), sym, sem_fast, limit=15))[-15:]
-        sequence = [{"o": c[1], "h": c[2], "l": c[3], "c": c[4], "v": c[5]} for c in best_seq]
+        best_candles = await fetch_ccxt_candles(exchanges.get('bitget'), sym, sem_fast, limit=60)
         
-        best["entry_price"] = sequence[-1]["c"]
-        best["sequence"] = sequence
+        # BUILD THE MINUTE-BY-MINUTE TIMELINE
+        timeline = build_momentum_timeline(best_candles, best["duration"])
+        
+        best["timeline"] = timeline
         best["vol_captured"] = vol_captured_pct
         
         print(f"🔥 LONGEST MOMENTUM: {best['symbol']} ({best['direction']}) | Duration: {best['duration']} MINUTES")
         print(f"   📊 Volatility: {best['avg_fluct']}%")
-        print(f"   📝 RECORD -> Start: {best['record']['start_type']} | Death: {best['record']['death_type']}")
+        
+        # PRINT THE FULL TIMELINE IN THE GITHUB LOGS
+        print(f"   ⏱️ MOMENTUM TIMELINE (What happened during these {best['duration']} minutes):")
+        for t in timeline:
+            print(f"      Min {t['minute']}: Move={t['move_pct']:+.2f}% | Body Ratio={t['body_ratio']} | Vol={t['volume']}")
+            
         print(f"   Accuracy: {best['vol_captured']:.1f}% | Scan Time: {time.time() - start_time:.1f}s")
         return best
 
