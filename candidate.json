@@ -1,11 +1,11 @@
 {
-  "symbol": "INIT",
+  "symbol": "UNITAS",
   "direction": "SHORT",
-  "score": 3.1969751420583905,
-  "move": -1.3951327346590592,
-  "win_vol": 0.43477084594080107,
-  "lose_vol": 0.5652291540591988,
-  "exchanges_used": 6,
-  "vol_captured": 100.00000000000003,
-  "entry_price": 0.10538
+  "score": 7.012934925557091,
+  "move": -0.7932310946589114,
+  "win_vol": 0.3324417498811222,
+  "lose_vol": 0.6675582501188778,
+  "exchanges_used": 1,
+  "vol_captured": 100.0,
+  "entry_price": 0.1876
 }
