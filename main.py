@@ -1,5 +1,6 @@
 import asyncio
 import ccxt.pro as ccxtpro
+import ccxt.async_support as ccxt_async
 import json
 import logging
 import os
@@ -23,7 +24,10 @@ GATE_MIN_NET = 0.0042
 STATE_FILE = "state.json"
 MAX_LEVERAGE = 5 
 
-CURRENT_ACTION = "Waiting for WebSocket Ignition..."
+MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
+
+# Keep track of the last time a coin fired to prevent spamming
+last_trade_time = {}
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -49,10 +53,9 @@ def save_state(state):
     except Exception: pass
 
 # ==========================================
-# THE MILLISECOND TRADE EXECUTION
+# TRADE EXECUTION
 # ==========================================
 async def execute_trade(exchange, sym, direction, state, ignition_data):
-    global CURRENT_ACTION
     market_sym = f"{sym}/USDT:USDT"
     market = exchange.market(market_sym)
     if not market: return
@@ -69,6 +72,7 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
     required_leverage = math.ceil((min_amt * entry_px) / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
     if required_leverage > MAX_LEVERAGE:
+        log.info(f"❌ Balance too small for {sym}")
         return
 
     await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
@@ -78,13 +82,13 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
     mode = "LIVE" if is_live else "PAPER"
     
     log.info(f"==================================================")
-    log.info(f"⚡ MILLISECOND IGNITION DETECTED!")
+    log.info(f"⚡ 1-MINUTE IGNITION DETECTED!")
     log.info(f"   Symbol: {sym} | Direction: {direction}")
     log.info(f"   Move: {ignition_data['move']}% | Vol Spike: {ignition_data['vol_spike']}x")
     log.info(f"🚀 [{mode}] OPENING {direction} | Price: {entry_px} | Size: {amount}")
     log.info(f"==================================================")
     
-    CURRENT_ACTION = f"Opened {direction} on {sym} at {entry_px}."
+    last_trade_time[sym] = time.time()
 
     if is_live:
         side = "buy" if direction == "LONG" else "sell"
@@ -140,21 +144,48 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
     save_state(state)
 
 # ==========================================
-# THE WEBSOCKET WATCHER
+# THE MARKET SCANNER (Runs on Render every 15s)
 # ==========================================
-async def watch_coin_ignition(exchange, sym, state):
-    market_sym = f"{sym}/USDT:USDT"
-    
-    while True:
-        try:
-            ohlcvs = await exchange.watch_ohlcv(market_sym, '1m')
+async def scan_market_for_ignition(exchange_rest, exchange_ws, state):
+    """Fetches all tickers, finds the biggest sudden movers, and checks their 1m candles."""
+    try:
+        # 1. Fetch all live tickers from Bitget
+        tickers = await exchange_rest.fetch_tickers()
+        
+        movers = []
+        for sym, ticker in tickers.items():
+            if not sym.endswith("USDT:USDT"): continue
+            base = sym.split('/')[0]
+            if base in MEGA_COINS: continue
             
-            if len(ohlcvs) < 20:
+            vol_24h = ticker.get('quoteVolume')
+            if not vol_24h or float(vol_24h) < 1_000_000: continue
+            
+            # Check if it moved in the last 1 minute (ticker percentage is 24h, but we can use it to filter fast)
+            # Actually, we just grab the top 50 by absolute 24h change to check their candles.
+            change = ticker.get('percentage', 0)
+            if change: movers.append((sym, abs(change)))
+            
+        # 2. Take the top 30 most volatile coins right now
+        movers.sort(key=lambda x: x[1], reverse=True)
+        top_movers = [m[0] for m in movers[:30]]
+        
+        # 3. Check their 1-minute candles for Ignition
+        for market_sym in top_movers:
+            base = market_sym.split('/')[0]
+            
+            # Don't scan if we just traded it in the last 5 minutes
+            if base in last_trade_time and (time.time() - last_trade_time[base]) < 300:
                 continue
                 
-            closed_candle = ohlcvs[-2]
-            base_candles = ohlcvs[-20:-1]
+            # Fetch the last 20 candles
+            candles = await exchange_rest.fetch_ohlcv(market_sym, '1m', limit=20)
+            if len(candles) < 20: continue
             
+            closed_candle = candles[-2]
+            base_candles = candles[:-2]
+            
+            # Check Quiet Base
             base_high = max(c[2] for c in base_candles)
             base_low = min(c[3] for c in base_candles)
             base_range = ((base_high - base_low) / base_low) * 100
@@ -172,15 +203,16 @@ async def watch_coin_ignition(exchange, sym, state):
             move_pct = (abs(c - o) / o) * 100
             vol_spike = v / base_vol_avg
             
+            # THE TRIGGER
             if move_pct >= 0.50 and body_ratio >= 0.75 and vol_spike >= 3.0:
                 direction = "LONG" if c > o else "SHORT"
                 ignition_data = {"move": round(move_pct, 2), "vol_spike": round(vol_spike, 1)}
                 
-                await execute_trade(exchange, sym, direction, state, ignition_data)
-                await asyncio.sleep(300) 
+                # Fire the trade using the WebSocket exchange instance
+                await execute_trade(exchange_ws, base, direction, state, ignition_data)
                 
-        except Exception:
-            await asyncio.sleep(1)
+    except Exception as e:
+        log.error(f"Scanner error: {e}")
 
 # ==========================================
 # MAIN ORCHESTRATOR
@@ -191,7 +223,10 @@ async def main():
     state = load_state()
     log.info(f"Executor starting | Mode: {'LIVE' if LIVE_TRADING and state['unlocked'] else 'PAPER'} | Streak: {state['streak']}/8")
     
-    exchange = ccxtpro.bitget({
+    # We need two instances: one for REST polling (scanning), one for WebSocket (trading)
+    exchange_rest = ccxt_async.bitget({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+    
+    exchange_ws = ccxtpro.bitget({
         'apiKey': BITGET_API_KEY, 
         'secret': BITGET_SECRET, 
         'password': BITGET_PASSPHRASE, 
@@ -200,49 +235,22 @@ async def main():
     })
     
     try:
-        await exchange.load_markets()
+        await exchange_rest.load_markets()
+        await exchange_ws.load_markets()
     except Exception:
         return
 
-    active_watchers = {}
-    
+    log.info("📡 Live Market Scanner Active. Checking top movers every 15 seconds...")
+
     while True:
         try:
-            # Corrected URL: chimeremezewisdom6
-            url = "https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json"
-            res = requests.get(url, timeout=10)
-            
-            if res.status_code != 200:
-                log.warning(f"GitHub returned {res.status_code}. Waiting for watchlist...")
-                await asyncio.sleep(30)
-                continue
-                
-            try:
-                data = res.json()
-            except json.JSONDecodeError:
-                log.warning(f"GitHub file is not valid JSON. It returned: {res.text[:50]}")
-                await asyncio.sleep(30)
-                continue
-                
-            watchlist = data.get("watchlist", [])
-            
-            if not watchlist:
-                log.info("Watchlist empty. Waiting for GitHub scan...")
-                await asyncio.sleep(30)
-                continue
-                
-            log.info(f"📡 WebSocket active. Watching {len(watchlist)} coins for Ignition...")
-            
-            for sym in watchlist:
-                if sym not in active_watchers:
-                    task = asyncio.create_task(watch_coin_ignition(exchange, sym, state))
-                    active_watchers[sym] = task
-                    
-            await asyncio.sleep(600)
+            # Scan the entire market for ignition every 15 seconds
+            await scan_market_for_ignition(exchange_rest, exchange_ws, state)
+            await asyncio.sleep(15)
             
         except Exception as e:
             log.error(f"Main loop error: {e}")
-            await asyncio.sleep(30)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
