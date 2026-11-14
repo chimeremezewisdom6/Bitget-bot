@@ -11,7 +11,6 @@ MIN_PRICE_MOVE = 0.22
 MIN_AVG_FLUCTUATION = 0.15
 
 MAJOR_EXCHANGES = ['binance', 'okx', 'bybit', 'bitget', 'kucoin', 'gate', 'mexc', 'htx', 'bingx', 'crypto', 'coinbase', 'kraken']
-CRYPTOCOMPARE_KEY = os.environ.get("CRYPTOCOMPARE_KEY", "")
 
 async def fetch_ccxt_candles(exchange, sym, sem):
     async with sem:
@@ -19,7 +18,16 @@ async def fetch_ccxt_candles(exchange, sym, sem):
             market_sym = f"{sym}/USDT:USDT"
             if not exchange.has.get('fetchOHLCV'): return None
             ohlcv = await exchange.fetch_ohlcv(market_sym, timeframe='1m', limit=15)
-            return ohlcv if ohlcv and len(ohlcv) >= 10 else None
+            if not ohlcv or len(ohlcv) < 10: return None
+            
+            # SAFEGUARD: Ensure all candle data is valid floats
+            clean_candles = []
+            for c in ohlcv:
+                if c[1] is None or c[2] is None or c[3] is None or c[4] is None or c[5] is None:
+                    continue
+                clean_candles.append([int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])])
+                
+            return clean_candles if len(clean_candles) >= 10 else None
         except Exception:
             return None
 
@@ -30,7 +38,9 @@ def fetch_coinmetrics_volume(assets):
         try:
             res = requests.get(base_url, params={"assets": ",".join([a.lower() for a in assets[i:i+50]]), "metrics": "volume_trusted_spot_usd_1d", "frequency": "1d", "page_size": 10000}, timeout=15)
             for entry in res.json().get("data", []):
-                volumes[entry["asset"].upper()] = float(entry.get("volume_trusted_spot_usd_1d", 0))
+                val = entry.get("volume_trusted_spot_usd_1d")
+                if val is not None:
+                    volumes[entry["asset"].upper()] = float(val)
         except Exception: pass
         time.sleep(0.5)
     return volumes
@@ -54,10 +64,14 @@ async def run_market_scan():
                 for sym, ticker in all_tickers_results[i].items():
                     if sym.endswith("USDT:USDT"):
                         base = sym.split('/')[0]
-                        exchange_volumes[base] = exchange_volumes.get(base, 0) + (ticker.get('quoteVolume', 0) or 0)
+                        # SAFEGUARD: Handle None volumes
+                        vol = ticker.get('quoteVolume')
+                        vol = float(vol) if vol is not None else 0.0
+                        exchange_volumes[base] = exchange_volumes.get(base, 0) + vol
 
         cm_volumes = fetch_coinmetrics_volume(list(exchange_volumes.keys()))
         validated_global_volumes = {}
+        
         for sym, ex_vol in exchange_volumes.items():
             if sym in MEGA_COINS: continue
             sources = [cm_volumes.get(sym, 0), ex_vol]
@@ -67,7 +81,9 @@ async def run_market_scan():
 
         bitget_tickers = exchange_tickers.get('bitget', {})
         valid_coins = [sym for sym in validated_global_volumes.keys() if f"{sym}/USDT:USDT" in bitget_tickers]
-        sem_fast, sem_agg = asyncio.Semaphore(50), asyncio.Semaphore(20)
+        
+        sem_fast = asyncio.Semaphore(50)
+        sem_agg = asyncio.Semaphore(20)
         
         async def check_fluctuation(sym):
             candles = await fetch_ccxt_candles(exchanges.get('bitget'), sym, sem_fast)
@@ -80,12 +96,22 @@ async def run_market_scan():
 
         for sym in candidates:
             market_sym = f"{sym}/USDT:USDT"
-            holding_exchanges = [(ex_id, tickers[market_sym].get('quoteVolume', 0)) for ex_id, tickers in exchange_tickers.items() if market_sym in tickers and tickers[market_sym].get('quoteVolume', 0) > 0]
+            holding_exchanges = []
+            
+            for ex_id, tickers in exchange_tickers.items():
+                if market_sym in tickers:
+                    # SAFEGUARD: Handle None volumes safely
+                    vol = tickers[market_sym].get('quoteVolume')
+                    vol = float(vol) if vol is not None else 0.0
+                    if vol > 0:
+                        holding_exchanges.append((ex_id, vol))
+                        
             if not holding_exchanges: continue
             
             holding_exchanges.sort(key=lambda x: x[1], reverse=True)
             top_10_exchanges = holding_exchanges[:10]
             vol_captured_pct = (sum(x[1] for x in top_10_exchanges) / validated_global_volumes[sym]) * 100
+            
             if vol_captured_pct < 95.0: continue
                 
             tasks = [fetch_ccxt_candles(exchanges[ex_id], sym, sem_agg) for ex_id, _ in top_10_exchanges]
@@ -93,6 +119,8 @@ async def run_market_scan():
             if not valid_candles: continue
             
             sum_green, sum_red, sum_price, sum_fluct = 0, 0, 0, 0
+            count = len(valid_candles)
+            
             for ex_data in valid_candles:
                 last_10 = ex_data[-10:]
                 green = sum(c[5] for c in last_10 if c[4] > c[1])
@@ -103,7 +131,6 @@ async def run_market_scan():
                 sum_price += ((last_10[-1][4] - last_10[0][1]) / last_10[0][1]) * 100
                 sum_fluct += sum([((c[2] - c[3]) / c[3]) * 100 for c in last_10]) / 10
 
-            count = len(valid_candles)
             avg_green, avg_red = sum_green / count, sum_red / count
             avg_price, avg_fluct = sum_price / count, sum_fluct / count
             
@@ -123,12 +150,14 @@ async def run_market_scan():
                 "symbol": sym, "direction": direction, "score": score,
                 "move": avg_price, "win_vol": win_vol, "lose_vol": lose_vol,
                 "vol_captured": vol_captured_pct, "entry_price": best_candles[-1][4],
-                "sequence": sequence # <-- THE AI WILL READ THIS
+                "sequence": sequence
             })
 
-        if not all_ranked_candidates: return None
+        if not all_ranked_candidates: 
+            print("❌ No valid candidates found.")
+            return None
+            
         all_ranked_candidates.sort(key=lambda x: x['score'], reverse=True)
-        
         best = all_ranked_candidates[0]
         print(f"🔥 BEST CANDIDATE: {best['symbol']} ({best['direction']}) | Score: {best['score']:.2f}")
         return best
