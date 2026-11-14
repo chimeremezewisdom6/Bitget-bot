@@ -89,12 +89,13 @@ async def execute_trade(exchange, candidate, state):
     CURRENT_CANDIDATE = candidate
     sym, direction = candidate['symbol'], candidate['direction']
     
-    log.info("🧠 AI is analyzing the entry candle sequence...")
+    log.info("🧠 AI is analyzing the Exhaustion Reversal...")
     sequence_str = json.dumps(candidate['sequence'])
     entry_prompt = (
-        f"You are an expert crypto trader. The price of {sym} just made an efficient move {direction}. "
+        f"You are an expert crypto trader. The price of {sym} had a trend of {candidate.get('trend_30m', 0):.2f}% over 30m, "
+        f"and is now making an early reversal {direction} at the '500m mark'. "
         f"Candle sequence: {sequence_str}. "
-        f"Look at the bodies and wicks. Tell me in 2 sentences exactly what caused this price movement. Was it a liquidity vacuum?"
+        f"Tell me in 2 sentences if the exhausted side is truly giving way."
     )
     entry_analysis = await asyncio.to_thread(ask_ai, entry_prompt)
     log.info(f"==================================================")
@@ -133,15 +134,14 @@ async def execute_trade(exchange, candidate, state):
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception: CURRENT_CANDIDATE = None; return
 
-    # THE SQUEEZE ENGINE
     start_time = time.time()
-    exit_reason = "timeout_20min"
+    exit_reason = "timeout_5min"
     current_px = entry_px
     peak_px = entry_px
     breakeven_locked = False
 
-    while time.time() - start_time < 1200: # 20 mins
-        await asyncio.sleep(2)
+    while time.time() - start_time < 300: # 5 mins max
+        await asyncio.sleep(1) 
         try:
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
             current_px = ticker['last']
@@ -153,23 +153,23 @@ async def execute_trade(exchange, candidate, state):
                 pnl = (entry_px - current_px) / entry_px
                 peak_px = min(peak_px, current_px)
 
-            if pnl <= -0.030: 
+            if pnl <= -0.015: 
                 exit_reason = "hard_stop_loss"
                 break
                 
-            if pnl >= 0.005:
+            if pnl >= 0.003:
                 breakeven_locked = True
 
             if breakeven_locked:
                 if direction == "LONG":
-                    if (peak_px - current_px) / peak_px >= 0.005:
+                    if (peak_px - current_px) / peak_px >= 0.004:
                         exit_reason = "trailing_stop_profit"
                         break
                     if pnl <= 0:
                         exit_reason = "breakeven_stop"
                         break
                 else:
-                    if (current_px - peak_px) / peak_px >= 0.005:
+                    if (current_px - peak_px) / peak_px >= 0.004:
                         exit_reason = "trailing_stop_profit"
                         break
                     if pnl <= 0:
@@ -225,7 +225,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received Efficiency Candle candidate: {candidate['symbol']} ({candidate['direction']})")
+                log.info(f"🎯 Received Best Available Candidate: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
