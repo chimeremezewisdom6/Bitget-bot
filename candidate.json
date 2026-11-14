@@ -1,11 +1,11 @@
 {
-  "symbol": "BARD",
-  "direction": "LONG",
-  "score": 7.2916048042244075,
-  "move": 0.4702714014396773,
-  "win_vol": 0.18521964289146167,
-  "lose_vol": 0.8147803571085384,
-  "exchanges_used": 5,
-  "vol_captured": 100.0,
-  "entry_price": 0.1315
+  "symbol": "INIT",
+  "direction": "SHORT",
+  "score": 3.1969751420583905,
+  "move": -1.3951327346590592,
+  "win_vol": 0.43477084594080107,
+  "lose_vol": 0.5652291540591988,
+  "exchanges_used": 6,
+  "vol_captured": 100.00000000000003,
+  "entry_price": 0.10538
 }
