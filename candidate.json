@@ -1,11 +1,11 @@
 {
-  "symbol": "SHELL",
-  "direction": "LONG",
-  "score": 1.7215203086134148,
-  "move": 0.7297113463154921,
-  "win_vol": 0.46212585241305215,
-  "lose_vol": 0.5378741475869481,
+  "symbol": "IDOL",
+  "direction": "SHORT",
+  "score": 5.4223478018611155,
+  "move": -0.4942549070636991,
+  "win_vol": 0.2662790772653727,
+  "lose_vol": 0.7337209227346273,
   "exchanges_used": 5,
   "vol_captured": 100.0,
-  "entry_price": 0.03401
+  "entry_price": 0.02151
 }
