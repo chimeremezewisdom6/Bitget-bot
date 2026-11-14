@@ -1,11 +1,11 @@
 {
-  "symbol": "AKE",
+  "symbol": "APR",
   "direction": "LONG",
-  "score": 3.2977852520948474,
-  "move": 1.307303388887616,
-  "win_vol": 0.39751889126471945,
-  "lose_vol": 0.6024811087352805,
-  "exchanges_used": 6,
+  "score": 2.455584442427832,
+  "move": 0.9050257015572303,
+  "win_vol": 0.36206329313523167,
+  "lose_vol": 0.6379367068647683,
+  "exchanges_used": 4,
   "vol_captured": 100.0,
-  "entry_price": 0.0120607
+  "entry_price": 0.03904
 }
