@@ -1,11 +1,11 @@
 {
-  "symbol": "DGAI",
+  "symbol": "INIT",
   "direction": "SHORT",
-  "score": 2.2045258997439294,
-  "move": -0.21768350090023103,
-  "win_vol": 0.28755537688675925,
-  "lose_vol": 0.7124446231132407,
-  "exchanges_used": 4,
+  "score": 1.3100188282841312,
+  "move": -0.6556037144219653,
+  "win_vol": 0.49924971001508284,
+  "lose_vol": 0.5007502899849171,
+  "exchanges_used": 6,
   "vol_captured": 100.0,
-  "entry_price": 0.7136
+  "entry_price": 0.10279
 }
