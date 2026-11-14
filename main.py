@@ -63,7 +63,6 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
         ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
         entry_px = ticker['last']
     except Exception as e:
-        log.error(f"Fetch error: {e}")
         return
 
     min_amt = market['limits']['amount']['min']
@@ -90,9 +89,7 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
     if is_live:
         side = "buy" if direction == "LONG" else "sell"
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
-        except Exception as e: 
-            log.error(f"Order failed: {e}")
-            return
+        except Exception as e: return
 
     # Monitor Trade
     start_time = time.time()
@@ -113,26 +110,14 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
                 pnl = (entry_px - current_px) / entry_px
                 peak_px = min(peak_px, current_px)
 
-            if pnl <= -0.015: 
-                log.info("🛑 Hard Stop Loss Hit")
-                break
+            if pnl <= -0.015: break
             if pnl >= 0.003: breakeven_locked = True
 
             if breakeven_locked:
                 if direction == "LONG":
-                    if (peak_px - current_px) / peak_px >= 0.004:
-                        log.info("✅ Trailing Stop Profit Hit")
-                        break
-                    if pnl <= 0:
-                        log.info("⚖️ Breakeven Stop Hit")
-                        break
+                    if (peak_px - current_px) / peak_px >= 0.004 or pnl <= 0: break
                 else:
-                    if (current_px - peak_px) / peak_px >= 0.004:
-                        log.info("✅ Trailing Stop Profit Hit")
-                        break
-                    if pnl <= 0:
-                        log.info("⚖️ Breakeven Stop Hit")
-                        break
+                    if (current_px - peak_px) / peak_px >= 0.004 or pnl <= 0: break
                         
         except Exception: pass
 
@@ -143,7 +128,7 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
     if is_live:
         close_side = "sell" if direction == "LONG" else "buy"
         try: await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
-        except Exception as e: log.error(f"Close failed: {e}")
+        except Exception: pass
 
     if net >= GATE_MIN_NET:
         state["streak"] += 1
@@ -155,37 +140,30 @@ async def execute_trade(exchange, sym, direction, state, ignition_data):
     save_state(state)
 
 # ==========================================
-# THE WEBSOCKET WATCHER (Per Coin)
+# THE WEBSOCKET WATCHER
 # ==========================================
 async def watch_coin_ignition(exchange, sym, state):
-    """Watches a single coin's 1m candles via WebSocket."""
     market_sym = f"{sym}/USDT:USDT"
     
     while True:
         try:
-            # Fetch the last 20 candles to establish the "Quiet Base"
             ohlcvs = await exchange.watch_ohlcv(market_sym, '1m')
             
             if len(ohlcvs) < 20:
                 continue
                 
-            # The last fully closed candle is -2 (index -1 is currently forming)
             closed_candle = ohlcvs[-2]
-            base_candles = ohlcvs[-20:-1] # The previous 19 candles
+            base_candles = ohlcvs[-20:-1]
             
-            # 1. Check the Quiet Base
             base_high = max(c[2] for c in base_candles)
             base_low = min(c[3] for c in base_candles)
             base_range = ((base_high - base_low) / base_low) * 100
             
-            if base_range > 1.0:
-                continue # Base is too volatile, not a new ignition
+            if base_range > 1.0: continue
                 
             base_vol_avg = sum(c[5] for c in base_candles) / len(base_candles)
-            if base_vol_avg == 0:
-                continue
+            if base_vol_avg == 0: continue
                 
-            # 2. Check the Ignition Candle
             o, h, l, c, v = closed_candle[1], closed_candle[2], closed_candle[3], closed_candle[4], closed_candle[5]
             total_range = h - l
             if total_range == 0: continue
@@ -194,22 +172,14 @@ async def watch_coin_ignition(exchange, sym, state):
             move_pct = (abs(c - o) / o) * 100
             vol_spike = v / base_vol_avg
             
-            # 3. The Trigger
             if move_pct >= 0.50 and body_ratio >= 0.75 and vol_spike >= 3.0:
                 direction = "LONG" if c > o else "SHORT"
-                ignition_data = {
-                    "move": round(move_pct, 2),
-                    "vol_spike": round(vol_spike, 1)
-                }
+                ignition_data = {"move": round(move_pct, 2), "vol_spike": round(vol_spike, 1)}
                 
-                # Fire the trade immediately
                 await execute_trade(exchange, sym, direction, state, ignition_data)
-                
-                # Wait a few minutes before watching this coin again to prevent double firing
                 await asyncio.sleep(300) 
                 
-        except Exception as e:
-            # Silently ignore socket disconnects and retry
+        except Exception:
             await asyncio.sleep(1)
 
 # ==========================================
@@ -234,18 +204,30 @@ async def main():
     except Exception:
         return
 
-    # Main Loop: Fetch watchlist and spawn WebSocket watchers
     active_watchers = {}
     
     while True:
         try:
-            # Fetch the watchlist from GitHub
-            res = requests.get("https://raw.githubusercontent.com/chimeremezewidom6/Bitget-bot/main/candidate.json", timeout=10)
-            data = res.json()
+            # Corrected URL: chimeremezewisdom6
+            url = "https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json"
+            res = requests.get(url, timeout=10)
+            
+            if res.status_code != 200:
+                log.warning(f"GitHub returned {res.status_code}. Waiting for watchlist...")
+                await asyncio.sleep(30)
+                continue
+                
+            try:
+                data = res.json()
+            except json.JSONDecodeError:
+                log.warning(f"GitHub file is not valid JSON. It returned: {res.text[:50]}")
+                await asyncio.sleep(30)
+                continue
+                
             watchlist = data.get("watchlist", [])
             
             if not watchlist:
-                log.info("Waiting for GitHub to provide watchlist...")
+                log.info("Watchlist empty. Waiting for GitHub scan...")
                 await asyncio.sleep(30)
                 continue
                 
@@ -253,11 +235,9 @@ async def main():
             
             for sym in watchlist:
                 if sym not in active_watchers:
-                    # Spawn a new non-blocking WebSocket task for this coin
                     task = asyncio.create_task(watch_coin_ignition(exchange, sym, state))
                     active_watchers[sym] = task
                     
-            # Wait 10 minutes before checking GitHub for an updated watchlist
             await asyncio.sleep(600)
             
         except Exception as e:
