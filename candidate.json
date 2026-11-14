@@ -1,5 +1,11 @@
 {
-  "symbol": "AXS",
+  "symbol": "JCT",
   "direction": "LONG",
-  "score": 2.570387672472615
+  "score": 13.672230459448425,
+  "move": 0.8863097233527976,
+  "win_vol": 0.1852146067225974,
+  "lose_vol": 0.8147853932774026,
+  "exchanges_used": 6,
+  "vol_captured": 100.00000000000003,
+  "entry_price": 0.002037
 }
