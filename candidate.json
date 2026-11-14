@@ -1,38 +1,38 @@
 {
-  "symbol": "EVAA",
+  "symbol": "PURR",
   "direction": "SHORT",
   "duration": 5,
-  "avg_fluct": 1.126,
+  "avg_fluct": 0.213,
   "timeline": [
     {
       "minute": 1,
-      "move_pct": -0.979,
-      "body_ratio": 0.88,
-      "volume": 2532.0
+      "move_pct": -0.05,
+      "body_ratio": 0.21,
+      "volume": 13.52
     },
     {
       "minute": 2,
-      "move_pct": -0.224,
-      "body_ratio": 0.31,
-      "volume": 3869.0
+      "move_pct": -0.037,
+      "body_ratio": 0.18,
+      "volume": 28.39
     },
     {
       "minute": 3,
-      "move_pct": -0.05,
-      "body_ratio": 0.04,
-      "volume": 4453.0
+      "move_pct": -0.037,
+      "body_ratio": 1.0,
+      "volume": 2.4
     },
     {
       "minute": 4,
-      "move_pct": -0.399,
-      "body_ratio": 0.41,
-      "volume": 5973.0
+      "move_pct": -0.162,
+      "body_ratio": 0.36,
+      "volume": 135.3
     },
     {
       "minute": 5,
-      "move_pct": -0.144,
-      "body_ratio": 0.15,
-      "volume": 2011.0
+      "move_pct": -0.199,
+      "body_ratio": 0.64,
+      "volume": 246.55
     }
   ],
   "vol_captured": 100.0
