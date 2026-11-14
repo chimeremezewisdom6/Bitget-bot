@@ -8,10 +8,11 @@ import ccxt.async_support as ccxt_async
 
 MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
 
-# THE DAVID RULES
-MIN_PRICE_MOVE = 0.22
-MAX_WINNING_DOMINANCE = 0.50
-MIN_AVG_FLUCTUATION = 0.10
+# THE TRAPPED SELLER RULES
+MIN_PRICE_MOVE = 0.22          # Must move up at least 0.22%
+MAX_WINNING_VOLUME = 0.40      # Buy volume (the aggressor) must be < 40%
+MIN_LOSING_VOLUME = 0.60       # Sell volume (the trapped) must be > 60%
+MIN_AVG_FLUCTUATION = 0.20     # Average fluctuation per minute must be >= 0.2%
 
 async def fetch_okx_candles(session, sem, sym):
     async with sem:
@@ -37,8 +38,7 @@ async def get_bitget_tradable_symbols():
         await exchange.close()
 
 async def get_global_universe():
-    """Fetches ALL coins from CoinLore and filters for >$1M global 24h volume."""
-    print("🌐 Fetching full global universe from CoinLore (14,000+ coins)...")
+    print("🌐 Fetching full global universe from CoinLore...")
     all_coins = []
     start = 0
     limit = 100
@@ -48,30 +48,21 @@ async def get_global_universe():
             url = f"https://api.coinlore.net/api/tickers/?start={start}&limit={limit}"
             res = requests.get(url, timeout=15)
             data = res.json().get('data', [])
-            
-            if not data:
-                break
+            if not data: break
                 
             for coin in data:
                 sym = coin.get('symbol', '').upper()
                 vol = coin.get('volume24', 0) or 0
-                
-                # Filter: Global 24h volume >= $1M
                 if vol >= 1_000_000 and sym not in MEGA_COINS:
                     all_coins.append(sym)
                     
             start += limit
-            time.sleep(1) # CoinLore recommends ~1 req/sec
-            
-            # Safety break to avoid infinite loops
-            if start > 20000:
-                break
-                
+            time.sleep(0.5)
+            if start > 15000: break 
     except Exception as e:
         print(f"CoinLore failed: {e}")
         return []
         
-    print(f"✅ Found {len(set(all_coins))} global coins with >$1M 24h volume.")
     return list(set(all_coins))
 
 async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
@@ -84,7 +75,7 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         
         last_10 = candles[-10:]
         
-        # 1. Check Average Fluctuation (>= 0.1% per minute)
+        # 1. Check Average Fluctuation (>= 0.2% per minute)
         fluctuations = [((c[2] - c[3]) / c[3]) * 100 for c in last_10]
         avg_fluctuation = sum(fluctuations) / len(fluctuations)
         if avg_fluctuation < MIN_AVG_FLUCTUATION: continue
@@ -95,60 +86,52 @@ async def process_bot_chunk(bot_id, symbols_chunk, session, sem):
         total_vol = green_vol + red_vol
         if total_vol == 0: continue
         
-        green_dominance = green_vol / total_vol
-        red_dominance = red_vol / total_vol
+        green_pct = green_vol / total_vol # Buy volume
+        red_pct = red_vol / total_vol     # Sell volume
         
         # 3. Calculate Price Change
         open_price = last_10[0][1]
         close_price = last_10[-1][4]
         price_change_pct = ((close_price - open_price) / open_price) * 100
         
-        direction = None
-        winning_dominance = 0
-        
-        # DAVID SETUP 1: Long (Aggressive Buyers)
-        if price_change_pct >= MIN_PRICE_MOVE and green_dominance <= MAX_WINNING_DOMINANCE and green_dominance > 0:
-            direction = "LONG"
-            winning_dominance = green_dominance
-            
-        # DAVID SETUP 2: Short (Aggressive Sellers)
-        elif price_change_pct <= -MIN_PRICE_MOVE and red_dominance <= MAX_WINNING_DOMINANCE and red_dominance > 0:
-            direction = "SHORT"
-            winning_dominance = red_dominance
-
-        if direction:
-            score = abs(price_change_pct) / winning_dominance
-            if score > highest_score:
-                highest_score = score
-                best_in_chunk = {
-                    "symbol": sym, "direction": direction, "score": score,
-                    "move": price_change_pct, "volume_pct": winning_dominance,
-                    "avg_fluct": avg_fluctuation
-                }
+        # --- THE TRAP SETUP (LONG ONLY) ---
+        # Price MUST go up
+        # Buy volume MUST be < 40%
+        # Sell volume MUST be > 60%
+        if price_change_pct >= MIN_PRICE_MOVE:
+            if green_pct <= MAX_WINNING_VOLUME and red_pct >= MIN_LOSING_VOLUME:
+                
+                # Score: Highest price gain divided by the lowest buy volume
+                # Example: 1.5% gain on 25% volume = score of 6.0 (Amazing)
+                # Example: 0.3% gain on 38% volume = score of 0.78 (Okay)
+                score = price_change_pct / green_pct 
+                
+                if score > highest_score:
+                    highest_score = score
+                    best_in_chunk = {
+                        "symbol": sym, 
+                        "direction": "LONG", 
+                        "score": score,
+                        "move": price_change_pct,
+                        "buy_vol": green_pct,
+                        "sell_vol": red_pct
+                    }
 
     return best_in_chunk
 
 async def run_market_scan():
-    # 1. Get global universe (>$1M volume across all exchanges)
     global_coins = await get_global_universe()
-    if not global_coins:
-        print("❌ No global coins found.")
-        return None
+    if not global_coins: return None
 
-    # 2. Get Bitget tradable symbols
     bitget_bases = await get_bitget_tradable_symbols()
-    print(f"🏦 Bitget lists {len(bitget_bases)} tradable USDT perpetuals.")
-
-    # 3. Intersect: Coins that are BOTH globally >$1M AND on Bitget
     final_symbols = list(set([c for c in global_coins if c in bitget_bases]))
-    print(f"📊 Intersection: {len(final_symbols)} coins are >$1M globally AND tradable on Bitget.")
+    print(f"📊 Found {len(final_symbols)} global coins (>$1M vol) tradable on Bitget.")
 
     if not final_symbols: return None
 
-    # 4. Divide into 100 bots
     chunk_size = max(1, len(final_symbols) // 100)
     chunks = [final_symbols[i:i + chunk_size] for i in range(0, len(final_symbols), chunk_size)]
-    print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for DAVID setups.")
+    print(f"👨‍🎓 Spawned {len(chunks)} bots to hunt for Trapped Sellers (LONG only, 0.2%+ Fluctuation).")
 
     sem = asyncio.Semaphore(30)
     async with aiohttp.ClientSession() as session:
@@ -156,20 +139,17 @@ async def run_market_scan():
         winners = await asyncio.gather(*tasks)
 
     valid_winners = [w for w in winners if w is not None]
-    
     if not valid_winners:
-        print("❌ No David setups found. The market is behaving normally.")
+        print("❌ No trapped sellers found. Market is normal.")
         return None
-
-    print(f"🏆 Gathered {len(valid_winners)} David setups. The bots are voting...")
 
     valid_winners.sort(key=lambda x: x['score'], reverse=True)
     best = valid_winners[0]
     
-    print(f"🔥 THE BIGGEST DAVID IS: {best['symbol']} ({best['direction']})")
-    print(f"   Price Move: {best['move']:.2f}%")
-    print(f"   Winning Volume: {best['volume_pct']*100:.1f}% (The minority side pushed the price!)")
-    print(f"   Average Fluctuation: {best['avg_fluct']:.2f}%/min")
+    print(f"🔥 TRAPPED SELLER DETECTED: {best['symbol']} ({best['direction']})")
+    print(f"   Price Move: +{best['move']:.2f}%")
+    print(f"   Aggressive Buyers (Winning): {best['buy_vol']*100:.1f}% Volume")
+    print(f"   Trapped Sellers (Losing): {best['sell_vol']*100:.1f}% Volume")
     return best
 
 if __name__ == "__main__":
