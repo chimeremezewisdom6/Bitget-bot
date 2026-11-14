@@ -13,7 +13,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("bot")
 
-# ==================== CONFIGURATION ====================
 BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "")
 BITGET_SECRET = os.environ.get("BITGET_SECRET", "")
 BITGET_PASSPHRASE = os.environ.get("BITGET_PASSPHRASE", "")
@@ -30,7 +29,6 @@ MAX_LEVERAGE = 5
 CURRENT_CANDIDATE = None
 CURRENT_ACTION = "Waiting for the GitHub scanner..."
 
-# ==================== KEEP-ALIVE SERVER ====================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -42,7 +40,6 @@ def run_keepalive():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
-# ==================== STATE MANAGEMENT ====================
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -55,43 +52,20 @@ def save_state(state):
         with open(STATE_FILE, "w") as f: json.dump(state, f)
     except Exception: pass
 
-# ==================== AI ENGINE (With 10x Retry) ====================
-def ask_ai(prompt, max_retries=10):
-    """Calls Pollinations AI with an aggressive retry loop."""
+def ask_ai(prompt, max_retries=3):
     if not POLLINATIONS_KEY: return "AI key missing."
-    
     url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai&token={POLLINATIONS_KEY}"
-    
     for attempt in range(max_retries):
         try:
-            res = requests.get(url, timeout=20)
+            res = requests.get(url, timeout=15)
             if res.status_code == 200:
                 text = res.text.strip()
-                # Check if Pollinations returned a real answer (not an error page)
                 if text and len(text) > 10 and "error" not in text.lower():
                     return text
-        except Exception as e:
-            log.warning(f"AI attempt {attempt+1}/10 failed: {e}")
-            
-        # Wait 3 seconds before rechecking
-        time.sleep(3)
-            
-    return "⚠️ AI analysis failed after 10 attempts. (The trade proceeded without analysis to not miss the entry window)."
+        except Exception: pass
+        time.sleep(2)
+    return "AI analysis unavailable."
 
-async def ai_reporter(state):
-    while True:
-        await asyncio.sleep(600)
-        status = f"Holding {CURRENT_CANDIDATE['direction']} on {CURRENT_CANDIDATE['symbol']}." if CURRENT_CANDIDATE else "Waiting for GitHub scanner."
-        prompt = f"Facts: Win streak {state['streak']}/8. Mode {'UNLOCKED' if state['unlocked'] else 'LOCKED'}. Status: {status}. Last action: {CURRENT_ACTION}. Write exactly 2 sentences."
-        log.info("🧠 Generating 10-minute AI summary...")
-        ai_summary = await asyncio.to_thread(ask_ai, prompt, 3) # Only retry 3x for regular reports
-        log.info(f"\n📊 10-MIN AI REPORT:\n{ai_summary}\n")
-
-def ask_ai_risk_manager(symbol, direction, current_pnl):
-    prompt = f"I am in a {direction} trade on {symbol}, losing {current_pnl*100:.2f}%. Explain in 1 sentence what is going wrong. End with '[ACTION: CUT]' or '[ACTION: HOLD]'."
-    return ask_ai(prompt, 2) # Only retry 2x for emergency checks
-
-# ==================== GITHUB PINGER ====================
 async def github_pinger():
     if not GITHUB_TOKEN: return
     url = "https://api.github.com/repos/chimeremezewisdom6/Bitget-bot/actions/workflows/scanner.yml/dispatches"
@@ -103,7 +77,6 @@ async def github_pinger():
         except Exception: pass
         await asyncio.sleep(600) 
 
-# ==================== CANDIDATE CHECKER ====================
 async def check_for_candidate():
     try:
         res = requests.get("https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json", timeout=10)
@@ -111,33 +84,25 @@ async def check_for_candidate():
         return data if "symbol" in data else None
     except Exception: return None
 
-# ==================== TRADE EXECUTION ====================
 async def execute_trade(exchange, candidate, state):
     global CURRENT_CANDIDATE, CURRENT_ACTION
     CURRENT_CANDIDATE = candidate
     sym, direction = candidate['symbol'], candidate['direction']
     
-    # ----------------------------------------
-    # 1. ENTRY AI ANALYSIS
-    # ----------------------------------------
+    # 1. AI entry analysis (Purely informational, not execution)
     log.info("🧠 AI is analyzing the entry 10-minute price sequence...")
     sequence_str = json.dumps(candidate['sequence'])
     entry_prompt = (
         f"You are an expert crypto trader. The price of {sym} moved {candidate['move']:.2f}% in the last 10 minutes. "
-        f"Here is the exact candle sequence (Open, High, Low, Close, Volume): {sequence_str}. "
-        f"Winning volume was {candidate['win_vol']*100:.1f}%, losing volume was {candidate['lose_vol']*100:.1f}%. "
-        f"Look at the bodies and wicks. Tell me in 2 sentences exactly what moved the price. "
-        f"Was it aggressive buyers stepping in? Was it a lack of sellers? Was it a fakeout rejection?"
+        f"Candle sequence: {sequence_str}. Winning volume: {candidate['win_vol']*100:.1f}%, Losing volume: {candidate['lose_vol']*100:.1f}%. "
+        f"Tell me in 2 sentences exactly what moved the price."
     )
     entry_analysis = await asyncio.to_thread(ask_ai, entry_prompt)
-    
     log.info(f"==================================================")
     log.info(f"🧠 ENTRY ANALYSIS:\n{entry_analysis}")
     log.info(f"==================================================")
 
-    # ----------------------------------------
-    # 2. OPEN THE TRADE
-    # ----------------------------------------
+    # 2. Open the trade
     market_sym = f"{sym}/USDT:USDT"
     market = exchange.market(market_sym)
     if not market: CURRENT_CANDIDATE = None; return
@@ -170,41 +135,58 @@ async def execute_trade(exchange, candidate, state):
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception: CURRENT_CANDIDATE = None; return
 
-    # ----------------------------------------
-    # 3. MONITOR FOR 10 MINUTES
-    # ----------------------------------------
+    # 3. THE NEW EXECUTION ENGINE: Breakeven Lock + Trailing Stop
     start_time = time.time()
-    exit_reason = "timeout_10min"
+    exit_reason = "timeout_20min"
     current_px = entry_px
+    peak_px = entry_px
+    breakeven_locked = False
 
-    while time.time() - start_time < 600:
-        await asyncio.sleep(5)
+    while time.time() - start_time < 1200: # 20 Minutes max hold
+        await asyncio.sleep(2) # Check every 2 seconds
         try:
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
             current_px = ticker['last']
-            if direction == "LONG": pnl = (current_px - entry_px) / entry_px
-            else: pnl = (entry_px - current_px) / entry_px
             
-            # Emergency stop loss
-            if pnl <= -0.015: 
-                exit_reason = "stop_loss"
+            if direction == "LONG":
+                pnl = (current_px - entry_px) / entry_px
+                peak_px = max(peak_px, current_px)
+            else:
+                pnl = (entry_px - current_px) / entry_px
+                peak_px = min(peak_px, current_px)
+
+            # Rule A: Hard Stop Loss at -2.5%
+            if pnl <= -0.025: 
+                exit_reason = "hard_stop_loss"
                 break
                 
-            # AI Risk Manager if bleeding
-            if pnl < -0.005 and pnl > -0.015:
-                ai_decision = await asyncio.to_thread(ask_ai_risk_manager, sym, direction, pnl)
-                if "CUT" in ai_decision.upper():
-                    log.info(f"\n🤖 AI RISK MANAGER:\n{ai_decision}\n")
-                    exit_reason = "ai_cut"
-                    break
-                    
+            # Rule B: Lock Breakeven when profit hits +0.25%
+            if pnl >= 0.0025:
+                breakeven_locked = True
+
+            # Rule C: Trailing Stop (Only active after breakeven is locked)
+            if breakeven_locked:
+                if direction == "LONG":
+                    drawdown = (peak_px - current_px) / peak_px
+                    if drawdown >= 0.004: # Drops 0.4% from peak
+                        exit_reason = "trailing_stop_profit"
+                        break
+                    if pnl <= 0: # Hit breakeven
+                        exit_reason = "breakeven_stop"
+                        break
+                else:
+                    drawdown = (current_px - peak_px) / peak_px
+                    if drawdown >= 0.004:
+                        exit_reason = "trailing_stop_profit"
+                        break
+                    if pnl <= 0:
+                        exit_reason = "breakeven_stop"
+                        break
+
         except Exception: pass
 
-    # ----------------------------------------
-    # 4. CLOSE THE TRADE & CALCULATE EXIT VOLUMES
-    # ----------------------------------------
+    # 4. Close Trade
     close_win_vol, close_lose_vol = 0, 0
-    exit_sequence_str = "No sequence data"
     try:
         ohlcv = await exchange.fetch_ohlcv(market_sym, timeframe='1m', limit=10)
         if ohlcv and len(ohlcv) >= 10:
@@ -212,15 +194,10 @@ async def execute_trade(exchange, candidate, state):
             red = sum(c[5] for c in ohlcv if c[4] < c[1] and c[5] is not None)
             total = green + red
             if total > 0:
-                close_green = (green / total) * 100
-                close_red = (red / total) * 100
                 if direction == "LONG":
-                    close_win_vol, close_lose_vol = close_green, close_red
+                    close_win_vol, close_lose_vol = (green / total) * 100, (red / total) * 100
                 else:
-                    close_win_vol, close_lose_vol = close_red, close_green
-            
-            exit_seq = [{"o": c[1], "h": c[2], "l": c[3], "c": c[4], "v": c[5]} for c in ohlcv]
-            exit_sequence_str = json.dumps(exit_seq)
+                    close_win_vol, close_lose_vol = (red / total) * 100, (green / total) * 100
     except Exception: pass
 
     final = current_px
@@ -241,27 +218,7 @@ async def execute_trade(exchange, candidate, state):
         try: await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
         except Exception as e: log.critical(f"🚨 [LIVE] FAILED TO CLOSE! Error: {e}")
 
-    # ----------------------------------------
-    # 5. EXIT AI ANALYSIS
-    # ----------------------------------------
-    log.info("🧠 AI is analyzing the trade result...")
-    exit_prompt = (
-        f"You are an expert crypto trader. I just closed a {direction} trade on {sym}. "
-        f"Entry Price: {entry_px}, Exit Price: {final}. Net PnL: {net*100:.2f}%. Exit Reason: {exit_reason}. "
-        f"Entry Volume: Winning {candidate['win_vol']*100:.1f}% vs Losing {candidate['lose_vol']*100:.1f}%. "
-        f"Exit Volume: Winning {close_win_vol:.1f}% vs Losing {close_lose_vol:.1f}%. "
-        f"Here is the closing candle sequence: {exit_sequence_str}. "
-        f"Explain in 2 sentences what happened during this trade and why it won or lost. Be precise."
-    )
-    exit_analysis = await asyncio.to_thread(ask_ai, exit_prompt)
-    
-    log.info(f"==================================================")
-    log.info(f"🧠 EXIT ANALYSIS:\n{exit_analysis}")
-    log.info(f"==================================================")
-
-    # ----------------------------------------
-    # 6. UPDATE GATE & CLEANUP
-    # ----------------------------------------
+    # 5. Update Gate
     if net >= GATE_MIN_NET:
         state["streak"] += 1
         log.info(f"✅ WIN! Streak: {state['streak']}/8")
@@ -276,7 +233,6 @@ async def execute_trade(exchange, candidate, state):
     save_state(state)
     CURRENT_CANDIDATE = None
 
-# ==================== MAIN LOOP ====================
 async def main_loop():
     state = load_state()
     log.info(f"Executor starting | Mode: {'LIVE' if LIVE_TRADING and state['unlocked'] else 'PAPER'} | Streak: {state['streak']}/8")
@@ -290,7 +246,6 @@ async def main_loop():
     except Exception: return
 
     asyncio.create_task(github_pinger())
-    asyncio.create_task(ai_reporter(state))
 
     last_traded = None
     while True:
