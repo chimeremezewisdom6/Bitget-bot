@@ -1,11 +1,11 @@
 {
-  "symbol": "RSR",
-  "direction": "LONG",
-  "score": 4.385551584373582,
-  "move": 0.2792613846795612,
-  "win_vol": 0.18174675976436927,
-  "lose_vol": 0.8182532402356306,
-  "exchanges_used": 5,
+  "symbol": "AKE",
+  "direction": "SHORT",
+  "score": 2.9205493307596044,
+  "move": -1.1124489505212096,
+  "win_vol": 0.38549030444169863,
+  "lose_vol": 0.6145096955583014,
+  "exchanges_used": 6,
   "vol_captured": 100.0,
-  "entry_price": 0.001439
+  "entry_price": 0.0118291
 }
