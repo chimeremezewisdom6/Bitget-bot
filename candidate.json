@@ -1,11 +1,11 @@
 {
-  "symbol": "Q",
-  "direction": "LONG",
-  "score": 3.2314531370210635,
-  "move": 0.37707568914529405,
-  "win_vol": 0.3437636291526772,
-  "lose_vol": 0.6562363708473227,
+  "symbol": "ONE",
+  "direction": "SHORT",
+  "score": 6.675843967384518,
+  "move": -0.5520344948565349,
+  "win_vol": 0.2386553192677094,
+  "lose_vol": 0.7613446807322906,
   "exchanges_used": 5,
-  "vol_captured": 100.0,
-  "entry_price": 0.027618
+  "vol_captured": 100.00000000000003,
+  "entry_price": 0.001373
 }
