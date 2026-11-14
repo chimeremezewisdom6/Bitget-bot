@@ -1,11 +1,11 @@
 {
-  "symbol": "IDOL",
+  "symbol": "\u725b\u6765",
   "direction": "SHORT",
-  "score": 4.210433180850338,
-  "move": -1.9114373240753124,
-  "win_vol": 0.45078956095089157,
-  "lose_vol": 0.5492104390491084,
-  "exchanges_used": 5,
-  "vol_captured": 100.00000000000003,
-  "entry_price": 0.020233
+  "score": 4.07415822060149,
+  "move": -0.334928970961049,
+  "win_vol": 0.23745101627553586,
+  "lose_vol": 0.7625489837244642,
+  "exchanges_used": 3,
+  "vol_captured": 100.0,
+  "entry_price": 0.05846
 }
