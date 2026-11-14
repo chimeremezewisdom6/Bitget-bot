@@ -1,11 +1,11 @@
 {
-  "symbol": "DOS",
+  "symbol": "UNITAS",
   "direction": "LONG",
-  "score": 2.489000944287965,
-  "move": 7.869310357083892,
-  "win_vol": 0.6757848819624063,
-  "lose_vol": 0.3242151180375936,
-  "exchanges_used": 5,
+  "score": 6.589871210344293,
+  "move": 0.714285714285712,
+  "win_vol": 0.31944937482743657,
+  "lose_vol": 0.6805506251725634,
+  "exchanges_used": 1,
   "vol_captured": 100.0,
-  "entry_price": 0.16278
+  "entry_price": 0.1833
 }
