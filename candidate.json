@@ -1,11 +1,11 @@
 {
-  "symbol": "\u725b\u6765",
-  "direction": "SHORT",
-  "score": 4.07415822060149,
-  "move": -0.334928970961049,
-  "win_vol": 0.23745101627553586,
-  "lose_vol": 0.7625489837244642,
-  "exchanges_used": 3,
+  "symbol": "DOS",
+  "direction": "LONG",
+  "score": 2.489000944287965,
+  "move": 7.869310357083892,
+  "win_vol": 0.6757848819624063,
+  "lose_vol": 0.3242151180375936,
+  "exchanges_used": 5,
   "vol_captured": 100.0,
-  "entry_price": 0.05846
+  "entry_price": 0.16278
 }
