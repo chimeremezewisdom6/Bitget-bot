@@ -1,11 +1,11 @@
 {
-  "symbol": "ONE",
+  "symbol": "NIL",
   "direction": "SHORT",
-  "score": 6.675843967384518,
-  "move": -0.5520344948565349,
-  "win_vol": 0.2386553192677094,
-  "lose_vol": 0.7613446807322906,
+  "score": 9.497138081108451,
+  "move": -0.7738606827833475,
+  "win_vol": 0.2349410307302477,
+  "lose_vol": 0.7650589692697523,
   "exchanges_used": 5,
-  "vol_captured": 100.00000000000003,
-  "entry_price": 0.001373
+  "vol_captured": 100.0,
+  "entry_price": 0.05324
 }
