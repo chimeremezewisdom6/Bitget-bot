@@ -1,11 +1,11 @@
 {
-  "symbol": "APR",
+  "symbol": "IRYS",
   "direction": "LONG",
-  "score": 2.455584442427832,
-  "move": 0.9050257015572303,
-  "win_vol": 0.36206329313523167,
-  "lose_vol": 0.6379367068647683,
-  "exchanges_used": 4,
+  "score": 6.413649551196365,
+  "move": 0.6722484069086672,
+  "win_vol": 0.3061673277072709,
+  "lose_vol": 0.6938326722927293,
+  "exchanges_used": 5,
   "vol_captured": 100.0,
-  "entry_price": 0.03904
+  "entry_price": 0.015725
 }
