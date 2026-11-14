@@ -1,11 +1,11 @@
 {
-  "symbol": "IRYS",
-  "direction": "LONG",
-  "score": 6.413649551196365,
-  "move": 0.6722484069086672,
-  "win_vol": 0.3061673277072709,
-  "lose_vol": 0.6938326722927293,
+  "symbol": "SLX",
+  "direction": "SHORT",
+  "score": 7.565723723325026,
+  "move": -3.663259033108551,
+  "win_vol": 0.4815140288299096,
+  "lose_vol": 0.5184859711700904,
   "exchanges_used": 5,
   "vol_captured": 100.0,
-  "entry_price": 0.015725
+  "entry_price": 0.03638
 }
