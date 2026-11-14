@@ -7,10 +7,7 @@ import ccxt.async_support as ccxt_async
 
 MEGA_COINS = {'BTC', 'ETH', 'USDT', 'BNB', 'SOL', 'USDC', 'XRP', 'STETH', 'TON', 'DOGE', 'ADA', 'SHIB', 'AVAX', 'TRX', 'DOT', 'BCH', 'LINK', 'NEAR', 'MATIC', 'LTC'}
 
-# THE RULES
-MIN_PRICE_MOVE = 0.22
-MAX_WINNING_VOLUME = 0.40
-MIN_LOSING_VOLUME = 0.60
+# We only require a basic fluctuation to filter out dead coins
 MIN_AVG_FLUCTUATION = 0.15
 
 # THE 15 MAJOR EXCHANGES
@@ -70,7 +67,7 @@ async def run_market_scan():
             pass
 
     # 2. Fetch ALL Tickers across ALL exchanges simultaneously
-    print("📊 Fetching 24h tickers from all 15 exchanges concurrently...")
+    print("📊 Fetching 24h tickers from all exchanges concurrently...")
     ticker_tasks = [ex.fetch_tickers() for ex in exchanges.values()]
     all_tickers_results = await asyncio.gather(*ticker_tasks, return_exceptions=True)
     
@@ -115,11 +112,11 @@ async def run_market_scan():
 
     if not candidates: return None
 
-    # 5. Stage 2 & 3: Top 10 Exchange Verification & Averaged 10m Aggregation
-    print("🔬 Stage 2: Verifying 95% volume coverage using the Top 10 exchanges per coin...")
+    # 5. Stage 2: Top 10 Exchange Verification & Ranked Averaging
+    print("🔬 Stage 2: Verifying 95% volume coverage & ranking the best candidate...")
     sem_agg = asyncio.Semaphore(20)
-    best_winner = None
-    highest_score = -1
+    
+    all_ranked_candidates = []
 
     for sym in candidates:
         market_sym = f"{sym}/USDT:USDT"
@@ -139,12 +136,12 @@ async def run_market_scan():
         holding_exchanges.sort(key=lambda x: x[1], reverse=True)
         top_10_exchanges = holding_exchanges[:10]
         
-        # Check if Top 10 accounts for 95%+ of the global volume
+        # Check 95% Volume Accuracy
         combined_24h_vol = sum(x[1] for x in top_10_exchanges)
         vol_captured_pct = (combined_24h_vol / global_vol) * 100
         
         if vol_captured_pct < 95.0:
-            continue # Reject if we don't have 95% of the market
+            continue
             
         # Fetch 10m candles from these specific Top 10 exchanges
         tasks = [fetch_ccxt_candles(exchanges[ex_id], sym, sem_agg) for ex_id, _ in top_10_exchanges]
@@ -169,7 +166,6 @@ async def run_market_scan():
             
             if total_vol == 0: continue
             
-            # Calculate individual exchange metrics
             ex_green_pct = green / total_vol
             ex_red_pct = red / total_vol
             
@@ -180,7 +176,6 @@ async def run_market_scan():
             fluct = [((c[2] - c[3]) / c[3]) * 100 for c in last_10]
             ex_fluct = sum(fluct) / len(fluct)
             
-            # Sum them up
             sum_green_pct += ex_green_pct
             sum_red_pct += ex_red_pct
             sum_price_change += ex_price_change
@@ -189,47 +184,60 @@ async def run_market_scan():
             
         if count == 0: continue
         
-        # Divide by the number of exchanges (average dominance and price change)
         avg_green_pct = sum_green_pct / count
         avg_red_pct = sum_red_pct / count
         avg_price_change = sum_price_change / count
         avg_fluct = sum_fluct / count
 
-        # Optional filter for aggregated fluctuation
-        if avg_fluct < MIN_AVG_FLUCTUATION: continue
+        # --- THE NEW RANKING LOGIC (No strict cutoffs) ---
+        # We want the biggest price move with the smallest winning volume.
+        # If price went up, we calculate Long score. If price went down, we calculate Short score.
+        
+        if avg_price_change > 0:
+            # LONG: High price change, low buy volume
+            score = avg_price_change / (avg_green_pct + 0.01) # 0.01 prevents div by zero
+            direction = "LONG"
+            win_vol = avg_green_pct
+            lose_vol = avg_red_pct
+        else:
+            # SHORT: High negative price change, low sell volume
+            score = abs(avg_price_change) / (avg_red_pct + 0.01)
+            direction = "SHORT"
+            win_vol = avg_red_pct
+            lose_vol = avg_green_pct
+            
+        # Add a small bonus for high raw fluctuation to break ties
+        score += (avg_fluct * 0.1)
 
-        # THE TRAP LOGIC (LONG ONLY)
-        if avg_price_change >= MIN_PRICE_MOVE:
-            if avg_green_pct <= MAX_WINNING_VOLUME and avg_red_pct >= MIN_LOSING_VOLUME:
-                score = avg_price_change / avg_green_pct
-                if score > highest_score:
-                    highest_score = score
-                    best_winner = {
-                        "symbol": sym, 
-                        "direction": "LONG", 
-                        "score": score,
-                        "move": avg_price_change,
-                        "buy_vol": avg_green_pct,
-                        "sell_vol": avg_red_pct,
-                        "exchanges_used": count,
-                        "vol_captured": vol_captured_pct
-                    }
+        all_ranked_candidates.append({
+            "symbol": sym, 
+            "direction": direction, 
+            "score": score,
+            "move": avg_price_change,
+            "win_vol": win_vol,
+            "lose_vol": lose_vol,
+            "exchanges_used": count,
+            "vol_captured": vol_captured_pct
+        })
 
     # Cleanup
     for ex in exchanges.values():
         await ex.close()
 
-    if best_winner:
-        print(f"🔥 TRAPPED SELLER DETECTED: {best_winner['symbol']} (LONG)")
-        print(f"   Average Price Move (Top 10 Ex): +{best_winner['move']:.2f}%")
-        print(f"   Average Buy Vol (Top 10 Ex): {best_winner['buy_vol']*100:.1f}%")
-        print(f"   Average Sell Vol (Top 10 Ex): {best_winner['sell_vol']*100:.1f}%")
-        print(f"   Aggregated across {best_winner['exchanges_used']} exchanges.")
-        print(f"   Volume Accuracy: {best_winner['vol_captured']:.1f}% of Global")
-        return best_winner
-    else:
-        print("❌ No trapped sellers found in aggregated data.")
+    # Pick the absolute best candidate from the entire list
+    if not all_ranked_candidates:
+        print("❌ No valid candidates found after 95% volume filtering.")
         return None
+        
+    all_ranked_candidates.sort(key=lambda x: x['score'], reverse=True)
+    best_winner = all_ranked_candidates[0]
+
+    print(f"🔥 BEST RELATIVE CANDIDATE: {best_winner['symbol']} ({best_winner['direction']})")
+    print(f"   Price Move: {best_winner['move']:+.2f}%")
+    print(f"   Winning Side Volume: {best_winner['win_vol']*100:.1f}% (Losing Side: {best_winner['lose_vol']*100:.1f}%)")
+    print(f"   Aggregated across {best_winner['exchanges_used']} exchanges.")
+    print(f"   Volume Accuracy: {best_winner['vol_captured']:.1f}% of Global")
+    return best_winner
 
 if __name__ == "__main__":
     best_coin = asyncio.run(run_market_scan())
