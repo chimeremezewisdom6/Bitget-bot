@@ -52,13 +52,21 @@ def save_state(state):
         with open(STATE_FILE, "w") as f: json.dump(state, f)
     except Exception: pass
 
-def ask_ai(prompt):
+def ask_ai(prompt, max_retries=3):
+    """Calls Pollinations AI with retry logic to handle timeouts."""
     if not POLLINATIONS_KEY: return "AI key missing."
-    try:
-        url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai&token={POLLINATIONS_KEY}"
-        return requests.get(url, timeout=20).text.strip()
-    except Exception as e:
-        return f"AI failed: {e}"
+    url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai&token={POLLINATIONS_KEY}"
+    
+    for attempt in range(max_retries):
+        try:
+            res = requests.get(url, timeout=20)
+            if res.status_code == 200:
+                return res.text.strip()
+        except Exception as e:
+            log.warning(f"AI attempt {attempt+1} failed. Retrying...")
+            time.sleep(2)
+            
+    return "AI failed to analyze after multiple attempts."
 
 async def github_pinger():
     if not GITHUB_TOKEN: return
@@ -82,7 +90,7 @@ async def ai_reporter(state):
 
 def ask_ai_risk_manager(symbol, direction, current_pnl):
     prompt = f"I am in a {direction} trade on {symbol}, losing {current_pnl*100:.2f}%. Explain in 1 sentence what is going wrong. End with '[ACTION: CUT]' or '[ACTION: HOLD]'."
-    return ask_ai(prompt)
+    return ask_ai(prompt, max_retries=1)
 
 async def check_for_candidate():
     try:
@@ -96,21 +104,26 @@ async def execute_trade(exchange, candidate, state):
     CURRENT_CANDIDATE = candidate
     sym, direction = candidate['symbol'], candidate['direction']
     
-    log.info("🧠 AI is analyzing the 10-minute price sequence...")
+    # ==========================================
+    # ENTRY AI ANALYSIS
+    # ==========================================
+    log.info("🧠 AI is analyzing the entry 10-minute price sequence...")
     sequence_str = json.dumps(candidate['sequence'])
-    prompt = (
+    entry_prompt = (
         f"You are an expert crypto trader. The price of {sym} moved {candidate['move']:.2f}% in the last 10 minutes. "
-        f"Here is the exact candle sequence (Open, High, Low, Close, Volume): {sequence_str}. "
-        f"The winning volume was {candidate['win_vol']*100:.1f}%, losing volume was {candidate['lose_vol']*100:.1f}%. "
-        f"Look at the bodies and the wicks. Based ONLY on this data, tell me in 2 sentences exactly what moved the price. "
-        f"Was it aggressive buyers stepping in? Was it a lack of sellers? Was it a fakeout rejection? Be precise."
+        f"Here is the exact candle sequence: {sequence_str}. "
+        f"Winning volume was {candidate['win_vol']*100:.1f}%, losing volume was {candidate['lose_vol']*100:.1f}%. "
+        f"Look at the bodies and wicks. Tell me in 2 sentences exactly what moved the price."
     )
-    ai_analysis = await asyncio.to_thread(ask_ai, prompt)
+    entry_analysis = await asyncio.to_thread(ask_ai, entry_prompt)
     
     log.info(f"==================================================")
-    log.info(f"🧠 AI MARKET ANALYSIS:\n{ai_analysis}")
+    log.info(f"🧠 ENTRY ANALYSIS:\n{entry_analysis}")
     log.info(f"==================================================")
 
+    # ==========================================
+    # EXECUTE TRADE
+    # ==========================================
     market_sym = f"{sym}/USDT:USDT"
     market = exchange.market(market_sym)
     if not market: CURRENT_CANDIDATE = None; return
@@ -143,6 +156,9 @@ async def execute_trade(exchange, candidate, state):
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception: CURRENT_CANDIDATE = None; return
 
+    # ==========================================
+    # MONITOR FOR 10 MINUTES
+    # ==========================================
     start_time = time.time()
     exit_reason = "timeout_10min"
     current_px = entry_px
@@ -159,7 +175,11 @@ async def execute_trade(exchange, candidate, state):
                 break
         except Exception: pass
 
+    # ==========================================
+    # CALCULATE CLOSING VOLUMES & EXIT SEQUENCE
+    # ==========================================
     close_win_vol, close_lose_vol = 0, 0
+    exit_sequence_str = "No sequence data"
     try:
         ohlcv = await exchange.fetch_ohlcv(market_sym, timeframe='1m', limit=10)
         if ohlcv and len(ohlcv) >= 10:
@@ -173,6 +193,10 @@ async def execute_trade(exchange, candidate, state):
                     close_win_vol, close_lose_vol = close_green, close_red
                 else:
                     close_win_vol, close_lose_vol = close_red, close_green
+            
+            # Extract closing sequence for the AI
+            exit_seq = [{"o": c[1], "h": c[2], "l": c[3], "c": c[4], "v": c[5]} for c in ohlcv]
+            exit_sequence_str = json.dumps(exit_seq)
     except Exception: pass
 
     final = current_px
@@ -188,6 +212,27 @@ async def execute_trade(exchange, candidate, state):
     
     CURRENT_ACTION = f"Closed {direction} {sym} ({exit_reason}). Net: {net*100:.2f}%"
 
+    # ==========================================
+    # EXIT AI ANALYSIS
+    # ==========================================
+    log.info("🧠 AI is analyzing the trade result...")
+    exit_prompt = (
+        f"You are an expert crypto trader. I just closed a {direction} trade on {sym}. "
+        f"Entry Price: {entry_px}, Exit Price: {final}. Net PnL: {net*100:.2f}%. Exit Reason: {exit_reason}. "
+        f"Entry Volume: Winning {candidate['win_vol']*100:.1f}% vs Losing {candidate['lose_vol']*100:.1f}%. "
+        f"Exit Volume: Winning {close_win_vol:.1f}% vs Losing {close_lose_vol:.1f}%. "
+        f"Here is the closing candle sequence: {exit_sequence_str}. "
+        f"Explain in 2 sentences what happened during this trade and why it won or lost. Be precise."
+    )
+    exit_analysis = await asyncio.to_thread(ask_ai, exit_prompt)
+    
+    log.info(f"==================================================")
+    log.info(f"🧠 EXIT ANALYSIS:\n{exit_analysis}")
+    log.info(f"==================================================")
+
+    # ==========================================
+    # UPDATE GATE & CLEANUP
+    # ==========================================
     if is_live:
         close_side = "sell" if direction == "LONG" else "buy"
         try: await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
