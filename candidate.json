@@ -1,11 +1,11 @@
 {
-  "symbol": "AKE",
+  "symbol": "BANANAS31",
   "direction": "SHORT",
-  "score": 2.9205493307596044,
-  "move": -1.1124489505212096,
-  "win_vol": 0.38549030444169863,
-  "lose_vol": 0.6145096955583014,
-  "exchanges_used": 6,
-  "vol_captured": 100.0,
-  "entry_price": 0.0118291
+  "score": 4.078387711030483,
+  "move": -1.7788847838509974,
+  "win_vol": 0.4336534657397168,
+  "lose_vol": 0.5663465342602831,
+  "exchanges_used": 5,
+  "vol_captured": 99.99999999999997,
+  "entry_price": 0.004337
 }
