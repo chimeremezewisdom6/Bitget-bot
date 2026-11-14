@@ -1,11 +1,11 @@
 {
-  "symbol": "DOS",
+  "symbol": "RSR",
   "direction": "LONG",
-  "score": 1.5280862455841644,
-  "move": 0.17433681766117548,
-  "win_vol": 0.34356234713277,
-  "lose_vol": 0.65643765286723,
+  "score": 4.385551584373582,
+  "move": 0.2792613846795612,
+  "win_vol": 0.18174675976436927,
+  "lose_vol": 0.8182532402356306,
   "exchanges_used": 5,
   "vol_captured": 100.0,
-  "entry_price": 0.16053
+  "entry_price": 0.001439
 }
