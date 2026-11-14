@@ -7,7 +7,6 @@ import requests
 import threading
 import time
 import math
-import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -17,8 +16,6 @@ BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "")
 BITGET_SECRET = os.environ.get("BITGET_SECRET", "")
 BITGET_PASSPHRASE = os.environ.get("BITGET_PASSPHRASE", "")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "NO") == "YES"
-POLLINATIONS_KEY = os.environ.get("POLLINATIONS_API_KEY", "")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 FEE_ROUND_TRIP = 0.0012
 GATE_WINS_REQUIRED = 8
@@ -26,8 +23,7 @@ GATE_MIN_NET = 0.0042
 STATE_FILE = "state.json"
 MAX_LEVERAGE = 5 
 
-CURRENT_CANDIDATE = None
-CURRENT_ACTION = "Waiting for the GitHub scanner..."
+CURRENT_ACTION = "Waiting for WebSocket Ignition..."
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -52,80 +48,29 @@ def save_state(state):
         with open(STATE_FILE, "w") as f: json.dump(state, f)
     except Exception: pass
 
-def ask_ai(prompt, max_retries=5):
-    if not POLLINATIONS_KEY: return "AI key missing."
-    url = f"https://text.pollinations.ai/{urllib.parse.quote(prompt)}?model=openai&token={POLLINATIONS_KEY}"
-    for attempt in range(max_retries):
-        try:
-            res = requests.get(url, timeout=15)
-            if res.status_code == 200:
-                text = res.text.strip()
-                if text and len(text) > 10 and "error" not in text.lower():
-                    return text
-        except Exception: pass
-        time.sleep(2)
-    return "AI analysis unavailable."
-
-async def github_pinger():
-    if not GITHUB_TOKEN: return
-    url = "https://api.github.com/repos/chimeremezewisdom6/Bitget-bot/actions/workflows/scanner.yml/dispatches"
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    while True:
-        try:
-            res = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
-            if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new scan.")
-        except Exception: pass
-        await asyncio.sleep(600) 
-
-async def check_for_candidate():
-    try:
-        res = requests.get("https://raw.githubusercontent.com/chimeremezewidom6/Bitget-bot/main/candidate.json", timeout=10)
-        data = res.json()
-        return data if "symbol" in data else None
-    except Exception: return None
-
-async def execute_trade(exchange, candidate, state):
-    global CURRENT_CANDIDATE, CURRENT_ACTION
-    CURRENT_CANDIDATE = candidate
-    sym, direction = candidate['symbol'], candidate['direction']
-    duration = candidate.get('duration', 0)
-    timeline = candidate.get('timeline', [])
-    
-    log.info(f"🧠 Trading {sym} which has sustained momentum for {duration} minutes.")
-    
-    # Log the timeline so the user sees what happened
-    log.info(f"⏱️ MOMENTUM TIMELINE (Last {duration} mins):")
-    for t in timeline:
-        log.info(f"   Min {t['minute']}: Move={t['move_pct']:+.2f}% | Body Ratio={t['body_ratio']} | Vol={t['volume']}")
-    
-    timeline_str = json.dumps(timeline)
-    entry_prompt = (
-        f"You are an expert crypto trader. The price of {sym} moved {direction} and has been moving for {duration} minutes. "
-        f"Here is the minute-by-minute breakdown of that move: {timeline_str}. "
-        f"Tell me in 2 sentences: Did the momentum accelerate at the end, or was it slowing down before I entered?"
-    )
-    entry_analysis = await asyncio.to_thread(ask_ai, entry_prompt)
-    log.info(f"==================================================")
-    log.info(f"🧠 ENTRY ANALYSIS:\n{entry_analysis}")
-    log.info(f"==================================================")
-
+# ==========================================
+# THE MILLISECOND TRADE EXECUTION
+# ==========================================
+async def execute_trade(exchange, sym, direction, state, ignition_data):
+    global CURRENT_ACTION
     market_sym = f"{sym}/USDT:USDT"
     market = exchange.market(market_sym)
-    if not market: CURRENT_CANDIDATE = None; return
+    if not market: return
 
     try:
         balance = await exchange.fetch_balance(params={'uta': True})
         usdt_free = balance['USDT']['free']
         ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
         entry_px = ticker['last']
-    except Exception: CURRENT_CANDIDATE = None; return
+    except Exception as e:
+        log.error(f"Fetch error: {e}")
+        return
 
     min_amt = market['limits']['amount']['min']
     required_leverage = math.ceil((min_amt * entry_px) / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
     if required_leverage > MAX_LEVERAGE:
-        log.info(f"❌ Balance too small for {sym}. Skipping.")
-        CURRENT_CANDIDATE = None; return
+        return
 
     await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
     amount = float(exchange.amount_to_precision(market_sym, (usdt_free * 0.90 * required_leverage) / entry_px))
@@ -133,16 +78,24 @@ async def execute_trade(exchange, candidate, state):
     is_live = LIVE_TRADING and state["unlocked"]
     mode = "LIVE" if is_live else "PAPER"
     
-    log.info(f"🚀 [{mode}] OPENING {direction} ON {sym} | Price: {entry_px} | Size: {amount}")
+    log.info(f"==================================================")
+    log.info(f"⚡ MILLISECOND IGNITION DETECTED!")
+    log.info(f"   Symbol: {sym} | Direction: {direction}")
+    log.info(f"   Move: {ignition_data['move']}% | Vol Spike: {ignition_data['vol_spike']}x")
+    log.info(f"🚀 [{mode}] OPENING {direction} | Price: {entry_px} | Size: {amount}")
+    log.info(f"==================================================")
+    
     CURRENT_ACTION = f"Opened {direction} on {sym} at {entry_px}."
 
     if is_live:
         side = "buy" if direction == "LONG" else "sell"
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
-        except Exception: CURRENT_CANDIDATE = None; return
+        except Exception as e: 
+            log.error(f"Order failed: {e}")
+            return
 
+    # Monitor Trade
     start_time = time.time()
-    exit_reason = "timeout_10min"
     current_px = entry_px
     peak_px = entry_px
     breakeven_locked = False
@@ -161,55 +114,36 @@ async def execute_trade(exchange, candidate, state):
                 peak_px = min(peak_px, current_px)
 
             if pnl <= -0.015: 
-                exit_reason = "hard_stop_loss"
+                log.info("🛑 Hard Stop Loss Hit")
                 break
-                
-            if pnl >= 0.003:
-                breakeven_locked = True
+            if pnl >= 0.003: breakeven_locked = True
 
             if breakeven_locked:
                 if direction == "LONG":
                     if (peak_px - current_px) / peak_px >= 0.004:
-                        exit_reason = "trailing_stop_profit"
+                        log.info("✅ Trailing Stop Profit Hit")
                         break
                     if pnl <= 0:
-                        exit_reason = "breakeven_stop"
+                        log.info("⚖️ Breakeven Stop Hit")
                         break
                 else:
                     if (current_px - peak_px) / peak_px >= 0.004:
-                        exit_reason = "trailing_stop_profit"
+                        log.info("✅ Trailing Stop Profit Hit")
                         break
                     if pnl <= 0:
-                        exit_reason = "breakeven_stop"
-                        break
-                        
-            # Momentum Death Check (Every 10s, look at the last 2 candles)
-            if int(time.time() - start_time) % 10 == 0:
-                candles = await exchange.fetch_ohlcv(market_sym, timeframe='1m', limit=3)
-                if len(candles) >= 2:
-                    current_body = abs(candles[-1][4] - candles[-1][1])
-                    prev_body = abs(candles[-2][4] - candles[-2][1])
-                    
-                    # If body shrinks by half and we are in profit, get out.
-                    if current_body < (prev_body * 0.5) and pnl > 0.001:
-                        exit_reason = "momentum_death_deceleration"
+                        log.info("⚖️ Breakeven Stop Hit")
                         break
                         
         except Exception: pass
 
-    final = current_px
-    gross = (final - entry_px) / entry_px if direction == "LONG" else (entry_px - final) / entry_px
+    gross = (current_px - entry_px) / entry_px if direction == "LONG" else (entry_px - current_px) / entry_px
     net = gross - FEE_ROUND_TRIP
-    
-    log.info(f"==================================================")
-    log.info(f"📉 [{mode}] CLOSED {direction} ON {sym} ({exit_reason})")
-    log.info(f"   Net PnL: {net*100:+.2f}%")
-    log.info(f"==================================================")
+    log.info(f"📉 [{mode}] CLOSED {direction} ON {sym} | Net PnL: {net*100:+.2f}%")
     
     if is_live:
         close_side = "sell" if direction == "LONG" else "buy"
         try: await exchange.create_order(market_sym, "market", close_side, amount, params={'uta': True, 'reduceOnly': 'yes'})
-        except Exception as e: log.critical(f"🚨 [LIVE] FAILED TO CLOSE! Error: {e}")
+        except Exception as e: log.error(f"Close failed: {e}")
 
     if net >= GATE_MIN_NET:
         state["streak"] += 1
@@ -218,39 +152,117 @@ async def execute_trade(exchange, candidate, state):
         state["streak"] = 0
         log.info(f"❌ LOSS. Streak reset to 0.")
 
-    if state["streak"] >= GATE_WINS_REQUIRED and not state["unlocked"]:
-        state["unlocked"] = True
-        log.info("🔥🔥🔥 GATE PASSED! Live trading UNLOCKED. 🔥🔥🔥")
-        
     save_state(state)
-    CURRENT_CANDIDATE = None
 
-async def main_loop():
+# ==========================================
+# THE WEBSOCKET WATCHER (Per Coin)
+# ==========================================
+async def watch_coin_ignition(exchange, sym, state):
+    """Watches a single coin's 1m candles via WebSocket."""
+    market_sym = f"{sym}/USDT:USDT"
+    
+    while True:
+        try:
+            # Fetch the last 20 candles to establish the "Quiet Base"
+            ohlcvs = await exchange.watch_ohlcv(market_sym, '1m')
+            
+            if len(ohlcvs) < 20:
+                continue
+                
+            # The last fully closed candle is -2 (index -1 is currently forming)
+            closed_candle = ohlcvs[-2]
+            base_candles = ohlcvs[-20:-1] # The previous 19 candles
+            
+            # 1. Check the Quiet Base
+            base_high = max(c[2] for c in base_candles)
+            base_low = min(c[3] for c in base_candles)
+            base_range = ((base_high - base_low) / base_low) * 100
+            
+            if base_range > 1.0:
+                continue # Base is too volatile, not a new ignition
+                
+            base_vol_avg = sum(c[5] for c in base_candles) / len(base_candles)
+            if base_vol_avg == 0:
+                continue
+                
+            # 2. Check the Ignition Candle
+            o, h, l, c, v = closed_candle[1], closed_candle[2], closed_candle[3], closed_candle[4], closed_candle[5]
+            total_range = h - l
+            if total_range == 0: continue
+            
+            body_ratio = abs(c - o) / total_range
+            move_pct = (abs(c - o) / o) * 100
+            vol_spike = v / base_vol_avg
+            
+            # 3. The Trigger
+            if move_pct >= 0.50 and body_ratio >= 0.75 and vol_spike >= 3.0:
+                direction = "LONG" if c > o else "SHORT"
+                ignition_data = {
+                    "move": round(move_pct, 2),
+                    "vol_spike": round(vol_spike, 1)
+                }
+                
+                # Fire the trade immediately
+                await execute_trade(exchange, sym, direction, state, ignition_data)
+                
+                # Wait a few minutes before watching this coin again to prevent double firing
+                await asyncio.sleep(300) 
+                
+        except Exception as e:
+            # Silently ignore socket disconnects and retry
+            await asyncio.sleep(1)
+
+# ==========================================
+# MAIN ORCHESTRATOR
+# ==========================================
+async def main():
+    threading.Thread(target=run_keepalive, daemon=True).start()
+    
     state = load_state()
     log.info(f"Executor starting | Mode: {'LIVE' if LIVE_TRADING and state['unlocked'] else 'PAPER'} | Streak: {state['streak']}/8")
     
-    exchange = ccxtpro.bitget({'apiKey': BITGET_API_KEY, 'secret': BITGET_SECRET, 'password': BITGET_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'swap', 'uta': True}})
+    exchange = ccxtpro.bitget({
+        'apiKey': BITGET_API_KEY, 
+        'secret': BITGET_SECRET, 
+        'password': BITGET_PASSPHRASE, 
+        'enableRateLimit': True, 
+        'options': {'defaultType': 'swap', 'uta': True}
+    })
     
     try:
-        log.info("📥 Loading Bitget markets...")
         await exchange.load_markets()
-        log.info(f"✅ Loaded {len(exchange.markets)} markets.")
-    except Exception: return
+    except Exception:
+        return
 
-    asyncio.create_task(github_pinger())
-
-    last_traded = None
+    # Main Loop: Fetch watchlist and spawn WebSocket watchers
+    active_watchers = {}
+    
     while True:
         try:
-            candidate = await check_for_candidate()
-            if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received Duration Candidate: {candidate['symbol']} ({candidate['direction']})")
-                last_traded = candidate['symbol']
-                await execute_trade(exchange, candidate, state)
-            else:
+            # Fetch the watchlist from GitHub
+            res = requests.get("https://raw.githubusercontent.com/chimeremezewidom6/Bitget-bot/main/candidate.json", timeout=10)
+            data = res.json()
+            watchlist = data.get("watchlist", [])
+            
+            if not watchlist:
+                log.info("Waiting for GitHub to provide watchlist...")
                 await asyncio.sleep(30)
-        except Exception: await asyncio.sleep(10)
+                continue
+                
+            log.info(f"📡 WebSocket active. Watching {len(watchlist)} coins for Ignition...")
+            
+            for sym in watchlist:
+                if sym not in active_watchers:
+                    # Spawn a new non-blocking WebSocket task for this coin
+                    task = asyncio.create_task(watch_coin_ignition(exchange, sym, state))
+                    active_watchers[sym] = task
+                    
+            # Wait 10 minutes before checking GitHub for an updated watchlist
+            await asyncio.sleep(600)
+            
+        except Exception as e:
+            log.error(f"Main loop error: {e}")
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
-    threading.Thread(target=run_keepalive, daemon=True).start()
-    asyncio.run(main_loop())
+    asyncio.run(main())
