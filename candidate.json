@@ -1,11 +1,11 @@
 {
-  "symbol": "PUMP",
+  "symbol": "IDOL",
   "direction": "SHORT",
-  "score": 3.59420299597481,
-  "move": -0.34594995520393607,
-  "win_vol": 0.2801777174283886,
-  "lose_vol": 0.7198222825716114,
+  "score": 4.210433180850338,
+  "move": -1.9114373240753124,
+  "win_vol": 0.45078956095089157,
+  "lose_vol": 0.5492104390491084,
   "exchanges_used": 5,
-  "vol_captured": 100.0,
-  "entry_price": 0.003396
+  "vol_captured": 100.00000000000003,
+  "entry_price": 0.020233
 }
