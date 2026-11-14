@@ -1,11 +1,11 @@
 {
-  "symbol": "UNITAS",
+  "symbol": "PUMP",
   "direction": "SHORT",
-  "score": 7.012934925557091,
-  "move": -0.7932310946589114,
-  "win_vol": 0.3324417498811222,
-  "lose_vol": 0.6675582501188778,
-  "exchanges_used": 1,
+  "score": 3.59420299597481,
+  "move": -0.34594995520393607,
+  "win_vol": 0.2801777174283886,
+  "lose_vol": 0.7198222825716114,
+  "exchanges_used": 5,
   "vol_captured": 100.0,
-  "entry_price": 0.1876
+  "entry_price": 0.003396
 }
