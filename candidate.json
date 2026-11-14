@@ -1,11 +1,11 @@
 {
-  "symbol": "INIT",
-  "direction": "SHORT",
-  "score": 1.3100188282841312,
-  "move": -0.6556037144219653,
-  "win_vol": 0.49924971001508284,
-  "lose_vol": 0.5007502899849171,
+  "symbol": "JCT",
+  "direction": "LONG",
+  "score": 1.750260097842009,
+  "move": 0.8323587714575869,
+  "win_vol": 0.4826352507651608,
+  "lose_vol": 0.5173647492348391,
   "exchanges_used": 6,
   "vol_captured": 100.0,
-  "entry_price": 0.10279
+  "entry_price": 0.002151
 }
