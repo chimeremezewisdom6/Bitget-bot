@@ -1,11 +1,11 @@
 {
-  "symbol": "JCT",
-  "direction": "LONG",
-  "score": 1.750260097842009,
-  "move": 0.8323587714575869,
-  "win_vol": 0.4826352507651608,
-  "lose_vol": 0.5173647492348391,
-  "exchanges_used": 6,
+  "symbol": "NAORIS",
+  "direction": "SHORT",
+  "score": 4.347785079158528,
+  "move": -2.0980886455057606,
+  "win_vol": 0.48436252100592164,
+  "lose_vol": 0.5156374789940784,
+  "exchanges_used": 5,
   "vol_captured": 100.0,
-  "entry_price": 0.002151
+  "entry_price": 0.02853
 }
