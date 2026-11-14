@@ -35,11 +35,9 @@ async def fetch_ccxt_candles(exchange, sym, sem):
             return None
 
 def fetch_coinmetrics_volume(assets):
-    """Fetches Trusted Volume from Coin Metrics."""
     print("  📊 Fetching Trusted Volume from Coin Metrics...")
     base_url = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
     volumes = {}
-    # Limit to top 100 assets for speed to avoid API timeout
     for i in range(0, min(len(assets), 100), 50):
         batch = assets[i:i+50]
         params = {
@@ -59,12 +57,11 @@ def fetch_coinmetrics_volume(assets):
     return volumes
 
 def fetch_cryptocompare_volume(assets):
-    """Fetches Aggregated Volume from CryptoCompare."""
     if not CRYPTOCOMPARE_KEY: return {}
     print("  📊 Fetching Aggregated Volume from CryptoCompare...")
     volumes = {}
     url = "https://min-api.cryptocompare.com/data/top/totalvolfull"
-    for page in range(0, 5): # Top 500 coins
+    for page in range(0, 5):
         try:
             params = {"limit": 100, "page": page, "tsym": "USD", "api_key": CRYPTOCOMPARE_KEY}
             res = requests.get(url, params=params, timeout=15)
@@ -81,7 +78,6 @@ def fetch_cryptocompare_volume(assets):
 async def run_market_scan():
     exchanges = {}
     try:
-        # 1. Initialize Exchanges
         print("🔌 Initializing 15 Major Exchanges...")
         for ex_id in MAJOR_EXCHANGES:
             try:
@@ -89,7 +85,6 @@ async def run_market_scan():
                 await exchanges[ex_id].load_markets()
             except Exception: pass
 
-        # 2. Fetch ALL Tickers
         print("📊 Fetching 24h tickers from all exchanges concurrently...")
         ticker_tasks = [ex.fetch_tickers() for ex in exchanges.values()]
         all_tickers_results = await asyncio.gather(*ticker_tasks, return_exceptions=True)
@@ -106,7 +101,6 @@ async def run_market_scan():
                         vol = ticker.get('quoteVolume', 0) or 0
                         exchange_volumes[base] = exchange_volumes.get(base, 0) + vol
 
-        # 3. Cross-Validate Global Volume (Fallback to Exchanges if APIs fail)
         print("🌐 Cross-Validating Global Volume...")
         all_assets = list(exchange_volumes.keys())
         cm_volumes = fetch_coinmetrics_volume(all_assets)
@@ -116,30 +110,24 @@ async def run_market_scan():
         
         for sym in all_assets:
             if sym in MEGA_COINS: continue
-            
             sources = []
             if sym in cm_volumes and cm_volumes[sym] > 0: sources.append(cm_volumes[sym])
             if sym in cc_volumes and cc_volumes[sym] > 0: sources.append(cc_volumes[sym])
             if sym in exchange_volumes and exchange_volumes[sym] > 0: sources.append(exchange_volumes[sym])
             
             if not sources: continue
-            
-            # Use median to filter out extreme outliers if there are multiple sources
             consensus = statistics.median(sources)
-            
             if consensus >= 1_000_000:
                 validated_global_volumes[sym] = consensus
 
         print(f"✅ Found {len(validated_global_volumes)} coins with >$1M Cross-Validated Volume.")
 
-        # 4. Filter by Bitget
         bitget_tickers = exchange_tickers.get('bitget', {})
         valid_coins = [sym for sym in validated_global_volumes.keys() if f"{sym}/USDT:USDT" in bitget_tickers]
         print(f"📊 {len(valid_coins)} tradable on Bitget.")
 
         if not valid_coins: return None
 
-        # 5. Stage 1: Fast Fluctuation Filter
         print("⚡ Stage 1: Fast filter for 0.15% fluctuation on Bitget...")
         sem_fast = asyncio.Semaphore(50)
         bitget_ex = exchanges.get('bitget')
@@ -159,7 +147,6 @@ async def run_market_scan():
 
         if not candidates: return None
 
-        # 6. Stage 2: Top 10 Verification
         print("🔬 Stage 2: Verifying 95% volume coverage & ranking the best candidate...")
         sem_agg = asyncio.Semaphore(20)
         all_ranked_candidates = []
@@ -233,18 +220,19 @@ async def run_market_scan():
                 
             score = abs(avg_price_change) / (win_vol + 0.01) 
             
-            # STRICT PENALTY: David logic
-            if win_vol > 0.50:
-                score = score * 0.2
-            if win_vol < 0.35:
-                score = score * 3.0
+            if win_vol > 0.50: score = score * 0.2
+            if win_vol < 0.35: score = score * 3.0
                 
             score += (avg_fluct * 0.1)
+            
+            # Extract the closing price of the first valid exchange for entry_price
+            entry_price = valid_candles[0][-1][4] 
 
             all_ranked_candidates.append({
                 "symbol": sym, "direction": direction, "score": score,
                 "move": avg_price_change, "win_vol": win_vol, "lose_vol": lose_vol,
-                "exchanges_used": count, "vol_captured": vol_captured_pct
+                "exchanges_used": count, "vol_captured": vol_captured_pct,
+                "entry_price": entry_price
             })
 
         if not all_ranked_candidates:
@@ -255,14 +243,14 @@ async def run_market_scan():
         best_winner = all_ranked_candidates[0]
 
         print(f"🔥 BEST CANDIDATE: {best_winner['symbol']} ({best_winner['direction']})")
+        print(f"   Opening Price: {best_winner['entry_price']:.6f}")
         print(f"   Price Move: {best_winner['move']:+.2f}%")
-        print(f"   Winning Side Volume: {best_winner['win_vol']*100:.1f}% (Losing Side: {best_winner['lose_vol']*100:.1f}%)")
+        print(f"   Opening Volumes: Winning {best_winner['win_vol']*100:.1f}% | Losing {best_winner['lose_vol']*100:.1f}%")
         print(f"   Aggregated across {best_winner['exchanges_used']} exchanges.")
         print(f"   VOLUME ACCURACY: {best_winner['vol_captured']:.1f}% (Cross-Validated)")
         return best_winner
 
     finally:
-        # Ensure ALL connections are closed cleanly to prevent memory leaks
         for ex in exchanges.values():
             try: await ex.close()
             except Exception: pass
@@ -270,5 +258,5 @@ async def run_market_scan():
 if __name__ == "__main__":
     best_coin = asyncio.run(run_market_scan())
     with open("candidate.json", "w") as f:
-        if best_coin: json.dump({"symbol": best_coin["symbol"], "direction": best_coin["direction"], "score": best_coin["score"]}, f, indent=2)
+        if best_coin: json.dump(best_coin, f, indent=2)
         else: json.dump({}, f)
