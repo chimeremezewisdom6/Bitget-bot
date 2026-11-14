@@ -19,24 +19,17 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests aiohttp ccxt
+        run: pip install -r requirements.txt
 
       - name: Run scanner
-        env:
-          POLLINATIONS_KEY: ${{ secrets.POLLINATIONS_KEY }}
         run: python scanner_script.py
 
       - name: Commit and push candidate
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Fetch the latest changes from the remote repository
           git fetch origin main
-          # Reset the local repo to match the remote (this keeps your latest code)
           git reset --soft origin/main
-          # Add the new candidate file
           git add candidate.json
-          # Commit the changes
           git commit -m "Update candidate [skip ci]" || echo "No changes to commit"
-          # Push the update
           git push
