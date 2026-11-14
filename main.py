@@ -69,7 +69,7 @@ async def github_pinger():
             res = requests.post(url, headers=headers, json={"ref": "main"}, timeout=10)
             if res.status_code == 204: log.info("🔔 Successfully pinged GitHub to run a new 100-bot scan.")
         except Exception: pass
-        await asyncio.sleep(600) # Ping every 10 minutes
+        await asyncio.sleep(600) 
 
 async def ai_reporter(state):
     while True:
@@ -104,11 +104,11 @@ async def execute_trade(exchange, candidate, state):
         balance = await exchange.fetch_balance(params={'uta': True})
         usdt_free = balance['USDT']['free']
         ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
-        price = ticker['last']
+        entry_px = ticker['last']
     except Exception: CURRENT_CANDIDATE = None; return
 
     min_amt = market['limits']['amount']['min']
-    required_leverage = math.ceil((min_amt * price) / (usdt_free * 0.90)) if usdt_free > 0 else 999
+    required_leverage = math.ceil((min_amt * entry_px) / (usdt_free * 0.90)) if usdt_free > 0 else 999
 
     if required_leverage > MAX_LEVERAGE:
         log.info(f"❌ Balance too small for {sym} (requires {required_leverage}x). Skipping.")
@@ -116,43 +116,74 @@ async def execute_trade(exchange, candidate, state):
 
     await exchange.set_leverage(required_leverage, market_sym, params={'uta': True})
     
-    amount = float(exchange.amount_to_precision(market_sym, (usdt_free * 0.90 * required_leverage) / price))
+    amount = float(exchange.amount_to_precision(market_sym, (usdt_free * 0.90 * required_leverage) / entry_px))
     is_live = LIVE_TRADING and state["unlocked"]
     mode = "LIVE" if is_live else "PAPER"
     
-    CURRENT_ACTION = f"Opened {direction} on {sym} at {price}."
-    log.info(f"🚀 [{mode}] Opening {direction} on {sym} | Size: {amount} @ {price}")
+    log.info(f"==================================================")
+    log.info(f"🚀 [{mode}] OPENING {direction} ON {sym}")
+    log.info(f"   Opening Price: {entry_px:.6f}")
+    log.info(f"   Opening Volumes: Winning {candidate['win_vol']*100:.1f}% | Losing {candidate['lose_vol']*100:.1f}%")
+    log.info(f"   Leverage: {required_leverage}x | Size: {amount}")
+    log.info(f"==================================================")
+    
+    CURRENT_ACTION = f"Opened {direction} on {sym} at {entry_px}."
 
     if is_live:
         side = "buy" if direction == "LONG" else "sell"
         try: await exchange.create_order(market_sym, "market", side, amount, params={'uta': True, 'reduceOnly': 'no'})
         except Exception: CURRENT_CANDIDATE = None; return
 
-    # MONITOR FOR EXACTLY 10 MINUTES (600 SECONDS)
     start_time = time.time()
     exit_reason = "timeout_10min"
-    current = price
+    current_px = entry_px
 
     while time.time() - start_time < 600:
         await asyncio.sleep(5)
         try:
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
-            current = ticker['last']
+            current_px = ticker['last']
             
-            if direction == "LONG": pnl = (current - price) / price
-            else: pnl = (price - current) / price
+            if direction == "LONG": pnl = (current_px - entry_px) / entry_px
+            else: pnl = (entry_px - current_px) / entry_px
 
             if pnl <= -0.015: 
                 exit_reason = "stop_loss"
                 break
         except Exception: pass
 
-    # CLOSE TRADE
-    final = current
-    gross = (final - price) / price if direction == "LONG" else (price - final) / price
+    # CALCULATE CLOSING VOLUMES
+    close_win_vol = 0
+    close_lose_vol = 0
+    try:
+        ohlcv = await exchange.fetch_ohlcv(market_sym, timeframe='1m', limit=10)
+        if ohlcv and len(ohlcv) >= 10:
+            green = sum(c[5] for c in ohlcv if c[4] > c[1])
+            red = sum(c[5] for c in ohlcv if c[4] < c[1])
+            total = green + red
+            if total > 0:
+                close_green = (green / total) * 100
+                close_red = (red / total) * 100
+                if direction == "LONG":
+                    close_win_vol = close_green
+                    close_lose_vol = close_red
+                else:
+                    close_win_vol = close_red
+                    close_lose_vol = close_green
+    except Exception: pass
+
+    final = current_px
+    gross = (final - entry_px) / entry_px if direction == "LONG" else (entry_px - final) / entry_px
     net = gross - FEE_ROUND_TRIP
+    
+    log.info(f"==================================================")
+    log.info(f"📉 [{mode}] CLOSED {direction} ON {sym} ({exit_reason})")
+    log.info(f"   Closing Price: {final:.6f}")
+    log.info(f"   Closing Volumes: Winning {close_win_vol:.1f}% | Losing {close_lose_vol:.1f}%")
+    log.info(f"   Net PnL: {net*100:+.2f}%")
+    log.info(f"==================================================")
+    
     CURRENT_ACTION = f"Closed {direction} {sym} ({exit_reason}). Net: {net*100:.2f}%"
-    log.info(f"📉 [{mode}] {CURRENT_ACTION}")
 
     if is_live:
         close_side = "sell" if direction == "LONG" else "buy"
@@ -193,7 +224,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received DAVID candidate: {candidate['symbol']} ({candidate['direction']})")
+                log.info(f"🎯 Received candidate from GitHub: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
