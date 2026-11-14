@@ -79,7 +79,7 @@ async def github_pinger():
 
 async def check_for_candidate():
     try:
-        res = requests.get("https://raw.githubusercontent.com/chimeremezewisdom6/Bitget-bot/main/candidate.json", timeout=10)
+        res = requests.get("https://raw.githubusercontent.com/chimeremezewidom6/Bitget-bot/main/candidate.json", timeout=10)
         data = res.json()
         return data if "symbol" in data else None
     except Exception: return None
@@ -88,14 +88,16 @@ async def execute_trade(exchange, candidate, state):
     global CURRENT_CANDIDATE, CURRENT_ACTION
     CURRENT_CANDIDATE = candidate
     sym, direction = candidate['symbol'], candidate['direction']
+    record = candidate.get('record', {})
     
-    log.info("🧠 AI is analyzing the Exhaustion Reversal...")
+    log.info(f"🧠 Lifecycle Record: Start: {record.get('start_type')} | Death: {record.get('death_type')}")
+    
     sequence_str = json.dumps(candidate['sequence'])
     entry_prompt = (
-        f"You are an expert crypto trader. The price of {sym} had a trend of {candidate.get('trend_30m', 0):.2f}% over 30m, "
-        f"and is now making an early reversal {direction} at the '500m mark'. "
+        f"You are an expert crypto trader. The price of {sym} just started a {direction} momentum. "
+        f"Historical record: The previous momentum started with a {record.get('start_type')} and died with a {record.get('death_type')}. "
         f"Candle sequence: {sequence_str}. "
-        f"Tell me in 2 sentences if the exhausted side is truly giving way."
+        f"Tell me in 2 sentences if this current move is likely to accelerate or fade."
     )
     entry_analysis = await asyncio.to_thread(ask_ai, entry_prompt)
     log.info(f"==================================================")
@@ -135,12 +137,12 @@ async def execute_trade(exchange, candidate, state):
         except Exception: CURRENT_CANDIDATE = None; return
 
     start_time = time.time()
-    exit_reason = "timeout_5min"
+    exit_reason = "timeout_10min"
     current_px = entry_px
     peak_px = entry_px
     breakeven_locked = False
-
-    while time.time() - start_time < 300: # 5 mins max
+    
+    while time.time() - start_time < 600: # 10 mins max
         await asyncio.sleep(1) 
         try:
             ticker = await exchange.fetch_ticker(market_sym, params={'uta': True})
@@ -175,6 +177,29 @@ async def execute_trade(exchange, candidate, state):
                     if pnl <= 0:
                         exit_reason = "breakeven_stop"
                         break
+                        
+            # Dynamic Momentum Death Check based on historical record
+            if int(time.time() - start_time) % 10 == 0:
+                candles = await exchange.fetch_ohlcv(market_sym, timeframe='1m', limit=3)
+                if len(candles) >= 2:
+                    current_body = abs(candles[-1][4] - candles[-1][1])
+                    prev_body = abs(candles[-2][4] - candles[-2][1])
+                    
+                    if "Deceleration" in record.get('death_type', ''):
+                        # If history says it dies by fading, exit on body shrink
+                        if current_body < (prev_body * 0.6) and pnl > 0.001:
+                            exit_reason = "momentum_death_deceleration"
+                            break
+                    elif "Acceleration" in record.get('death_type', ''):
+                        # If history says it dies by blow-off, wait for the huge candle then exit
+                        if current_body > (prev_body * 2.0) and pnl > 0.002:
+                            exit_reason = "momentum_death_blowoff"
+                            break
+                    else:
+                        # Normal death: standard deceleration check
+                        if current_body < (prev_body * 0.5) and pnl > 0.001:
+                            exit_reason = "momentum_death_normal"
+                            break
                         
         except Exception: pass
 
@@ -225,7 +250,7 @@ async def main_loop():
         try:
             candidate = await check_for_candidate()
             if candidate and candidate['symbol'] != last_traded:
-                log.info(f"🎯 Received Best Available Candidate: {candidate['symbol']} ({candidate['direction']})")
+                log.info(f"🎯 Received Lifecycle Candidate: {candidate['symbol']} ({candidate['direction']})")
                 last_traded = candidate['symbol']
                 await execute_trade(exchange, candidate, state)
             else:
