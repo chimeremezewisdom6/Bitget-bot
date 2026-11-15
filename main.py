@@ -8,19 +8,18 @@ import ccxt.async_support as ccxt
 import requests
 import base64
 import math
-import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("render_executor")
 
 # --- CONFIGURATION ---
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "my_secret_password_123")
-WIN_THRESHOLD = 8
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "YES") == "YES"
+WIN_THRESHOLD = 8
 
-# GitHub Setup (To save the 8-win streak permanently)
+# GitHub Setup
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPO") # e.g., "yourusername/Bitget-bot"
+GITHUB_REPO = os.environ.get("GITHUB_REPO")
 STATE_FILE_PATH = "state.json"
 
 # --- GITHUB STATE MANAGEMENT ---
@@ -33,12 +32,18 @@ def load_state_from_github():
     if res.status_code == 200:
         content = base64.b64decode(res.json()['content']).decode('utf-8')
         return json.loads(content), res.json()['sha']
-    return {"streak": 0, "unlocked": False}, None
+    
+    # Default state if file doesn't exist
+    default_state = {
+        "Reversal": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Momentum": {"paper_streak": 0, "live_unlocked": False, "live_history": []}
+    }
+    return default_state, None
 
 def save_state_to_github(state, sha):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE_PATH}"
     content_encoded = base64.b64encode(json.dumps(state, indent=2).encode('utf-8')).decode('utf-8')
-    payload = {"message": f"Update state: Streak {state['streak']}", "content": content_encoded}
+    payload = {"message": f"Update state", "content": content_encoded}
     if sha: payload["sha"] = sha
     res = requests.put(url, headers=get_github_headers(), json=payload)
     return res.status_code in [200, 201]
@@ -58,7 +63,7 @@ async def get_ai_confirmation(symbol, direction, rsi, move_1h, move_5m):
         log.error(f"AI API failed: {e}")
         return False
 
-# --- BITGET UTA EXECUTION (One-Way Mode) ---
+# --- BITGET UTA EXECUTION ---
 async def execute_bitget_trade(symbol, direction):
     exchange = ccxt.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
@@ -68,66 +73,47 @@ async def execute_bitget_trade(symbol, direction):
     })
     try:
         await exchange.load_markets()
-        
-        # 1. Fetch Balance
         balance = await exchange.fetch_balance(params={'uta': True})
         usdt_free = balance.get('USDT', {}).get('free', 0)
-        log.info(f"💰 Available Balance: ${usdt_free:.2f}")
-
+        
         if usdt_free < 1.0:
             log.error("❌ Balance too low to trade.")
             return False
 
-        # 2. Check Minimums & Price
         market = exchange.market(symbol)
         ticker = await exchange.fetch_ticker(symbol)
         price = ticker['last']
         min_amount = market['limits']['amount']['min']
         
-        # 3. Calculate Position Size
         usable_balance = usdt_free * 0.90
         required_leverage = math.ceil((min_amount * price) / usable_balance) if usable_balance > 0 else 999
         
         if required_leverage > 20:
-            log.error(f"❌ Balance too small to trade {symbol}. Required leverage: {required_leverage}x")
+            log.error(f"❌ Balance too small. Required leverage: {required_leverage}x")
             return False
 
         await exchange.set_leverage(required_leverage, symbol, params={'uta': True})
-        amount = (usable_balance * required_leverage) / price
-        amount = float(exchange.amount_to_precision(symbol, amount))
+        amount = float(exchange.amount_to_precision(symbol, (usable_balance * required_leverage) / price))
         
-        # 4. OPEN POSITION (One-Way Mode)
         side = "buy" if direction == "LONG" else "sell"
-        
-        log.info(f"🚀 Opening {direction}: {amount} {symbol} at {required_leverage}x leverage")
+        log.info(f"🚀 LIVE {direction}: {amount} {symbol} at {required_leverage}x")
         
         order = await exchange.create_order(
-            symbol=symbol, 
-            type="market", 
-            side=side, 
-            amount=amount,
-            params={'uta': True, 'reduceOnly': False} # reduceOnly=False for opening
+            symbol=symbol, type="market", side=side, amount=amount,
+            params={'uta': True, 'reduceOnly': False}
         )
-        log.info(f"✅ OPEN ORDER PLACED: {order['id']}")
         
-        # --- SIMULATE HOLDING THE TRADE ---
-        # In a real bot, you would monitor the price for your exit condition (Fade/Stop Loss)
-        log.info("⏳ Holding trade for 5 seconds to simulate...")
+        # --- SIMULATE TRADE HOLD & RESULT ---
+        # In production, you monitor the price here. For now, we assume a win to test the logic.
         await asyncio.sleep(5) 
+        trade_won = True 
         
-        # 5. CLOSE POSITION (reduceOnly=True)
         close_side = "sell" if direction == "LONG" else "buy"
-        log.info(f"🔄 Closing {direction} position...")
-        
-        close_order = await exchange.create_order(
-            symbol=symbol, 
-            type="market", 
-            side=close_side, 
-            amount=amount,
-            params={'uta': True, 'reduceOnly': True} # reduceOnly=True for closing
+        await exchange.create_order(
+            symbol=symbol, type="market", side=close_side, amount=amount,
+            params={'uta': True, 'reduceOnly': True}
         )
-        log.info(f"✅ CLOSE ORDER PLACED: {close_order['id']}")
-        return True
+        return trade_won
         
     except Exception as e:
         log.error(f"Bitget execution failed: {e}")
@@ -135,46 +121,80 @@ async def execute_bitget_trade(symbol, direction):
     finally:
         await exchange.close()
 
-# --- WEBHOOK RECEIVER ---
+# --- WEBHOOK RECEIVER & STATE MACHINE ---
 async def handle_signal(request):
     if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
         return web.Response(status=401, text="Unauthorized")
 
     try:
         data = await request.json()
-        log.info(f"📥 Signal Received: {data['symbol']} {data['direction']}")
+        symbol = data['symbol']
+        direction = data['direction']
+        setup_type = data.get('setup_type', 'Reversal') # Defaults to Reversal if missing
+        
+        log.info(f"📥 Signal Received: {symbol} {direction} | Type: {setup_type}")
         
         # 1. AI Check
-        if not await get_ai_confirmation(data['symbol'], data['direction'], data['macro_rsi'], data['move_1h'], data['move_5m']):
+        if not await get_ai_confirmation(symbol, direction, data['macro_rsi'], data['move_1h'], data['move_5m']):
             return web.Response(status=200, text="AI Rejected")
 
         # 2. Load State
         state, sha = load_state_from_github()
-        is_live = LIVE_TRADING and state["unlocked"] 
         
-        trade_successful = False
-
+        # Ensure setup type exists in state
+        if setup_type not in state:
+            state[setup_type] = {"paper_streak": 0, "live_unlocked": False, "live_history": []}
+            
+        strategy_state = state[setup_type]
+        
+        # 3. Execute based on Gate
+        is_live = LIVE_TRADING and strategy_state["live_unlocked"]
+        trade_won = False
+        
         if is_live:
-            log.info("🔴 GATE UNLOCKED. EXECUTING LIVE TRADE.")
-            trade_successful = await execute_bitget_trade(data['symbol'], data['direction'])
+            log.info(f"🔴 [{setup_type}] GATE UNLOCKED. EXECUTING LIVE TRADE.")
+            trade_won = await execute_bitget_trade(symbol, direction)
+            
+            # Track Live History
+            strategy_state["live_history"].append(1 if trade_won else 0)
+            if len(strategy_state["live_history"]) > 8:
+                strategy_state["live_history"].pop(0)
+                
+            # --- DEMOTION RULES ---
+            if len(strategy_state["live_history"]) >= 3 and strategy_state["live_history"][-3:] == [0, 0, 0]:
+                log.info(f"🛑 [{setup_type}] DEMOTED: 3 consecutive losses. Back to paper trading.")
+                strategy_state["live_unlocked"] = False
+                strategy_state["paper_streak"] = 0
+                strategy_state["live_history"] = []
+                
+            elif len(strategy_state["live_history"]) >= 8 and strategy_state["live_history"].count(0) >= 6:
+                log.info(f"🛑 [{setup_type}] DEMOTED: 6 losses in last 8 trades. Back to paper trading.")
+                strategy_state["live_unlocked"] = False
+                strategy_state["paper_streak"] = 0
+                strategy_state["live_history"] = []
+                
         else:
-            log.info(f"🟢 PAPER TRADE. Current Streak: {state['streak']}/8")
-            # Simulate a paper trade taking 5 seconds
+            log.info(f"🟢 [{setup_type}] PAPER TRADING. Streak: {strategy_state['paper_streak']}/8")
+            
+            # SIMULATE PAPER TRADE
             await asyncio.sleep(5)
-            trade_successful = True # Simulate a win
-
-        # 3. Update Streak (Only if not already unlocked)
-        if trade_successful and not state["unlocked"]:
-            state["streak"] += 1
-            log.info(f"✅ Trade WON. New Streak: {state['streak']}")
+            trade_won = True # Set to False to test loss logic
             
-            if state["streak"] >= WIN_THRESHOLD:
-                state["unlocked"] = True
-                log.info("🚀 8 WINS ACHIEVED! GATE UNLOCKED.")
-            
-            save_state_to_github(state, sha)
+            if trade_won:
+                strategy_state["paper_streak"] += 1
+                log.info(f"✅ [{setup_type}] Paper WIN. New Streak: {strategy_state['paper_streak']}")
+            else:
+                strategy_state["paper_streak"] = 0
+                log.info(f"❌ [{setup_type}] Paper LOSS. Streak reset.")
+                
+            if strategy_state["paper_streak"] >= WIN_THRESHOLD:
+                strategy_state["live_unlocked"] = True
+                log.info(f"🚀 [{setup_type}] 8 WINS ACHIEVED! GATE UNLOCKED.")
 
+        # 4. Save State
+        save_state_to_github(state, sha)
         return web.Response(status=200, text="Processed")
+        
     except Exception as e:
         log.error(f"Signal error: {e}")
         return web.Response(status=500, text="Error")
