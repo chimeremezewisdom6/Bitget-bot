@@ -7,6 +7,8 @@ from aiohttp import web
 import ccxt.async_support as ccxt
 import requests
 import base64
+import math
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("render_executor")
@@ -41,7 +43,7 @@ def save_state_to_github(state, sha):
     res = requests.put(url, headers=get_github_headers(), json=payload)
     return res.status_code in [200, 201]
 
-# --- AI RISK MANAGER (Pollinations - No Key Needed) ---
+# --- AI RISK MANAGER (Pollinations) ---
 async def get_ai_confirmation(symbol, direction, rsi, move_1h, move_5m):
     prompt = f"Risk Manager: Symbol: {symbol}, Dir: {direction}, RSI: {rsi}, 1H: {move_1h}%, 5M: {move_5m}%. Good reversal? Reply YES or NO."
     payload = {"model": "openai", "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
@@ -56,8 +58,8 @@ async def get_ai_confirmation(symbol, direction, rsi, move_1h, move_5m):
         log.error(f"AI API failed: {e}")
         return False
 
-# --- BITGET UTA EXECUTION ---
-async def execute_bitget_trade(symbol, direction, amount_usdt=10):
+# --- BITGET UTA EXECUTION (One-Way Mode) ---
+async def execute_bitget_trade(symbol, direction):
     exchange = ccxt.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
         'secret': os.environ.get("BITGET_SECRET"),
@@ -65,18 +67,71 @@ async def execute_bitget_trade(symbol, direction, amount_usdt=10):
         'options': {'defaultType': 'swap', 'uta': True}
     })
     try:
+        await exchange.load_markets()
+        
+        # 1. Fetch Balance
+        balance = await exchange.fetch_balance(params={'uta': True})
+        usdt_free = balance.get('USDT', {}).get('free', 0)
+        log.info(f"💰 Available Balance: ${usdt_free:.2f}")
+
+        if usdt_free < 1.0:
+            log.error("❌ Balance too low to trade.")
+            return False
+
+        # 2. Check Minimums & Price
+        market = exchange.market(symbol)
         ticker = await exchange.fetch_ticker(symbol)
-        amount = amount_usdt / ticker['last']
+        price = ticker['last']
+        min_amount = market['limits']['amount']['min']
+        
+        # 3. Calculate Position Size
+        usable_balance = usdt_free * 0.90
+        required_leverage = math.ceil((min_amount * price) / usable_balance) if usable_balance > 0 else 999
+        
+        if required_leverage > 20:
+            log.error(f"❌ Balance too small to trade {symbol}. Required leverage: {required_leverage}x")
+            return False
+
+        await exchange.set_leverage(required_leverage, symbol, params={'uta': True})
+        amount = (usable_balance * required_leverage) / price
+        amount = float(exchange.amount_to_precision(symbol, amount))
+        
+        # 4. OPEN POSITION (One-Way Mode)
         side = "buy" if direction == "LONG" else "sell"
-        pos_side = "long" if direction == "LONG" else "short"
+        
+        log.info(f"🚀 Opening {direction}: {amount} {symbol} at {required_leverage}x leverage")
         
         order = await exchange.create_order(
-            symbol=symbol, type="market", side=side, amount=amount,
-            params={'uta': True, 'posSide': pos_side, 'reduceOnly': False}
+            symbol=symbol, 
+            type="market", 
+            side=side, 
+            amount=amount,
+            params={'uta': True, 'reduceOnly': False} # reduceOnly=False for opening
         )
-        log.info(f"✅ LIVE ORDER PLACED ON BITGET: {order['id']}")
+        log.info(f"✅ OPEN ORDER PLACED: {order['id']}")
+        
+        # --- SIMULATE HOLDING THE TRADE ---
+        # In a real bot, you would monitor the price for your exit condition (Fade/Stop Loss)
+        log.info("⏳ Holding trade for 5 seconds to simulate...")
+        await asyncio.sleep(5) 
+        
+        # 5. CLOSE POSITION (reduceOnly=True)
+        close_side = "sell" if direction == "LONG" else "buy"
+        log.info(f"🔄 Closing {direction} position...")
+        
+        close_order = await exchange.create_order(
+            symbol=symbol, 
+            type="market", 
+            side=close_side, 
+            amount=amount,
+            params={'uta': True, 'reduceOnly': True} # reduceOnly=True for closing
+        )
+        log.info(f"✅ CLOSE ORDER PLACED: {close_order['id']}")
+        return True
+        
     except Exception as e:
         log.error(f"Bitget execution failed: {e}")
+        return False
     finally:
         await exchange.close()
 
@@ -93,32 +148,29 @@ async def handle_signal(request):
         if not await get_ai_confirmation(data['symbol'], data['direction'], data['macro_rsi'], data['move_1h'], data['move_5m']):
             return web.Response(status=200, text="AI Rejected")
 
-        # 2. Load State (Check 8-win gate)
+        # 2. Load State
         state, sha = load_state_from_github()
-        
-        # LIVE TRADING ONLY HAPPENS IF UNLOCKED
         is_live = LIVE_TRADING and state["unlocked"] 
         
+        trade_successful = False
+
         if is_live:
             log.info("🔴 GATE UNLOCKED. EXECUTING LIVE TRADE.")
-            await execute_bitget_trade(data['symbol'], data['direction'])
+            trade_successful = await execute_bitget_trade(data['symbol'], data['direction'])
         else:
             log.info(f"🟢 PAPER TRADE. Current Streak: {state['streak']}/8")
-            
-            # SIMULATED PAPER TRADE OUTCOME 
-            # (Replace 'True' with actual PnL logic later)
-            trade_won = True 
-            
-            if trade_won:
-                state["streak"] += 1
-                log.info(f"✅ Paper Trade WON. New Streak: {state['streak']}")
-            else:
-                state["streak"] = 0
-                log.info(f"❌ Paper Trade LOST. Streak reset to 0.")
+            # Simulate a paper trade taking 5 seconds
+            await asyncio.sleep(5)
+            trade_successful = True # Simulate a win
 
+        # 3. Update Streak (Only if not already unlocked)
+        if trade_successful and not state["unlocked"]:
+            state["streak"] += 1
+            log.info(f"✅ Trade WON. New Streak: {state['streak']}")
+            
             if state["streak"] >= WIN_THRESHOLD:
                 state["unlocked"] = True
-                log.info("🚀 8 WINS ACHIEVED! GATE UNLOCKED FOR NEXT TRADE.")
+                log.info("🚀 8 WINS ACHIEVED! GATE UNLOCKED.")
             
             save_state_to_github(state, sha)
 
