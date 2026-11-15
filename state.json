@@ -1,0 +1,17 @@
+{
+  "Liquidity_Sweep": {
+    "paper_streak": 0,
+    "live_unlocked": false,
+    "live_history": []
+  },
+  "Squeeze_Breakout": {
+    "paper_streak": 0,
+    "live_unlocked": false,
+    "live_history": []
+  },
+  "RSI_Reversal": {
+    "paper_streak": 1,
+    "live_unlocked": false,
+    "live_history": []
+  }
+}
