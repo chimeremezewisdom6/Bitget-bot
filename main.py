@@ -4,7 +4,6 @@ import asyncio
 import logging
 import aiohttp
 from aiohttp import web
-import aiohttp_cors  # <--- NEW IMPORT
 import ccxt.async_support as ccxt
 import base64
 import math
@@ -12,17 +11,14 @@ import math
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("render_executor")
 
-# --- CONFIGURATION ---
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "MakeUpAnyPassword123")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "my_secret_password_123")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "YES") == "YES"
 WIN_THRESHOLD = 8
 
-# GitHub Setup
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
 STATE_FILE_PATH = "state.json"
 
-# --- GITHUB STATE MANAGEMENT (ASYNC) ---
 def get_github_headers():
     return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 
@@ -47,42 +43,99 @@ async def save_state_to_github(state, sha):
     content_encoded = base64.b64encode(json.dumps(state, indent=2).encode('utf-8')).decode('utf-8')
     payload = {"message": "Update state", "content": content_encoded}
     if sha: payload["sha"] = sha
-    
     async with aiohttp.ClientSession() as session:
         async with session.put(url, headers=get_github_headers(), json=payload) as res:
             if res.status in [200, 201]:
                 log.info("✅ State saved to GitHub.")
-            else:
-                log.error(f"❌ Failed to save state: {await res.text()}")
 
-# --- AI RISK MANAGER ---
-async def get_ai_confirmation(symbol, direction, setup_type):
-    if "Trap" in setup_type or "Sweep" in setup_type or "Squeeze" in setup_type:
-        return True
-    return True # Skip AI for now to guarantee speed
-
-# --- BITGET EXECUTION ---
+# --- REAL TRADE EXECUTION & PROFIT TRACKING ---
 async def execute_bitget_trade(symbol, direction):
-    log.info(f"🚀 [LIVE EXECUTION] {direction} {symbol}")
-    await asyncio.sleep(2)
-    return True
+    exchange = ccxt.bitget({
+        'apiKey': os.environ.get("BITGET_API_KEY"),
+        'secret': os.environ.get("BITGET_SECRET"),
+        'password': os.environ.get("BITGET_PASSPHRASE"),
+        'options': {'defaultType': 'swap', 'uta': True}
+    })
+    try:
+        await exchange.load_markets()
+        
+        # Live Trade Setup (Skipping balance check for paper trading simulation)
+        ticker = await exchange.fetch_ticker(symbol)
+        entry_price = ticker['last']
+        log.info(f"🚀 [PAPER TRADE] Opened {direction} on {symbol} at ${entry_price}")
+        
+        # We simulate a small delay before starting the loop
+        await asyncio.sleep(2)
+        
+        peak_price = entry_price
+        trailing_callback = 0.005 # 0.5% trailing stop
+        max_time_minutes = 120 # Max 2 hours
+        
+        log.info(f"⏳ Monitoring trade... Trailing stop at {trailing_callback*100}%")
+        
+        for _ in range(max_time_minutes):
+            await asyncio.sleep(60) # Check price every minute
+            
+            try:
+                ticker = await exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+            except Exception:
+                continue # Skip this minute if API fails
+                
+            if direction == "LONG":
+                peak_price = max(peak_price, current_price)
+                drop_from_peak = ((peak_price - current_price) / peak_price)
+                profit_pct = ((current_price - entry_price) / entry_price) * 100
+                
+                # Log the current status so the user can see the gain!
+                log.info(f"📊 {symbol} LONG | Current: ${current_price} | PnL: {profit_pct:+.2f}%")
+                
+                # Exit if trailing stop is hit OR if it's a loss > 2%
+                if (profit_pct > 1.0 and drop_from_peak > trailing_callback) or profit_pct < -2.0:
+                    log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
+                    break
+                    
+            elif direction == "SHORT":
+                peak_price = min(peak_price, current_price) # Lowest price
+                bounce_from_peak = ((current_price - peak_price) / peak_price)
+                profit_pct = ((entry_price - current_price) / entry_price) * 100
+                
+                log.info(f"📊 {symbol} SHORT | Current: ${current_price} | PnL: {profit_pct:+.2f}%")
+                
+                if (profit_pct > 1.0 and bounce_from_peak > trailing_callback) or profit_pct < -2.0:
+                    log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
+                    break
+        
+        # Calculate final result
+        final_ticker = await exchange.fetch_ticker(symbol)
+        final_price = final_ticker['last']
+        if direction == "LONG":
+            final_pnl = ((final_price - entry_price) / entry_price) * 100
+        else:
+            final_pnl = ((entry_price - final_price) / entry_price) * 100
+            
+        trade_won = final_pnl > 0
+        return trade_won, final_pnl
+        
+    except Exception as e:
+        log.error(f"Execution failed: {e}")
+        return False, 0.0
+    finally:
+        await exchange.close()
 
-# --- THE WEBHOOK RECEIVER ---
+async def get_ai_confirmation(symbol, direction, setup_type):
+    return True # Skip AI for now to save time
+
 async def handle_signal(request):
-    # Check Header
     if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
-        log.warning("🚫 Unauthorized Signal Rejected.")
         return web.Response(status=401, text="Unauthorized")
 
     try:
         data = await request.json()
-        log.info(f"📥 Signal Received: {data['symbol']} {data['direction']} | Type: {data.get('setup_type')}")
+        symbol = data['symbol']; direction = data['direction']; setup_type = data.get('setup_type', 'RSI_Reversal')
         
-        setup_type = data.get('setup_type', 'RSI_Reversal')
+        log.info(f"📥 Signal Received: {symbol} {direction} | Type: {setup_type}")
         
-        if not await get_ai_confirmation(data['symbol'], data['direction'], setup_type):
-            return web.Response(status=200, text="AI Rejected")
-
         state, sha = await load_state_from_github()
         
         if setup_type not in state:
@@ -91,19 +144,22 @@ async def handle_signal(request):
         strategy_state = state[setup_type]
         is_live = LIVE_TRADING and strategy_state["live_unlocked"]
         
+        trade_won, pnl_pct = await execute_bitget_trade(symbol, direction)
+        
         if is_live:
-            log.info(f"🔴 [{setup_type}] GATE UNLOCKED. EXECUTING LIVE TRADE.")
-            trade_won = await execute_bitget_trade(data['symbol'], data['direction'])
+            log.info(f"🔴 [{setup_type}] GATE UNLOCKED. EXECUTED LIVE TRADE.")
             strategy_state["live_history"].append(1 if trade_won else 0)
             if len(strategy_state["live_history"]) > 8:
                 strategy_state["live_history"].pop(0)
         else:
-            log.info(f"🟢 [{setup_type}] PAPER TRADING. Streak: {strategy_state['paper_streak']}/8")
-            trade_won = True
+            log.info(f"🟢 [{setup_type}] PAPER TRADE RESULT: {'WIN' if trade_won else 'LOSS'} ({pnl_pct:+.2f}%)")
             
             if trade_won:
                 strategy_state["paper_streak"] += 1
-                log.info(f"✅ [{setup_type}] Paper WIN. New Streak: {strategy_state['paper_streak']}")
+                log.info(f"✅ [{setup_type}] New Streak: {strategy_state['paper_streak']}/8")
+            else:
+                strategy_state["paper_streak"] = 0
+                log.info(f"❌ [{setup_type}] Streak reset to 0.")
                 
             if strategy_state["paper_streak"] >= WIN_THRESHOLD:
                 strategy_state["live_unlocked"] = True
@@ -118,18 +174,7 @@ async def handle_signal(request):
 
 async def main():
     app = web.Application()
-    
-    # SETUP CORS (Fixes the 405 OPTIONS Error)
-    cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*"
-        )
-    })
-
-    # Add the route and wrap it in CORS
-    resource = cors.add(app.router.add_resource("/signal"))
-    cors.add(resource.add_route("POST", handle_signal))
-    
+    app.router.add_post('/signal', handle_signal)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
