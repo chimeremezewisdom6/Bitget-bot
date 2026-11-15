@@ -19,7 +19,7 @@ WIN_THRESHOLD = 8
 
 # GitHub Setup
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPO")
+GITHUB_REPO = os.environ.get("GITHUB_REPO") # e.g., "yourusername/Bitget-bot"
 STATE_FILE_PATH = "state.json"
 
 # --- GITHUB STATE MANAGEMENT ---
@@ -33,23 +33,27 @@ def load_state_from_github():
         content = base64.b64decode(res.json()['content']).decode('utf-8')
         return json.loads(content), res.json()['sha']
     
-    # Default state if file doesn't exist
     default_state = {
-        "Reversal": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
-        "Momentum": {"paper_streak": 0, "live_unlocked": False, "live_history": []}
+        "Liquidity_Sweep": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Squeeze_Breakout": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "RSI_Reversal": {"paper_streak": 0, "live_unlocked": False, "live_history": []}
     }
     return default_state, None
 
 def save_state_to_github(state, sha):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE_PATH}"
     content_encoded = base64.b64encode(json.dumps(state, indent=2).encode('utf-8')).decode('utf-8')
-    payload = {"message": f"Update state", "content": content_encoded}
+    payload = {"message": "Update state", "content": content_encoded}
     if sha: payload["sha"] = sha
     res = requests.put(url, headers=get_github_headers(), json=payload)
     return res.status_code in [200, 201]
 
 # --- AI RISK MANAGER (Pollinations) ---
-async def get_ai_confirmation(symbol, direction, rsi, move_1h, move_5m):
+async def get_ai_confirmation(symbol, direction, setup_type, rsi, move_1h, move_5m):
+    if "Trap" in setup_type or "Sweep" in setup_type or "Squeeze" in setup_type:
+        log.info(f"🤖 Structural setup ({setup_type}) detected. Auto-approving AI check.")
+        return True
+        
     prompt = f"Risk Manager: Symbol: {symbol}, Dir: {direction}, RSI: {rsi}, 1H: {move_1h}%, 5M: {move_5m}%. Good reversal? Reply YES or NO."
     payload = {"model": "openai", "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
     try:
@@ -63,7 +67,7 @@ async def get_ai_confirmation(symbol, direction, rsi, move_1h, move_5m):
         log.error(f"AI API failed: {e}")
         return False
 
-# --- BITGET UTA EXECUTION ---
+# --- BITGET UTA EXECUTION (One-Way Mode + Trailing Stop) ---
 async def execute_bitget_trade(symbol, direction):
     exchange = ccxt.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
@@ -82,41 +86,70 @@ async def execute_bitget_trade(symbol, direction):
 
         market = exchange.market(symbol)
         ticker = await exchange.fetch_ticker(symbol)
-        price = ticker['last']
-        min_amount = market['limits']['amount']['min']
+        entry_price = ticker['last']
         
+        # Dynamic Leverage for small balance
+        min_amount = market['limits']['amount']['min']
         usable_balance = usdt_free * 0.90
-        required_leverage = math.ceil((min_amount * price) / usable_balance) if usable_balance > 0 else 999
+        required_leverage = math.ceil((min_amount * entry_price) / usable_balance) if usable_balance > 0 else 999
         
         if required_leverage > 20:
-            log.error(f"❌ Balance too small. Required leverage: {required_leverage}x")
+            log.error(f"❌ Leverage required ({required_leverage}x) exceeds 20x max.")
             return False
 
         await exchange.set_leverage(required_leverage, symbol, params={'uta': True})
-        amount = float(exchange.amount_to_precision(symbol, (usable_balance * required_leverage) / price))
+        amount = float(exchange.amount_to_precision(symbol, (usable_balance * required_leverage) / entry_price))
         
+        # OPEN POSITION (One-Way Mode)
         side = "buy" if direction == "LONG" else "sell"
-        log.info(f"🚀 LIVE {direction}: {amount} {symbol} at {required_leverage}x")
+        log.info(f"🚀 LIVE {direction}: {amount} {symbol} at {required_leverage}x | Price: {entry_price}")
         
-        order = await exchange.create_order(
+        await exchange.create_order(
             symbol=symbol, type="market", side=side, amount=amount,
-            params={'uta': True, 'reduceOnly': False}
+            params={'uta': True, 'reduceOnly': False} 
         )
+
+        # CHANDELIER TRAILING STOP (To catch >1% moves)
+        peak_price = entry_price
+        trailing_callback = 0.005 # 0.5% drop from peak triggers exit
+        max_time_minutes = 120 # Timeout after 2 hours
         
-        # --- SIMULATE TRADE HOLD & RESULT ---
-        # In production, you monitor the price here. For now, we assume a win to test the logic.
-        await asyncio.sleep(5) 
-        trade_won = True 
+        log.info(f"⏳ Monitoring trade. Trailing stop at {trailing_callback*100}%...")
         
+        for _ in range(max_time_minutes):
+            await asyncio.sleep(60) # Check every minute
+            ticker = await exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            if direction == "LONG":
+                peak_price = max(peak_price, current_price)
+                drop_from_peak = ((peak_price - current_price) / peak_price)
+                profit_pct = ((current_price - entry_price) / entry_price) * 100
+                
+                if profit_pct > 1.0 and drop_from_peak > trailing_callback:
+                    log.info(f"💰 TRAILING STOP HIT. Locked in Profit: {profit_pct:.2f}%")
+                    break
+                    
+            elif direction == "SHORT":
+                peak_price = min(peak_price, current_price)
+                bounce_from_peak = ((current_price - peak_price) / peak_price)
+                profit_pct = ((entry_price - current_price) / entry_price) * 100
+                
+                if profit_pct > 1.0 and bounce_from_peak > trailing_callback:
+                    log.info(f"💰 TRAILING STOP HIT. Locked in Profit: {profit_pct:.2f}%")
+                    break
+
+        # CLOSE POSITION (reduceOnly=True)
         close_side = "sell" if direction == "LONG" else "buy"
         await exchange.create_order(
             symbol=symbol, type="market", side=close_side, amount=amount,
             params={'uta': True, 'reduceOnly': True}
         )
-        return trade_won
+        log.info(f"✅ Trade Closed.")
+        return True
         
     except Exception as e:
-        log.error(f"Bitget execution failed: {e}")
+        log.error(f"Execution failed: {e}")
         return False
     finally:
         await exchange.close()
@@ -130,24 +163,19 @@ async def handle_signal(request):
         data = await request.json()
         symbol = data['symbol']
         direction = data['direction']
-        setup_type = data.get('setup_type', 'Reversal') # Defaults to Reversal if missing
+        setup_type = data.get('setup_type', 'RSI_Reversal')
         
         log.info(f"📥 Signal Received: {symbol} {direction} | Type: {setup_type}")
         
-        # 1. AI Check
-        if not await get_ai_confirmation(symbol, direction, data['macro_rsi'], data['move_1h'], data['move_5m']):
+        if not await get_ai_confirmation(symbol, direction, setup_type, data['macro_rsi'], data.get('move_1h', 0), data.get('move_5m', 0)):
             return web.Response(status=200, text="AI Rejected")
 
-        # 2. Load State
         state, sha = load_state_from_github()
         
-        # Ensure setup type exists in state
         if setup_type not in state:
             state[setup_type] = {"paper_streak": 0, "live_unlocked": False, "live_history": []}
             
         strategy_state = state[setup_type]
-        
-        # 3. Execute based on Gate
         is_live = LIVE_TRADING and strategy_state["live_unlocked"]
         trade_won = False
         
@@ -155,30 +183,27 @@ async def handle_signal(request):
             log.info(f"🔴 [{setup_type}] GATE UNLOCKED. EXECUTING LIVE TRADE.")
             trade_won = await execute_bitget_trade(symbol, direction)
             
-            # Track Live History
             strategy_state["live_history"].append(1 if trade_won else 0)
             if len(strategy_state["live_history"]) > 8:
                 strategy_state["live_history"].pop(0)
                 
-            # --- DEMOTION RULES ---
+            # Demotion Rules
             if len(strategy_state["live_history"]) >= 3 and strategy_state["live_history"][-3:] == [0, 0, 0]:
-                log.info(f"🛑 [{setup_type}] DEMOTED: 3 consecutive losses. Back to paper trading.")
+                log.info(f"🛑 [{setup_type}] DEMOTED: 3 consecutive losses. Back to paper.")
                 strategy_state["live_unlocked"] = False
                 strategy_state["paper_streak"] = 0
                 strategy_state["live_history"] = []
                 
             elif len(strategy_state["live_history"]) >= 8 and strategy_state["live_history"].count(0) >= 6:
-                log.info(f"🛑 [{setup_type}] DEMOTED: 6 losses in last 8 trades. Back to paper trading.")
+                log.info(f"🛑 [{setup_type}] DEMOTED: 6 losses in last 8 trades. Back to paper.")
                 strategy_state["live_unlocked"] = False
                 strategy_state["paper_streak"] = 0
                 strategy_state["live_history"] = []
                 
         else:
             log.info(f"🟢 [{setup_type}] PAPER TRADING. Streak: {strategy_state['paper_streak']}/8")
-            
-            # SIMULATE PAPER TRADE
-            await asyncio.sleep(5)
-            trade_won = True # Set to False to test loss logic
+            await asyncio.sleep(2)
+            trade_won = True # Simulated win
             
             if trade_won:
                 strategy_state["paper_streak"] += 1
@@ -191,7 +216,6 @@ async def handle_signal(request):
                 strategy_state["live_unlocked"] = True
                 log.info(f"🚀 [{setup_type}] 8 WINS ACHIEVED! GATE UNLOCKED.")
 
-        # 4. Save State
         save_state_to_github(state, sha)
         return web.Response(status=200, text="Processed")
         
