@@ -11,14 +11,17 @@ import math
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("render_executor")
 
+# --- CONFIGURATION ---
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "my_secret_password_123")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "YES") == "YES"
 WIN_THRESHOLD = 8
 
+# GitHub Setup
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
 STATE_FILE_PATH = "state.json"
 
+# --- GITHUB STATE MANAGEMENT ---
 def get_github_headers():
     return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 
@@ -43,10 +46,13 @@ async def save_state_to_github(state, sha):
     content_encoded = base64.b64encode(json.dumps(state, indent=2).encode('utf-8')).decode('utf-8')
     payload = {"message": "Update state", "content": content_encoded}
     if sha: payload["sha"] = sha
+    
     async with aiohttp.ClientSession() as session:
         async with session.put(url, headers=get_github_headers(), json=payload) as res:
             if res.status in [200, 201]:
                 log.info("✅ State saved to GitHub.")
+            else:
+                log.error(f"❌ Failed to save state: {await res.text()}")
 
 # --- REAL TRADE EXECUTION & PROFIT TRACKING ---
 async def execute_bitget_trade(symbol, direction):
@@ -59,12 +65,10 @@ async def execute_bitget_trade(symbol, direction):
     try:
         await exchange.load_markets()
         
-        # Live Trade Setup (Skipping balance check for paper trading simulation)
         ticker = await exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
         log.info(f"🚀 [PAPER TRADE] Opened {direction} on {symbol} at ${entry_price}")
         
-        # We simulate a small delay before starting the loop
         await asyncio.sleep(2)
         
         peak_price = entry_price
@@ -80,23 +84,21 @@ async def execute_bitget_trade(symbol, direction):
                 ticker = await exchange.fetch_ticker(symbol)
                 current_price = ticker['last']
             except Exception:
-                continue # Skip this minute if API fails
+                continue 
                 
             if direction == "LONG":
                 peak_price = max(peak_price, current_price)
                 drop_from_peak = ((peak_price - current_price) / peak_price)
                 profit_pct = ((current_price - entry_price) / entry_price) * 100
                 
-                # Log the current status so the user can see the gain!
                 log.info(f"📊 {symbol} LONG | Current: ${current_price} | PnL: {profit_pct:+.2f}%")
                 
-                # Exit if trailing stop is hit OR if it's a loss > 2%
                 if (profit_pct > 1.0 and drop_from_peak > trailing_callback) or profit_pct < -2.0:
                     log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
                     break
                     
             elif direction == "SHORT":
-                peak_price = min(peak_price, current_price) # Lowest price
+                peak_price = min(peak_price, current_price) 
                 bounce_from_peak = ((current_price - peak_price) / peak_price)
                 profit_pct = ((entry_price - current_price) / entry_price) * 100
                 
@@ -106,7 +108,6 @@ async def execute_bitget_trade(symbol, direction):
                     log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
                     break
         
-        # Calculate final result
         final_ticker = await exchange.fetch_ticker(symbol)
         final_price = final_ticker['last']
         if direction == "LONG":
@@ -123,11 +124,14 @@ async def execute_bitget_trade(symbol, direction):
     finally:
         await exchange.close()
 
+# --- AI RISK MANAGER (Skipped for speed) ---
 async def get_ai_confirmation(symbol, direction, setup_type):
-    return True # Skip AI for now to save time
+    return True 
 
+# --- WEBHOOK RECEIVER ---
 async def handle_signal(request):
     if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
+        log.warning("🚫 Unauthorized Signal Rejected.")
         return web.Response(status=401, text="Unauthorized")
 
     try:
@@ -151,6 +155,13 @@ async def handle_signal(request):
             strategy_state["live_history"].append(1 if trade_won else 0)
             if len(strategy_state["live_history"]) > 8:
                 strategy_state["live_history"].pop(0)
+                
+            # Demotion Rule
+            if len(strategy_state["live_history"]) >= 3 and strategy_state["live_history"][-3:] == [0, 0, 0]:
+                log.info(f"🛑 [{setup_type}] DEMOTED: 3 consecutive losses. Back to paper.")
+                strategy_state["live_unlocked"] = False
+                strategy_state["paper_streak"] = 0
+                strategy_state["live_history"] = []
         else:
             log.info(f"🟢 [{setup_type}] PAPER TRADE RESULT: {'WIN' if trade_won else 'LOSS'} ({pnl_pct:+.2f}%)")
             
@@ -172,15 +183,28 @@ async def handle_signal(request):
         log.error(f"Signal error: {e}")
         return web.Response(status=500, text="Error")
 
+# --- MAIN SERVER SETUP ---
 async def main():
     app = web.Application()
+    
+    # 1. The Webhook for Hugging Face
     app.router.add_post('/signal', handle_signal)
+    
+    # 2. The Health Check for UptimeRobot (Fixes the 404 issue!)
+    app.router.add_get('/', lambda r: web.Response(text="Bot is alive and running!"))
+    
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
+    
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    log.info("🚀 Webhook Active on /signal")
-    while True: await asyncio.sleep(3600)
+    
+    log.info(f"🚀 Webhook Active on /signal")
+    log.info(f"💚 Health check active on port {port}")
+    
+    while True: 
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
