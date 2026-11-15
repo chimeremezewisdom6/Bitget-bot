@@ -1,7 +1,7 @@
 {
   "Liquidity_Sweep": {
-    "paper_streak": 7,
-    "live_unlocked": false,
+    "paper_streak": 8,
+    "live_unlocked": true,
     "live_history": []
   },
   "Squeeze_Breakout": {
