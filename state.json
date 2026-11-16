@@ -1,17 +1,8 @@
 {
-  "Liquidity_Sweep": {
-    "paper_streak": 3,
-    "live_unlocked": true,
-    "live_history": []
-  },
-  "Squeeze_Breakout": {
+  "Auto_Discovery": {
     "paper_streak": 0,
     "live_unlocked": false,
-    "live_history": []
-  },
-  "RSI_Reversal": {
-    "paper_streak": 1,
-    "live_unlocked": true,
-    "live_history": []
+    "live_history": [],
+    "signature_history": []
   }
 }
