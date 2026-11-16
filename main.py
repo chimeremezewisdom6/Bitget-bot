@@ -18,7 +18,7 @@ LEVERAGE = 5
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
-HF_READY_URL = os.environ.get("HF_READY_URL") # Make sure this is set to https://chimeremeze321-crypto-aggregator.hf.space/ready
+HF_READY_URL = os.environ.get("HF_READY_URL") # MUST BE: https://chimeremeze321-crypto-aggregator.hf.space/ready
 
 is_trading = False
 
