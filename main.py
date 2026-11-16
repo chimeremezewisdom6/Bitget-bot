@@ -18,7 +18,9 @@ LEVERAGE = 5
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
-HF_READY_URL = os.environ.get("HF_READY_URL") # MUST BE: https://chimeremeze321-crypto-aggregator.hf.space/ready
+
+# MUST BE EXACTLY: https://chimeremeze321-crypto-aggregator.hf.space/ready
+HF_READY_URL = os.environ.get("HF_READY_URL") 
 
 is_trading = False
 
@@ -34,9 +36,19 @@ async def load_state():
                 data = await res.json()
                 content = base64.b64decode(data['content']).decode('utf-8')
                 return json.loads(content), data['sha']
-    return {"Liquidity_Sweep": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
-            "Squeeze_Breakout": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
-            "RSI_Reversal": {"paper_streak": 0, "live_unlocked": False, "live_history": []}}, None
+    # Default state with all 10 setups
+    return {
+        "RSI_Standard": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "RSI_Extreme": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Sweep_20": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Sweep_50": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Squeeze_Tight": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Squeeze_Extreme": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Volume_RSI": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Wick_Rejection": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "Momentum": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+        "EMA_Cross": {"paper_streak": 0, "live_unlocked": False, "live_history": []}
+    }, None
 
 async def save_state(state, sha):
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state.json"
@@ -47,6 +59,8 @@ async def save_state(state, sha):
         async with session.put(url, headers=get_github_headers(), json=payload) as res:
             if res.status in [200, 201]:
                 log.info("✅ State saved to GitHub.")
+            else:
+                log.error(f"❌ Failed to save state: {await res.text()}")
 
 # --- EXECUTE TRADE ---
 async def execute_trade(symbol, direction):
@@ -68,7 +82,7 @@ async def execute_trade(symbol, direction):
         peak_price = entry_price
         trailing_callback = 0.005 
         
-        for _ in range(120):
+        for _ in range(120): # Max 2 hours
             await asyncio.sleep(60) 
             try:
                 ticker = await exchange.fetch_ticker(symbol)
@@ -115,6 +129,8 @@ async def process_trade(symbol, direction, setup_type):
     
     try:
         state, sha = await load_state()
+        
+        # If a new setup type is added on HF that isn't in state.json yet, create it
         if setup_type not in state:
             state[setup_type] = {"paper_streak": 0, "live_unlocked": False, "live_history": []}
             
@@ -145,14 +161,17 @@ async def process_trade(symbol, direction, setup_type):
 
         await save_state(state, sha)
         
-        # CALLBACK TO HUGGING FACE
+        # ROBUST CALLBACK TO HUGGING FACE
         if HF_READY_URL:
             try:
                 async with aiohttp.ClientSession() as session:
-                    await session.post(HF_READY_URL, timeout=10)
-                    log.info("📡 Callback sent to Hugging Face! Render is ready.")
+                    async with session.post(HF_READY_URL, timeout=10) as resp:
+                        if resp.status == 200:
+                            log.info(f"📡 Callback sent to Hugging Face! Status: 200 OK.")
+                        else:
+                            log.error(f"⚠️ Callback to HF failed. Status: {resp.status}")
             except Exception as e:
-                log.error(f"Failed to send callback to HF: {e}")
+                log.error(f"❌ Callback network error to HF: {e}")
                 
     finally:
         is_trading = False
@@ -163,13 +182,14 @@ async def handle_signal(request):
     if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
         return web.Response(status=401, text="Unauthorized")
 
+    # If Render is already trading, reject immediately so HF keeps it in memory
     if is_trading:
         return web.Response(status=429, text="Busy")
 
     try:
         data = await request.json()
-        log.info(f"📥 Signal Received: {data['symbol']} {data['direction']}")
-        asyncio.create_task(process_trade(data['symbol'], data['direction'], data.get('setup_type', 'RSI_Reversal')))
+        log.info(f"📥 Signal Received: {data['symbol']} {data['direction']} | Setup: {data.get('setup_type')}")
+        asyncio.create_task(process_trade(data['symbol'], data['direction'], data.get('setup_type', 'RSI_Standard')))
         return web.Response(status=200, text="Started")
     except Exception as e:
         return web.Response(status=500, text="Error")
