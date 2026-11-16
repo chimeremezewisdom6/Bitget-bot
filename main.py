@@ -15,47 +15,42 @@ log = logging.getLogger("render_executor")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "my_secret_password_123")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "YES") == "YES"
 WIN_THRESHOLD = 8
+LEVERAGE = 5  # Max 5x leverage
 
-# GitHub Setup
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
-STATE_FILE_PATH = "state.json"
+HF_READY_URL = os.environ.get("HF_READY_URL") # e.g., https://chimeremeze321-crypto-aggregator.hf.space/ready
 
-# --- GITHUB STATE MANAGEMENT ---
+is_trading = False
+
+# --- GITHUB STATE ---
 def get_github_headers():
     return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 
-async def load_state_from_github():
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE_PATH}"
+async def load_state():
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state.json"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=get_github_headers()) as res:
             if res.status == 200:
                 data = await res.json()
                 content = base64.b64decode(data['content']).decode('utf-8')
                 return json.loads(content), data['sha']
-    
-    default_state = {
-        "Liquidity_Sweep": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
-        "Squeeze_Breakout": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
-        "RSI_Reversal": {"paper_streak": 0, "live_unlocked": False, "live_history": []}
-    }
-    return default_state, None
+    return {"Liquidity_Sweep": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+            "Squeeze_Breakout": {"paper_streak": 0, "live_unlocked": False, "live_history": []},
+            "RSI_Reversal": {"paper_streak": 0, "live_unlocked": False, "live_history": []}}, None
 
-async def save_state_to_github(state, sha):
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE_PATH}"
-    content_encoded = base64.b64encode(json.dumps(state, indent=2).encode('utf-8')).decode('utf-8')
-    payload = {"message": "Update state", "content": content_encoded}
+async def save_state(state, sha):
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state.json"
+    content = base64.b64encode(json.dumps(state, indent=2).encode('utf-8')).decode('utf-8')
+    payload = {"message": "Update state", "content": content}
     if sha: payload["sha"] = sha
-    
     async with aiohttp.ClientSession() as session:
         async with session.put(url, headers=get_github_headers(), json=payload) as res:
             if res.status in [200, 201]:
                 log.info("✅ State saved to GitHub.")
-            else:
-                log.error(f"❌ Failed to save state: {await res.text()}")
 
-# --- REAL TRADE EXECUTION & PROFIT TRACKING ---
-async def execute_bitget_trade(symbol, direction):
+# --- EXECUTE TRADE (5x Leverage, UTA One-Way Mode) ---
+async def execute_trade(symbol, direction):
     exchange = ccxt.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
         'secret': os.environ.get("BITGET_SECRET"),
@@ -65,26 +60,23 @@ async def execute_bitget_trade(symbol, direction):
     try:
         await exchange.load_markets()
         
+        # Set Leverage to 5x
+        await exchange.set_leverage(LEVERAGE, symbol, params={'uta': True})
+        
         ticker = await exchange.fetch_ticker(symbol)
         entry_price = ticker['last']
-        log.info(f"🚀 [PAPER TRADE] Opened {direction} on {symbol} at ${entry_price}")
         
-        await asyncio.sleep(2)
+        log.info(f"🚀 [PAPER TRADE] Opened {direction} on {symbol} at ${entry_price} | Leverage: {LEVERAGE}x")
         
         peak_price = entry_price
-        trailing_callback = 0.005 # 0.5% trailing stop
-        max_time_minutes = 120 # Max 2 hours
+        trailing_callback = 0.005 
         
-        log.info(f"⏳ Monitoring trade... Trailing stop at {trailing_callback*100}%")
-        
-        for _ in range(max_time_minutes):
-            await asyncio.sleep(60) # Check price every minute
-            
+        for _ in range(120): # Max 2 hours
+            await asyncio.sleep(60) 
             try:
                 ticker = await exchange.fetch_ticker(symbol)
                 current_price = ticker['last']
-            except Exception:
-                continue 
+            except Exception: continue 
                 
             if direction == "LONG":
                 peak_price = max(peak_price, current_price)
@@ -108,103 +100,98 @@ async def execute_bitget_trade(symbol, direction):
                     log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
                     break
         
+        # Close the trade
         final_ticker = await exchange.fetch_ticker(symbol)
         final_price = final_ticker['last']
-        if direction == "LONG":
-            final_pnl = ((final_price - entry_price) / entry_price) * 100
-        else:
-            final_pnl = ((entry_price - final_price) / entry_price) * 100
-            
-        trade_won = final_pnl > 0
-        return trade_won, final_pnl
+        final_pnl = ((final_price - entry_price) / entry_price) * 100 if direction == "LONG" else ((entry_price - final_price) / entry_price) * 100
         
+        return final_pnl > 0, final_pnl
     except Exception as e:
         log.error(f"Execution failed: {e}")
         return False, 0.0
     finally:
         await exchange.close()
 
-# --- AI RISK MANAGER (Skipped for speed) ---
-async def get_ai_confirmation(symbol, direction, setup_type):
-    return True 
-
-# --- WEBHOOK RECEIVER ---
-async def handle_signal(request):
-    if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
-        log.warning("🚫 Unauthorized Signal Rejected.")
-        return web.Response(status=401, text="Unauthorized")
-
+# --- WORKER ---
+async def process_trade(symbol, direction, setup_type):
+    global is_trading
+    is_trading = True
+    
     try:
-        data = await request.json()
-        symbol = data['symbol']; direction = data['direction']; setup_type = data.get('setup_type', 'RSI_Reversal')
-        
-        log.info(f"📥 Signal Received: {symbol} {direction} | Type: {setup_type}")
-        
-        state, sha = await load_state_from_github()
-        
+        state, sha = await load_state()
         if setup_type not in state:
             state[setup_type] = {"paper_streak": 0, "live_unlocked": False, "live_history": []}
             
-        strategy_state = state[setup_type]
-        is_live = LIVE_TRADING and strategy_state["live_unlocked"]
+        strat = state[setup_type]
+        is_live = LIVE_TRADING and strat["live_unlocked"]
         
-        trade_won, pnl_pct = await execute_bitget_trade(symbol, direction)
+        won, pnl = await execute_trade(symbol, direction)
         
         if is_live:
-            log.info(f"🔴 [{setup_type}] GATE UNLOCKED. EXECUTED LIVE TRADE.")
-            strategy_state["live_history"].append(1 if trade_won else 0)
-            if len(strategy_state["live_history"]) > 8:
-                strategy_state["live_history"].pop(0)
-                
-            # Demotion Rule
-            if len(strategy_state["live_history"]) >= 3 and strategy_state["live_history"][-3:] == [0, 0, 0]:
-                log.info(f"🛑 [{setup_type}] DEMOTED: 3 consecutive losses. Back to paper.")
-                strategy_state["live_unlocked"] = False
-                strategy_state["paper_streak"] = 0
-                strategy_state["live_history"] = []
+            strat["live_history"].append(1 if won else 0)
+            if len(strat["live_history"]) > 8: strat["live_history"].pop(0)
+            if len(strat["live_history"]) >= 3 and strat["live_history"][-3:] == [0, 0, 0]:
+                strat["live_unlocked"] = False
+                strat["paper_streak"] = 0
+                strat["live_history"] = []
+                log.info(f"🛑 DEMOTED: 3 losses. Back to paper.")
         else:
-            log.info(f"🟢 [{setup_type}] PAPER TRADE RESULT: {'WIN' if trade_won else 'LOSS'} ({pnl_pct:+.2f}%)")
-            
-            if trade_won:
-                strategy_state["paper_streak"] += 1
-                log.info(f"✅ [{setup_type}] New Streak: {strategy_state['paper_streak']}/8")
+            if won:
+                strat["paper_streak"] += 1
+                log.info(f"✅ [{setup_type}] Paper WIN. Streak: {strat['paper_streak']}/8")
             else:
-                strategy_state["paper_streak"] = 0
-                log.info(f"❌ [{setup_type}] Streak reset to 0.")
+                strat["paper_streak"] = 0
+                log.info(f"❌ [{setup_type}] Paper LOSS.")
                 
-            if strategy_state["paper_streak"] >= WIN_THRESHOLD:
-                strategy_state["live_unlocked"] = True
-                log.info(f"🚀 [{setup_type}] 8 WINS ACHIEVED! GATE UNLOCKED.")
+            if strat["paper_streak"] >= WIN_THRESHOLD:
+                strat["live_unlocked"] = True
+                log.info(f"🚀 [{setup_type}] GATE UNLOCKED.")
 
-        await save_state_to_github(state, sha)
-        return web.Response(status=200, text="Processed")
+        await save_state(state, sha)
         
+        # CALLBACK TO HUGGING FACE
+        if HF_READY_URL:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    await session.post(HF_READY_URL, timeout=10)
+                    log.info("📡 Callback sent to Hugging Face. Ready for next trade.")
+            except Exception as e:
+                log.error(f"Failed to send callback to HF: {e}")
+                
+    finally:
+        is_trading = False
+
+# --- WEBHOOK RECEIVER ---
+async def handle_signal(request):
+    global is_trading
+    if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
+        return web.Response(status=401, text="Unauthorized")
+
+    # If a trade is already active, reject immediately so HF keeps it in memory
+    if is_trading:
+        return web.Response(status=429, text="Busy")
+
+    try:
+        data = await request.json()
+        log.info(f"📥 Signal Received: {data['symbol']} {data['direction']}")
+        asyncio.create_task(process_trade(data['symbol'], data['direction'], data.get('setup_type', 'RSI_Reversal')))
+        return web.Response(status=200, text="Started")
     except Exception as e:
-        log.error(f"Signal error: {e}")
         return web.Response(status=500, text="Error")
 
-# --- MAIN SERVER SETUP ---
 async def main():
     app = web.Application()
-    
-    # 1. The Webhook for Hugging Face
     app.router.add_post('/signal', handle_signal)
-    
-    # 2. The Health Check for UptimeRobot (Fixes the 404 issue!)
-    app.router.add_get('/', lambda r: web.Response(text="Bot is alive and running!"))
+    app.router.add_get('/', lambda r: web.Response(text="Alive"))
     
     runner = web.AppRunner(app)
     await runner.setup()
-    
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
-    log.info(f"🚀 Webhook Active on /signal")
-    log.info(f"💚 Health check active on port {port}")
-    
-    while True: 
-        await asyncio.sleep(3600)
+    log.info(f"🚀 Webhook Active on port {port}")
+    while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
