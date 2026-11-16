@@ -14,11 +14,11 @@ log = logging.getLogger("render_executor")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "my_secret_password_123")
 LIVE_TRADING = os.environ.get("LIVE_TRADING", "YES") == "YES"
 WIN_THRESHOLD = 8
-LEVERAGE = 5  # Max 5x leverage
+LEVERAGE = 5 
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPO")
-HF_READY_URL = os.environ.get("HF_READY_URL") # e.g., https://chimeremeze321-crypto-aggregator.hf.space/ready
+HF_READY_URL = os.environ.get("HF_READY_URL") # Make sure this is set to https://chimeremeze321-crypto-aggregator.hf.space/ready
 
 is_trading = False
 
@@ -48,7 +48,7 @@ async def save_state(state, sha):
             if res.status in [200, 201]:
                 log.info("✅ State saved to GitHub.")
 
-# --- EXECUTE TRADE (5x Leverage, UTA One-Way Mode) ---
+# --- EXECUTE TRADE ---
 async def execute_trade(symbol, direction):
     exchange = ccxt.bitget({
         'apiKey': os.environ.get("BITGET_API_KEY"),
@@ -58,8 +58,6 @@ async def execute_trade(symbol, direction):
     })
     try:
         await exchange.load_markets()
-        
-        # Set Leverage to 5x
         await exchange.set_leverage(LEVERAGE, symbol, params={'uta': True})
         
         ticker = await exchange.fetch_ticker(symbol)
@@ -70,7 +68,7 @@ async def execute_trade(symbol, direction):
         peak_price = entry_price
         trailing_callback = 0.005 
         
-        for _ in range(120): # Max 2 hours
+        for _ in range(120):
             await asyncio.sleep(60) 
             try:
                 ticker = await exchange.fetch_ticker(symbol)
@@ -99,7 +97,6 @@ async def execute_trade(symbol, direction):
                     log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
                     break
         
-        # Close the trade
         final_ticker = await exchange.fetch_ticker(symbol)
         final_price = final_ticker['last']
         final_pnl = ((final_price - entry_price) / entry_price) * 100 if direction == "LONG" else ((entry_price - final_price) / entry_price) * 100
@@ -153,7 +150,7 @@ async def process_trade(symbol, direction, setup_type):
             try:
                 async with aiohttp.ClientSession() as session:
                     await session.post(HF_READY_URL, timeout=10)
-                    log.info("📡 Callback sent to Hugging Face. Ready for next trade.")
+                    log.info("📡 Callback sent to Hugging Face! Render is ready.")
             except Exception as e:
                 log.error(f"Failed to send callback to HF: {e}")
                 
@@ -166,7 +163,6 @@ async def handle_signal(request):
     if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
         return web.Response(status=401, text="Unauthorized")
 
-    # If a trade is already active, reject immediately so HF keeps it in memory
     if is_trading:
         return web.Response(status=429, text="Busy")
 
