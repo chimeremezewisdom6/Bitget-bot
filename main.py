@@ -6,7 +6,6 @@ import aiohttp
 from aiohttp import web
 import ccxt.async_support as ccxt
 import base64
-import math
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("render_executor")
