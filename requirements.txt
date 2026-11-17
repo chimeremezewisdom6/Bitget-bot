@@ -1,4 +1,3 @@
 aiohttp
-aiohttp-cors
 ccxt
 requests
