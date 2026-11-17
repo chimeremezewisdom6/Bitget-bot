@@ -1,242 +1,402 @@
-import os
-import json
 import asyncio
+import base64
+import json
 import logging
+import os
+
 import aiohttp
 from aiohttp import web
 import ccxt.async_support as ccxt
-import base64
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 log = logging.getLogger("render_executor")
 
 # --- CONFIGURATION ---
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "my_secret_password_123")
-LIVE_TRADING = os.environ.get("LIVE_TRADING", "YES") == "YES"
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "change_me_secret")
+LIVE_TRADING = os.environ.get("LIVE_TRADING", "NO").upper() == "YES"
 WIN_THRESHOLD = 8
-LEVERAGE = 5
+LOSS_DEMOTION_STREAK = 3
+MAX_LEVERAGE = 5
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPO")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
+STATE_FILE_PATH = "state.json"
 
-# MUST BE EXACTLY: https://chimeremeze321-crypto-aggregator.hf.space/ready
-HF_READY_URL = os.environ.get("HF_READY_URL")
+HF_READY_URL = os.environ.get("HF_READY_URL", "")
+POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY", "")
+POLLINATIONS_URL = "https://text.pollinations.ai/openai"
 
-# 🔑 The single fixed gate bucket (must match HF's GATE_SETUP_NAME)
-GATE_SETUP_NAME = "Auto_Discovery"
+PORT = int(os.environ.get("PORT", 10000))
 
+ALL_SETUPS = [
+    "RSI_Standard", "RSI_Extreme", "Sweep_20", "Sweep_50",
+    "Squeeze_Tight", "Squeeze_Extreme", "Volume_RSI",
+    "Wick_Rejection", "Momentum", "EMA_Cross"
+]
+
+# --- CONCURRENCY LOCKS ---
+trade_lock = asyncio.Lock()
+github_lock = asyncio.Lock()
 is_trading = False
 
 
-# --- GITHUB STATE ---
-def get_github_headers():
-    return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-
-
-async def load_state():
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state.json"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=get_github_headers()) as res:
-            if res.status == 200:
-                data = await res.json()
-                content = base64.b64decode(data['content']).decode('utf-8')
-                return json.loads(content), data['sha']
-
+def default_state_schema():
     return {
-        GATE_SETUP_NAME: {
-            "paper_streak": 0,
-            "live_unlocked": False,
-            "live_history": [],
-            "signature_history": [],
-        }
-    }, None
+        name: {"paper_streak": 0, "live_unlocked": False, "live_history": []}
+        for name in ALL_SETUPS
+    }
 
 
-async def save_state(state, sha):
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/state.json"
-    content = base64.b64encode(json.dumps(state, indent=2).encode('utf-8')).decode('utf-8')
-    payload = {"message": "Update state", "content": content}
+# --- GITHUB PERSISTENT STATE (Survives Render Restarts) ---
+def get_github_headers():
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+
+async def load_state_from_github():
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return default_state_schema(), None
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE_PATH}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=get_github_headers(), timeout=15) as res:
+                if res.status == 200:
+                    payload = await res.json()
+                    raw = base64.b64decode(payload["content"]).decode("utf-8")
+                    loaded = json.loads(raw)
+                    for name in ALL_SETUPS:
+                        if name not in loaded:
+                            loaded[name] = {
+                                "paper_streak": 0,
+                                "live_unlocked": False,
+                                "live_history": []
+                            }
+                    return loaded, payload["sha"]
+    except Exception as e:
+        log.error(f"GitHub load_state error: {e}")
+    return default_state_schema(), None
+
+
+async def save_state_to_github(state, sha):
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        log.warning("Missing GITHUB_TOKEN or GITHUB_REPO; skipping state persistence.")
+        return False
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE_PATH}"
+    encoded = base64.b64encode(json.dumps(state, indent=2).encode("utf-8")).decode("utf-8")
+    body = {"message": "Update trading streak state", "content": encoded}
     if sha:
-        payload["sha"] = sha
-    async with aiohttp.ClientSession() as session:
-        async with session.put(url, headers=get_github_headers(), json=payload) as res:
-            if res.status in [200, 201]:
-                log.info("✅ State saved to GitHub.")
-            else:
-                log.error(f"❌ Failed to save state: {await res.text()}")
+        body["sha"] = sha
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.put(url, headers=get_github_headers(), json=body, timeout=15) as res:
+                if res.status in (200, 201):
+                    log.info("Saved state.json to GitHub.")
+                    return True
+                log.error(f"GitHub save_state HTTP {res.status}: {await res.text()}")
+    except Exception as e:
+        log.error(f"GitHub save_state error: {e}")
+    return False
 
 
-# --- EXECUTE TRADE ---
-async def execute_trade(symbol, direction):
+# --- AI RISK CONFIRMATION ---
+async def get_ai_confirmation(symbol, direction, setup_type, rsi, move_1h, move_5m):
+    if any(k in setup_type for k in ("Sweep", "Squeeze", "Wick")):
+        log.info(f"Structural setup ({setup_type}) auto-approved.")
+        return True
+
+    prompt = (
+        f"Risk Manager check: Symbol={symbol}, Direction={direction}, Setup={setup_type}, "
+        f"RSI={rsi}, 1H={move_1h}%, 5M={move_5m}%. Safe to take? Reply YES or NO."
+    )
+    payload = {"model": "openai", "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
+    headers = {"Content-Type": "application/json"}
+    if POLLINATIONS_API_KEY:
+        headers["Authorization"] = f"Bearer {POLLINATIONS_API_KEY}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(POLLINATIONS_URL, json=payload, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    text = data["choices"][0]["message"]["content"].strip().upper()
+                    log.info(f"Pollinations AI decision: {text}")
+                    return "YES" in text
+    except Exception as e:
+        log.warning(f"AI check failed ({e}); defaulting to YES.")
+    return True
+
+
+# --- FADE DETECTION HELPER ---
+async def check_momentum_fade(exchange, symbol, direction, profit_pct):
+    try:
+        candles = await exchange.fetch_ohlcv(symbol, "1m", limit=5)
+        if not candles or len(candles) < 4:
+            return False
+
+        closed = candles[-2]
+        prev_2 = candles[-4:-2]
+        o, h, l, c, v = closed[1], closed[2], closed[3], closed[4], closed[5]
+        candle_range = h - l
+        body_ratio = abs(c - o) / candle_range if candle_range > 0 else 0.0
+        avg_prev_vol = sum(x[5] for x in prev_2) / 2.0
+
+        # Hold when solid momentum body persists (> 0.70)
+        if body_ratio > 0.70:
+            is_aligned = (direction == "LONG" and c > o) or (direction == "SHORT" and c < o)
+            if is_aligned:
+                return False
+
+        # Exit on fade when profitable and candle collapses into wicks with volume drop
+        if profit_pct > 0.25 and body_ratio < 0.20 and avg_prev_vol > 0 and v < (avg_prev_vol * 0.50):
+            log.info(
+                f"Fade detected on {symbol}: body_ratio={body_ratio:.2f}, "
+                f"vol={v:.1f} vs prev_avg={avg_prev_vol:.1f}"
+            )
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# --- BITGET UTA SINGLE-TRADE EXECUTION (5x Leverage, One-Way, reduceOnly) ---
+async def execute_trade(symbol, direction, use_live):
     exchange = ccxt.bitget({
-        'apiKey': os.environ.get("BITGET_API_KEY"),
-        'secret': os.environ.get("BITGET_SECRET"),
-        'password': os.environ.get("BITGET_PASSPHRASE"),
-        'options': {'defaultType': 'swap', 'uta': True}
+        "apiKey": os.environ.get("BITGET_API_KEY", ""),
+        "secret": os.environ.get("BITGET_SECRET", ""),
+        "password": os.environ.get("BITGET_PASSPHRASE", ""),
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap", "uta": True}
     })
+
+    live_order_opened = False
+    order_amount = 0.0
+    entry_side = "buy" if direction == "LONG" else "sell"
+    exit_side = "sell" if direction == "LONG" else "buy"
+
     try:
         await exchange.load_markets()
-        await exchange.set_leverage(LEVERAGE, symbol, params={'uta': True})
-
         ticker = await exchange.fetch_ticker(symbol)
-        entry_price = ticker['last']
+        entry_price = float(ticker["last"])
+        market = exchange.market(symbol)
+        min_amount = float(market.get("limits", {}).get("amount", {}).get("min") or 0.0)
 
-        log.info(f"🚀 [PAPER TRADE] Opened {direction} on {symbol} at ${entry_price} | Leverage: {LEVERAGE}x")
+        if use_live:
+            balance = await exchange.fetch_balance(params={"uta": True})
+            usdt_free = float(balance.get("USDT", {}).get("free") or 0.0)
+            if usdt_free < 1.0:
+                log.error(f"Live balance too low (${usdt_free:.2f}). Falling back to paper simulation.")
+                use_live = False
+            else:
+                await exchange.set_leverage(MAX_LEVERAGE, symbol, params={"uta": True})
+                usable_margin = usdt_free * 0.90
+                notional = usable_margin * MAX_LEVERAGE
+                raw_amount = notional / entry_price
+                if raw_amount < min_amount:
+                    log.error(f"Calculated size {raw_amount:.6f} below Bitget min {min_amount}. Aborting live order.")
+                    return False
+
+                order_amount = float(exchange.amount_to_precision(symbol, raw_amount))
+                # One-Way Mode UTA entry (reduceOnly=False, no hedge posSide)
+                entry_order = await exchange.create_order(
+                    symbol=symbol,
+                    type="market",
+                    side=entry_side,
+                    amount=order_amount,
+                    params={"uta": True, "reduceOnly": False}
+                )
+                live_order_opened = True
+                log.info(
+                    f"[LIVE UTA 5x] Opened {direction} {symbol} | Amount={order_amount} | "
+                    f"Entry=${entry_price} | Order={entry_order.get('id')}"
+                )
+        else:
+            log.info(f"[PAPER] Opened {direction} {symbol} @ ${entry_price} | Max Leverage={MAX_LEVERAGE}x")
 
         peak_price = entry_price
         trailing_callback = 0.005
+        final_profit_pct = 0.0
 
-        for _ in range(120):
+        for minute in range(120):
             await asyncio.sleep(60)
             try:
                 ticker = await exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
+                current_price = float(ticker["last"])
             except Exception:
                 continue
 
             if direction == "LONG":
                 peak_price = max(peak_price, current_price)
-                drop_from_peak = ((peak_price - current_price) / peak_price)
-                profit_pct = ((current_price - entry_price) / entry_price) * 100
-                log.info(f"📊 {symbol} LONG | Current: ${current_price} | PnL: {profit_pct:+.2f}%")
-                if (profit_pct > 1.0 and drop_from_peak > trailing_callback) or profit_pct < -2.0:
-                    log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
-                    break
-            elif direction == "SHORT":
+                pullback = (peak_price - current_price) / peak_price
+                final_profit_pct = ((current_price - entry_price) / entry_price) * 100.0
+            else:
                 peak_price = min(peak_price, current_price)
-                bounce_from_peak = ((current_price - peak_price) / peak_price)
-                profit_pct = ((entry_price - current_price) / entry_price) * 100
-                log.info(f"📊 {symbol} SHORT | Current: ${current_price} | PnL: {profit_pct:+.2f}%")
-                if (profit_pct > 1.0 and bounce_from_peak > trailing_callback) or profit_pct < -2.0:
-                    log.info(f"💰 TRAILING STOP HIT. Final Profit: {profit_pct:+.2f}%")
-                    break
+                pullback = (current_price - peak_price) / peak_price
+                final_profit_pct = ((entry_price - current_price) / entry_price) * 100.0
 
-        final_ticker = await exchange.fetch_ticker(symbol)
-        final_price = final_ticker['last']
-        final_pnl = (((final_price - entry_price) / entry_price) * 100 if direction == "LONG"
-                     else ((entry_price - final_price) / entry_price) * 100)
-        return final_pnl > 0, final_pnl
+            log.info(f"[{minute + 1}m] {symbol} {direction} | Price=${current_price} | PnL={final_profit_pct:+.2f}%")
+
+            trailing_hit = final_profit_pct > 1.0 and pullback >= trailing_callback
+            hard_stop_hit = final_profit_pct <= -2.0
+            fade_hit = await check_momentum_fade(exchange, symbol, direction, final_profit_pct)
+
+            if trailing_hit or hard_stop_hit or fade_hit:
+                reason = "Hard Stop" if hard_stop_hit else ("Fade Exit" if fade_hit else "Trailing Stop")
+                log.info(f"{reason} triggered on {symbol} | Final PnL: {final_profit_pct:+.2f}%")
+                break
+
+        if live_order_opened and order_amount > 0:
+            # Close One-Way Mode position strictly with reduceOnly=True
+            close_order = await exchange.create_order(
+                symbol=symbol,
+                type="market",
+                side=exit_side,
+                amount=order_amount,
+                params={"uta": True, "reduceOnly": True}
+            )
+            log.info(f"[LIVE CLOSED reduceOnly] {symbol} | Order={close_order.get('id')}")
+
+        return final_profit_pct > 0.0
+
     except Exception as e:
-        log.error(f"Execution failed: {e}")
-        return False, 0.0
+        log.error(f"Trade execution error for {symbol}: {e}")
+        if live_order_opened and order_amount > 0:
+            try:
+                await exchange.create_order(
+                    symbol=symbol,
+                    type="market",
+                    side=exit_side,
+                    amount=order_amount,
+                    params={"uta": True, "reduceOnly": True}
+                )
+                log.info(f"Emergency reduceOnly close succeeded for {symbol}.")
+            except Exception as close_err:
+                log.critical(f"Emergency close failed for {symbol}: {close_err}")
+        return False
     finally:
         await exchange.close()
 
 
-# --- WORKER ---
-async def process_trade(symbol, direction, setup_type, signature=None):
+# --- TWO-WAY CALLBACK TO HUGGING FACE ---
+async def notify_hf_ready():
+    if not HF_READY_URL:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(HF_READY_URL, json={"status": "ready"}, timeout=10) as resp:
+                log.info(f"Notified Hugging Face /ready -> HTTP {resp.status}")
+    except Exception as e:
+        log.warning(f"Failed to notify Hugging Face /ready: {e}")
+
+
+# --- FULL TRADE LIFECYCLE TASK ---
+async def process_trade_lifecycle(data):
     global is_trading
-    is_trading = True
+    symbol = data["symbol"]
+    direction = data["direction"]
+    setup_type = data.get("setup_type", "Momentum")
 
     try:
-        state, sha = await load_state()
+        async with github_lock:
+            state, _ = await load_state_from_github()
+        setup_state = state.get(setup_type, {"paper_streak": 0, "live_unlocked": False, "live_history": []})
+        use_live = LIVE_TRADING and bool(setup_state.get("live_unlocked", False))
 
-        gate_name = GATE_SETUP_NAME
-        if gate_name not in state:
-            state[gate_name] = {
-                "paper_streak": 0,
-                "live_unlocked": False,
-                "live_history": [],
-                "signature_history": [],
-            }
+        won = await execute_trade(symbol, direction, use_live=use_live)
 
-        strat = state[gate_name]
-        is_live = LIVE_TRADING and strat["live_unlocked"]
+        async with github_lock:
+            state, sha = await load_state_from_github()
+            entry = state.setdefault(setup_type, {"paper_streak": 0, "live_unlocked": False, "live_history": []})
 
-        sig_display = signature or setup_type or "unknown"
-        log.info(f"📊 Trading under gate '{gate_name}' | signature: {sig_display}")
-
-        won, pnl = await execute_trade(symbol, direction)
-
-        strat.setdefault("signature_history", []).append({
-            "signature": sig_display,
-            "direction": direction,
-            "symbol": symbol,
-            "won": won,
-            "pnl": round(pnl, 2),
-        })
-        if len(strat["signature_history"]) > 50:
-            strat["signature_history"] = strat["signature_history"][-50:]
-
-        if is_live:
-            strat["live_history"].append(1 if won else 0)
-            if len(strat["live_history"]) > 8:
-                strat["live_history"].pop(0)
-            if len(strat["live_history"]) >= 3 and strat["live_history"][-3:] == [0, 0, 0]:
-                strat["live_unlocked"] = False
-                strat["paper_streak"] = 0
-                strat["live_history"] = []
-                log.info("🛑 DEMOTED: 3 losses. Back to paper.")
-        else:
-            if won:
-                strat["paper_streak"] += 1
-                log.info(f"✅ [{gate_name}] Paper WIN ({sig_display}). Streak: {strat['paper_streak']}/{WIN_THRESHOLD}")
+            if use_live:
+                entry["live_history"].append(bool(won))
+                entry["live_history"] = entry["live_history"][-20:]
+                if len(entry["live_history"]) >= LOSS_DEMOTION_STREAK and not any(entry["live_history"][-LOSS_DEMOTION_STREAK:]):
+                    entry["live_unlocked"] = False
+                    entry["paper_streak"] = 0
+                    log.warning(f"{setup_type} hit {LOSS_DEMOTION_STREAK} live losses. Demoted back to paper mode.")
             else:
-                strat["paper_streak"] = 0
-                log.info(f"❌ [{gate_name}] Paper LOSS ({sig_display}). Streak reset.")
+                if won:
+                    entry["paper_streak"] += 1
+                    log.info(f"{setup_type} paper streak: {entry['paper_streak']}/{WIN_THRESHOLD}")
+                    if entry["paper_streak"] >= WIN_THRESHOLD:
+                        entry["live_unlocked"] = True
+                        log.info(f"8-WIN GATE UNLOCKED for {setup_type}!")
+                else:
+                    entry["paper_streak"] = 0
+                    log.info(f"{setup_type} paper loss. Streak reset to 0.")
 
-            if strat["paper_streak"] >= WIN_THRESHOLD:
-                strat["live_unlocked"] = True
-                log.info(f"🚀 [{gate_name}] GATE UNLOCKED — live trading armed.")
-
-        await save_state(state, sha)
-
-        if HF_READY_URL:
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(HF_READY_URL, timeout=10) as resp:
-                        if resp.status == 200:
-                            log.info("📡 Callback sent to Hugging Face! Status: 200 OK.")
-                        else:
-                            log.error(f"⚠️ Callback to HF failed. Status: {resp.status}")
-            except Exception as e:
-                log.error(f"❌ Callback network error to HF: {e}")
-
+            await save_state_to_github(state, sha)
     finally:
-        is_trading = False
+        async with trade_lock:
+            is_trading = False
+        await notify_hf_ready()
 
 
-# --- WEBHOOK RECEIVER ---
+# --- WEB SERVER HANDLERS ---
+async def handle_health(request):
+    return web.Response(status=200, text="Bot is alive and running!")
+
+
 async def handle_signal(request):
     global is_trading
     if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
-        log.warning("❌ Unauthorized — WEBHOOK_SECRET mismatch.")
+        log.warning("Unauthorized webhook rejected.")
         return web.Response(status=401, text="Unauthorized")
-
-    if is_trading:
-        return web.Response(status=429, text="Busy")
 
     try:
         data = await request.json()
-        symbol = data['symbol']
-        direction = data['direction']
-        setup_type = data.get('setup_type', GATE_SETUP_NAME)
-        signature = data.get('signature')
+    except Exception:
+        return web.Response(status=400, text="Invalid JSON")
 
-        log.info(f"📥 Signal: {symbol} {direction} | setup={setup_type} | signature={signature}")
-        asyncio.create_task(process_trade(symbol, direction, setup_type, signature))
-        return web.Response(status=200, text="Started")
-    except Exception as e:
-        log.error(f"Bad signal payload: {e}")
-        return web.Response(status=500, text="Error")
+    symbol = data.get("symbol")
+    direction = data.get("direction")
+    setup_type = data.get("setup_type", "Momentum")
+    if not symbol or direction not in ("LONG", "SHORT"):
+        return web.Response(status=400, text="Missing symbol or invalid direction")
+
+    async with trade_lock:
+        if is_trading:
+            log.info(f"Trade already active. Returning 429 for {symbol}.")
+            return web.Response(status=429, text="Executor busy")
+
+        approved = await get_ai_confirmation(
+            symbol,
+            direction,
+            setup_type,
+            data.get("macro_rsi", 50),
+            data.get("move_1h", 0),
+            data.get("move_5m", 0)
+        )
+        if not approved:
+            log.info(f"Pollinations AI rejected {symbol} ({setup_type}).")
+            return web.Response(status=200, text="Rejected by AI")
+
+        is_trading = True
+        asyncio.create_task(process_trade_lifecycle(data))
+
+    return web.Response(status=200, text="Accepted")
 
 
 async def main():
     app = web.Application()
-    app.router.add_post('/signal', handle_signal)
-    app.router.add_get('/', lambda r: web.Response(text="Alive"))
+    app.router.add_get("/", handle_health)
+    app.router.add_post("/signal", handle_signal)
+    app.router.add_post("/", handle_signal)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-
-    log.info(f"🚀 Webhook Active on port {port}")
-    log.info(f"   → Gate bucket: {GATE_SETUP_NAME}")
-    log.info(f"   → HF callback: {HF_READY_URL or '⚠️ NOT SET'}")
-    while True:
-        await asyncio.sleep(3600)
+    log.info(f"Render Single-Trade Executor listening on port {PORT} (LIVE_TRADING={LIVE_TRADING})")
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
