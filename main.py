@@ -1,5 +1,5 @@
 import os
-import json
+import sys
 import asyncio
 import logging
 import aiohttp
@@ -7,86 +7,99 @@ from aiohttp import web
 import ccxt.async_support as ccxt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("render_orderbook_executor")
+log = logging.getLogger("render_executor")
 
-# --- CONFIGURATION ---
-WEBHOOK_SECRET = os.environ.get("RENDER_WEBHOOK_SECRET")
-LIVE_TRADING = os.environ.get("LIVE_TRADING", "NO") == "YES"
+# --- ENVIRONMENT CONFIGURATION ---
+PORT = int(os.environ.get("PORT", 10000))
 HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "").rstrip("/")
-
-# Exchange API Credentials
-EX_KEY = os.environ.get("BITGET_KEY", "")
-EX_SECRET = os.environ.get("BITGET_SECRET", "")
-EX_PASS = os.environ.get("BITGET_PASS", "")
-
+RENDER_WEBHOOK_SECRET = os.environ.get("RENDER_WEBHOOK_SECRET", "")
+EX_KEY = os.environ.get("BITGET_API_KEY", "")
+EX_SECRET = os.environ.get("BITGET_API_SECRET", "")
+EX_PASS = os.environ.get("BITGET_PASSPHRASE", "")
 DEPTH_LEVELS = 20
 
-# --- SINGLE TRADE LOCK ---
-trade_lock = asyncio.Lock()
+# Global Active Trade Lock
 active_trade = None
 
-async def notify_hf_ready():
-    """Notifies Hugging Face Space when Render finishes a trade and frees the slot."""
+async def notify_hf_ready(symbol=None, direction=None, won=False, pnl_pct=0.0):
+    """Notifies Hugging Face Space with trade outcome and frees slot."""
     if not HF_SPACE_URL:
+        log.warning("âš ï¸ HF_SPACE_URL is not configured. Skipping callback notification.")
         return
     ready_endpoint = f"{HF_SPACE_URL}/ready"
-    log.info(f"🔔 Notifying Hugging Face Space at {ready_endpoint}...")
+    log.info(f"ðŸ”” Notifying Hugging Face Space at {ready_endpoint} with result...")
+    payload = {
+        "symbol": symbol,
+        "direction": direction,
+        "won": won,
+        "pnl_pct": pnl_pct
+    }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(ready_endpoint, timeout=10) as resp:
+            async with session.post(ready_endpoint, json=payload, timeout=10) as resp:
                 if resp.status == 200:
-                    log.info("✅ Hugging Face notified: Render is free for next trade.")
+                    log.info("âœ… Hugging Face notified successfully.")
+                else:
+                    log.error(f"âŒ HF callback failed | Status: {resp.status}")
     except Exception as e:
-        log.error(f"❌ Failed to notify Hugging Face: {e}")
+        log.error(f"âŒ Failed to notify Hugging Face: {e}")
 
 async def monitor_orderbook_shift(symbol, direction):
-    """Monitors live order book depth and exits immediately when opposing side dominates."""
+    """Monitors orderbook depth shift and returns (won, pnl_pct)."""
     exchange = ccxt.bitget({
         "apiKey": EX_KEY,
         "secret": EX_SECRET,
         "password": EX_PASS,
         "options": {"defaultType": "swap", "uta": True}
     })
-
     try:
         await exchange.load_markets()
-        log.info(f"⚡ Monitoring Live Order Book Imbalance for {symbol} ({direction})...")
+        ticker = await exchange.fetch_ticker(symbol)
+        entry_price = ticker.get("last", 0.0)
+        log.info(f"ðŸ“ Entry Price for {symbol}: {entry_price}")
 
         max_time_seconds = 3600
         start_time = asyncio.get_event_loop().time()
 
         while (asyncio.get_event_loop().time() - start_time) < max_time_seconds:
             await asyncio.sleep(2)
-
             try:
                 orderbook = await exchange.fetch_order_book(symbol, limit=DEPTH_LEVELS)
                 bids = orderbook.get("bids", [])
                 asks = orderbook.get("asks", [])
-
-                if not bids or not asks: continue
+                if not bids or not asks:
+                    continue
 
                 bid_depth = sum(price * qty for price, qty in bids[:DEPTH_LEVELS])
                 ask_depth = sum(price * qty for price, qty in asks[:DEPTH_LEVELS])
+                curr_price = (bids[0][0] + asks[0][0]) / 2.0 if bids and asks else entry_price
 
-                if direction == "LONG":
-                    # Exit trigger: Ask Depth >= Bid Depth (ratio <= 1.0)
-                    if ask_depth >= bid_depth:
-                        log.info(f"🛑 OPPOSING SHIFT DETECTED on {symbol}! Ask Depth ({ask_depth:.2f}) >= Bid Depth ({bid_depth:.2f}). Exiting instantly.")
-                        return True, 1.0
-                elif direction == "SHORT":
-                    # Exit trigger: Bid Depth >= Ask Depth (ratio <= 1.0)
-                    if bid_depth >= ask_depth:
-                        log.info(f"🛑 OPPOSING SHIFT DETECTED on {symbol}! Bid Depth ({bid_depth:.2f}) >= Ask Depth ({ask_depth:.2f}). Exiting instantly.")
-                        return True, 1.0
+                # Exit condition check based on orderbook imbalance reversal
+                should_exit = False
+                if direction == "LONG" and ask_depth >= bid_depth:
+                    should_exit = True
+                elif direction == "SHORT" and bid_depth >= ask_depth:
+                    should_exit = True
+
+                if should_exit:
+                    pnl_pct = ((curr_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - curr_price) / entry_price * 100)
+                    won = pnl_pct > 0
+                    log.info(f"ðŸŽ¯ Order Book Shift Triggered Exit | PnL: {pnl_pct:+.2f}%")
+                    return won, pnl_pct
             except Exception as e:
                 log.error(f"Depth fetch error: {e}")
                 continue
 
-        log.info(f"⏰ Maximum trade duration reached (60 min). Exiting {symbol}.")
-        return True, 0.5
+        # Exit on 1-hour timeout
+        ticker = await exchange.fetch_ticker(symbol)
+        exit_price = ticker.get("last", entry_price)
+        pnl_pct = ((exit_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - exit_price) / entry_price * 100)
+        won = pnl_pct > 0
+        log.info(f"â° Timeout Reached (60m) | PnL: {pnl_pct:+.2f}%")
+        return won, pnl_pct
 
     except Exception as e:
-        log.error(f"Execution monitoring error: {e}")
+        log.error(f"Execution error: {e}")
         return False, 0.0
     finally:
         await exchange.close()
@@ -94,63 +107,59 @@ async def monitor_orderbook_shift(symbol, direction):
 async def process_trade(symbol, direction, setup_type):
     global active_trade
     try:
-        log.info(f"⚙️ Executing Order Book Imbalance trade on {symbol} ({direction})...")
+        log.info(f"âš™ï¸ Executing Order Book Imbalance trade on {symbol} ({direction})...")
         trade_won, pnl_pct = await monitor_orderbook_shift(symbol, direction)
-        log.info(f"📈 Trade Finished | Result: {'WIN' if trade_won else 'LOSS'}")
+        log.info(f"ðŸ“ˆ Trade Finished | Result: {'WIN' if trade_won else 'LOSS'} ({pnl_pct:+.2f}%)")
     finally:
         active_trade = None
-        log.info("✅ Trade slot freed. Notifying Hugging Face Space...")
-        await notify_hf_ready()
+        await notify_hf_ready(symbol, direction, trade_won, pnl_pct)
 
+# --- AIOHTTP WEB SERVER FOR RENDER ---
+routes = web.RouteTableDef()
+
+@routes.get("/")
+@routes.get("/health")
+async def health_check(request):
+    return web.json_response({"status": "online", "active_trade": active_trade})
+
+@routes.post("/signal")
 async def handle_signal(request):
     global active_trade
-
-    if request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
-        return web.Response(status=401, text="Unauthorized secret token")
-
+    
+    # Secret Header Verification
+    incoming_secret = request.headers.get("X-Webhook-Secret", "")
+    if RENDER_WEBHOOK_SECRET and incoming_secret != RENDER_WEBHOOK_SECRET:
+        log.warning("âŒ Signal rejected: Invalid X-Webhook-Secret header.")
+        return web.json_response({"error": "Unauthorized"}, status=401)
+        
     if active_trade is not None:
-        log.warning(f"⚠️ Trade active on {active_trade}. Rejecting signal.")
-        return web.Response(status=429, text="Busy: Active trade in progress")
+        log.warning(f"âš ï¸ Signal rejected: Trade already in progress on {active_trade}.")
+        return web.json_response({"error": "Busy", "active_trade": active_trade}, status=429)
 
     try:
         data = await request.json()
         symbol = data.get("symbol")
-        direction = data.get("direction")
+        direction = data.get("direction", "LONG")
         setup_type = data.get("setup_type", "OrderBook_Imbalance")
 
-        if not symbol or not direction:
-            return web.Response(status=400, text="Missing symbol or direction")
+        if not symbol:
+            return web.json_response({"error": "Missing symbol"}, status=400)
 
-        log.info(f"📥 Signal Accepted: {symbol} {direction} | Type: {setup_type}")
         active_trade = symbol
-
+        log.info(f"ðŸ“¥ Signal Accepted from HF: {symbol} ({direction})")
+        
+        # Start execution in background task
         asyncio.create_task(process_trade(symbol, direction, setup_type))
-        return web.Response(status=200, text="Signal accepted")
-
+        return web.json_response({"status": "accepted", "symbol": symbol, "direction": direction})
     except Exception as e:
-        log.error(f"Signal handling error: {e}")
-        active_trade = None
-        return web.Response(status=500, text="Internal Server Error")
+        log.error(f"Error handling signal payload: {e}")
+        return web.json_response({"error": str(e)}, status=400)
 
-async def handle_health(request):
-    return web.Response(status=200, text="OrderBook Executor is alive and running!")
-
-async def main():
+def main():
     app = web.Application()
-    app.router.add_post("/signal", handle_signal)
-    app.router.add_get("/", handle_health)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-    log.info(f"🚀 Render OrderBook Executor Webhook Live on port {port}")
-
-    while True:
-        await asyncio.sleep(3600)
+    app.add_routes(routes)
+    log.info(f"ðŸš€ Render Web Service starting on port {PORT}...")
+    web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
