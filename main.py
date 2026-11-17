@@ -16,12 +16,12 @@ RENDER_WEBHOOK_SECRET = os.environ.get("RENDER_WEBHOOK_SECRET", "")
 EX_KEY = os.environ.get("BITGET_API_KEY", "")
 EX_SECRET = os.environ.get("BITGET_API_SECRET", "")
 EX_PASS = os.environ.get("BITGET_PASSPHRASE", "")
-DEPTH_LEVELS = 20
 
-# Risk & Exit Settings
-TAKE_PROFIT_PCT = 1.5      # Take profit target +1.5%
-STOP_LOSS_PCT = -1.0       # Stop loss -1.0%
-MIN_PNL_BUFFER_PCT = 0.3    # Minimum +0.3% PnL buffer required before depth flip exit
+DEPTH_LEVELS = 20
+TAKE_PROFIT_PCT = 2.5
+STOP_LOSS_PCT = 1.0
+MIN_BUFFER_PNL = 1.0
+TRAILING_OFFSET = 0.4
 
 active_trade = None
 
@@ -49,7 +49,7 @@ async def notify_hf_ready(symbol=None, direction=None, won=False, pnl_pct=0.0):
         log.error(f"❌ Failed to notify Hugging Face: {e}")
 
 async def monitor_orderbook_shift(symbol, direction):
-    """Monitors orderbook depth shift with TP/SL & minimum PnL buffer."""
+    """Monitors orderbook depth shift & enforces +1.0% minimum profit buffer + trailing SL."""
     exchange = ccxt.bitget({
         "apiKey": EX_KEY,
         "secret": EX_SECRET,
@@ -62,6 +62,7 @@ async def monitor_orderbook_shift(symbol, direction):
         entry_price = ticker.get("last", 0.0)
         log.info(f"📍 Entry Price for {symbol}: {entry_price}")
 
+        peak_pnl = 0.0
         max_time_seconds = 3600
         start_time = asyncio.get_event_loop().time()
 
@@ -78,27 +79,41 @@ async def monitor_orderbook_shift(symbol, direction):
                 ask_depth = sum(price * qty for price, qty in asks[:DEPTH_LEVELS])
                 curr_price = (bids[0][0] + asks[0][0]) / 2.0 if bids and asks else entry_price
 
-                pnl_pct = ((curr_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - curr_price) / entry_price * 100)
+                # Calculate PnL %
+                if direction == "LONG":
+                    curr_pnl = ((curr_price - entry_price) / entry_price) * 100.0
+                else:
+                    curr_pnl = ((entry_price - curr_price) / entry_price) * 100.0
 
-                # Hard Take Profit & Stop Loss
-                if pnl_pct >= TAKE_PROFIT_PCT:
-                    log.info(f"🎯 Take Profit Hit! PnL: {pnl_pct:+.2f}%")
-                    return True, pnl_pct
-                if pnl_pct <= STOP_LOSS_PCT:
-                    log.info(f"🛑 Stop Loss Hit! PnL: {pnl_pct:+.2f}%")
-                    return False, pnl_pct
+                if curr_pnl > peak_pnl:
+                    peak_pnl = curr_pnl
 
-                # Orderbook Depth Flip Exit (Requires Minimum PnL Buffer)
-                should_exit = False
+                # Hard Take Profit Check (+2.5%)
+                if curr_pnl >= TAKE_PROFIT_PCT:
+                    log.info(f"🎯 Take Profit (+{curr_pnl:.2f}%) Reached!")
+                    return True, curr_pnl
+
+                # Hard Stop Loss Check (-1.0%)
+                if curr_pnl <= -STOP_LOSS_PCT:
+                    log.info(f"🛑 Stop Loss ({curr_pnl:.2f}%) Reached.")
+                    return False, curr_pnl
+
+                # Trailing Stop Loss Check (Activates at +1.0% PnL)
+                if peak_pnl >= MIN_BUFFER_PNL and (peak_pnl - curr_pnl) >= TRAILING_OFFSET:
+                    log.info(f"📈 Trailing Stop Activated | Peak: +{peak_pnl:.2f}% | Locked Exit: +{curr_pnl:.2f}%")
+                    return True, curr_pnl
+
+                # Order Book Shift Check (Ignored unless PnL >= +1.0%)
+                depth_flipped = False
                 if direction == "LONG" and ask_depth >= bid_depth:
-                    should_exit = True
+                    depth_flipped = True
                 elif direction == "SHORT" and bid_depth >= ask_depth:
-                    should_exit = True
+                    depth_flipped = True
 
-                if should_exit and pnl_pct >= MIN_PNL_BUFFER_PCT:
-                    won = pnl_pct > 0
-                    log.info(f"🎯 Order Book Shift Triggered Exit (Buffer Met) | PnL: {pnl_pct:+.2f}%")
-                    return won, pnl_pct
+                if depth_flipped and curr_pnl >= MIN_BUFFER_PNL:
+                    log.info(f"🎯 Order Book Shift Triggered Exit (Buffer Met) | PnL: {curr_pnl:+.2f}%")
+                    return True, curr_pnl
+
             except Exception as e:
                 log.error(f"Depth fetch error: {e}")
                 continue
@@ -151,7 +166,7 @@ async def handle_signal(request):
         data = await request.json()
         symbol = data.get("symbol")
         direction = data.get("direction", "LONG")
-        setup_type = data.get("setup_type", "Coinalyze_Volatile_OrderBook_Imbalance")
+        setup_type = data.get("setup_type", "Coinalyze_Unfilled_Orderbook_Imbalance")
 
         if not symbol:
             return web.json_response({"error": "Missing symbol"}, status=400)
@@ -173,4 +188,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
