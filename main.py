@@ -18,7 +18,11 @@ EX_SECRET = os.environ.get("BITGET_API_SECRET", "")
 EX_PASS = os.environ.get("BITGET_PASSPHRASE", "")
 DEPTH_LEVELS = 20
 
-# Global Active Trade Lock
+# Risk & Exit Settings
+TAKE_PROFIT_PCT = 1.5      # Take profit target +1.5%
+STOP_LOSS_PCT = -1.0       # Stop loss -1.0%
+MIN_PNL_BUFFER_PCT = 0.3    # Minimum +0.3% PnL buffer required before depth flip exit
+
 active_trade = None
 
 async def notify_hf_ready(symbol=None, direction=None, won=False, pnl_pct=0.0):
@@ -45,7 +49,7 @@ async def notify_hf_ready(symbol=None, direction=None, won=False, pnl_pct=0.0):
         log.error(f"❌ Failed to notify Hugging Face: {e}")
 
 async def monitor_orderbook_shift(symbol, direction):
-    """Monitors orderbook depth shift and returns (won, pnl_pct)."""
+    """Monitors orderbook depth shift with TP/SL & minimum PnL buffer."""
     exchange = ccxt.bitget({
         "apiKey": EX_KEY,
         "secret": EX_SECRET,
@@ -74,17 +78,26 @@ async def monitor_orderbook_shift(symbol, direction):
                 ask_depth = sum(price * qty for price, qty in asks[:DEPTH_LEVELS])
                 curr_price = (bids[0][0] + asks[0][0]) / 2.0 if bids and asks else entry_price
 
-                # Exit condition check based on orderbook imbalance reversal
+                pnl_pct = ((curr_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - curr_price) / entry_price * 100)
+
+                # Hard Take Profit & Stop Loss
+                if pnl_pct >= TAKE_PROFIT_PCT:
+                    log.info(f"🎯 Take Profit Hit! PnL: {pnl_pct:+.2f}%")
+                    return True, pnl_pct
+                if pnl_pct <= STOP_LOSS_PCT:
+                    log.info(f"🛑 Stop Loss Hit! PnL: {pnl_pct:+.2f}%")
+                    return False, pnl_pct
+
+                # Orderbook Depth Flip Exit (Requires Minimum PnL Buffer)
                 should_exit = False
                 if direction == "LONG" and ask_depth >= bid_depth:
                     should_exit = True
                 elif direction == "SHORT" and bid_depth >= ask_depth:
                     should_exit = True
 
-                if should_exit:
-                    pnl_pct = ((curr_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - curr_price) / entry_price * 100)
+                if should_exit and pnl_pct >= MIN_PNL_BUFFER_PCT:
                     won = pnl_pct > 0
-                    log.info(f"🎯 Order Book Shift Triggered Exit | PnL: {pnl_pct:+.2f}%")
+                    log.info(f"🎯 Order Book Shift Triggered Exit (Buffer Met) | PnL: {pnl_pct:+.2f}%")
                     return won, pnl_pct
             except Exception as e:
                 log.error(f"Depth fetch error: {e}")
@@ -114,7 +127,6 @@ async def process_trade(symbol, direction, setup_type):
         active_trade = None
         await notify_hf_ready(symbol, direction, trade_won, pnl_pct)
 
-# --- AIOHTTP WEB SERVER FOR RENDER ---
 routes = web.RouteTableDef()
 
 @routes.get("/")
@@ -126,7 +138,6 @@ async def health_check(request):
 async def handle_signal(request):
     global active_trade
 
-    # Secret Header Verification
     incoming_secret = request.headers.get("X-Webhook-Secret", "")
     if RENDER_WEBHOOK_SECRET and incoming_secret != RENDER_WEBHOOK_SECRET:
         log.warning("❌ Signal rejected: Invalid X-Webhook-Secret header.")
@@ -140,7 +151,7 @@ async def handle_signal(request):
         data = await request.json()
         symbol = data.get("symbol")
         direction = data.get("direction", "LONG")
-        setup_type = data.get("setup_type", "OrderBook_Imbalance")
+        setup_type = data.get("setup_type", "Coinalyze_Volatile_OrderBook_Imbalance")
 
         if not symbol:
             return web.json_response({"error": "Missing symbol"}, status=400)
@@ -148,7 +159,6 @@ async def handle_signal(request):
         active_trade = symbol
         log.info(f"📥 Signal Accepted from HF: {symbol} ({direction})")
 
-        # Start execution in background task
         asyncio.create_task(process_trade(symbol, direction, setup_type))
         return web.json_response({"status": "accepted", "symbol": symbol, "direction": direction})
     except Exception as e:
@@ -163,3 +173,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
