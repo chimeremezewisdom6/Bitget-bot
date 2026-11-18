@@ -3,5 +3,4 @@ aiohttp>=3.9.0
 fastapi>=0.109.0
 uvicorn>=0.27.0
 gradio>=4.16.0
-pandas>=2.0.0
 numpy>=1.24.0
