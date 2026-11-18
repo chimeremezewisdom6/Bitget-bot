@@ -9,38 +9,29 @@ import ccxt.async_support as ccxt
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("executor")
 
-# --- ENV (Accepts your exact Render variable names) ---
 PORT = int(os.environ.get("PORT", 10000))
-
-# Accepts HF_READY_URL or HF_SPACE_URL and strips /ready if present
 _hf_url = (os.environ.get("HF_SPACE_URL") or os.environ.get("HF_READY_URL") or "").rstrip("/")
 HF_SPACE_URL = _hf_url.replace("/ready", "")
 
-# Accepts WEBHOOK_SECRET or RENDER_WEBHOOK_SECRET
 RENDER_WEBHOOK_SECRET = (os.environ.get("RENDER_WEBHOOK_SECRET") or 
                          os.environ.get("WEBHOOK_SECRET") or "")
 
-# Accepts BITGET_SECRET / BITGET_API_SECRET
 EX_KEY = os.environ.get("BITGET_API_KEY", "")
 EX_SECRET = (os.environ.get("BITGET_SECRET") or os.environ.get("BITGET_API_SECRET") or "")
 EX_PASS = (os.environ.get("BITGET_PASSWORD") or os.environ.get("BITGET_PASSPHRASE") or "")
 
-# Position sizing
 POSITION_MARGIN_USDT = float(os.environ.get("POSITION_MARGIN_USDT", "10"))
 LEVERAGE = int(os.environ.get("LEVERAGE", "5"))
 
-# Dynamic exit logic
-WINDOW_MINUTES = 30
-MOMENTUM_CHECK_INTERVAL = 30
+WINDOW_MINUTES = 60      # 1 hour of 5min data
 HARD_TIMEOUT_SECONDS = int(os.environ.get("HARD_TIMEOUT_SECONDS", "3600"))
+MOMENTUM_CHECK_INTERVAL = 30
 
 active_trade = None
 lock = asyncio.Lock()
 
-
 def creds_ok():
     return bool(EX_KEY and EX_SECRET and EX_PASS)
-
 
 async def notify_hf(symbol, direction, won, pnl_pct, aborted=False):
     if not HF_SPACE_URL:
@@ -56,10 +47,8 @@ async def notify_hf(symbol, direction, won, pnl_pct, aborted=False):
     except Exception as e:
         log.error(f"HF notify error: {e}")
 
-
 def compute_bias(closes):
-    """Dynamic ranking metric: returns up_sum, down_sum, direction."""
-    if len(closes) < 10:
+    if len(closes) < 6:
         return None
     up = 0.0; down = 0.0
     for i in range(1, len(closes)):
@@ -73,11 +62,9 @@ def compute_bias(closes):
     direction = "LONG" if up > down else "SHORT"
     return up, down, direction
 
-
 async def place(exchange, symbol, side, amount, reduce_only=False):
     return await exchange.create_order(symbol, "market", side, amount,
                                        params={"reduceOnly": reduce_only})
-
 
 async def run_trade(symbol, direction):
     if not creds_ok():
@@ -95,19 +82,15 @@ async def run_trade(symbol, direction):
             log.error(f"Market missing: {symbol}")
             return False, 0.0, True
 
-        # Get initial momentum data to calculate dynamic SL
-        candles = await exchange.fetch_ohlcv(symbol, "1m", limit=WINDOW_MINUTES)
+        candles = await exchange.fetch_ohlcv(symbol, "5min", limit=12) # Using 5min
         closes = [c[4] for c in candles if c and len(c) >= 5]
         bias = compute_bias(closes)
         if not bias:
-            log.error(f"Not enough data for {symbol}")
             return False, 0.0, True
         init_up, init_down, _ = bias
-        if init_up + init_down <= 0:
-            return False, 0.0, True
         
         init_range_pct = (max(closes) - min(closes)) / min(closes) * 100.0
-        sl_dist_pct = max(init_range_pct * 2.0, 0.5) # Stop loss is 2x the 30m range
+        sl_dist_pct = max(init_range_pct * 2.0, 0.5)
 
         ticker = await exchange.fetch_ticker(symbol)
         entry_px = float(ticker.get("last") or 0)
@@ -123,7 +106,6 @@ async def run_trade(symbol, direction):
         except Exception:
             pass
         if amount <= 0:
-            log.error(f"Trade size too small ({amount})")
             return False, 0.0, True
 
         try:
@@ -146,7 +128,6 @@ async def run_trade(symbol, direction):
 
         while (time.monotonic() - start) < HARD_TIMEOUT_SECONDS:
             await asyncio.sleep(5)
-
             try:
                 t = await exchange.fetch_ticker(symbol)
                 current = float(t.get("last") or current)
@@ -154,27 +135,22 @@ async def run_trade(symbol, direction):
                 pass
 
             if direction == "LONG" and current <= sl_price:
-                exit_reason = "STOP_LOSS"
-                break
+                exit_reason = "STOP_LOSS"; break
             if direction == "SHORT" and current >= sl_price:
-                exit_reason = "STOP_LOSS"
-                break
+                exit_reason = "STOP_LOSS"; break
 
             if time.monotonic() - last_mom >= MOMENTUM_CHECK_INTERVAL:
                 try:
-                    c = await exchange.fetch_ohlcv(symbol, "1m", limit=WINDOW_MINUTES)
+                    c = await exchange.fetch_ohlcv(symbol, "5min", limit=12) # Using 5min
                     cls = [x[4] for x in c if x and len(x) >= 5]
                     b = compute_bias(cls)
                     if b:
                         up, dn, _ = b
-                        if direction == "LONG" and dn >= up:
-                            exit_reason = "MOMENTUM_FLIP"
-                        elif direction == "SHORT" and up >= dn:
-                            exit_reason = "MOMENTUM_FLIP"
-                        if exit_reason:
-                            break
-                except Exception as e:
-                    log.debug(f"momentum check: {e}")
+                        if direction == "LONG" and dn >= up: exit_reason = "MOMENTUM_FLIP"
+                        elif direction == "SHORT" and up >= dn: exit_reason = "MOMENTUM_FLIP"
+                        if exit_reason: break
+                except Exception:
+                    pass
                 last_mom = time.monotonic()
 
         if exit_reason is None:
@@ -203,19 +179,17 @@ async def run_trade(symbol, direction):
         except Exception:
             pass
 
-
 async def process(symbol, direction):
     global active_trade
     won, pnl, aborted = False, 0.0, False
     try:
         won, pnl, aborted = await run_trade(symbol, direction)
-    except Exception as e:
+    except Exception:
         aborted = True
     finally:
         async with lock:
             active_trade = None
         await notify_hf(symbol, direction, won, pnl, aborted=aborted)
-
 
 routes = web.RouteTableDef()
 
