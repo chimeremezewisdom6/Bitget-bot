@@ -1,247 +1,254 @@
 import os
-import sys
+import time
 import asyncio
 import logging
-import aiohttp
 from aiohttp import web
+import aiohttp
 import ccxt.async_support as ccxt
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("render_executor")
+log = logging.getLogger("executor")
 
-# --- ENVIRONMENT CONFIGURATION ---
+# --- ENV (Accepts your exact Render variable names) ---
 PORT = int(os.environ.get("PORT", 10000))
-HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "").rstrip("/")
-RENDER_WEBHOOK_SECRET = os.environ.get("RENDER_WEBHOOK_SECRET", "")
-EX_KEY = os.environ.get("BITGET_API_KEY", "")
-EX_SECRET = os.environ.get("BITGET_API_SECRET", "")
-EX_PASS = os.environ.get("BITGET_PASSPHRASE", "")
 
-# Execution parameters
-MAX_LEVERAGE = 5          # Max 5x leverage depending on capital
-TAKE_PROFIT_PCT = 5.0     # +5.0% Take Profit
-STOP_LOSS_PCT = 1.5       # -1.5% Hard Stop Loss
-MIN_BUFFER_PNL = 1.5      # +1.5% Minimum PnL before momentum exit activates
-TRAILING_OFFSET = 0.5     # 0.5% momentum reversal drop from peak locks in profit
+# Accepts HF_READY_URL or HF_SPACE_URL and strips /ready if present
+_hf_url = (os.environ.get("HF_SPACE_URL") or os.environ.get("HF_READY_URL") or "").rstrip("/")
+HF_SPACE_URL = _hf_url.replace("/ready", "")
+
+# Accepts WEBHOOK_SECRET or RENDER_WEBHOOK_SECRET
+RENDER_WEBHOOK_SECRET = (os.environ.get("RENDER_WEBHOOK_SECRET") or 
+                         os.environ.get("WEBHOOK_SECRET") or "")
+
+# Accepts BITGET_SECRET / BITGET_API_SECRET
+EX_KEY = os.environ.get("BITGET_API_KEY", "")
+EX_SECRET = (os.environ.get("BITGET_SECRET") or os.environ.get("BITGET_API_SECRET") or "")
+EX_PASS = (os.environ.get("BITGET_PASSWORD") or os.environ.get("BITGET_PASSPHRASE") or "")
+
+# Position sizing
+POSITION_MARGIN_USDT = float(os.environ.get("POSITION_MARGIN_USDT", "10"))
+LEVERAGE = int(os.environ.get("LEVERAGE", "5"))
+
+# Dynamic exit logic
+WINDOW_MINUTES = 30
+MOMENTUM_CHECK_INTERVAL = 30
+HARD_TIMEOUT_SECONDS = int(os.environ.get("HARD_TIMEOUT_SECONDS", "3600"))
 
 active_trade = None
+lock = asyncio.Lock()
 
-async def notify_hf_ready(symbol=None, direction=None, won=False, pnl_pct=0.0):
-    """Notifies Hugging Face Space with trade outcome and frees slot."""
+
+def creds_ok():
+    return bool(EX_KEY and EX_SECRET and EX_PASS)
+
+
+async def notify_hf(symbol, direction, won, pnl_pct, aborted=False):
     if not HF_SPACE_URL:
-        log.warning("⚠️ HF_SPACE_URL is not configured. Skipping callback notification.")
         return
-    ready_endpoint = f"{HF_SPACE_URL}/ready"
-    log.info(f"🔔 Notifying Hugging Face Space at {ready_endpoint} with result...")
-    payload = {
-        "symbol": symbol,
-        "direction": direction,
-        "won": won,
-        "pnl_pct": pnl_pct
-    }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(ready_endpoint, json=payload, timeout=10) as resp:
-                if resp.status == 200:
-                    log.info("✅ Hugging Face notified successfully.")
-                else:
-                    log.error(f"❌ HF callback failed | Status: {resp.status}")
+        async with aiohttp.ClientSession() as s:
+            async with s.post(f"{HF_SPACE_URL}/ready",
+                              json={"symbol": symbol, "direction": direction,
+                                    "won": won, "pnl_pct": pnl_pct,
+                                    "aborted": aborted}, timeout=10) as r:
+                if r.status == 200:
+                    log.info("✅ HF notified.")
     except Exception as e:
-        log.error(f"❌ Failed to notify Hugging Face: {e}")
+        log.error(f"HF notify error: {e}")
 
-async def configure_bitget_uta(exchange, symbol):
-    """
-    Configures Bitget Unified Trading Account (UTA):
-    1. Sets One-Way Position Mode (hedged=False).
-    2. Sets Leverage dynamically up to maximum 5x.
-    """
-    try:
-        # Set position mode to One-Way (not Hedge)
-        try:
-            await exchange.set_position_mode(hedged=False, symbol=symbol)
-            log.info(f"✅ One-Way Position Mode set for {symbol}")
-        except Exception as e:
-            log.info(f"Position mode notice for {symbol}: {e}")
 
-        # Set Leverage to Max 5x
-        try:
-            await exchange.set_leverage(MAX_LEVERAGE, symbol=symbol)
-            log.info(f"⚡ Leverage set to {MAX_LEVERAGE}x for {symbol}")
-        except Exception as e:
-            log.info(f"Leverage setup notice for {symbol}: {e}")
-    except Exception as e:
-        log.warning(f"UTA configuration notice: {e}")
+def compute_bias(closes):
+    """Dynamic ranking metric: returns up_sum, down_sum, direction."""
+    if len(closes) < 10:
+        return None
+    up = 0.0; down = 0.0
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        if d > 0:
+            up += d
+        elif d < 0:
+            down += -d
+    if up + down <= 0:
+        return None
+    direction = "LONG" if up > down else "SHORT"
+    return up, down, direction
 
-async def monitor_and_execute_trade(symbol, direction):
-    """
-    Executes Long or Short position on Bitget UTA in One-Way Mode,
-    using reduce-only orders for all position exits.
-    """
+
+async def place(exchange, symbol, side, amount, reduce_only=False):
+    return await exchange.create_order(symbol, "market", side, amount,
+                                       params={"reduceOnly": reduce_only})
+
+
+async def run_trade(symbol, direction):
+    if not creds_ok():
+        log.error("Bitget creds missing.")
+        return False, 0.0, True
+
     exchange = ccxt.bitget({
-        "apiKey": EX_KEY,
-        "secret": EX_SECRET,
-        "password": EX_PASS,
-        "options": {"defaultType": "swap", "uta": True}
+        "apiKey": EX_KEY, "secret": EX_SECRET, "password": EX_PASS,
+        "enableRateLimit": True, "options": {"defaultType": "swap"},
     })
+
     try:
         await exchange.load_markets()
-        await configure_bitget_uta(exchange, symbol)
+        if symbol not in exchange.markets:
+            log.error(f"Market missing: {symbol}")
+            return False, 0.0, True
+
+        # Get initial momentum data to calculate dynamic SL
+        candles = await exchange.fetch_ohlcv(symbol, "1m", limit=WINDOW_MINUTES)
+        closes = [c[4] for c in candles if c and len(c) >= 5]
+        bias = compute_bias(closes)
+        if not bias:
+            log.error(f"Not enough data for {symbol}")
+            return False, 0.0, True
+        init_up, init_down, _ = bias
+        if init_up + init_down <= 0:
+            return False, 0.0, True
+        
+        init_range_pct = (max(closes) - min(closes)) / min(closes) * 100.0
+        sl_dist_pct = max(init_range_pct * 2.0, 0.5) # Stop loss is 2x the 30m range
 
         ticker = await exchange.fetch_ticker(symbol)
-        entry_price = ticker.get("last", 0.0)
-        if entry_price == 0.0:
-            log.error(f"Could not fetch valid entry price for {symbol}")
-            return False, 0.0
+        entry_px = float(ticker.get("last") or 0)
+        if entry_px <= 0:
+            return False, 0.0, True
 
-        log.info(f"📍 Entry Price for {symbol} ({direction}): {entry_price}")
-
-        # Fetch Available Capital in Bitget UTA to determine position size (Max 5x leverage)
+        market = exchange.market(symbol)
+        contract_size = float(market.get("contractSize") or 1.0)
+        notional = POSITION_MARGIN_USDT * LEVERAGE
+        amount = notional / entry_px / contract_size
         try:
-            balance = await exchange.fetch_balance({"type": "swap"})
-            free_usdt = float(balance.get("USDT", {}).get("free", 10.0))
+            amount = float(exchange.amount_to_precision(symbol, amount))
         except Exception:
-            free_usdt = 10.0
+            pass
+        if amount <= 0:
+            log.error(f"Trade size too small ({amount})")
+            return False, 0.0, True
 
-        position_value_usdt = free_usdt * MAX_LEVERAGE * 0.95  # 95% of 5x leveraged capital
-        qty = position_value_usdt / entry_price
-
-        # Place Entry Order (One-Way Mode)
-        entry_side = "buy" if direction == "LONG" else "sell"
-        log.info(f"🚀 Placing {direction} Entry Market Order for {qty:.4f} {symbol}...")
         try:
-            await exchange.create_order(symbol, "market", entry_side, qty)
-            log.info("✅ Entry order executed.")
-        except Exception as e:
-            log.error(f"Entry order execution error: {e}")
-            # Continue monitoring price movement even if test paper account
+            await exchange.set_leverage(LEVERAGE, symbol)
+        except Exception:
+            pass
 
-        peak_pnl = 0.0
-        max_time_seconds = 14400  # 4-hour macro holding window
-        start_time = asyncio.get_event_loop().time()
+        side = "buy" if direction == "LONG" else "sell"
+        log.info(f"💵 ENTRY {side} {amount} {symbol} @ ~{entry_px}")
+        order = await place(exchange, symbol, side, amount)
+        fill = float(order.get("average") or order.get("price") or entry_px)
+        
+        sl_price = (fill * (1 - sl_dist_pct / 100) if direction == "LONG"
+                    else fill * (1 + sl_dist_pct / 100))
 
-        while (asyncio.get_event_loop().time() - start_time) < max_time_seconds:
-            await asyncio.sleep(2)
+        start = time.monotonic()
+        last_mom = 0.0
+        current = fill
+        exit_reason = None
+
+        while (time.monotonic() - start) < HARD_TIMEOUT_SECONDS:
+            await asyncio.sleep(5)
+
             try:
-                curr_ticker = await exchange.fetch_ticker(symbol)
-                curr_price = curr_ticker.get("last", entry_price)
+                t = await exchange.fetch_ticker(symbol)
+                current = float(t.get("last") or current)
+            except Exception:
+                pass
 
-                # Calculate Current PnL %
-                if direction == "LONG":
-                    curr_pnl = ((curr_price - entry_price) / entry_price) * 100.0
-                else:
-                    curr_pnl = ((entry_price - curr_price) / entry_price) * 100.0
+            if direction == "LONG" and current <= sl_price:
+                exit_reason = "STOP_LOSS"
+                break
+            if direction == "SHORT" and current >= sl_price:
+                exit_reason = "STOP_LOSS"
+                break
 
-                if curr_pnl > peak_pnl:
-                    peak_pnl = curr_pnl
+            if time.monotonic() - last_mom >= MOMENTUM_CHECK_INTERVAL:
+                try:
+                    c = await exchange.fetch_ohlcv(symbol, "1m", limit=WINDOW_MINUTES)
+                    cls = [x[4] for x in c if x and len(x) >= 5]
+                    b = compute_bias(cls)
+                    if b:
+                        up, dn, _ = b
+                        if direction == "LONG" and dn >= up:
+                            exit_reason = "MOMENTUM_FLIP"
+                        elif direction == "SHORT" and up >= dn:
+                            exit_reason = "MOMENTUM_FLIP"
+                        if exit_reason:
+                            break
+                except Exception as e:
+                    log.debug(f"momentum check: {e}")
+                last_mom = time.monotonic()
 
-                # Hard Take Profit (+5.0%)
-                if curr_pnl >= TAKE_PROFIT_PCT:
-                    log.info(f"🎯 Hard Take Profit (+{curr_pnl:.2f}%) Reached!")
-                    await close_position_reduce_only(exchange, symbol, direction, qty)
-                    return True, curr_pnl
+        if exit_reason is None:
+            exit_reason = "TIMEOUT"
 
-                # Hard Stop Loss (-1.5%)
-                if curr_pnl <= -STOP_LOSS_PCT:
-                    log.info(f"🛑 Hard Stop Loss ({curr_pnl:.2f}%) Reached.")
-                    await close_position_reduce_only(exchange, symbol, direction, qty)
-                    return False, curr_pnl
+        exit_side = "sell" if direction == "LONG" else "buy"
+        log.info(f"💵 EXIT [{exit_reason}] {exit_side} {amount} {symbol}")
+        try:
+            await place(exchange, symbol, exit_side, amount, reduce_only=True)
+        except Exception as e:
+            log.critical(f"🚨 EXIT FAILED — close manually: {e}")
+            return False, 0.0, True
 
-                # Momentum Exhaustion Exit: Minimum +1.5% PnL Buffer + 0.5% Trailing Reversal
-                if peak_pnl >= MIN_BUFFER_PNL and (peak_pnl - curr_pnl) >= TRAILING_OFFSET:
-                    log.info(f"📈 Momentum Exhaustion Exit | Peak: +{peak_pnl:.2f}% | Exit: +{curr_pnl:.2f}%")
-                    await close_position_reduce_only(exchange, symbol, direction, qty)
-                    return True, curr_pnl
-
-            except Exception as e:
-                log.error(f"Price monitoring error: {e}")
-                continue
-
-        # 4-Hour Timeout Exit
-        curr_ticker = await exchange.fetch_ticker(symbol)
-        exit_price = curr_ticker.get("last", entry_price)
-        pnl_pct = ((exit_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - exit_price) / entry_price * 100)
-        won = pnl_pct > 0
-        log.info(f"⏰ 4-Hour Timeout Reached | PnL: {pnl_pct:+.2f}%")
-        await close_position_reduce_only(exchange, symbol, direction, qty)
-        return won, pnl_pct
+        pnl = ((current - fill) / fill * 100 if direction == "LONG"
+               else (fill - current) / fill * 100)
+        won = pnl > 0
+        log.info(f"📈 [{exit_reason}] {'WIN' if won else 'LOSS'} {pnl:+.2f}%")
+        return won, pnl, False
 
     except Exception as e:
-        log.error(f"Execution error: {e}")
-        return False, 0.0
+        log.error(f"Trade error: {e}")
+        return False, 0.0, True
     finally:
-        await exchange.close()
+        try:
+            await exchange.close()
+        except Exception:
+            pass
 
-async def close_position_reduce_only(exchange, symbol, direction, qty):
-    """
-    Closes the open position using REDUCE-ONLY market orders to guarantee
-    the exit never opens an unintended opposite position on Bitget UTA.
-    """
-    exit_side = "sell" if direction == "LONG" else "buy"
-    log.info(f"🔒 Executing REDUCE-ONLY {exit_side.upper()} order to close {direction} position on {symbol}...")
-    try:
-        await exchange.create_order(
-            symbol=symbol,
-            type="market",
-            side=exit_side,
-            amount=qty,
-            params={"reduceOnly": True}
-        )
-        log.info("✅ REDUCE-ONLY exit order completed.")
-    except Exception as e:
-        log.error(f"Reduce-only exit error: {e}")
 
-async def process_trade(symbol, direction, setup_type):
+async def process(symbol, direction):
     global active_trade
+    won, pnl, aborted = False, 0.0, False
     try:
-        log.info(f"⚙️ Executing {direction} trade on Bitget UTA for {symbol}...")
-        trade_won, pnl_pct = await monitor_and_execute_trade(symbol, direction)
-        log.info(f"📈 Trade Finished | Result: {'WIN' if trade_won else 'LOSS'} ({pnl_pct:+.2f}%)")
+        won, pnl, aborted = await run_trade(symbol, direction)
+    except Exception as e:
+        aborted = True
     finally:
-        active_trade = None
-        await notify_hf_ready(symbol, direction, trade_won, pnl_pct)
+        async with lock:
+            active_trade = None
+        await notify_hf(symbol, direction, won, pnl, aborted=aborted)
+
 
 routes = web.RouteTableDef()
 
 @routes.get("/")
 @routes.get("/health")
-async def health_check(request):
-    return web.json_response({"status": "online", "active_trade": active_trade})
+async def health(request):
+    return web.json_response({"status": "online", "active_trade": active_trade, "creds_ok": creds_ok()})
 
 @routes.post("/signal")
-async def handle_signal(request):
+async def on_signal(request):
     global active_trade
-
-    incoming_secret = request.headers.get("X-Webhook-Secret", "")
-    if RENDER_WEBHOOK_SECRET and incoming_secret != RENDER_WEBHOOK_SECRET:
-        log.warning("❌ Signal rejected: Invalid X-Webhook-Secret header.")
-        return web.json_response({"error": "Unauthorized"}, status=401)
-
-    if active_trade is not None:
-        log.warning(f"⚠️ Signal rejected: Trade already in progress on {active_trade}.")
-        return web.json_response({"error": "Busy", "active_trade": active_trade}, status=429)
-
-    try:
-        data = await request.json()
-        symbol = data.get("symbol")
+    if RENDER_WEBHOOK_SECRET:
+        if request.headers.get("X-Webhook-Secret", "") != RENDER_WEBHOOK_SECRET:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+    async with lock:
+        if active_trade:
+            return web.json_response({"error": "Busy", "active_trade": active_trade}, status=429)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Bad JSON"}, status=400)
+        sym = data.get("symbol")
         direction = data.get("direction", "LONG")
-        setup_type = data.get("setup_type", "24h_Exhaustion_Volume_Death_Reversal")
-
-        if not symbol:
+        if not sym:
             return web.json_response({"error": "Missing symbol"}, status=400)
-
-        active_trade = symbol
-        log.info(f"📥 Signal Accepted from HF: {symbol} ({direction})")
-
-        asyncio.create_task(process_trade(symbol, direction, setup_type))
-        return web.json_response({"status": "accepted", "symbol": symbol, "direction": direction})
-    except Exception as e:
-        log.error(f"Error handling signal payload: {e}")
-        return web.json_response({"error": str(e)}, status=400)
+        active_trade = sym
+        log.info(f"📥 Signal {sym} {direction}")
+    asyncio.create_task(process(sym, direction))
+    return web.json_response({"status": "accepted"})
 
 def main():
     app = web.Application()
     app.add_routes(routes)
-    log.info(f"🚀 Render Web Service starting on port {PORT}...")
     web.run_app(app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
