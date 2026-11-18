@@ -12,5 +12,5 @@ jobs:
         uses: huggingface/hub-sync@main
         with:
           github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: Chimeremeze321/Bitgetbot
+          huggingface_repo_id: Chimeremeze321/NAME_OF_YOUR_NEW_SPACE
           hf_token: ${{ secrets.HF_TOKEN }}
