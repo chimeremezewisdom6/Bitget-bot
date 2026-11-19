@@ -96,14 +96,12 @@ async def main():
                             highest_score = score
                             best_signal = {"symbol": item["symbol"], "direction": direction, "score": score}
 
-        # Send to Cloudflare (either a new signal or a ping to check the active trade)
+        # Send to Cloudflare
         if best_signal:
             raw_sym = best_signal["symbol"].split("_")[0]
             sym = raw_sym + "T" if raw_sym.endswith("USD") else raw_sym
-            
             payload = {"symbol": sym, "direction": best_signal["direction"], "is_paper": is_paper}
         else:
-            # Even if no signal is found, we still ping Cloudflare to check on the ACTIVE trade
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
         headers = {"X-Webhook-Secret": WEBHOOK_SECRET}
@@ -117,6 +115,8 @@ async def main():
                 elif data.get("status") == "CLOSED":
                     emoji = "✅" if data["won"] else "❌"
                     log.info(f"{emoji} TRADE CLOSED: {data['symbol']} | Final PnL: {data['pnl_percent']}% | Peak: {data['peak_pnl']}% | Reason: {data['reason']} | New Streak: {data['streak']}/8")
+                elif data.get("status") == "WAITING":
+                    log.info(f"⏳ WAITING: {data['message']}")
             else:
                 log.error(f"❌ Cloudflare failed: {await resp.text()}")
 
