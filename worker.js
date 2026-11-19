@@ -154,8 +154,9 @@ export default {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({
             status: "WAITING",
-            message: "No 9/10 or 10/10 momentum signals found in $100k-$200k volume band.",
-            highest_market_winner: signal.highest_market_winner || "N/A"
+            message: "No 9/10 or 10/10 momentum signals found.",
+            best_long: signal.best_long || "N/A",
+            best_short: signal.best_short || "N/A"
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
