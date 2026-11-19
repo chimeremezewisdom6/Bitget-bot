@@ -23,7 +23,7 @@ SEMAPHORE = asyncio.Semaphore(15)
 
 MIN_24H_VOLUME = 100000     # Min $100k Volume
 MAX_24H_VOLUME = 10000000   # Max $10M Volume Range
-MIN_CANDLE_WINS = 8        # Minimum 8/10 candles for trade entry
+MIN_CANDLE_WINS = 9        # Requires 9 or 10 same-color candles (allowing Doji)
 
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
@@ -133,20 +133,16 @@ async def main():
             tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in valid_coins]
             all_candles = await asyncio.gather(*tasks)
 
-            # Initialize exact 10-candle distribution counters
-            distribution = {
-                (10, 0): [],
-                (9, 1): [],
-                (8, 2): [],
-                (7, 3): [],
-                (6, 4): [],
-                (5, 5): [],
-                (4, 6): [],
-                (3, 7): [],
-                (2, 8): [],
-                (1, 9): [],
-                (0, 10): []
-            }
+            # Category Counters
+            cat_10_green = 0
+            cat_9_green = 0
+            cat_8_green = 0
+            cat_6_7_green = 0
+            cat_neutral_chop = 0
+            cat_6_7_red = 0
+            cat_8_red = 0
+            cat_9_red = 0
+            cat_10_red = 0
 
             all_evaluated = []
 
@@ -183,10 +179,25 @@ async def main():
                 avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
                 close_10m = float(candles[-1][4])
 
-                # Record in distribution if exact green/red pair matches
-                pair = (green_count, red_count)
-                if pair in distribution:
-                    distribution[pair].append(symbol)
+                # Classify into aggregate count categories
+                if green_count == 10:
+                    cat_10_green += 1
+                elif green_count == 9:
+                    cat_9_green += 1
+                elif green_count == 8:
+                    cat_8_green += 1
+                elif green_count in (6, 7):
+                    cat_6_7_green += 1
+                elif red_count == 10:
+                    cat_10_red += 1
+                elif red_count == 9:
+                    cat_9_red += 1
+                elif red_count == 8:
+                    cat_8_red += 1
+                elif red_count in (6, 7):
+                    cat_6_7_red += 1
+                else:
+                    cat_neutral_chop += 1
 
                 all_evaluated.append({
                     "symbol": symbol,
@@ -198,22 +209,22 @@ async def main():
                     "current_price": close_10m
                 })
 
-            log.info("==========================================================================")
-            log.info("📊 FULL MARKET CANDLE DISTRIBUTION MATRIX (LAST 10 MINUTES):")
-            log.info(f"  🟢 10 Green / 0 Red : {len(distribution[(10, 0)])} coins {distribution[(10, 0)][:3]}")
-            log.info(f"  🟢  9 Green / 1 Red : {len(distribution[(9, 1)])} coins {distribution[(9, 1)][:3]}")
-            log.info(f"  🟢  8 Green / 2 Red : {len(distribution[(8, 2)])} coins {distribution[(8, 2)][:3]}")
-            log.info(f"  🟢  7 Green / 3 Red : {len(distribution[(7, 3)])} coins {distribution[(7, 3)][:3]}")
-            log.info(f"  🟢  6 Green / 4 Red : {len(distribution[(6, 4)])} coins {distribution[(6, 4)][:3]}")
-            log.info(f"  ⚖️  5 Green / 5 Red : {len(distribution[(5, 5)])} coins {distribution[(5, 5)][:3]}")
-            log.info(f"  🔴  4 Green / 6 Red : {len(distribution[(4, 6)])} coins {distribution[(4, 6)][:3]}")
-            log.info(f"  🔴  3 Green / 7 Red : {len(distribution[(3, 7)])} coins {distribution[(3, 7)][:3]}")
-            log.info(f"  🔴  2 Green / 8 Red : {len(distribution[(2, 8)])} coins {distribution[(2, 8)][:3]}")
-            log.info(f"  🔴  1 Green / 9 Red : {len(distribution[(1, 9)])} coins {distribution[(1, 9)][:3]}")
-            log.info(f"  🔴  0 Green / 10 Red: {len(distribution[(0, 10)])} coins {distribution[(0, 10)][:3]}")
-            log.info("==========================================================================")
+            log.info("=================================================================================")
+            log.info(f"📊 MARKET CANDLE CATEGORY SUMMARY TABLE (TOTAL SCANNED: {len(all_evaluated)} COINS):")
+            log.info(f"{'CANDLE PATTERN CATEGORY':<42} | {'NUMBER OF COINS':<15}")
+            log.info("-" * 62)
+            log.info(f"{'10 Green / 0 Red (Extreme Bullish Momentum)':<42} | {cat_10_green:<15}")
+            log.info(f"{'9 Green / 0-1 Red (Strong Bullish Momentum - LONG Signal)':<42} | {cat_9_green:<15}")
+            log.info(f"{'8 Green / 0-2 Red (High Bullish Momentum)':<42} | {cat_8_green:<15}")
+            log.info(f"{'6-7 Green Candles (Moderate Bullish Trend)':<42} | {cat_6_7_green:<15}")
+            log.info(f"{'4-5 Green / 4-5 Red (Sideways / Neutral Chop)':<42} | {cat_neutral_chop:<15}")
+            log.info(f"{'6-7 Red Candles (Moderate Bearish Trend)':<42} | {cat_6_7_red:<15}")
+            log.info(f"{'8 Red / 0-2 Green (High Bearish Momentum)':<42} | {cat_8_red:<15}")
+            log.info(f"{'9 Red / 0-1 Green (Strong Bearish Momentum - SHORT Signal)':<42} | {cat_9_red:<15}")
+            log.info(f"{'10 Red / 0 Green (Extreme Bearish Momentum)':<42} | {cat_10_red:<15}")
+            log.info("=================================================================================")
 
-            # Filter for entry signals (>= MIN_CANDLE_WINS e.g. 8/10 with >= 0.20% avg fluctuation)
+            # Signal evaluation: 9+ Green OR 9+ Red (allowing Doji) with >= 0.20% avg fluctuation
             valid_longs = [c for c in all_evaluated if c["green_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
             valid_shorts = [c for c in all_evaluated if c["red_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
 
@@ -230,7 +241,8 @@ async def main():
             if all_signals:
                 all_signals.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
                 best_signal = all_signals[0]
-                log.info(f"🔥 ENTRY SIGNAL MATCHED: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
+                doji_info = f" ({best_signal['doji_count']} Doji)" if best_signal['doji_count'] > 0 else ""
+                log.info(f"🔥 ENTRY SIGNAL MATCHED: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
                 payload = {
                     "symbol": best_signal["symbol"],
                     "direction": best_signal["direction"],
