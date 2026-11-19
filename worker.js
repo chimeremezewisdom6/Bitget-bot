@@ -26,15 +26,6 @@ export default {
         });
       };
 
-      const getPrice = async (sym) => {
-        const res = await fetch(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${sym}&productType=USDT-FUTURES`);
-        const data = await res.json();
-        if (data.code === '00000' && data.data && data.data.length > 0) {
-            return parseFloat(data.data[0].lastPr);
-        }
-        throw new Error(`Failed to get price for ${sym}. Bitget might be blocking Cloudflare IP.`);
-      };
-
       const tradeState = await getGithubFile('active_trade.json');
       const streakState = await getGithubFile('streak.json');
       const historyState = await getGithubFile('trade_history.json');
@@ -44,8 +35,17 @@ export default {
       let tradeHistory = historyState ? historyState.content : [];
       let isLiveMode = currentStreak >= 8;
 
+      // ==========================================
+      // IF TRADE ACTIVE -> CHECK TP/SL AND DYNAMIC TRAILING
+      // ==========================================
       if (activeTrade.active) {
-        const currentPrice = await getPrice(activeTrade.symbol);
+        // 🚨 USE PRICE PASSED FROM GITHUB 🚨
+        const currentPrice = signal.current_price; 
+        
+        if (!currentPrice) {
+            throw new Error("No current price provided by GitHub.");
+        }
+
         let pnlPercent = 0;
         
         if (activeTrade.direction === 'LONG') {
@@ -64,6 +64,7 @@ export default {
             if (currentPrice >= activeTrade.stop_loss) hitSL = true;
         }
 
+        // DYNAMIC REBOUND TRAILING STOP
         let isFading = false;
         let trailing_stop_pnl = -100; 
         
@@ -80,7 +81,6 @@ export default {
           currentStreak = won ? currentStreak + 1 : 0;
           let reason = hitSL ? "STOP LOSS (2%)" : `TRAILING REBOUND (${trailing_stop_pnl.toFixed(2)}%)`;
 
-          // 🚨 ADD TO TRADE HISTORY 🚨
           tradeHistory.push({
               symbol: activeTrade.symbol,
               direction: activeTrade.direction,
@@ -92,14 +92,11 @@ export default {
               date: new Date().toISOString()
           });
 
-          // Keep only the last 50 trades so the file doesn't get too big
           if (tradeHistory.length > 50) tradeHistory.shift();
 
-          // Save files to GitHub
           await updateGithubFile('streak.json', { wins: currentStreak }, streakState.sha);
           await updateGithubFile('active_trade.json', { active: false }, tradeState.sha);
           
-          // If trade_history.json doesn't exist yet, we have to create it
           if (historyState) {
               await updateGithubFile('trade_history.json', tradeHistory, historyState.sha);
           } else {
@@ -127,12 +124,15 @@ export default {
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
       } 
+      // ==========================================
+      // IF NO TRADE ACTIVE -> OPEN NEW
+      // ==========================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({ status: "WAITING", message: "No signal found." }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
-        const currentPrice = signal.current_price || await getPrice(signal.symbol); 
+        const currentPrice = signal.current_price; 
         
         let stop_loss;
         if (signal.direction === 'LONG') {
