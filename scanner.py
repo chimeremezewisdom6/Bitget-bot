@@ -23,6 +23,7 @@ SEMAPHORE = asyncio.Semaphore(15)
 
 MIN_24H_VOLUME = 100000     # Min $100k Volume
 MAX_24H_VOLUME = 10000000   # Max $10M Volume Range
+MIN_CANDLE_WINS = 8        # Minimum 8/10 candles for trade entry
 
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
@@ -132,8 +133,22 @@ async def main():
             tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in valid_coins]
             all_candles = await asyncio.gather(*tasks)
 
-            long_candidates = []
-            short_candidates = []
+            # Initialize exact 10-candle distribution counters
+            distribution = {
+                (10, 0): [],
+                (9, 1): [],
+                (8, 2): [],
+                (7, 3): [],
+                (6, 4): [],
+                (5, 5): [],
+                (4, 6): [],
+                (3, 7): [],
+                (2, 8): [],
+                (1, 9): [],
+                (0, 10): []
+            }
+
+            all_evaluated = []
 
             for idx, candle_data in enumerate(all_candles):
                 if not candle_data or len(candle_data) < 10:
@@ -146,6 +161,7 @@ async def main():
 
                 green_count = 0
                 red_count = 0
+                doji_count = 0
                 fluctuations = []
 
                 for c in candles:
@@ -161,45 +177,53 @@ async def main():
                         green_count += 1
                     elif cl < o:
                         red_count += 1
+                    else:
+                        doji_count += 1
 
                 avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
                 close_10m = float(candles[-1][4])
 
-                item = {
+                # Record in distribution if exact green/red pair matches
+                pair = (green_count, red_count)
+                if pair in distribution:
+                    distribution[pair].append(symbol)
+
+                all_evaluated.append({
                     "symbol": symbol,
                     "vol_24h": vol_24h,
                     "green_count": green_count,
                     "red_count": red_count,
+                    "doji_count": doji_count,
                     "avg_fluctuation": avg_fluctuation,
                     "current_price": close_10m
-                }
+                })
 
-                if green_count > red_count:
-                    item["max_wins"] = green_count
-                    item["direction"] = "LONG"
-                    long_candidates.append(item)
-                elif red_count > green_count:
-                    item["max_wins"] = red_count
-                    item["direction"] = "SHORT"
-                    short_candidates.append(item)
+            log.info("==========================================================================")
+            log.info("📊 FULL MARKET CANDLE DISTRIBUTION MATRIX (LAST 10 MINUTES):")
+            log.info(f"  🟢 10 Green / 0 Red : {len(distribution[(10, 0)])} coins {distribution[(10, 0)][:3]}")
+            log.info(f"  🟢  9 Green / 1 Red : {len(distribution[(9, 1)])} coins {distribution[(9, 1)][:3]}")
+            log.info(f"  🟢  8 Green / 2 Red : {len(distribution[(8, 2)])} coins {distribution[(8, 2)][:3]}")
+            log.info(f"  🟢  7 Green / 3 Red : {len(distribution[(7, 3)])} coins {distribution[(7, 3)][:3]}")
+            log.info(f"  🟢  6 Green / 4 Red : {len(distribution[(6, 4)])} coins {distribution[(6, 4)][:3]}")
+            log.info(f"  ⚖️  5 Green / 5 Red : {len(distribution[(5, 5)])} coins {distribution[(5, 5)][:3]}")
+            log.info(f"  🔴  4 Green / 6 Red : {len(distribution[(4, 6)])} coins {distribution[(4, 6)][:3]}")
+            log.info(f"  🔴  3 Green / 7 Red : {len(distribution[(3, 7)])} coins {distribution[(3, 7)][:3]}")
+            log.info(f"  🔴  2 Green / 8 Red : {len(distribution[(2, 8)])} coins {distribution[(2, 8)][:3]}")
+            log.info(f"  🔴  1 Green / 9 Red : {len(distribution[(1, 9)])} coins {distribution[(1, 9)][:3]}")
+            log.info(f"  🔴  0 Green / 10 Red: {len(distribution[(0, 10)])} coins {distribution[(0, 10)][:3]}")
+            log.info("==========================================================================")
 
-            # Sort both lists by Candle Win Count descending, then Fluctuation descending
-            long_candidates.sort(key=lambda x: (x["max_wins"], x["avg_fluctuation"]), reverse=True)
-            short_candidates.sort(key=lambda x: (x["max_wins"], x["avg_fluctuation"]), reverse=True)
+            # Filter for entry signals (>= MIN_CANDLE_WINS e.g. 8/10 with >= 0.20% avg fluctuation)
+            valid_longs = [c for c in all_evaluated if c["green_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
+            valid_shorts = [c for c in all_evaluated if c["red_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
 
-            log.info("--------------------------------------------------")
-            log.info("📊 TOP LONG CANDIDATES RIGHT NOW:")
-            for i, c in enumerate(long_candidates[:3], 1):
-                log.info(f"  🟢 LONG #{i} {c['symbol']}: {c['green_count']}/10 Green Candles | 10-Min Avg Fluc: {c['avg_fluctuation']:.2f}% | Price: {c['current_price']}")
+            for c in valid_longs:
+                c["direction"] = "LONG"
+                c["max_wins"] = c["green_count"]
 
-            log.info("📊 TOP SHORT CANDIDATES RIGHT NOW:")
-            for i, c in enumerate(short_candidates[:3], 1):
-                log.info(f"  🔴 SHORT #{i} {c['symbol']}: {c['red_count']}/10 Red Candles | 10-Min Avg Fluc: {c['avg_fluctuation']:.2f}% | Price: {c['current_price']}")
-            log.info("--------------------------------------------------")
-
-            # Entry Signals Filter (9/10 or 10/10 with >= 0.20% fluctuation)
-            valid_longs = [c for c in long_candidates if c["green_count"] >= 9 and c["avg_fluctuation"] >= 0.20]
-            valid_shorts = [c for c in short_candidates if c["red_count"] >= 9 and c["avg_fluctuation"] >= 0.20]
+            for c in valid_shorts:
+                c["direction"] = "SHORT"
+                c["max_wins"] = c["red_count"]
 
             all_signals = valid_longs + valid_shorts
 
@@ -216,19 +240,11 @@ async def main():
                     "is_ping": False
                 }
             else:
-                top_long = long_candidates[0] if long_candidates else None
-                top_short = short_candidates[0] if short_candidates else None
-
-                long_str = f"{top_long['symbol']} ({top_long['green_count']}/10 LONG, {top_long['avg_fluctuation']:.2f}% fluc)" if top_long else "None"
-                short_str = f"{top_short['symbol']} ({top_short['red_count']}/10 SHORT, {top_short['avg_fluctuation']:.2f}% fluc)" if top_short else "None"
-
-                log.info(f"ℹ️ No 9/10 signals found this cycle. Best Long: {long_str} | Best Short: {short_str}")
+                log.info(f"ℹ️ No signals reaching >= {MIN_CANDLE_WINS}/10 candles with >= 0.20% fluctuation this minute.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
                     "is_paper": is_paper,
-                    "best_long": long_str,
-                    "best_short": short_str,
                     "is_ping": False
                 }
 
