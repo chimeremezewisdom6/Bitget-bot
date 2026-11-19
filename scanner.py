@@ -44,7 +44,7 @@ async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Top 1000 for the BEST pair... (Streak: {wins}/8 | Mode: {mode_text})")
     
     now_ts = int(time.time())
     ts_24h_ago = now_ts - 86400
@@ -55,8 +55,9 @@ async def main():
             return
 
         all_syms = [m["symbol"] for m in markets if m.get("symbol", "").endswith("_PERP.A")][:1000]
+        
         best_signal = None
-        highest_score = 0
+        highest_score = -1 # Start at -1 so the first coin evaluated always becomes the baseline
 
         for i in range(0, len(all_syms), 50):
             chunk = all_syms[i:i+50]
@@ -72,34 +73,50 @@ async def main():
                 if len(history) < 90:
                     continue
                 
+                # --- 24H BASELINE ---
                 vol_24h = sum([c["v"] for c in history])
                 avg_vol_15m_baseline = vol_24h / 96.0
                 ranges_24h = [(c["h"] - c["l"]) / c["l"] for c in history if c["l"] > 0]
                 avg_range_24h = sum(ranges_24h) / len(ranges_24h) if ranges_24h else 0.01
 
+                # --- 15M CURRENT ACTION ---
                 current_candle = history[-1]
                 vol_15m = current_candle["v"]
                 close_price = current_candle["c"]
                 open_price = current_candle["o"]
                 
                 price_change_15m = (close_price - open_price) / open_price if open_price > 0 else 0
-                volume_surge = vol_15m > (avg_vol_15m_baseline * 2.5) 
                 
-                if volume_surge:
-                    normalized_move = price_change_15m / avg_range_24h if avg_range_24h > 0 else 0
-                    if abs(normalized_move) > 1.5:
-                        vol_multiplier = vol_15m / avg_vol_15m_baseline
-                        score = abs(normalized_move) * vol_multiplier
-                        direction = "LONG" if normalized_move > 0 else "SHORT"
-                        
-                        if score > highest_score:
-                            highest_score = score
-                            best_signal = {"symbol": item["symbol"], "direction": direction, "score": score}
+                # --- SCORING (NO STRICT FILTERS) ---
+                # We calculate the score for EVERY coin to find the mathematically best one
+                vol_multiplier = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
+                normalized_move = price_change_15m / avg_range_24h if avg_range_24h > 0 else 0
+                
+                # Score = Volume Surge * Normalized Percentage Move
+                score = abs(normalized_move) * vol_multiplier
+                
+                # We only care about direction if there is actual movement
+                if score > 0:
+                    direction = "LONG" if normalized_move > 0 else "SHORT"
+                    
+                    if score > highest_score:
+                        highest_score = score
+                        best_signal = {
+                            "symbol": item["symbol"], 
+                            "direction": direction, 
+                            "score": score,
+                            "move": normalized_move,
+                            "vol_mult": vol_multiplier
+                        }
 
-        # Send to Cloudflare
+        # Send the absolute best found to Cloudflare
         if best_signal:
             raw_sym = best_signal["symbol"].split("_")[0]
             sym = raw_sym + "T" if raw_sym.endswith("USD") else raw_sym
+            
+            log.info(f"🎯 BEST PAIR: {best_signal['direction']} on {sym}")
+            log.info(f"   Score: {best_signal['score']:.2f} | Move Mult: {best_signal['move']:.2f}x | Vol Surge: {best_signal['vol_mult']:.1f}x")
+            
             payload = {"symbol": sym, "direction": best_signal["direction"], "is_paper": is_paper}
         else:
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
