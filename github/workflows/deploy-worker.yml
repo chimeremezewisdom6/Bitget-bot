@@ -1,18 +1,23 @@
-name: Deploy Cloudflare Worker
+name: Run Trading Scanner
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
-  deploy:
+  scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install aiohttp
+      - name: Run Scanner
+        env:
+          COINALYZE_API_KEYS: ${{ secrets.COINALYZE_API_KEYS }}
+          CLOUDFLARE_URL: ${{ secrets.CLOUDFLARE_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: python scanner.py
