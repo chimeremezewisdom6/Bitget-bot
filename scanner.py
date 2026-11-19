@@ -46,8 +46,8 @@ async def fetch_single_price(session, symbol):
                 data = await r.json()
                 if data.get("code") == "00000" and data.get("data"):
                     return float(data["data"][0]["lastPr"])
-    except Exception as e:
-        log.error(f"Failed to fetch price for {symbol}: {e}")
+    except Exception:
+        pass
     return None
 
 async def fetch_bitget_tickers(session):
@@ -63,7 +63,8 @@ async def fetch_bitget_tickers(session):
 
 async def fetch_bitget_1m_candles(session, symbol):
     async with SEMAPHORE:
-        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "15"}
+        # Look at the last 10 1-minute candles
+        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "10"}
         try:
             async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
                 if r.status == 200:
@@ -82,7 +83,7 @@ async def main():
     active_trade = get_active_trade()
     
     if active_trade:
-        log.info(f"⏳ Active trade in progress: {active_trade['symbol']}. Fetching live price from GitHub... (Streak: {wins}/8)")
+        log.info(f"⏳ Active trade in progress: {active_trade['symbol']}. Fetching live price... (Streak: {wins}/8)")
         async with aiohttp.ClientSession() as session:
             current_price = await fetch_single_price(session, active_trade['symbol'])
             
@@ -95,10 +96,10 @@ async def main():
                     "is_ping": True
                 }
             else:
-                log.error("❌ Failed to fetch active trade price from Bitget via GitHub.")
+                log.error("❌ Failed to fetch active trade price.")
                 return
     else:
-        log.info(f"🛰️ Scanning Bitget (Stealth Trap Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
+        log.info(f"🛰️ Scanning Bitget (Slow Acceleration Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
         start_time = time.time()
         
         async with aiohttp.ClientSession() as session:
@@ -122,40 +123,41 @@ async def main():
             top_signals = []
 
             for idx, candle_data in enumerate(all_candles):
-                if not candle_data or len(candle_data) < 15:
+                if not candle_data or len(candle_data) < 10:
                     continue
                     
                 coin_info = top_200[idx]
                 symbol = coin_info["symbol"]
-                candles = list(reversed(candle_data))
+                candles = list(reversed(candle_data)) # Oldest to newest (10 candles)
                 
-                open_15m = float(candles[0][1])
-                close_15m = float(candles[-1][4])
-                net_move_pct = ((close_15m - open_15m) / open_15m) * 100 if open_15m > 0 else 0
+                open_10m = float(candles[0][1])
+                close_10m = float(candles[-1][4])
+                net_move_pct = ((close_10m - open_10m) / open_10m) * 100 if open_10m > 0 else 0
                 
                 up_steps = 0
                 down_steps = 0
-                up_body_pct = 0.0
-                down_body_pct = 0.0
+                up_bodies = []
+                down_bodies = []
                 is_spike = False
                 sequence = []
                 
                 for c in candles:
                     o = float(c[1])
                     cl = float(c[4])
-                    candle_move_pct = abs(((cl - o) / o) * 100) if o > 0 else 0
+                    body_pct = ((cl - o) / o) * 100 if o > 0 else 0
                     
-                    if candle_move_pct > 1.0:
+                    # 🚨 NO SPIKE RULE (Max 0.8% per 1m candle) 🚨
+                    if abs(body_pct) > 0.8:
                         is_spike = True
                         break
                         
                     if cl > o:
                         up_steps += 1
-                        up_body_pct += candle_move_pct
+                        up_bodies.append(body_pct)
                         sequence.append("U")
                     elif cl < o:
                         down_steps += 1
-                        down_body_pct += candle_move_pct
+                        down_bodies.append(abs(body_pct))
                         sequence.append("D")
                     else:
                         sequence.append("-")
@@ -163,28 +165,50 @@ async def main():
                 if is_spike or up_steps == 0 or down_steps == 0:
                     continue
                     
-                # LONG TRAP
-                if down_steps > up_steps and net_move_pct > 0.2 and up_body_pct > (down_body_pct * 1.5):
-                    direction = "LONG"
-                    dominance = up_body_pct / down_body_pct
-                    trap_type = f"Only {up_steps} Green candles, but they are {dominance:.1f}x larger than the {down_steps} Red candles!"
-                # SHORT TRAP
-                elif up_steps > down_steps and net_move_pct < -0.2 and down_body_pct > (up_body_pct * 1.5):
-                    direction = "SHORT"
-                    dominance = down_body_pct / up_body_pct
-                    trap_type = f"Only {down_steps} Red candles, but they are {dominance:.1f}x larger than the {up_steps} Green candles!"
-                else:
-                    continue 
+                # 🚨 FILTER 1: 70% Dominance (e.g., 7 out of 10) 🚨
+                max_steps = max(up_steps, down_steps)
+                min_steps = min(up_steps, down_steps)
+                
+                if max_steps < 7:
+                    continue
                     
-                score = abs(net_move_pct) * dominance
+                # 🚨 FILTER 2: SLOW ACCELERATION 🚨
+                # Check if the winning side's bodies are getting larger (recent 3 vs first 3)
+                if up_steps > down_steps:
+                    direction = "LONG"
+                    winning_bodies = up_bodies
+                    losing_bodies = down_bodies
+                else:
+                    direction = "SHORT"
+                    winning_bodies = down_bodies
+                    losing_bodies = up_bodies
+                    
+                if len(winning_bodies) >= 6:
+                    first_3_avg = sum(winning_bodies[:3]) / 3
+                    last_3_avg = sum(winning_bodies[-3:]) / 3
+                    
+                    # If the last 3 candles are smaller than the first 3, it's decelerating. We want acceleration.
+                    if last_3_avg < first_3_avg:
+                        continue
+                        
+                # 🚨 FILTER 3: Opposing side is completely dead 🚨
+                total_win_vol = sum(winning_bodies)
+                total_lose_vol = sum(losing_bodies)
+                
+                if total_lose_vol > (total_win_vol * 0.4):
+                    continue # Losers are fighting back too hard
+                    
+                # Score: Step Dominance * Acceleration * Net Move
+                dominance_ratio = max_steps / min_steps if min_steps > 0 else 10.0
+                score = dominance_ratio * abs(net_move_pct)
                 
                 top_signals.append({
                     "symbol": symbol,
                     "direction": direction,
                     "net_move": net_move_pct,
-                    "trap_type": trap_type,
                     "sequence": " ".join(sequence),
-                    "current_price": close_15m,
+                    "dominance_ratio": dominance_ratio,
+                    "current_price": close_10m,
                     "score": score
                 })
                 
@@ -198,7 +222,9 @@ async def main():
             if top_signals:
                 best_signal = top_signals[0]
                 log.info(f"🏆 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
-                log.info(f"  [Trap Found] {best_signal['trap_type']}")
+                log.info(f"  [Sequence]    {best_signal['sequence']}")
+                log.info(f"  [Dominance]   {best_signal['dominance_ratio']:.1f}x stronger on {best_signal['direction']} side")
+                log.info(f"  [Net Move]    {best_signal['net_move']:+.2f}% (Slowly accelerating...)")
                 
                 payload = {
                     "symbol": best_signal["symbol"], 
@@ -208,7 +234,7 @@ async def main():
                     "is_ping": False
                 }
             else:
-                log.warning("❌ No stealth traps found right now.")
+                log.warning("❌ No coins passed the Slow Acceleration filter right now.")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper, "is_ping": False}
 
     # Send to Cloudflare Webhook
