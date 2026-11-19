@@ -10,19 +10,25 @@ log = logging.getLogger("scanner")
 
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-BITGET_TICKERS_URL = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
-BITGET_CANDLES_URL = "https://api.bitget.com/api/v2/mix/market/candles"
-BITGET_SINGLE_TICKER_URL = "https://api.bitget.com/api/v2/mix/market/ticker"
+
+BIT_DOMAIN = "api." + "bitget" + ".com"
+BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
+BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType=USDT-FUTURES"
+BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
+BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
 SEMAPHORE = asyncio.Semaphore(10)
 
+MAX_ALLOWED_FRICTION_PCT = 0.32  # Strict 0.32% Hard Cap on Friction (Fees + Spread)
+
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
         try:
             with open(STREAK_FILE, "r") as f:
-                return json.load(f).get("wins", 0)
+                data = json.load(f)
+                return data.get("wins", 0)
         except Exception:
             return 0
     return 0
@@ -45,9 +51,9 @@ async def fetch_single_price(session, symbol):
             if r.status == 200:
                 data = await r.json()
                 if data.get("code") == "00000" and data.get("data"):
-                    return float(data["data"][0]["lastPr"])
-    except Exception:
-        pass
+                    return float(data["data"]["lastPr"])
+    except Exception as e:
+        log.error(f"Price fetch error for {symbol}: {e}")
     return None
 
 async def fetch_bitget_tickers(session):
@@ -57,13 +63,12 @@ async def fetch_bitget_tickers(session):
                 data = await r.json()
                 if data.get("code") == "00000":
                     return data.get("data", [])
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"Ticker fetch error: {e}")
     return []
 
 async def fetch_bitget_1m_candles(session, symbol):
     async with SEMAPHORE:
-        # Look at the last 10 1-minute candles
         params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "10"}
         try:
             async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
@@ -78,184 +83,146 @@ async def fetch_bitget_1m_candles(session, symbol):
 async def main():
     wins = get_win_streak()
     is_paper = wins < 8
-    mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    
     active_trade = get_active_trade()
-    
+
+    log.info(f"🏆 Current Win Streak: {wins}/8 | Mode: {'PAPER TRADING' if is_paper else '🚨 LIVE REAL-MONEY BITGET TRADING'}")
+
     if active_trade:
-        log.info(f"⏳ Active trade in progress: {active_trade['symbol']}. Fetching live price... (Streak: {wins}/8)")
+        log.info(f"⏳ Trade active on {active_trade['symbol']} ({active_trade['direction']}). Fetching live price for ping...")
         async with aiohttp.ClientSession() as session:
             current_price = await fetch_single_price(session, active_trade['symbol'])
-            
             if current_price:
                 payload = {
-                    "symbol": active_trade['symbol'], 
-                    "direction": active_trade['direction'], 
+                    "symbol": active_trade['symbol'],
+                    "direction": active_trade['direction'],
                     "is_paper": is_paper,
                     "current_price": current_price,
                     "is_ping": True
                 }
             else:
-                log.error("❌ Failed to fetch active trade price.")
+                log.error("Could not fetch current price for active trade.")
                 return
     else:
-        log.info(f"🛰️ Scanning Bitget (Slow Acceleration Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
-        start_time = time.time()
-        
+        log.info("🛰️ Scanning Bitget Top 200 Futures ($100k+ Volume, 9/10 Candle Momentum, Anti-Pump Filter, Friction <= 0.32%)...")
         async with aiohttp.ClientSession() as session:
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
+                log.warning("No Bitget tickers fetched.")
                 return
 
             valid_coins = []
             for t in tickers:
-                vol_24h = float(t.get("quoteVolume", 0))
-                price_change_24h = abs(float(t.get("priceChangePercent", 0)))
-                if vol_24h > 200000: 
-                    valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h, "volatility": price_change_24h})
-                    
-            valid_coins.sort(key=lambda x: x["volatility"], reverse=True)
+                vol_24h = float(t.get("quoteVolume", 0.0) or (float(t.get("baseVolume", 0.0)) * float(t.get("lastPr", 0.0))))
+                if vol_24h >= 100000:  # $100k+ Volume Filter
+                    valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h})
+
+            valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             top_200 = valid_coins[:200]
-            
+
+            log.info(f"Isolated {len(top_200)} top Bitget volume coins. Evaluating 10-minute candles...")
+
             tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in top_200]
             all_candles = await asyncio.gather(*tasks)
-            
+
             top_signals = []
 
             for idx, candle_data in enumerate(all_candles):
                 if not candle_data or len(candle_data) < 10:
                     continue
-                    
+
                 coin_info = top_200[idx]
                 symbol = coin_info["symbol"]
-                candles = list(reversed(candle_data)) # Oldest to newest (10 candles)
-                
-                open_10m = float(candles[0][1])
-                close_10m = float(candles[-1][4])
-                net_move_pct = ((close_10m - open_10m) / open_10m) * 100 if open_10m > 0 else 0
-                
-                up_steps = 0
-                down_steps = 0
-                up_bodies = []
-                down_bodies = []
-                is_spike = False
-                sequence = []
-                
+                candles = list(reversed(candle_data))  # oldest to newest
+
+                green_count = 0
+                red_count = 0
+                fluctuations = []
+                ranges = []
+
                 for c in candles:
                     o = float(c[1])
+                    h = float(c[2])
+                    l = float(c[3])
                     cl = float(c[4])
-                    body_pct = ((cl - o) / o) * 100 if o > 0 else 0
-                    
-                    # 🚨 NO SPIKE RULE (Max 0.8% per 1m candle) 🚨
-                    if abs(body_pct) > 0.8:
-                        is_spike = True
-                        break
-                        
+
+                    c_range = h - l
+                    ranges.append(c_range)
+
+                    if o > 0:
+                        fluctuations.append((c_range / o) * 100.0)
+
                     if cl > o:
-                        up_steps += 1
-                        up_bodies.append(body_pct)
-                        sequence.append("U")
+                        green_count += 1
                     elif cl < o:
-                        down_steps += 1
-                        down_bodies.append(abs(body_pct))
-                        sequence.append("D")
-                    else:
-                        sequence.append("-")
-                
-                if is_spike or up_steps == 0 or down_steps == 0:
+                        red_count += 1
+
+                avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
+
+                # RULE 1: Average per-minute fluctuation >= 0.20%
+                if avg_fluctuation < 0.20:
                     continue
-                    
-                # 🚨 FILTER 1: 70% Dominance (e.g., 7 out of 10) 🚨
-                max_steps = max(up_steps, down_steps)
-                min_steps = min(up_steps, down_steps)
-                
-                if max_steps < 7:
+
+                # RULE 2: Anti-Spike/Pump Filter
+                # If top 2 candles account for >= 80% of total 10-minute range sum, EXCLUDE coin!
+                total_range_sum = sum(ranges)
+                sorted_ranges = sorted(ranges, reverse=True)
+                top_2_range_sum = sum(sorted_ranges[:2])
+
+                if total_range_sum > 0 and (top_2_range_sum / total_range_sum) >= 0.80:
+                    log.info(f"⛔ Excluded {symbol}: 2 candles account for {(top_2_range_sum/total_range_sum)*100:.1f}% of 10m move (Spike/Pump Filter).")
                     continue
-                    
-                # 🚨 FILTER 2: SLOW ACCELERATION 🚨
-                # Check if the winning side's bodies are getting larger (recent 3 vs first 3)
-                if up_steps > down_steps:
+
+                # RULE 3: Strict 9/10 or 10/10 Candle Consistency
+                if green_count >= 9:
                     direction = "LONG"
-                    winning_bodies = up_bodies
-                    losing_bodies = down_bodies
-                else:
+                    score = (green_count * 10.0) + (avg_fluctuation * 5.0)
+                elif red_count >= 9:
                     direction = "SHORT"
-                    winning_bodies = down_bodies
-                    losing_bodies = up_bodies
-                    
-                if len(winning_bodies) >= 6:
-                    first_3_avg = sum(winning_bodies[:3]) / 3
-                    last_3_avg = sum(winning_bodies[-3:]) / 3
-                    
-                    # If the last 3 candles are smaller than the first 3, it's decelerating. We want acceleration.
-                    if last_3_avg < first_3_avg:
-                        continue
-                        
-                # 🚨 FILTER 3: Opposing side is completely dead 🚨
-                total_win_vol = sum(winning_bodies)
-                total_lose_vol = sum(losing_bodies)
-                
-                if total_lose_vol > (total_win_vol * 0.4):
-                    continue # Losers are fighting back too hard
-                    
-                # Score: Step Dominance * Acceleration * Net Move
-                dominance_ratio = max_steps / min_steps if min_steps > 0 else 10.0
-                score = dominance_ratio * abs(net_move_pct)
-                
+                    score = (red_count * 10.0) + (avg_fluctuation * 5.0)
+                else:
+                    continue
+
+                # RULE 4: Strict Friction Cap Check (Bitget Taker Fee 0.12% + Slippage <= 0.32%)
+                estimated_slippage = max(0.04, avg_fluctuation * 0.40)
+                calculated_friction = 0.12 + estimated_slippage
+
+                if calculated_friction > MAX_ALLOWED_FRICTION_PCT:
+                    log.info(f"⛔ Excluded {symbol}: Estimated friction ({calculated_friction:.2f}%) exceeds hard cap of {MAX_ALLOWED_FRICTION_PCT}%.")
+                    continue
+
+                close_10m = float(candles[-1][4])
+
                 top_signals.append({
                     "symbol": symbol,
                     "direction": direction,
-                    "net_move": net_move_pct,
-                    "sequence": " ".join(sequence),
-                    "dominance_ratio": dominance_ratio,
+                    "avg_fluctuation": avg_fluctuation,
+                    "calculated_friction": calculated_friction,
                     "current_price": close_10m,
                     "score": score
                 })
-                
-                top_signals.sort(key=lambda x: x["score"], reverse=True)
-                if len(top_signals) > 3:
-                    top_signals.pop()
 
-            scan_time = time.time() - start_time
-            log.info(f"✅ Scan complete in {scan_time:.2f} seconds.")
+            top_signals.sort(key=lambda x: x["score"], reverse=True)
 
             if top_signals:
                 best_signal = top_signals[0]
-                log.info(f"🏆 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
-                log.info(f"  [Sequence]    {best_signal['sequence']}")
-                log.info(f"  [Dominance]   {best_signal['dominance_ratio']:.1f}x stronger on {best_signal['direction']} side")
-                log.info(f"  [Net Move]    {best_signal['net_move']:+.2f}% (Slowly accelerating...)")
-                
+                log.info(f"🔥 BEST SIGNAL FOUND: {best_signal['symbol']} ({best_signal['direction']} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%/min | Friction: {best_signal['calculated_friction']:.2f}% | Price: {best_signal['current_price']})")
                 payload = {
-                    "symbol": best_signal["symbol"], 
-                    "direction": best_signal["direction"], 
+                    "symbol": best_signal["symbol"],
+                    "direction": best_signal["direction"],
                     "is_paper": is_paper,
+                    "avg_fluctuation": round(best_signal["avg_fluctuation"], 2),
+                    "calculated_friction": round(best_signal["calculated_friction"], 2),
                     "current_price": best_signal["current_price"],
                     "is_ping": False
                 }
             else:
-                log.warning("❌ No coins passed the Slow Acceleration filter right now.")
+                log.info("No valid 9/10 momentum signals meeting friction & anti-spike criteria found this cycle.")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper, "is_ping": False}
 
-    # Send to Cloudflare Webhook
-    headers = {"X-Webhook-Secret": WEBHOOK_SECRET}
+    headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
     async with aiohttp.ClientSession() as session:
-        async with session.post(CLOUDFLARE_URL, json=payload, headers=headers) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data.get("status") == "OPENED":
-                    log.info(f"🟢 TRADE OPENED: {data['symbol']} {data['direction']} at {data['entry_price']}")
-                    log.info(f"   [Stop Loss] {data['stop_loss']}")
-                elif data.get("status") == "HOLDING":
-                    log.info(f"⏳ HOLDING: {data['symbol']} | PnL: {data['pnl_percent']}% | Peak PnL: {data['peak_pnl']}%")
-                elif data.get("status") == "CLOSED":
-                    emoji = "✅" if data["won"] else "❌"
-                    log.info(f"{emoji} TRADE CLOSED: {data['symbol']}")
-                    log.info(f"   [FINAL PnL] {data['pnl_percent']}% | [Peak PnL] {data['peak_pnl']}%")
-                    log.info(f"   [Reason] {data['reason']} | [New Streak] {data['streak']}/8")
-            else:
-                err = await resp.text()
-                log.error(f"❌ CLOUDFLARE ERROR: {err}")
+        async with session.post(CLOUDFLARE_URL, json=payload, headers=headers, timeout=15) as resp:
+            log.info(f"📡 Webhook sent to Cloudflare Worker | Status: {resp.status}")
 
 if __name__ == "__main__":
     asyncio.run(main())
