@@ -96,5 +96,18 @@
     "elapsed_minutes": "10.1",
     "streak_after_trade": 1,
     "date": "2026-11-19T23:20:27.788Z"
+  },
+  {
+    "symbol": "AAOIUSDT",
+    "direction": "SHORT",
+    "mode": "PAPER",
+    "entry": 39.21,
+    "exit": 39,
+    "gross_pnl": "0.54%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +0.94% | Exit: +0.54%)",
+    "elapsed_minutes": "19.9",
+    "streak_after_trade": 2,
+    "date": "2026-11-19T23:45:16.616Z"
   }
 ]
