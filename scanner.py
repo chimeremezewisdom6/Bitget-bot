@@ -16,6 +16,23 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 BASE_URL = "https://api." + "coinalyze" + ".net/v1"
 STREAK_FILE = "streak.json"
 
+# ==========================================
+# SMART KEY MANAGER (Distributes requests across all 15 keys)
+# ==========================================
+class KeyManager:
+    def __init__(self, keys):
+        self.keys = keys
+        self.key_index = 0
+        self.lock = asyncio.Lock()
+
+    async def get_key(self):
+        async with self.lock:
+            key = self.keys[self.key_index]
+            self.key_index = (self.key_index + 1) % len(self.keys)
+            return key
+
+key_manager = KeyManager(COINALYZE_KEYS)
+
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
         try:
@@ -25,53 +42,61 @@ def get_win_streak():
             return 0
     return 0
 
-async def fetch_coinalyze(session, target_url, api_key):
+async def fetch_coinalyze(session, target_url):
+    api_key = await key_manager.get_key()
     try:
         async with session.get(target_url, params={"api_key": api_key}, timeout=15) as r:
             if r.status == 200:
                 return await r.json()
             elif r.status == 429:
-                log.warning(f"⚠️ Rate limit hit on key {api_key[-4:]}")
-                return None
-    except Exception as e:
-        return None
+                log.warning(f"⚠️ Burst limit hit on key {api_key[-4:]}! Retrying in 1s...")
+                await asyncio.sleep(1)
+                return await fetch_coinalyze(session, target_url) # Retry
+    except Exception:
+        pass
     return None
 
 async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning Top 1000 (Parallel Mode)... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Top 1000 (15-Key Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
     
+    start_time = time.time()
     now_ts = int(time.time())
     ts_24h_ago = now_ts - 86400
     
     async with aiohttp.ClientSession() as session:
-        # 1. Fetch Markets List (using first key)
+        # 1. Fetch Markets List
         markets_url = f"{BASE_URL}/future-markets"
-        async with session.get(markets_url, params={"api_key": COINALYZE_KEYS[0]}) as r:
-            if r.status != 200:
-                log.error(f"Failed to fetch markets: {await r.text()}")
-                return
-            markets = await r.json()
+        markets = await fetch_coinalyze(session, markets_url)
+        
+        if not markets or not isinstance(markets, list):
+            log.error("❌ Failed to fetch markets.")
+            return
 
         all_syms = [m["symbol"] for m in markets if m.get("symbol", "").endswith("_PERP.A")][:1000]
         
-        # 2. Prepare Parallel Tasks
         tasks = []
         for i in range(0, len(all_syms), 50):
             chunk = all_syms[i:i+50]
             sym_str = ",".join(chunk)
             target_url = f"{BASE_URL}/ohlcv-history?symbols={sym_str}&interval=15min&from={ts_24h_ago}&to={now_ts}"
-            
-            # Rotate API keys so every request uses a different key
-            key = COINALYZE_KEYS[i % len(COINALYZE_KEYS)]
-            tasks.append(fetch_coinalyze(session, target_url, key))
+            tasks.append(fetch_coinalyze(session, target_url))
 
-        log.info(f"⚡ Firing {len(tasks)} requests simultaneously...")
+        log.info(f"⚡ Firing {len(tasks)} requests mapped across {len(COINALYZE_KEYS)} API keys...")
         
-        # 3. FIRE ALL REQUESTS AT THE SAME TIME
-        results = await asyncio.gather(*tasks)
+        # 2. Micro-Batch the requests to avoid IP burst limits
+        results = []
+        batch1 = tasks[:15] # Fire 15 at once (uses all keys)
+        batch2 = tasks[15:] # Fire remaining 
+        
+        results.extend(await asyncio.gather(*batch1))
+        await asyncio.sleep(0.5) # 500ms pause to trick the firewall
+        results.extend(await asyncio.gather(*batch2))
+        
+        scan_time = time.time() - start_time
+        log.info(f"✅ Data gathered in {scan_time:.2f} seconds.")
 
         top_signals = []
 
