@@ -59,9 +59,7 @@ export default {
           peakPnl = pnlPercent;
         }
 
-        // EXIT CONDITIONS:
-        // 1. Losing: PnL is below 0
-        // 2. Fading: PnL has dropped by 0.2% from its peak (e.g. peaked at 1.0%, drops to 0.8%)
+        // EXIT CONDITIONS: Stop Loss (Losing) or Trailing Stop (Fading by 0.2% from peak)
         const isLosing = pnlPercent <= 0;
         const isFading = peakPnl > 0.3 && pnlPercent < (peakPnl - 0.2);
         
@@ -71,7 +69,7 @@ export default {
 
           // If live mode, place a real CLOSE order (Reduce Only)
           if (isLiveMode) {
-            // (Live close logic omitted for brevity, focus on simulation)
+            // (Live close logic omitted)
           }
 
           await updateGithubFile('streak.json', { wins: currentStreak }, streakState.sha);
@@ -107,6 +105,14 @@ export default {
       // IF NO TRADE IS ACTIVE -> OPEN A NEW ONE
       // ==========================================
       else {
+        // Catch the "NONE" signal if no opportunities were found
+        if (signal.symbol === "NONE") {
+          return new Response(JSON.stringify({ 
+            status: "WAITING", 
+            message: "No active trade and no new signal found."
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+
         const currentPrice = await getPrice(signal.symbol);
         
         const newTrade = {
