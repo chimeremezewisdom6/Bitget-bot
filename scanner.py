@@ -45,9 +45,10 @@ async def fetch_bitget_tickers(session):
         pass
     return []
 
-async def fetch_bitget_15m_candles(session, symbol):
+async def fetch_bitget_1m_candles(session, symbol):
     async with SEMAPHORE:
-        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "15m", "limit": "96"}
+        # Look at the last 15 1-minute candles
+        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "15"}
         try:
             async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
                 if r.status == 200:
@@ -67,7 +68,7 @@ async def main():
         log.info(f"⏳ Active trade in progress. Pinging Cloudflare to manage TP/SL... (Streak: {wins}/8)")
         payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
     else:
-        log.info(f"🛰️ Scanning Bitget (Blowout Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
+        log.info(f"🛰️ Scanning Bitget (Stealth Trap Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
         start_time = time.time()
         
         async with aiohttp.ClientSession() as session:
@@ -75,6 +76,7 @@ async def main():
             if not tickers:
                 return
 
+            # Filter by >$200k Volume and Top 200 Volatile
             valid_coins = []
             for t in tickers:
                 vol_24h = float(t.get("quoteVolume", 0))
@@ -85,56 +87,89 @@ async def main():
             valid_coins.sort(key=lambda x: x["volatility"], reverse=True)
             top_200 = valid_coins[:200]
             
-            tasks = [fetch_bitget_15m_candles(session, coin["symbol"]) for coin in top_200]
+            tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in top_200]
             all_candles = await asyncio.gather(*tasks)
             
             top_signals = []
 
             for idx, candle_data in enumerate(all_candles):
-                if not candle_data or len(candle_data) < 90:
+                if not candle_data or len(candle_data) < 15:
                     continue
                     
                 coin_info = top_200[idx]
                 symbol = coin_info["symbol"]
-                current_candle = candle_data[0]
+                candles = list(reversed(candle_data)) # Oldest to newest
                 
-                # --- 15M DATA ---
-                open_15m = float(current_candle[1])
-                high_15m = float(current_candle[2])
-                low_15m = float(current_candle[3])
-                close_15m = float(current_candle[4])
-                vol_15m = float(current_candle[5])
+                open_15m = float(candles[0][1])
+                close_15m = float(candles[-1][4])
+                net_move_pct = ((close_15m - open_15m) / open_15m) * 100 if open_15m > 0 else 0
                 
-                # --- 24H DATA ---
-                total_vol_24h = sum([float(c[5]) for c in candle_data])
-                avg_vol_15m_baseline = total_vol_24h / 96.0
-                vol_surge = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
+                up_steps = 0
+                down_steps = 0
+                up_body_pct = 0.0
+                down_body_pct = 0.0
+                is_spike = False
+                sequence = []
                 
-                candle_range = high_15m - low_15m
-                candle_body = abs(close_15m - open_15m)
-                
-                if candle_range <= 0: continue
-                body_ratio = candle_body / candle_range
-                change_15m = ((close_15m - open_15m) / open_15m) * 100 if open_15m > 0 else 0
-                
-                # 🚨 FILTERS 🚨
-                if abs(change_15m) < 0.5: continue
-                if vol_surge < 1.0: continue
-                if body_ratio < 0.60: continue
+                for c in candles:
+                    o = float(c[1])
+                    cl = float(c[4])
                     
-                direction = "LONG" if change_15m > 0 else "SHORT"
-                score = abs(change_15m) * body_ratio * vol_surge
+                    # Calculate single candle move %
+                    candle_move_pct = abs(((cl - o) / o) * 100) if o > 0 else 0
+                    
+                    # 🚨 NO SPIKE RULE 🚨
+                    if candle_move_pct > 1.0:
+                        is_spike = True
+                        break
+                        
+                    if cl > o:
+                        up_steps += 1
+                        up_body_pct += candle_move_pct
+                        sequence.append("U")
+                    elif cl < o:
+                        down_steps += 1
+                        down_body_pct += candle_move_pct
+                        sequence.append("D")
+                    else:
+                        sequence.append("-")
+                
+                # Reject if there was a 1% spike
+                if is_spike:
+                    continue
+                    
+                if up_steps == 0 or down_steps == 0:
+                    continue
+                    
+                # --- STEALTH TRAP LOGIC ---
+                # LONG TRAP: Fewer green candles, but massive green bodies, price is going up
+                if down_steps > up_steps and net_move_pct > 0.2 and up_body_pct > (down_body_pct * 1.5):
+                    direction = "LONG"
+                    dominance = up_body_pct / down_body_pct
+                    trap_type = f"Only {up_steps} Green candles, but they are {dominance:.1f}x larger than the {down_steps} Red candles!"
+                    
+                # SHORT TRAP: Fewer red candles, but massive red bodies, price is going down
+                elif up_steps > down_steps and net_move_pct < -0.2 and down_body_pct > (up_body_pct * 1.5):
+                    direction = "SHORT"
+                    dominance = down_body_pct / up_body_pct
+                    trap_type = f"Only {down_steps} Red candles, but they are {dominance:.1f}x larger than the {up_steps} Green candles!"
+                    
+                else:
+                    continue # No trap, skip
+                    
+                score = abs(net_move_pct) * dominance
                 
                 top_signals.append({
                     "symbol": symbol,
                     "direction": direction,
-                    "net_profit": change_15m,
-                    "body_ratio": body_ratio,
-                    "vol_surge": vol_surge,
+                    "net_move": net_move_pct,
+                    "up_steps": up_steps,
+                    "down_steps": down_steps,
+                    "dominance": dominance,
+                    "trap_type": trap_type,
+                    "sequence": " ".join(sequence),
                     "vol_24h_usd": coin_info["vol_24h"],
-                    "high_15m": high_15m,
-                    "low_15m": low_15m,
-                    "current_price": close_15m, # PASS THIS TO CLOUDFLARE
+                    "current_price": close_15m,
                     "score": score
                 })
                 
@@ -148,18 +183,18 @@ async def main():
             if top_signals:
                 best_signal = top_signals[0]
                 log.info(f"🏆 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
-                log.info(f"  [Blowout] {best_signal['net_profit']:+.2f}% move | Body Ratio: {best_signal['body_ratio']*100:.1f}%")
+                log.info(f"  [Sequence]    {best_signal['sequence']}")
+                log.info(f"  [Trap Found]  {best_signal['trap_type']}")
+                log.info(f"  [Net Move]    {best_signal['net_move']:+.2f}% (Price agrees with the strong side!)")
                 
                 payload = {
                     "symbol": best_signal["symbol"], 
                     "direction": best_signal["direction"], 
                     "is_paper": is_paper,
-                    "high_15m": best_signal["high_15m"],
-                    "low_15m": best_signal["low_15m"],
-                    "current_price": best_signal["current_price"] # Send the entry price directly!
+                    "current_price": best_signal["current_price"]
                 }
             else:
-                log.warning("❌ No coins passed the Blowout Filter.")
+                log.warning("❌ No stealth traps found right now. (Market is too normal).")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
     # Send to Cloudflare Webhook
@@ -170,7 +205,7 @@ async def main():
                 data = await resp.json()
                 if data.get("status") == "OPENED":
                     log.info(f"🟢 TRADE OPENED: {data['symbol']} {data['direction']} at {data['entry_price']}")
-                    log.info(f"   [Take Profit] {data['take_profit']} | [Stop Loss] {data['stop_loss']}")
+                    log.info(f"   [Stop Loss] {data['stop_loss']}")
                 elif data.get("status") == "HOLDING":
                     log.info(f"⏳ HOLDING: {data['symbol']} | PnL: {data['pnl_percent']}% | Peak PnL: {data['peak_pnl']}%")
                 elif data.get("status") == "CLOSED":
@@ -179,7 +214,6 @@ async def main():
                     log.info(f"   [FINAL PnL] {data['pnl_percent']}% | [Peak PnL] {data['peak_pnl']}%")
                     log.info(f"   [Reason] {data['reason']} | [New Streak] {data['streak']}/8")
             else:
-                # 🚨 CATCH THE SILENT ERROR 🚨
                 err = await resp.text()
                 log.error(f"❌ CLOUDFLARE ERROR: {err}")
 
