@@ -42,7 +42,9 @@ export default {
       let currentStreak = streakState ? streakState.content.wins : 0;
       let isLiveMode = currentStreak >= 8;
 
-      // IF A TRADE IS ACTIVE -> CHECK HOLD OR CLOSE
+      // ==========================================
+      // IF TRADE ACTIVE -> CHECK TP/SL AND TRAILING
+      // ==========================================
       if (activeTrade.active) {
         const currentPrice = await getPrice(activeTrade.symbol);
         let pnlPercent = 0;
@@ -56,16 +58,26 @@ export default {
         let peakPnl = activeTrade.peak_pnl || 0;
         if (pnlPercent > peakPnl) peakPnl = pnlPercent;
 
-        // EXIT CONDITIONS: Stop Loss (Losing) or Trailing Stop (Fading by 0.2% from peak)
-        const isLosing = pnlPercent <= 0;
-        const isFading = peakPnl > 0.3 && pnlPercent < (peakPnl - 0.2);
-        
-        if (isLosing || isFading) {
+        // Check Hard Take Profit / Stop Loss
+        let hitTP = false;
+        let hitSL = false;
+
+        if (activeTrade.direction === 'LONG') {
+            if (currentPrice >= activeTrade.take_profit) hitTP = true;
+            if (currentPrice <= activeTrade.stop_loss) hitSL = true;
+        } else {
+            if (currentPrice <= activeTrade.take_profit) hitTP = true;
+            if (currentPrice >= activeTrade.stop_loss) hitSL = true;
+        }
+
+        // Check Trailing Stop (If profit drops by 0.2% from peak, but still positive)
+        const isFading = peakPnl > 0.3 && pnlPercent < (peakPnl - 0.2) && pnlPercent > 0;
+
+        if (hitTP || hitSL || isFading) {
           const won = pnlPercent > 0;
           currentStreak = won ? currentStreak + 1 : 0;
-
-          // If live mode, place a real CLOSE order (Reduce Only) here
-          // ... (Omitted for now, focusing on paper tracking)
+          
+          let reason = hitTP ? "TAKE PROFIT" : hitSL ? "STOP LOSS" : "TRAILING STOP";
 
           await updateGithubFile('streak.json', { wins: currentStreak }, streakState.sha);
           await updateGithubFile('active_trade.json', { active: false }, tradeState.sha);
@@ -73,9 +85,10 @@ export default {
           return new Response(JSON.stringify({ 
             status: "CLOSED", symbol: activeTrade.symbol, direction: activeTrade.direction,
             pnl_percent: pnlPercent.toFixed(2), peak_pnl: peakPnl.toFixed(2),
-            reason: isLosing ? "STOP LOSS" : "TRAILING STOP", won: won, streak: currentStreak 
+            reason: reason, won: won, streak: currentStreak 
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         } else {
+          // Still holding. Update peak_pnl.
           activeTrade.peak_pnl = peakPnl;
           await updateGithubFile('active_trade.json', activeTrade, tradeState.sha);
 
@@ -85,25 +98,43 @@ export default {
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
       } 
-      // IF NO TRADE IS ACTIVE -> OPEN A NEW ONE
+      // ==========================================
+      // IF NO TRADE ACTIVE -> OPEN NEW
+      // ==========================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({ status: "WAITING", message: "No signal found." }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
         const currentPrice = await getPrice(signal.symbol);
-        const newTrade = {
-          active: true, symbol: signal.symbol, direction: signal.direction,
-          entry_price: currentPrice, peak_pnl: 0, opened_at: Date.now()
-        };
+        
+        // DYNAMIC SL/TP BASED ON 15M CANDLE
+        let take_profit, stop_loss;
+        if (signal.direction === 'LONG') {
+            stop_loss = signal.low_15m * 0.999; // Just below the 15m low
+            take_profit = signal.high_15m * 1.002; // Breakout above 15m high
+        } else {
+            stop_loss = signal.high_15m * 1.001; // Just above the 15m high
+            take_profit = signal.low_15m * 0.998; // Breakdown below 15m low
+        }
 
-        // If live mode, place a real OPEN order here (using UTA V3 endpoints)
+        const newTrade = {
+          active: true, 
+          symbol: signal.symbol, 
+          direction: signal.direction,
+          entry_price: currentPrice, 
+          take_profit: take_profit,
+          stop_loss: stop_loss,
+          peak_pnl: 0, 
+          opened_at: Date.now()
+        };
 
         await updateGithubFile('active_trade.json', newTrade, tradeState.sha);
 
         return new Response(JSON.stringify({ 
           status: "OPENED", symbol: signal.symbol, direction: signal.direction,
-          entry_price: currentPrice, mode: isLiveMode ? "LIVE" : "PAPER"
+          entry_price: currentPrice, take_profit: take_profit.toFixed(5), stop_loss: stop_loss.toFixed(5),
+          mode: isLiveMode ? "LIVE" : "PAPER"
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
