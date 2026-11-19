@@ -96,19 +96,30 @@ async def main():
     if active_trade:
         symbol = active_trade.get("symbol")
         direction = active_trade.get("direction", "LONG")
-        log.info(f"⏳ Trade active on {symbol} ({direction}). Fetching live price for ping...")
+        entry_price = float(active_trade.get("entry_price", 0.0))
+        log.info(f"⏳ Trade ACTIVE on {symbol} ({direction} @ {entry_price}). Fetching live price for 5-min ping...")
 
         async with aiohttp.ClientSession() as session:
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
+                # Calculate live gross PnL percentage
+                if direction == "LONG":
+                    live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+                else:
+                    live_pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
+
+                pnl_str = f"{live_pnl_pct:+.2f}%"
+                log.info(f"📍 LIVE TRADE PING: {symbol} | Entry: {entry_price:.5f} | Current: {current_price:.5f} | Live PnL: {pnl_str}")
+
                 payload = {
                     "symbol": symbol,
                     "direction": direction,
                     "is_paper": is_paper,
+                    "entry_price": entry_price,
                     "current_price": current_price,
+                    "live_pnl_pct": round(live_pnl_pct, 2),
                     "is_ping": True
                 }
-                log.info(f"📍 Live Bitget Price for {symbol}: {current_price}")
             else:
                 log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
@@ -263,7 +274,24 @@ async def main():
     headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
     async with aiohttp.ClientSession() as session:
         async with session.post(CLOUDFLARE_URL, json=payload, headers=headers, timeout=15) as resp:
-            log.info(f"📡 Webhook sent to Cloudflare Worker | Status: {resp.status}")
+            status_code = resp.status
+            try:
+                res_data = await resp.json()
+            except Exception:
+                res_data = {}
+
+            if active_trade and res_data:
+                worker_status = res_data.get("status", "")
+                gross_pnl = res_data.get("gross_pnl_percent", "0.00")
+                peak_pnl = res_data.get("peak_gross_pnl", "0.00")
+                reason = res_data.get("reason", "")
+
+                if worker_status == "CLOSED":
+                    log.info(f"🛑 TRADE CLOSED: {symbol} ({direction}) | Closing Gross PnL: {gross_pnl}% | Peak PnL: {peak_pnl}% | Exit Reason: {reason} | Win Streak: {res_data.get('new_win_streak')}")
+                elif worker_status == "HOLDING":
+                    log.info(f"📈 TRADE HOLDING (5-MIN PING): {symbol} ({direction}) | Live Gross PnL: {gross_pnl}% | Peak PnL: {peak_pnl}% | Elapsed: {res_data.get('elapsed_minutes')}m")
+
+            log.info(f"📡 Webhook sent to Cloudflare Worker | Status: {status_code}")
 
 if __name__ == "__main__":
     asyncio.run(main())
