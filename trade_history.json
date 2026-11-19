@@ -1,1 +1,87 @@
-[{"symbol":"MOVRUSDT","direction":"SHORT","entry":0.8686,"exit":0.8851,"pnl":"-1.90%","won":false,"reason":"STOP LOSS (2%)","date":"2026-11-19T14:55:12.321Z"},{"symbol":"ETCUSDT","direction":"LONG","entry":5.899,"exit":5.766,"pnl":"-2.25%","won":false,"reason":"STOP LOSS (2%)","date":"2026-11-19T15:45:26.563Z"},{"symbol":"PLTRUSDT","direction":"SHORT","entry":160.65,"exit":158.16,"pnl":"1.55%","won":true,"reason":"TRAILING REBOUND (2.11%)","date":"2026-11-19T17:25:15.511Z"},{"symbol":"MSTRUSDT","direction":"LONG","entry":88.12,"exit":88.56,"pnl":"0.50%","won":true,"reason":"TRAILING REBOUND (1.03%)","date":"2026-11-19T17:45:28.848Z"},{"symbol":"ENAUSDT","direction":"SHORT","entry":0.10775,"exit":0.10711,"pnl":"0.59%","won":true,"reason":"TRAILING REBOUND (1.14%)","date":"2026-11-19T18:30:26.166Z"},{"symbol":"VELVETUSDT","direction":"SHORT","entry":0.07557,"exit":0.07485,"pnl":"0.95%","won":true,"reason":"TRAILING REBOUND (1.14%)","date":"2026-11-19T18:50:17.129Z"},{"symbol":"INTCUSDT","direction":"SHORT","entry":56.42,"exit":55.96,"pnl":"0.82%","won":true,"reason":"TRAILING REBOUND (0.84%)","date":"2026-11-19T20:40:19.360Z"}]
+[
+  {
+    "symbol": "MOVRUSDT",
+    "direction": "SHORT",
+    "entry": 0.8686,
+    "exit": 0.8851,
+    "pnl": "-1.90%",
+    "won": false,
+    "reason": "STOP LOSS (2%)",
+    "date": "2026-11-19T14:55:12.321Z"
+  },
+  {
+    "symbol": "ETCUSDT",
+    "direction": "LONG",
+    "entry": 5.899,
+    "exit": 5.766,
+    "pnl": "-2.25%",
+    "won": false,
+    "reason": "STOP LOSS (2%)",
+    "date": "2026-11-19T15:45:26.563Z"
+  },
+  {
+    "symbol": "PLTRUSDT",
+    "direction": "SHORT",
+    "entry": 160.65,
+    "exit": 158.16,
+    "pnl": "1.55%",
+    "won": true,
+    "reason": "TRAILING REBOUND (2.11%)",
+    "date": "2026-11-19T17:25:15.511Z"
+  },
+  {
+    "symbol": "MSTRUSDT",
+    "direction": "LONG",
+    "entry": 88.12,
+    "exit": 88.56,
+    "pnl": "0.50%",
+    "won": true,
+    "reason": "TRAILING REBOUND (1.03%)",
+    "date": "2026-11-19T17:45:28.848Z"
+  },
+  {
+    "symbol": "ENAUSDT",
+    "direction": "SHORT",
+    "entry": 0.10775,
+    "exit": 0.10711,
+    "pnl": "0.59%",
+    "won": true,
+    "reason": "TRAILING REBOUND (1.14%)",
+    "date": "2026-11-19T18:30:26.166Z"
+  },
+  {
+    "symbol": "VELVETUSDT",
+    "direction": "SHORT",
+    "entry": 0.07557,
+    "exit": 0.07485,
+    "pnl": "0.95%",
+    "won": true,
+    "reason": "TRAILING REBOUND (1.14%)",
+    "date": "2026-11-19T18:50:17.129Z"
+  },
+  {
+    "symbol": "INTCUSDT",
+    "direction": "SHORT",
+    "entry": 56.42,
+    "exit": 55.96,
+    "pnl": "0.82%",
+    "won": true,
+    "reason": "TRAILING REBOUND (0.84%)",
+    "date": "2026-11-19T20:40:19.360Z"
+  },
+  {
+    "symbol": "TSLAUSDT",
+    "direction": "LONG",
+    "mode": "PAPER",
+    "entry": 375.61,
+    "exit": 372.82,
+    "gross_pnl": "-0.74%",
+    "net_pnl": "-0.94%",
+    "total_friction": "0.20%",
+    "won": false,
+    "reason": "10-MIN LOSS TIMEOUT (Gross: -0.74% | Net: -0.94%)",
+    "elapsed_minutes": "54.1",
+    "streak_after_trade": 0,
+    "date": "2026-11-19T21:39:29.923Z"
+  }
+]
