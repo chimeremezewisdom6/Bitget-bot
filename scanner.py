@@ -19,7 +19,7 @@ BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
-SEMAPHORE = asyncio.Semaphore(10)
+SEMAPHORE = asyncio.Semaphore(15)  # Slightly increased concurrency for full market scan
 
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
@@ -109,7 +109,7 @@ async def main():
                 log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
     else:
-        log.info("🛰️ Scanning Bitget Top 200 Futures ($100k+ Volume, 9/10 & 10/10 Candles, 0.20%+/min Fluctuation)...")
+        log.info("🛰️ Scanning ALL Bitget Futures coins with $100k+ 24h Volume (9/10 & 10/10 Candles, 0.20%+ Avg 10-Min Fluctuation)...")
         async with aiohttp.ClientSession() as session:
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
@@ -119,15 +119,14 @@ async def main():
             valid_coins = []
             for t in tickers:
                 vol_24h = float(t.get("quoteVolume", 0.0) or (float(t.get("baseVolume", 0.0)) * float(t.get("lastPr", 0.0))))
-                if vol_24h >= 100000:
+                if vol_24h >= 100000:  # ALL $100k+ Volume coins (No top 200 cap!)
                     valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h})
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
-            top_200 = valid_coins[:200]
 
-            log.info(f"Isolated {len(top_200)} top Bitget volume coins. Evaluating 10-minute candles...")
+            log.info(f"Isolated ALL {len(valid_coins)} Bitget USDT futures coins with $100k+ 24h volume. Evaluating 10-minute candles...")
 
-            tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in top_200]
+            tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in valid_coins]
             all_candles = await asyncio.gather(*tasks)
 
             top_signals = []
@@ -136,9 +135,9 @@ async def main():
                 if not candle_data or len(candle_data) < 10:
                     continue
 
-                coin_info = top_200[idx]
+                coin_info = valid_coins[idx]
                 symbol = coin_info["symbol"]
-                candles = list(reversed(candle_data))  # oldest to newest
+                candles = list(reversed(candle_data))  # oldest to newest (last 10 minutes)
 
                 green_count = 0
                 red_count = 0
@@ -160,7 +159,7 @@ async def main():
 
                 avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
 
-                # FILTER 1: Average per-minute fluctuation >= 0.20%
+                # FILTER 1: Average fluctuation across the last 10 minutes >= 0.20%
                 if avg_fluctuation < 0.20:
                     continue
 
@@ -188,7 +187,7 @@ async def main():
 
             if top_signals:
                 best_signal = top_signals[0]
-                log.info(f"🔥 BEST SIGNAL FOUND: {best_signal['symbol']} ({best_signal['direction']} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%/min | Price: {best_signal['current_price']})")
+                log.info(f"🔥 BEST SIGNAL FOUND: {best_signal['symbol']} ({best_signal['direction']} | 10-Min Avg Fluctuation: {best_signal['avg_fluctuation']:.2f}% | Price: {best_signal['current_price']})")
                 payload = {
                     "symbol": best_signal["symbol"],
                     "direction": best_signal["direction"],
@@ -198,7 +197,7 @@ async def main():
                     "is_ping": False
                 }
             else:
-                log.info("No valid 9/10 momentum signals found this cycle.")
+                log.info("No valid 9/10 momentum signals found across all $100k+ volume coins this cycle.")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper, "is_ping": False}
 
     headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
