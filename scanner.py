@@ -63,7 +63,6 @@ async def main():
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
     
-    # 🚨 1. CHECK IF TRADE IS ACTIVE 🚨
     if is_trade_active():
         log.info(f"⏳ Active trade in progress. Pinging Cloudflare to manage TP/SL... (Streak: {wins}/8)")
         payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
@@ -121,7 +120,7 @@ async def main():
                 # 🚨 FILTERS 🚨
                 if abs(change_15m) < 0.5: continue
                 if vol_surge < 1.0: continue
-                if body_ratio < 0.60: continue # Must be a blowout candle
+                if body_ratio < 0.60: continue
                     
                 direction = "LONG" if change_15m > 0 else "SHORT"
                 score = abs(change_15m) * body_ratio * vol_surge
@@ -135,6 +134,7 @@ async def main():
                     "vol_24h_usd": coin_info["vol_24h"],
                     "high_15m": high_15m,
                     "low_15m": low_15m,
+                    "current_price": close_15m, # PASS THIS TO CLOUDFLARE
                     "score": score
                 })
                 
@@ -149,13 +149,14 @@ async def main():
                 best_signal = top_signals[0]
                 log.info(f"🏆 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
                 log.info(f"  [Blowout] {best_signal['net_profit']:+.2f}% move | Body Ratio: {best_signal['body_ratio']*100:.1f}%")
-                # Pass the 15m high and low for dynamic SL/TP
+                
                 payload = {
                     "symbol": best_signal["symbol"], 
                     "direction": best_signal["direction"], 
                     "is_paper": is_paper,
                     "high_15m": best_signal["high_15m"],
-                    "low_15m": best_signal["low_15m"]
+                    "low_15m": best_signal["low_15m"],
+                    "current_price": best_signal["current_price"] # Send the entry price directly!
                 }
             else:
                 log.warning("❌ No coins passed the Blowout Filter.")
@@ -177,6 +178,10 @@ async def main():
                     log.info(f"{emoji} TRADE CLOSED: {data['symbol']}")
                     log.info(f"   [FINAL PnL] {data['pnl_percent']}% | [Peak PnL] {data['peak_pnl']}%")
                     log.info(f"   [Reason] {data['reason']} | [New Streak] {data['streak']}/8")
+            else:
+                # 🚨 CATCH THE SILENT ERROR 🚨
+                err = await resp.text()
+                log.error(f"❌ CLOUDFLARE ERROR: {err}")
 
 if __name__ == "__main__":
     asyncio.run(main())
