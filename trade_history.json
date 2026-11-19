@@ -83,5 +83,18 @@
     "elapsed_minutes": "54.1",
     "streak_after_trade": 0,
     "date": "2026-11-19T21:39:29.923Z"
+  },
+  {
+    "symbol": "IRENUSDT",
+    "direction": "SHORT",
+    "mode": "PAPER",
+    "entry": 14.472,
+    "exit": 14.442,
+    "gross_pnl": "0.21%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +0.42% | Exit: +0.21%)",
+    "elapsed_minutes": "10.1",
+    "streak_after_trade": 1,
+    "date": "2026-11-19T23:20:27.788Z"
   }
 ]
