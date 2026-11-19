@@ -58,7 +58,7 @@ export default {
       const isPaper = currentStreak < 8;
 
       // =========================================================================
-      // 1. ACTIVE TRADE MONITORING & DYNAMIC FRICTION EXIT EVALUATION
+      // 1. ACTIVE TRADE MONITORING & EXITS
       // =========================================================================
       if (activeTrade.active) {
         const currentPrice = signal.current_price;
@@ -68,16 +68,8 @@ export default {
 
         const openedAt = activeTrade.opened_at || Date.now();
         const elapsedMinutes = (Date.now() - openedAt) / (1000 * 60);
-        const avgFluctuation = activeTrade.avg_fluctuation || 0.20;
 
-        // Dynamic Friction Calculation
-        // Round-trip Bitget Taker Fee: 0.12% (0.06% in + 0.06% out)
-        // Dynamic Spread/Slippage: max(0.04%, avg_fluctuation * 0.40) capped at 0.32%
-        const takerFeePct = 0.12;
-        const slippagePct = Math.max(0.04, avgFluctuation * 0.40);
-        const totalFriction = Math.min(0.32, takerFeePct + slippagePct);
-
-        // Gross Price PnL %
+        // Calculate Gross Price PnL %
         let grossPnl = 0;
         if (activeTrade.direction === 'LONG') {
           grossPnl = ((currentPrice - activeTrade.entry_price) / activeTrade.entry_price) * 100;
@@ -85,23 +77,17 @@ export default {
           grossPnl = ((activeTrade.entry_price - currentPrice) / activeTrade.entry_price) * 100;
         }
 
-        // Net Realized Cash PnL % (after fees, spread & slippage)
-        const netPnl = grossPnl - totalFriction;
-
         // Track Peak Gross PnL
         let peakGrossPnl = activeTrade.peak_gross_pnl || 0;
         if (grossPnl > peakGrossPnl) peakGrossPnl = grossPnl;
 
-        // Activation Level: Once peak gain covers total friction / 0.20
-        const activationLevel = totalFriction / 0.20;
-
         // Exit Condition 1: Hard Stop Loss (-2.0%)
         let hitSL = grossPnl <= -2.0;
 
-        // Exit Condition 2: 80%+ Net Gain Retention Lock (Friction + Pullback takes <= 20% of peak move)
+        // Exit Condition 2: 80% Peak Gain Retention (Triggers when gross PnL drops below 80% of peak, once peak >= 0.25%)
         let hit80PercentRetention = false;
-        if (peakGrossPnl >= activationLevel) {
-          const exitThreshold = peakGrossPnl * 0.80; // Retain 80%+ of peak move
+        if (peakGrossPnl >= 0.25) {
+          const exitThreshold = peakGrossPnl * 0.80;
           if (grossPnl <= exitThreshold) {
             hit80PercentRetention = true;
           }
@@ -111,13 +97,13 @@ export default {
         let hit10MinLossTimeout = elapsedMinutes >= 10 && grossPnl < 0;
 
         if (hitSL || hit80PercentRetention || hit10MinLossTimeout) {
-          const won = netPnl > 0;
+          const won = grossPnl > 0;
           currentStreak = won ? currentStreak + 1 : 0;
 
           let exitReason = "";
           if (hitSL) exitReason = "HARD STOP LOSS (-2.0%)";
-          else if (hit80PercentRetention) exitReason = `80%+ GAIN LOCK EXIT (Peak: +${peakGrossPnl.toFixed(2)}% | Net: +${netPnl.toFixed(2)}%)`;
-          else if (hit10MinLossTimeout) exitReason = `10-MIN LOSS TIMEOUT (Gross: ${grossPnl.toFixed(2)}% | Net: ${netPnl.toFixed(2)}%)`;
+          else if (hit80PercentRetention) exitReason = `80% PROFIT RETENTION EXIT (Peak: +${peakGrossPnl.toFixed(2)}% | Exit: +${grossPnl.toFixed(2)}%)`;
+          else if (hit10MinLossTimeout) exitReason = `10-MIN LOSS TIMEOUT (Gross: ${grossPnl.toFixed(2)}%)`;
 
           tradeHistory.push({
             symbol: activeTrade.symbol,
@@ -126,8 +112,6 @@ export default {
             entry: activeTrade.entry_price,
             exit: currentPrice,
             gross_pnl: grossPnl.toFixed(2) + "%",
-            net_pnl: netPnl.toFixed(2) + "%",
-            total_friction: totalFriction.toFixed(2) + "%",
             won: won,
             reason: exitReason,
             elapsed_minutes: elapsedMinutes.toFixed(1),
@@ -144,7 +128,7 @@ export default {
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
             mode: isPaper ? "PAPER" : "LIVE",
-            net_pnl_percent: netPnl.toFixed(2),
+            gross_pnl_percent: grossPnl.toFixed(2),
             peak_gross_pnl: peakGrossPnl.toFixed(2),
             reason: exitReason,
             won: won,
@@ -157,7 +141,7 @@ export default {
             status: "HOLDING",
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            net_pnl_percent: netPnl.toFixed(2),
+            gross_pnl_percent: grossPnl.toFixed(2),
             peak_gross_pnl: peakGrossPnl.toFixed(2),
             elapsed_minutes: elapsedMinutes.toFixed(1)
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -183,7 +167,6 @@ export default {
           stop_loss: stop_loss,
           peak_gross_pnl: 0,
           avg_fluctuation: signal.avg_fluctuation || 0.20,
-          calculated_friction: signal.calculated_friction || 0.20,
           opened_at: Date.now()
         };
 
