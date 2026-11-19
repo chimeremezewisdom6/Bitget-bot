@@ -47,16 +47,6 @@ export default {
         });
       };
 
-      // Direct Bitget Order Execution for Live Mode (wins >= 8)
-      // Bitget Futures UTA, One-Way Position Mode, 5x Leverage, Reduce-Only on Exits
-      const executeBitgetLiveOrder = async (symbol, side, qty, reduceOnly = false) => {
-        if (!env.BITGET_API_KEY || !env.BITGET_API_SECRET || !env.BITGET_PASSPHRASE) {
-          console.warn("Bitget API keys not set in Cloudflare secrets.");
-          return null;
-        }
-        return { status: "BITGET_LIVE_ORDER_EXECUTED", symbol, side, qty, reduceOnly };
-      };
-
       const tradeState = await fetchRepoFile('active_trade.json');
       const streakState = await fetchRepoFile('streak.json');
       const historyState = await fetchRepoFile('trade_history.json');
@@ -80,8 +70,8 @@ export default {
         const elapsedMinutes = (Date.now() - openedAt) / (1000 * 60);
         const avgFluctuation = activeTrade.avg_fluctuation || 0.20;
 
-        // Friction Calculation
-        // Round-trip Taker Fee: 0.12% (0.06% in + 0.06% out)
+        // Dynamic Friction Calculation
+        // Round-trip Bitget Taker Fee: 0.12% (0.06% in + 0.06% out)
         // Dynamic Spread/Slippage: max(0.04%, avg_fluctuation * 0.40) capped at 0.32%
         const takerFeePct = 0.12;
         const slippagePct = Math.max(0.04, avgFluctuation * 0.40);
@@ -128,12 +118,6 @@ export default {
           if (hitSL) exitReason = "HARD STOP LOSS (-2.0%)";
           else if (hit80PercentRetention) exitReason = `80%+ GAIN LOCK EXIT (Peak: +${peakGrossPnl.toFixed(2)}% | Net: +${netPnl.toFixed(2)}%)`;
           else if (hit10MinLossTimeout) exitReason = `10-MIN LOSS TIMEOUT (Gross: ${grossPnl.toFixed(2)}% | Net: ${netPnl.toFixed(2)}%)`;
-
-          // Execute Bitget reduce-only order if in live trading mode (wins >= 8)
-          if (!isPaper) {
-            const exitSide = activeTrade.direction === 'LONG' ? 'sell' : 'buy';
-            await executeBitgetLiveOrder(activeTrade.symbol, exitSide, activeTrade.qty || 1, true);
-          }
 
           tradeHistory.push({
             symbol: activeTrade.symbol,
@@ -202,12 +186,6 @@ export default {
           calculated_friction: signal.calculated_friction || 0.20,
           opened_at: Date.now()
         };
-
-        // Execute Bitget entry order if in live trading mode (wins >= 8)
-        if (!isPaper) {
-          const entrySide = signal.direction === 'LONG' ? 'buy' : 'sell';
-          await executeBitgetLiveOrder(signal.symbol, entrySide, 1, false);
-        }
 
         await updateRepoFile('active_trade.json', newTrade, tradeState ? tradeState.sha : null);
         return new Response(JSON.stringify({
