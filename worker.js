@@ -93,7 +93,7 @@ export default {
           }
         }
 
-        // Exit Condition 3: 10+ Minute Holding Loss Timeout (Close immediately if in a loss after 10 mins)
+        // Exit Condition 3: 10+ Minute Holding Loss Timeout (Close immediately if holding a loss after 10 mins)
         let hit10MinLossTimeout = elapsedMinutes >= 10 && grossPnl < 0;
 
         if (hitSL || hit80PercentRetention || hit10MinLossTimeout) {
@@ -152,7 +152,11 @@ export default {
       // =========================================================================
       else {
         if (signal.symbol === "NONE") {
-          return new Response(JSON.stringify({ status: "WAITING", message: "No momentum signals found this cycle." }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+          return new Response(JSON.stringify({
+            status: "WAITING",
+            message: "No 9/10 or 10/10 momentum signals found.",
+            highest_market_winner: signal.highest_market_winner || "N/A"
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
         const currentPrice = signal.current_price;
