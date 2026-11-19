@@ -26,7 +26,6 @@ def get_win_streak():
     return 0
 
 async def fetch_bitget_tickers(session):
-    """Fetches 24h stats for every coin on Bitget in ONE request."""
     try:
         async with session.get(BITGET_TICKERS_URL, timeout=10) as r:
             if r.status == 200:
@@ -38,7 +37,6 @@ async def fetch_bitget_tickers(session):
     return []
 
 async def fetch_bitget_candles(session, symbol):
-    """Fetches 24h of 15m candles for a specific coin."""
     params = {"symbol": symbol, "granularity": "15m", "limit": "96"}
     try:
         async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
@@ -54,18 +52,17 @@ async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning Bitget Direct (100% Real Data)... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Bitget (Time Compression Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
     
     start_time = time.time()
     
     async with aiohttp.ClientSession() as session:
-        # 1. Fetch ALL tickers from Bitget
         tickers = await fetch_bitget_tickers(session)
         if not tickers:
             log.error("❌ Failed to fetch Bitget markets.")
             return
 
-        # 2. Filter out junk coins (Min $1M Volume)
+        # 1. Filter by Volume (>$1M)
         valid_coins = []
         for t in tickers:
             vol_24h = float(t.get("quoteVolume", 0))
@@ -75,10 +72,8 @@ async def main():
         valid_coins.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
         log.info(f"✅ Found {len(valid_coins)} real coins with >$1M volume.")
         
-        # Check top 100 highest volume coins
+        # 2. Fetch 15m Candles for Top 100 coins
         top_100 = valid_coins[:100]
-        
-        # 3. Fetch 15m Candles for these 100 coins concurrently
         tasks = [fetch_bitget_candles(session, coin["symbol"]) for coin in top_100]
         all_candles = await asyncio.gather(*tasks)
         
@@ -91,42 +86,61 @@ async def main():
             coin_info = top_100[idx]
             symbol = coin_info["symbol"]
             
-            # Bitget returns candles newest-first. [0] is the current 15m candle.
             current_candle = candle_data[0]
-            close_price = float(current_candle[4])
-            open_price = float(current_candle[1])
+            
+            # --- 15M DATA ---
+            open_15m = float(current_candle[1])
+            high_15m = float(current_candle[2])
+            low_15m = float(current_candle[3])
+            close_15m = float(current_candle[4])
             vol_15m = float(current_candle[5])
             
-            # Calculate 24h baseline from the 96 candles (24 hours)
+            # --- 24H DATA ---
+            open_24h = float(candle_data[-1][1])
+            close_24h = close_15m
             total_vol_24h = sum([float(c[5]) for c in candle_data])
             avg_vol_15m_baseline = total_vol_24h / 96.0
             
-            price_change_15m = ((close_price - open_price) / open_price) * 100 if open_price > 0 else 0
+            # --- CALCULATE CHANGES ---
+            change_15m = ((close_15m - open_15m) / open_15m) * 100 if open_15m > 0 else 0
+            change_24h = ((close_24h - open_24h) / open_24h) * 100 if open_24h > 0 else 0
             
-            # Volatility normalization (Mega vs Micro)
-            ranges_24h = [(float(c[2]) - float(c[3])) / float(c[3]) for c in candle_data if float(c[3]) > 0]
-            avg_range_24h = sum(ranges_24h) / len(ranges_24h) if ranges_24h else 0.01
+            # --- NOISE FILTER ---
+            candle_range = high_15m - low_15m
+            candle_body = abs(close_15m - open_15m)
+            if candle_range == 0: continue
+            body_ratio = candle_body / candle_range
             
-            # --- CALCULATE METRICS ---
+            # 🚨 ONLY BASIC FILTERS TO ENSURE REAL TRADES 🚨
+            # 1. Must move at least 1% in 15m
+            if abs(change_15m) < 1.0: continue 
+            # 2. Volume must be surging (Takers present)
             vol_surge = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
-            move_multiplier = (price_change_15m / 100) / avg_range_24h if avg_range_24h > 0 else 0
+            if vol_surge < 1.5: continue
+            # 3. Noise filter (No huge wicks)
+            if body_ratio < 0.50: continue
             
-            # 🚨 STRICT FILTERS 🚨
-            if abs(price_change_15m) < 1.0: continue 
-            if vol_surge < 2.0: continue 
+            # --- TIME COMPRESSION LOGIC ---
+            # How close is the 15m move to the 24h move? (Absolute values)
+            # If change_24h is 0.1 and change_15m is 5.0, ratio is 50x (Huge compression)
+            aggression_ratio = abs(change_15m) / abs(change_24h) if abs(change_24h) > 0.1 else abs(change_15m) * 10
             
-            score = abs(price_change_15m) * vol_surge
-            direction = "LONG" if price_change_15m > 0 else "SHORT"
+            # Score: Aggression Ratio * Volume Surge * Body Ratio
+            score = aggression_ratio * vol_surge * body_ratio
+            
+            # Determine direction based purely on the 15m candle
+            direction = "LONG" if change_15m > 0 else "SHORT"
             
             top_signals.append({
                 "symbol": symbol,
                 "direction": direction, 
                 "score": score,
-                "move_mult": move_multiplier,
                 "vol_surge": vol_surge,
-                "vol_24h_usd": float(coin_info["quoteVolume"]),
-                "vol_15m": vol_15m,
-                "change_15m": price_change_15m
+                "body_ratio": body_ratio,
+                "change_24h": change_24h,
+                "change_15m": change_15m,
+                "aggression_ratio": aggression_ratio,
+                "vol_24h_usd": float(coin_info["quoteVolume"])
             })
             
             top_signals.sort(key=lambda x: x["score"], reverse=True)
@@ -138,18 +152,20 @@ async def main():
 
         # --- SHOW THE DETAILED BREAKDOWN ---
         if top_signals:
-            log.info("🏆 --- TOP 3 REAL BITGET PAIRS ---")
+            log.info("🏆 --- TOP 3 BEST PAIRS (Time Compression) ---")
             for idx, sig in enumerate(top_signals):
                 log.info(f"--- RANK {idx+1}: {sig['symbol']} ({sig['direction']}) | Score: {sig['score']:.2f} ---")
-                log.info(f"  [24H Data]  True Bitget Vol: ${sig['vol_24h_usd']:,.0f}")
-                log.info(f"  [15M Data]  Vol: {sig['vol_15m']:,.0f} | Price Change: {sig['change_15m']:+.2f}%")
-                log.info(f"  [Imbalance] 15M Volume is {sig['vol_surge']:.1f}x normal")
+                log.info(f"  [24H Data]  True Vol: ${sig['vol_24h_usd']:,.0f} | Price Change: {sig['change_24h']:+.2f}%")
+                log.info(f"  [15M Data]  Price Change: {sig['change_15m']:+.2f}% (Vol Surge: {sig['vol_surge']:.1f}x)")
+                log.info(f"  [Compression] 15m move is {sig['aggression_ratio']*100:.1f}% of the 24h move!")
+                log.info(f"  [Noise Check] 15m Candle Body is {sig['body_ratio']*100:.1f}% of total range.")
 
+            # Since we only add signals that pass the basic filters, the #1 result is our best available option
             best_signal = top_signals[0]
             log.info(f"🎯 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
             payload = {"symbol": best_signal["symbol"], "direction": best_signal["direction"], "is_paper": is_paper}
         else:
-            log.warning("❌ No Bitget coins passed the filters (Vol > $1M, Move > 1%). Waiting...")
+            log.warning("❌ Market is completely dead (No coin moved >1% with volume). Waiting...")
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
         # Send to Cloudflare Webhook
