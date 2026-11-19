@@ -53,7 +53,7 @@ async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning Bitget (Step Counting Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Bitget (Top 200 Volatile)... (Streak: {wins}/8 | Mode: {mode_text})")
     
     start_time = time.time()
     
@@ -63,19 +63,28 @@ async def main():
             log.error("❌ Failed to fetch Bitget markets.")
             return
 
-        # 1. Filter by Volume (>$1M)
+        # 1. Filter by Volume (>$500k) and calculate volatility
         valid_coins = []
         for t in tickers:
             vol_24h = float(t.get("quoteVolume", 0))
-            if vol_24h > 1000000: 
-                valid_coins.append(t)
+            # Get absolute 24h price change percentage as a measure of volatility
+            price_change_24h = abs(float(t.get("priceChangePercent", 0)))
+            
+            if vol_24h > 500000: 
+                valid_coins.append({
+                    "symbol": t["symbol"],
+                    "vol_24h": vol_24h,
+                    "volatility": price_change_24h
+                })
                 
-        valid_coins.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        log.info(f"✅ Found {len(valid_coins)} real coins with >$1M volume.")
+        # 2. Sort by Volatility (highest first) and take Top 200
+        valid_coins.sort(key=lambda x: x["volatility"], reverse=True)
+        top_200 = valid_coins[:200]
         
-        # 2. Fetch 1m Candles for Top 100 coins
-        top_100 = valid_coins[:100]
-        tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in top_100]
+        log.info(f"✅ Found {len(valid_coins)} coins >$500k vol. Selected Top {len(top_200)} most volatile.")
+        
+        # 3. Fetch 1m Candles for these Top 200 coins
+        tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in top_200]
         all_candles = await asyncio.gather(*tasks)
         
         top_signals = []
@@ -84,22 +93,21 @@ async def main():
             if not candle_data or len(candle_data) < 5:
                 continue
                 
-            coin_info = top_100[idx]
+            coin_info = top_200[idx]
             symbol = coin_info["symbol"]
             
             # Count steps (wicks) in the last 15 minutes
             up_steps = 0
             down_steps = 0
-            total_15m_move_pct = 0.0
             
             # candle_data[0] is the most recent 1m candle
             # candle_data[-1] is the candle 15 minutes ago
             open_15m = float(candle_data[-1][1])
             close_15m = float(candle_data[0][4])
             
-            if open_15m > 0:
-                total_15m_move_pct = ((close_15m - open_15m) / open_15m) * 100
+            total_15m_move_pct = ((close_15m - open_15m) / open_15m) * 100 if open_15m > 0 else 0
 
+            # Count the steps
             for c in candle_data:
                 o = float(c[1])
                 cl = float(c[4])
@@ -108,13 +116,11 @@ async def main():
                 elif cl < o:
                     down_steps += 1
             
-            # Determine direction and dominance ratio
             if up_steps == 0 and down_steps == 0:
                 continue # Doji flat, skip
                 
             if up_steps > down_steps:
                 direction = "LONG"
-                # Calculate how many times more up steps than down steps
                 dominance_ratio = up_steps / down_steps if down_steps > 0 else up_steps
             elif down_steps > up_steps:
                 direction = "SHORT"
@@ -122,12 +128,7 @@ async def main():
             else:
                 continue # Perfect tie, skip
             
-            # We want coins that actually moved in the 15m window
-            if abs(total_15m_move_pct) < 0.1:
-                continue
-                
-            # Score is the dominance ratio multiplied by the actual percentage move
-            # This ensures a 6-to-2 step with 2% move beats a 6-to-2 step with 0.5% move
+            # Score is the dominance ratio multiplied by the absolute percentage move
             score = dominance_ratio * abs(total_15m_move_pct)
             
             top_signals.append({
@@ -137,7 +138,7 @@ async def main():
                 "down_steps": down_steps,
                 "dominance_ratio": dominance_ratio,
                 "change_15m": total_15m_move_pct,
-                "vol_24h_usd": float(coin_info["quoteVolume"]),
+                "vol_24h_usd": coin_info["vol_24h"],
                 "score": score
             })
             
@@ -162,7 +163,8 @@ async def main():
             log.info(f"🎯 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
             payload = {"symbol": best_signal["symbol"], "direction": best_signal["direction"], "is_paper": is_paper}
         else:
-            log.warning("❌ Market is completely dead. No valid candles found.")
+            # If literally no valid candles were found (e.g., API failure)
+            log.warning("❌ No valid candle data returned from Bitget API.")
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
         # Send to Cloudflare Webhook
