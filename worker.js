@@ -27,9 +27,11 @@ export default {
       };
 
       const getPrice = async (sym) => {
-        const res = await fetch(`https://api.bitget.com/api/v3/market/ticker?category=USDT-FUTURES&symbol=${sym}`);
+        const res = await fetch(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${sym}&productType=USDT-FUTURES`);
         const data = await res.json();
-        if (data.code === '00000' && data.data && data.data.length > 0) return parseFloat(data.data[0].lastPr);
+        if (data.code === '00000' && data.data && data.data.length > 0) {
+            return parseFloat(data.data[0].lastPr);
+        }
         throw new Error(`Failed to get price for ${sym}`);
       };
 
@@ -54,12 +56,16 @@ export default {
         let peakPnl = activeTrade.peak_pnl || 0;
         if (pnlPercent > peakPnl) peakPnl = pnlPercent;
 
+        // EXIT CONDITIONS: Stop Loss (Losing) or Trailing Stop (Fading by 0.2% from peak)
         const isLosing = pnlPercent <= 0;
         const isFading = peakPnl > 0.3 && pnlPercent < (peakPnl - 0.2);
         
         if (isLosing || isFading) {
           const won = pnlPercent > 0;
           currentStreak = won ? currentStreak + 1 : 0;
+
+          // If live mode, place a real CLOSE order (Reduce Only) here
+          // ... (Omitted for now, focusing on paper tracking)
 
           await updateGithubFile('streak.json', { wins: currentStreak }, streakState.sha);
           await updateGithubFile('active_trade.json', { active: false }, tradeState.sha);
@@ -90,6 +96,8 @@ export default {
           active: true, symbol: signal.symbol, direction: signal.direction,
           entry_price: currentPrice, peak_pnl: 0, opened_at: Date.now()
         };
+
+        // If live mode, place a real OPEN order here (using UTA V3 endpoints)
 
         await updateGithubFile('active_trade.json', newTrade, tradeState.sha);
 
