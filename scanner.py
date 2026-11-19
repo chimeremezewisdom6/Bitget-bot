@@ -8,26 +8,13 @@ import aiohttp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("scanner")
 
-API_KEYS_RAW = os.environ.get("COINALYZE_API_KEYS", "")
-COINALYZE_KEYS = [k.strip() for k in API_KEYS_RAW.split(",") if k.strip()]
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-BASE_URL = "https://api." + "coinalyze" + ".net/v1"
-BITGET_URL = "https://api.bitget.com/api/v3/market/tickers?category=USDT-FUTURES"
+BITGET_TICKERS_URL = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
+BITGET_CANDLES_URL = "https://api.bitget.com/api/v2/mix/market/candles"
+
 STREAK_FILE = "streak.json"
-
-class KeyManager:
-    def __init__(self, keys):
-        self.keys = keys
-        self.key_index = 0
-    def get_key(self):
-        if not self.keys: return ""
-        key = self.keys[self.key_index]
-        self.key_index = (self.key_index + 1) % len(self.keys)
-        return key
-
-key_manager = KeyManager(COINALYZE_KEYS)
 
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
@@ -38,150 +25,107 @@ def get_win_streak():
             return 0
     return 0
 
-async def fetch_coinalyze_safe(session, target_url):
-    for attempt in range(3):
-        api_key = key_manager.get_key()
-        try:
-            async with session.get(target_url, params={"api_key": api_key}, timeout=10) as r:
-                if r.status == 200:
-                    return await r.json()
-                elif r.status == 429:
-                    await asyncio.sleep(0.5)
-                    continue
-                else:
-                    return None
-        except Exception:
-            await asyncio.sleep(0.5)
-            continue
-    return None
+async def fetch_bitget_tickers(session):
+    """Fetches 24h stats for every coin on Bitget in ONE request."""
+    try:
+        async with session.get(BITGET_TICKERS_URL, timeout=10) as r:
+            if r.status == 200:
+                data = await r.json()
+                if data.get("code") == "00000":
+                    return data.get("data", [])
+    except Exception as e:
+        log.error(f"Failed to fetch Bitget tickers: {e}")
+    return []
+
+async def fetch_bitget_candles(session, symbol):
+    """Fetches 24h of 15m candles for a specific coin."""
+    params = {"symbol": symbol, "granularity": "15m", "limit": "96"}
+    try:
+        async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
+            if r.status == 200:
+                data = await r.json()
+                if data.get("code") == "00000":
+                    return data.get("data", [])
+    except Exception:
+        return []
+    return []
 
 async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning Top 1000 (Strict Bitget Filter)... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Bitget Direct (100% Real Data)... (Streak: {wins}/8 | Mode: {mode_text})")
     
     start_time = time.time()
-    now_ts = int(time.time())
-    ts_24h_ago = now_ts - 86400
     
     async with aiohttp.ClientSession() as session:
-        # ==========================================
-        # 1. GET ALL VALID COINS ON BITGET
-        # ==========================================
-        log.info("🔍 Fetching valid Bitget UTA symbols...")
-        bitget_symbols = set()
-        try:
-            async with session.get(BITGET_URL, timeout=10) as r:
-                if r.status == 200:
-                    bg_data = await r.json()
-                    if bg_data.get("code") == "00000" and bg_data.get("data"):
-                        # Extract every valid symbol (e.g., BTCUSDT, SOLUSDT)
-                        bitget_symbols = {ticker["symbol"] for ticker in bg_data["data"]}
-        except Exception as e:
-            log.error(f"Failed to fetch Bitget markets: {e}")
-            return
-            
-        if not bitget_symbols:
-            log.error("❌ Could not load Bitget markets. Aborting to prevent bad trades.")
+        # 1. Fetch ALL tickers from Bitget
+        tickers = await fetch_bitget_tickers(session)
+        if not tickers:
+            log.error("❌ Failed to fetch Bitget markets.")
             return
 
-        log.info(f"✅ Loaded {len(bitget_symbols)} valid Bitget pairs.")
-
-        # ==========================================
-        # 2. GET COINALYZE MARKETS & FILTER
-        # ==========================================
-        markets_url = f"{BASE_URL}/future-markets"
-        markets = await fetch_coinalyze_safe(session, markets_url)
-        
-        if not markets or not isinstance(markets, list):
-            log.error("❌ Failed to fetch Coinalyze markets.")
-            return
-
-        valid_coinalyze_syms = []
-        
-        for m in markets:
-            raw_sym = m.get("symbol", "")
-            if not raw_sym.endswith("_PERP.A"):
-                continue
+        # 2. Filter out junk coins (Min $1M Volume)
+        valid_coins = []
+        for t in tickers:
+            vol_24h = float(t.get("quoteVolume", 0))
+            if vol_24h > 1000000: 
+                valid_coins.append(t)
                 
-            # Clean Coinalyze symbol to match Bitget (e.g., BTCUSD_PERP.A -> BTCUSDT)
-            clean_sym = raw_sym.split("_")[0].replace("USD", "USDT")
-            
-            # Only keep the coin if it exists on Bitget!
-            if clean_sym in bitget_symbols:
-                valid_coinalyze_syms.append(m["symbol"])
-                
-        log.info(f"🎯 Matched {len(valid_coinalyze_syms)} tradable pairs between Coinalyze and Bitget.")
+        valid_coins.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+        log.info(f"✅ Found {len(valid_coins)} real coins with >$1M volume.")
         
-        # Take top 1000 valid pairs
-        final_syms = valid_coinalyze_syms[:1000]
-        chunks = [final_syms[i:i+20] for i in range(0, len(final_syms), 20)]
+        # Check top 100 highest volume coins
+        top_100 = valid_coins[:100]
         
-        log.info(f"⚡ Processing {len(chunks)} chunks...")
-
-        # ==========================================
-        # 3. FETCH HISTORICAL DATA
-        # ==========================================
-        results = []
-        for chunk in chunks:
-            sym_str = ",".join(chunk)
-            target_url = f"{BASE_URL}/ohlcv-history?symbols={sym_str}&interval=15min&from={ts_24h_ago}&to={now_ts}"
-            data = await fetch_coinalyze_safe(session, target_url)
-            if data and isinstance(data, list):
-                results.extend(data)
-            await asyncio.sleep(0.2)
-
-        scan_time = time.time() - start_time
-        log.info(f"✅ Data gathered in {scan_time:.2f} seconds.")
-
+        # 3. Fetch 15m Candles for these 100 coins concurrently
+        tasks = [fetch_bitget_candles(session, coin["symbol"]) for coin in top_100]
+        all_candles = await asyncio.gather(*tasks)
+        
         top_signals = []
 
-        for item in results:
-            history = item.get("history", [])
-            if len(history) < 90:
+        for idx, candle_data in enumerate(all_candles):
+            if not candle_data or len(candle_data) < 90:
                 continue
+                
+            coin_info = top_100[idx]
+            symbol = coin_info["symbol"]
             
-            # --- 24H BASELINE ---
-            open_24h = history[0]["o"]
-            close_24h = history[-1]["c"]
-            vol_24h = sum([c["v"] for c in history])
-            price_change_24h = ((close_24h - open_24h) / open_24h) * 100 if open_24h > 0 else 0
-            avg_vol_15m_baseline = vol_24h / 96.0
-            ranges_24h = [(c["h"] - c["l"]) / c["l"] for c in history if c["l"] > 0]
-            avg_range_24h = sum(ranges_24h) / len(ranges_24h) if ranges_24h else 0.01
-
-            # --- 15M CURRENT ACTION ---
-            current_candle = history[-1]
-            vol_15m = current_candle["v"]
-            close_price = current_candle["c"]
-            open_price = current_candle["o"]
+            # Bitget returns candles newest-first. [0] is the current 15m candle.
+            current_candle = candle_data[0]
+            close_price = float(current_candle[4])
+            open_price = float(current_candle[1])
+            vol_15m = float(current_candle[5])
+            
+            # Calculate 24h baseline from the 96 candles (24 hours)
+            total_vol_24h = sum([float(c[5]) for c in candle_data])
+            avg_vol_15m_baseline = total_vol_24h / 96.0
+            
             price_change_15m = ((close_price - open_price) / open_price) * 100 if open_price > 0 else 0
+            
+            # Volatility normalization (Mega vs Micro)
+            ranges_24h = [(float(c[2]) - float(c[3])) / float(c[3]) for c in candle_data if float(c[3]) > 0]
+            avg_range_24h = sum(ranges_24h) / len(ranges_24h) if ranges_24h else 0.01
             
             # --- CALCULATE METRICS ---
             vol_surge = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
             move_multiplier = (price_change_15m / 100) / avg_range_24h if avg_range_24h > 0 else 0
             
             # 🚨 STRICT FILTERS 🚨
-            if vol_24h < 1000000: continue # Skip dead coins
-            if abs(price_change_15m) < 1.0: continue # Must move >1%
-            if vol_surge < 2.0: continue # Must have volume spike
-
-            score = abs(price_change_15m) * vol_surge
+            if abs(price_change_15m) < 1.0: continue 
+            if vol_surge < 2.0: continue 
             
+            score = abs(price_change_15m) * vol_surge
             direction = "LONG" if price_change_15m > 0 else "SHORT"
-            clean_sym = item["symbol"].split("_")[0].replace("USD", "")
             
             top_signals.append({
-                "raw_symbol": item["symbol"],
-                "clean_sym": clean_sym,
+                "symbol": symbol,
                 "direction": direction, 
                 "score": score,
                 "move_mult": move_multiplier,
                 "vol_surge": vol_surge,
-                "vol_24h": vol_24h,
+                "vol_24h_usd": float(coin_info["quoteVolume"]),
                 "vol_15m": vol_15m,
-                "change_24h": price_change_24h,
                 "change_15m": price_change_15m
             })
             
@@ -189,23 +133,23 @@ async def main():
             if len(top_signals) > 3:
                 top_signals.pop()
 
+        scan_time = time.time() - start_time
+        log.info(f"✅ Scan complete in {scan_time:.2f} seconds.")
+
         # --- SHOW THE DETAILED BREAKDOWN ---
         if top_signals:
-            log.info("🏆 --- TOP 3 TRADABLE BITGET PAIRS ---")
+            log.info("🏆 --- TOP 3 REAL BITGET PAIRS ---")
             for idx, sig in enumerate(top_signals):
-                log.info(f"--- RANK {idx+1}: {sig['clean_sym']} ({sig['direction']}) | Score: {sig['score']:.2f} ---")
-                log.info(f"  [24H Data]  Volume: {sig['vol_24h']:,.0f} | Price Change: {sig['change_24h']:+.2f}%")
-                log.info(f"  [15M Data]  Volume: {sig['vol_15m']:,.0f} | Price Change: {sig['change_15m']:+.2f}%")
+                log.info(f"--- RANK {idx+1}: {sig['symbol']} ({sig['direction']}) | Score: {sig['score']:.2f} ---")
+                log.info(f"  [24H Data]  True Bitget Vol: ${sig['vol_24h_usd']:,.0f}")
+                log.info(f"  [15M Data]  Vol: {sig['vol_15m']:,.0f} | Price Change: {sig['change_15m']:+.2f}%")
                 log.info(f"  [Imbalance] 15M Volume is {sig['vol_surge']:.1f}x normal")
 
             best_signal = top_signals[0]
-            raw_sym = best_signal["raw_symbol"].split("_")[0]
-            sym = raw_sym + "T" if raw_sym.endswith("USD") else raw_sym
-            
-            log.info(f"🎯 SELECTED BEST: {sym} {best_signal['direction']}")
-            payload = {"symbol": sym, "direction": best_signal["direction"], "is_paper": is_paper}
+            log.info(f"🎯 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
+            payload = {"symbol": best_signal["symbol"], "direction": best_signal["direction"], "is_paper": is_paper}
         else:
-            log.warning("❌ No tradable Bitget coins passed the filters (Vol > $1M, Move > 1%). Waiting...")
+            log.warning("❌ No Bitget coins passed the filters (Vol > $1M, Move > 1%). Waiting...")
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
         # Send to Cloudflare Webhook
