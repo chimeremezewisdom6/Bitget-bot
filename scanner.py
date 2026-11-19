@@ -36,8 +36,9 @@ async def fetch_bitget_tickers(session):
         log.error(f"Failed to fetch Bitget tickers: {e}")
     return []
 
-async def fetch_bitget_candles(session, symbol):
-    params = {"symbol": symbol, "granularity": "15m", "limit": "96"}
+async def fetch_bitget_1m_candles(session, symbol):
+    # Fetch the last 15 1-minute candles
+    params = {"symbol": symbol, "granularity": "1m", "limit": "15"}
     try:
         async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
             if r.status == 200:
@@ -52,7 +53,7 @@ async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning Bitget (Time Compression Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Bitget (Step Counting Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
     
     start_time = time.time()
     
@@ -72,75 +73,72 @@ async def main():
         valid_coins.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
         log.info(f"✅ Found {len(valid_coins)} real coins with >$1M volume.")
         
-        # 2. Fetch 15m Candles for Top 100 coins
+        # 2. Fetch 1m Candles for Top 100 coins
         top_100 = valid_coins[:100]
-        tasks = [fetch_bitget_candles(session, coin["symbol"]) for coin in top_100]
+        tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in top_100]
         all_candles = await asyncio.gather(*tasks)
         
         top_signals = []
 
         for idx, candle_data in enumerate(all_candles):
-            if not candle_data or len(candle_data) < 90:
+            if not candle_data or len(candle_data) < 5:
                 continue
                 
             coin_info = top_100[idx]
             symbol = coin_info["symbol"]
             
-            current_candle = candle_data[0]
+            # Count steps (wicks) in the last 15 minutes
+            up_steps = 0
+            down_steps = 0
+            total_15m_move_pct = 0.0
             
-            # --- 15M DATA ---
-            open_15m = float(current_candle[1])
-            high_15m = float(current_candle[2])
-            low_15m = float(current_candle[3])
-            close_15m = float(current_candle[4])
-            vol_15m = float(current_candle[5])
+            # candle_data[0] is the most recent 1m candle
+            # candle_data[-1] is the candle 15 minutes ago
+            open_15m = float(candle_data[-1][1])
+            close_15m = float(candle_data[0][4])
             
-            # --- 24H DATA ---
-            open_24h = float(candle_data[-1][1])
-            close_24h = close_15m
-            total_vol_24h = sum([float(c[5]) for c in candle_data])
-            avg_vol_15m_baseline = total_vol_24h / 96.0
+            if open_15m > 0:
+                total_15m_move_pct = ((close_15m - open_15m) / open_15m) * 100
+
+            for c in candle_data:
+                o = float(c[1])
+                cl = float(c[4])
+                if cl > o:
+                    up_steps += 1
+                elif cl < o:
+                    down_steps += 1
             
-            # --- CALCULATE CHANGES ---
-            change_15m = ((close_15m - open_15m) / open_15m) * 100 if open_15m > 0 else 0
-            change_24h = ((close_24h - open_24h) / open_24h) * 100 if open_24h > 0 else 0
+            # Determine direction and dominance ratio
+            if up_steps == 0 and down_steps == 0:
+                continue # Doji flat, skip
+                
+            if up_steps > down_steps:
+                direction = "LONG"
+                # Calculate how many times more up steps than down steps
+                dominance_ratio = up_steps / down_steps if down_steps > 0 else up_steps
+            elif down_steps > up_steps:
+                direction = "SHORT"
+                dominance_ratio = down_steps / up_steps if up_steps > 0 else down_steps
+            else:
+                continue # Perfect tie, skip
             
-            # --- NOISE FILTER ---
-            candle_range = high_15m - low_15m
-            candle_body = abs(close_15m - open_15m)
-            if candle_range == 0: continue
-            body_ratio = candle_body / candle_range
-            
-            # 🚨 ONLY BASIC FILTERS TO ENSURE REAL TRADES 🚨
-            # 1. Must move at least 1% in 15m
-            if abs(change_15m) < 1.0: continue 
-            # 2. Volume must be surging (Takers present)
-            vol_surge = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
-            if vol_surge < 1.5: continue
-            # 3. Noise filter (No huge wicks)
-            if body_ratio < 0.50: continue
-            
-            # --- TIME COMPRESSION LOGIC ---
-            # How close is the 15m move to the 24h move? (Absolute values)
-            # If change_24h is 0.1 and change_15m is 5.0, ratio is 50x (Huge compression)
-            aggression_ratio = abs(change_15m) / abs(change_24h) if abs(change_24h) > 0.1 else abs(change_15m) * 10
-            
-            # Score: Aggression Ratio * Volume Surge * Body Ratio
-            score = aggression_ratio * vol_surge * body_ratio
-            
-            # Determine direction based purely on the 15m candle
-            direction = "LONG" if change_15m > 0 else "SHORT"
+            # We want coins that actually moved in the 15m window
+            if abs(total_15m_move_pct) < 0.1:
+                continue
+                
+            # Score is the dominance ratio multiplied by the actual percentage move
+            # This ensures a 6-to-2 step with 2% move beats a 6-to-2 step with 0.5% move
+            score = dominance_ratio * abs(total_15m_move_pct)
             
             top_signals.append({
                 "symbol": symbol,
-                "direction": direction, 
-                "score": score,
-                "vol_surge": vol_surge,
-                "body_ratio": body_ratio,
-                "change_24h": change_24h,
-                "change_15m": change_15m,
-                "aggression_ratio": aggression_ratio,
-                "vol_24h_usd": float(coin_info["quoteVolume"])
+                "direction": direction,
+                "up_steps": up_steps,
+                "down_steps": down_steps,
+                "dominance_ratio": dominance_ratio,
+                "change_15m": total_15m_move_pct,
+                "vol_24h_usd": float(coin_info["quoteVolume"]),
+                "score": score
             })
             
             top_signals.sort(key=lambda x: x["score"], reverse=True)
@@ -152,20 +150,19 @@ async def main():
 
         # --- SHOW THE DETAILED BREAKDOWN ---
         if top_signals:
-            log.info("🏆 --- TOP 3 BEST PAIRS (Time Compression) ---")
+            log.info("🏆 --- TOP 3 BEST COINS (Step Dominance) ---")
             for idx, sig in enumerate(top_signals):
                 log.info(f"--- RANK {idx+1}: {sig['symbol']} ({sig['direction']}) | Score: {sig['score']:.2f} ---")
-                log.info(f"  [24H Data]  True Vol: ${sig['vol_24h_usd']:,.0f} | Price Change: {sig['change_24h']:+.2f}%")
-                log.info(f"  [15M Data]  Price Change: {sig['change_15m']:+.2f}% (Vol Surge: {sig['vol_surge']:.1f}x)")
-                log.info(f"  [Compression] 15m move is {sig['aggression_ratio']*100:.1f}% of the 24h move!")
-                log.info(f"  [Noise Check] 15m Candle Body is {sig['body_ratio']*100:.1f}% of total range.")
+                log.info(f"  [24H Data]  True Vol: ${sig['vol_24h_usd']:,.0f}")
+                log.info(f"  [15M Data]  Price Change: {sig['change_15m']:+.2f}%")
+                log.info(f"  [Steps]     {sig['up_steps']} UP steps vs {sig['down_steps']} DOWN steps")
+                log.info(f"  [Dominance] {sig['dominance_ratio']:.2f}x stronger on the {sig['direction']} side")
 
-            # Since we only add signals that pass the basic filters, the #1 result is our best available option
             best_signal = top_signals[0]
             log.info(f"🎯 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
             payload = {"symbol": best_signal["symbol"], "direction": best_signal["direction"], "is_paper": is_paper}
         else:
-            log.warning("❌ Market is completely dead (No coin moved >1% with volume). Waiting...")
+            log.warning("❌ Market is completely dead. No valid candles found.")
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
         # Send to Cloudflare Webhook
