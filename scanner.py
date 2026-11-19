@@ -22,8 +22,7 @@ class KeyManager:
         self.key_index = 0
 
     def get_key(self):
-        if not self.keys:
-            return ""
+        if not self.keys: return ""
         key = self.keys[self.key_index]
         self.key_index = (self.key_index + 1) % len(self.keys)
         return key
@@ -40,7 +39,6 @@ def get_win_streak():
     return 0
 
 async def fetch_coinalyze_safe(session, target_url):
-    """Sequential fetch with auto-retry and key rotation"""
     for attempt in range(3):
         api_key = key_manager.get_key()
         try:
@@ -48,7 +46,6 @@ async def fetch_coinalyze_safe(session, target_url):
                 if r.status == 200:
                     return await r.json()
                 elif r.status == 429:
-                    # Wait 0.5s and try again with the NEXT key
                     await asyncio.sleep(0.5)
                     continue
                 else:
@@ -62,38 +59,33 @@ async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning Top 1000 (Sequential Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Top 1000 (Strict Filter Mode)... (Streak: {wins}/8 | Mode: {mode_text})")
     
     start_time = time.time()
     now_ts = int(time.time())
     ts_24h_ago = now_ts - 86400
     
     async with aiohttp.ClientSession() as session:
-        # 1. Fetch Markets List
         markets_url = f"{BASE_URL}/future-markets"
         markets = await fetch_coinalyze_safe(session, markets_url)
         
         if not markets or not isinstance(markets, list):
-            log.error("❌ Failed to fetch markets. Keys might be invalid.")
+            log.error("❌ Failed to fetch markets.")
             return
 
         all_syms = [m["symbol"] for m in markets if m.get("symbol", "").endswith("_PERP.A")][:1000]
-        
-        # 2. Slice into chunks of 20 (Coinalyze Max)
         chunks = [all_syms[i:i+20] for i in range(0, len(all_syms), 20)]
-        log.info(f"⚡ Processing {len(chunks)} chunks sequentially to avoid burst limits...")
+        
+        log.info(f"⚡ Processing {len(chunks)} chunks with strict filters (Vol > $1M, Move > 1%)...")
 
         results = []
-        for idx, chunk in enumerate(chunks):
+        for chunk in chunks:
             sym_str = ",".join(chunk)
             target_url = f"{BASE_URL}/ohlcv-history?symbols={sym_str}&interval=15min&from={ts_24h_ago}&to={now_ts}"
-            
             data = await fetch_coinalyze_safe(session, target_url)
             if data and isinstance(data, list):
                 results.extend(data)
-            
-            # Strict 0.2s pause between requests to prevent burst limits
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2) # Safe delay
 
         scan_time = time.time() - start_time
         log.info(f"✅ Data gathered in {scan_time:.2f} seconds.")
@@ -121,41 +113,57 @@ async def main():
             open_price = current_candle["o"]
             price_change_15m = ((close_price - open_price) / open_price) * 100 if open_price > 0 else 0
             
-            # --- CALCULATE IMBALANCE (SCORE) ---
+            # --- CALCULATE METRICS ---
             vol_surge = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
             move_multiplier = (price_change_15m / 100) / avg_range_24h if avg_range_24h > 0 else 0
-            score = abs(move_multiplier) * vol_surge
             
-            if score > 0:
-                direction = "LONG" if price_change_15m > 0 else "SHORT"
-                clean_sym = item["symbol"].split("_")[0].replace("USD", "")
+            # ==========================================
+            # 🚨 HARD FILTERS (REJECT WEAK COINS) 🚨
+            # ==========================================
+            # 1. Reject if 24h volume is under 1,000,000
+            if vol_24h < 1000000:
+                continue
+            
+            # 2. Reject if 15m price change is less than 1.0%
+            if abs(price_change_15m) < 1.0:
+                continue
                 
-                top_signals.append({
-                    "raw_symbol": item["symbol"],
-                    "clean_sym": clean_sym,
-                    "direction": direction, 
-                    "score": score,
-                    "move_mult": move_multiplier,
-                    "vol_surge": vol_surge,
-                    "vol_24h": vol_24h,
-                    "vol_15m": vol_15m,
-                    "change_24h": price_change_24h,
-                    "change_15m": price_change_15m
-                })
-                
-                top_signals.sort(key=lambda x: x["score"], reverse=True)
-                if len(top_signals) > 3:
-                    top_signals.pop()
+            # 3. Reject if volume surge is less than 2.0x normal
+            if vol_surge < 2.0:
+                continue
+
+            # If it passes all filters, calculate score
+            score = abs(price_change_15m) * vol_surge
+            
+            direction = "LONG" if price_change_15m > 0 else "SHORT"
+            clean_sym = item["symbol"].split("_")[0].replace("USD", "")
+            
+            top_signals.append({
+                "raw_symbol": item["symbol"],
+                "clean_sym": clean_sym,
+                "direction": direction, 
+                "score": score,
+                "move_mult": move_multiplier,
+                "vol_surge": vol_surge,
+                "vol_24h": vol_24h,
+                "vol_15m": vol_15m,
+                "change_24h": price_change_24h,
+                "change_15m": price_change_15m
+            })
+            
+            top_signals.sort(key=lambda x: x["score"], reverse=True)
+            if len(top_signals) > 3:
+                top_signals.pop()
 
         # --- SHOW THE DETAILED BREAKDOWN ---
         if top_signals:
-            log.info("🏆 --- TOP 3 PAIRS WITH HIGHEST IMBALANCE ---")
+            log.info("🏆 --- TOP 3 PAIRS THAT PASSED THE FILTERS ---")
             for idx, sig in enumerate(top_signals):
                 log.info(f"--- RANK {idx+1}: {sig['clean_sym']} ({sig['direction']}) | Score: {sig['score']:.2f} ---")
                 log.info(f"  [24H Data]  Volume: {sig['vol_24h']:,.0f} | Price Change: {sig['change_24h']:+.2f}%")
                 log.info(f"  [15M Data]  Volume: {sig['vol_15m']:,.0f} | Price Change: {sig['change_15m']:+.2f}%")
                 log.info(f"  [Imbalance] 15M Volume is {sig['vol_surge']:.1f}x normal | 15M Move is {sig['move_mult']:.1f}x normal")
-                log.info(f"  => Takers are aggressively pushing {sig['direction']} while passive limit orders are overwhelmed.")
+                log.info(f"  => Takers are aggressively pushing {sig['direction']}!")
 
             best_signal = top_signals[0]
             raw_sym = best_signal["raw_symbol"].split("_")[0]
@@ -164,7 +172,7 @@ async def main():
             log.info(f"🎯 SELECTED BEST: {sym} {best_signal['direction']}")
             payload = {"symbol": sym, "direction": best_signal["direction"], "is_paper": is_paper}
         else:
-            log.warning("❌ Failed to gather enough data.")
+            log.warning("❌ No coins passed the strict filters this scan (Vol > $1M, Move > 1%). Waiting...")
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
         # Send to Cloudflare Webhook
