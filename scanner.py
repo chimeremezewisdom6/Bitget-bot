@@ -35,7 +35,7 @@ async def fetch_coinalyze_batch(session, endpoint, params):
                 if r.status == 200:
                     return await r.json()
                 elif r.status == 429:
-                    continue
+                    continue # Rotate to next key
         except Exception:
             continue
     return None
@@ -44,7 +44,7 @@ async def main():
     wins = get_win_streak()
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
-    log.info(f"🛰️ Scanning Top 1000 for the BEST pair... (Streak: {wins}/8 | Mode: {mode_text})")
+    log.info(f"🛰️ Scanning Top 1000 (Coinalyze 30+ Exchange Aggregate)... (Streak: {wins}/8 | Mode: {mode_text})")
     
     now_ts = int(time.time())
     ts_24h_ago = now_ts - 86400
@@ -52,12 +52,12 @@ async def main():
     async with aiohttp.ClientSession() as session:
         markets = await fetch_coinalyze_batch(session, "future-markets", {})
         if not markets:
+            log.error("❌ Failed to fetch markets from Coinalyze.")
             return
 
         all_syms = [m["symbol"] for m in markets if m.get("symbol", "").endswith("_PERP.A")][:1000]
         
-        best_signal = None
-        highest_score = -1 # Start at -1 so the first coin evaluated always becomes the baseline
+        top_signals = []
 
         for i in range(0, len(all_syms), 50):
             chunk = all_syms[i:i+50]
@@ -66,6 +66,7 @@ async def main():
             })
             
             if not data_24h_15m:
+                await asyncio.sleep(1.5) # Prevent rate limit
                 continue
                 
             for item in data_24h_15m:
@@ -74,8 +75,17 @@ async def main():
                     continue
                 
                 # --- 24H BASELINE ---
+                open_24h = history[0]["o"]
+                close_24h = history[-1]["c"]
                 vol_24h = sum([c["v"] for c in history])
+                
+                # 24h Price Change %
+                price_change_24h = ((close_24h - open_24h) / open_24h) * 100 if open_24h > 0 else 0
+                
+                # Average 15m volume over the last 24 hours
                 avg_vol_15m_baseline = vol_24h / 96.0
+                
+                # Average 15m price range over the last 24 hours (Volatility)
                 ranges_24h = [(c["h"] - c["l"]) / c["l"] for c in history if c["l"] > 0]
                 avg_range_24h = sum(ranges_24h) / len(ranges_24h) if ranges_24h else 0.01
 
@@ -85,42 +95,63 @@ async def main():
                 close_price = current_candle["c"]
                 open_price = current_candle["o"]
                 
-                price_change_15m = (close_price - open_price) / open_price if open_price > 0 else 0
+                # 15m Price Change %
+                price_change_15m = ((close_price - open_price) / open_price) * 100 if open_price > 0 else 0
                 
-                # --- SCORING (NO STRICT FILTERS) ---
-                # We calculate the score for EVERY coin to find the mathematically best one
-                vol_multiplier = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
-                normalized_move = price_change_15m / avg_range_24h if avg_range_24h > 0 else 0
+                # --- CALCULATE IMBALANCE (SCORE) ---
+                # How much bigger is the 15m volume compared to the 24h average?
+                vol_surge = vol_15m / avg_vol_15m_baseline if avg_vol_15m_baseline > 0 else 0
                 
-                # Score = Volume Surge * Normalized Percentage Move
-                score = abs(normalized_move) * vol_multiplier
+                # How much bigger is the 15m price move compared to the normal 15m move?
+                move_multiplier = (price_change_15m / 100) / avg_range_24h if avg_range_24h > 0 else 0
                 
-                # We only care about direction if there is actual movement
+                score = abs(move_multiplier) * vol_surge
+                
                 if score > 0:
-                    direction = "LONG" if normalized_move > 0 else "SHORT"
+                    direction = "LONG" if price_change_15m > 0 else "SHORT"
+                    clean_sym = item["symbol"].split("_")[0].replace("USD", "")
                     
-                    if score > highest_score:
-                        highest_score = score
-                        best_signal = {
-                            "symbol": item["symbol"], 
-                            "direction": direction, 
-                            "score": score,
-                            "move": normalized_move,
-                            "vol_mult": vol_multiplier
-                        }
+                    top_signals.append({
+                        "raw_symbol": item["symbol"],
+                        "clean_sym": clean_sym,
+                        "direction": direction, 
+                        "score": score,
+                        "move_mult": move_multiplier,
+                        "vol_surge": vol_surge,
+                        "vol_24h": vol_24h,
+                        "vol_15m": vol_15m,
+                        "change_24h": price_change_24h,
+                        "change_15m": price_change_15m
+                    })
+                    
+                    # Sort and keep only the top 3
+                    top_signals.sort(key=lambda x: x["score"], reverse=True)
+                    if len(top_signals) > 3:
+                        top_signals.pop()
+            
+            await asyncio.sleep(1.5) # Prevent rate limit
 
-        # Send the absolute best found to Cloudflare
-        if best_signal:
-            raw_sym = best_signal["symbol"].split("_")[0]
+        # --- SHOW THE DETAILED BREAKDOWN ---
+        if top_signals:
+            log.info("🏆 --- TOP 3 PAIRS WITH HIGHEST IMBALANCE (Weak Side Detected) ---")
+            for idx, sig in enumerate(top_signals):
+                log.info(f"--- RANK {idx+1}: {sig['clean_sym']} ({sig['direction']}) | Score: {sig['score']:.2f} ---")
+                log.info(f"  [24H Data]  Volume: {sig['vol_24h']:,.0f} | Price Change: {sig['change_24h']:+.2f}%")
+                log.info(f"  [15M Data]  Volume: {sig['vol_15m']:,.0f} | Price Change: {sig['change_15m']:+.2f}%")
+                log.info(f"  [Imbalance] 15M Volume is {sig['vol_surge']:.1f}x normal | 15M Move is {sig['move_mult']:.1f}x normal")
+                log.info(f"  => Takers are aggressively pushing {sig['direction']} while passive limit orders are overwhelmed.")
+
+            best_signal = top_signals[0]
+            raw_sym = best_signal["raw_symbol"].split("_")[0]
             sym = raw_sym + "T" if raw_sym.endswith("USD") else raw_sym
             
-            log.info(f"🎯 BEST PAIR: {best_signal['direction']} on {sym}")
-            log.info(f"   Score: {best_signal['score']:.2f} | Move Mult: {best_signal['move']:.2f}x | Vol Surge: {best_signal['vol_mult']:.1f}x")
-            
+            log.info(f"🎯 SELECTED BEST: {sym} {best_signal['direction']}")
             payload = {"symbol": sym, "direction": best_signal["direction"], "is_paper": is_paper}
         else:
+            log.warning("❌ Failed to gather enough data. (Check API limits).")
             payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
 
+        # Send to Cloudflare
         headers = {"X-Webhook-Secret": WEBHOOK_SECRET}
         async with session.post(CLOUDFLARE_URL, json=payload, headers=headers) as resp:
             if resp.status == 200:
