@@ -148,15 +148,13 @@ export default {
         }
       }
       // =========================================================================
-      // 2. NO ACTIVE TRADE -> OPEN NEW SIGNAL (9/10 OR 10/10 CANDLE MOMENTUM)
+      // 2. NO ACTIVE TRADE -> OPEN NEW SIGNAL
       // =========================================================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({
             status: "WAITING",
-            message: "No 9/10 or 10/10 momentum signals found.",
-            best_long: signal.best_long || "N/A",
-            best_short: signal.best_short || "N/A"
+            message: "No momentum signals found."
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
