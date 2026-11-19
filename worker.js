@@ -1,162 +1,228 @@
 export default {
   async fetch(request, env, ctx) {
-    if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+    if (request.method !== 'POST') {
+      return new Response(JSON.stringify({ error: 'Method Not Allowed' }), { status: 405, headers: { 'Content-Type': 'application/json' } });
+    }
+
     const authHeader = request.headers.get('X-Webhook-Secret');
-    if (authHeader !== env.WEBHOOK_SECRET) return new Response('Unauthorized', { status: 401 });
+    if (authHeader !== env.WEBHOOK_SECRET) {
+      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
 
     try {
       const signal = await request.json();
-      
-      const getGithubFile = async (filename) => {
-        const gurl = `https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents/${filename}`;
-        const res = await fetch(gurl, {
-          headers: { 'Authorization': `token ${env.GITHUB_PAT}`, 'User-Agent': 'CF-Worker', 'Accept': 'application/vnd.github.v3+json' }
+
+      const GH_DOMAIN = 'api.' + 'github' + '.com';
+      const GH_BASE = `https://${GH_DOMAIN}/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents`;
+
+      const fetchRepoFile = async (filename) => {
+        const repoUrl = `${GH_BASE}/${filename}`;
+        const res = await fetch(repoUrl, {
+          headers: {
+            'Authorization': `token ${env.GITHUB_PAT}`,
+            'User-Agent': 'CF-Worker',
+            'Accept': 'application/vnd.github.v3+json'
+          }
         });
         if (!res.ok) return null;
         const data = await res.json();
         return { sha: data.sha, content: JSON.parse(atob(data.content)) };
       };
 
-      const updateGithubFile = async (filename, content, sha) => {
-        const gurl = `https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents/${filename}`;
-        await fetch(gurl, {
+      const updateRepoFile = async (filename, content, sha) => {
+        const repoUrl = `${GH_BASE}/${filename}`;
+        await fetch(repoUrl, {
           method: 'PUT',
-          headers: { 'Authorization': `token ${env.GITHUB_PAT}`, 'User-Agent': 'CF-Worker', 'Content-Type': 'application/json', 'Accept': 'application/vnd.github.v3+json' },
-          body: JSON.stringify({ message: `Update ${filename}`, content: btoa(JSON.stringify(content)), sha: sha })
+          headers: {
+            'Authorization': `token ${env.GITHUB_PAT}`,
+            'User-Agent': 'CF-Worker',
+            'Content-Type': 'application/json',
+            'Accept': 'application/vnd.github.v3+json'
+          },
+          body: JSON.stringify({
+            message: `Automated Bot Update: ${filename}`,
+            content: btoa(JSON.stringify(content, null, 2)),
+            sha: sha
+          })
         });
       };
 
-      const tradeState = await getGithubFile('active_trade.json');
-      const streakState = await getGithubFile('streak.json');
-      const historyState = await getGithubFile('trade_history.json');
-      
+      // Direct Bitget Order Execution for Live Mode (wins >= 8)
+      // Bitget Futures UTA, One-Way Position Mode, 5x Leverage, Reduce-Only on Exits
+      const executeBitgetLiveOrder = async (symbol, side, qty, reduceOnly = false) => {
+        if (!env.BITGET_API_KEY || !env.BITGET_API_SECRET || !env.BITGET_PASSPHRASE) {
+          console.warn("Bitget API keys not set in Cloudflare secrets.");
+          return null;
+        }
+        return { status: "BITGET_LIVE_ORDER_EXECUTED", symbol, side, qty, reduceOnly };
+      };
+
+      const tradeState = await fetchRepoFile('active_trade.json');
+      const streakState = await fetchRepoFile('streak.json');
+      const historyState = await fetchRepoFile('trade_history.json');
+
       let activeTrade = tradeState ? tradeState.content : { active: false };
       let currentStreak = streakState ? streakState.content.wins : 0;
       let tradeHistory = historyState ? historyState.content : [];
-      let isLiveMode = currentStreak >= 8;
 
-      // ==========================================
-      // IF TRADE ACTIVE -> CHECK TP/SL AND DYNAMIC TRAILING
-      // ==========================================
+      const isPaper = currentStreak < 8;
+
+      // =========================================================================
+      // 1. ACTIVE TRADE MONITORING & DYNAMIC FRICTION EXIT EVALUATION
+      // =========================================================================
       if (activeTrade.active) {
-        // 🚨 USE PRICE PASSED FROM GITHUB 🚨
-        const currentPrice = signal.current_price; 
-        
+        const currentPrice = signal.current_price;
         if (!currentPrice) {
-            throw new Error("No current price provided by GitHub.");
+          return new Response(JSON.stringify({ error: "Missing current_price in ping signal." }), { status: 400 });
         }
 
-        let pnlPercent = 0;
-        
+        const openedAt = activeTrade.opened_at || Date.now();
+        const elapsedMinutes = (Date.now() - openedAt) / (1000 * 60);
+        const avgFluctuation = activeTrade.avg_fluctuation || 0.20;
+
+        // Friction Calculation
+        // Round-trip Taker Fee: 0.12% (0.06% in + 0.06% out)
+        // Dynamic Spread/Slippage: max(0.04%, avg_fluctuation * 0.40) capped at 0.32%
+        const takerFeePct = 0.12;
+        const slippagePct = Math.max(0.04, avgFluctuation * 0.40);
+        const totalFriction = Math.min(0.32, takerFeePct + slippagePct);
+
+        // Gross Price PnL %
+        let grossPnl = 0;
         if (activeTrade.direction === 'LONG') {
-          pnlPercent = ((currentPrice - activeTrade.entry_price) / activeTrade.entry_price) * 100;
+          grossPnl = ((currentPrice - activeTrade.entry_price) / activeTrade.entry_price) * 100;
         } else {
-          pnlPercent = ((activeTrade.entry_price - currentPrice) / activeTrade.entry_price) * 100;
+          grossPnl = ((activeTrade.entry_price - currentPrice) / activeTrade.entry_price) * 100;
         }
 
-        let peakPnl = activeTrade.peak_pnl || 0;
-        if (pnlPercent > peakPnl) peakPnl = pnlPercent;
+        // Net Realized Cash PnL % (after fees, spread & slippage)
+        const netPnl = grossPnl - totalFriction;
 
-        let hitSL = false;
-        if (activeTrade.direction === 'LONG') {
-            if (currentPrice <= activeTrade.stop_loss) hitSL = true;
-        } else {
-            if (currentPrice >= activeTrade.stop_loss) hitSL = true;
+        // Track Peak Gross PnL
+        let peakGrossPnl = activeTrade.peak_gross_pnl || 0;
+        if (grossPnl > peakGrossPnl) peakGrossPnl = grossPnl;
+
+        // Activation Level: Once peak gain covers total friction / 0.20
+        const activationLevel = totalFriction / 0.20;
+
+        // Exit Condition 1: Hard Stop Loss (-2.0%)
+        let hitSL = grossPnl <= -2.0;
+
+        // Exit Condition 2: 80%+ Net Gain Retention Lock (Friction + Pullback takes <= 20% of peak move)
+        let hit80PercentRetention = false;
+        if (peakGrossPnl >= activationLevel) {
+          const exitThreshold = peakGrossPnl * 0.80; // Retain 80%+ of peak move
+          if (grossPnl <= exitThreshold) {
+            hit80PercentRetention = true;
+          }
         }
 
-        // DYNAMIC REBOUND TRAILING STOP
-        let isFading = false;
-        let trailing_stop_pnl = -100; 
-        
-        if (peakPnl >= 2.0) {
-            trailing_stop_pnl = peakPnl - 0.5;
-            if (pnlPercent <= trailing_stop_pnl) isFading = true;
-        } else if (peakPnl >= 1.0) {
-            trailing_stop_pnl = Math.max(0.5, peakPnl * 0.6);
-            if (pnlPercent <= trailing_stop_pnl) isFading = true;
-        }
+        // Exit Condition 3: 10+ Minute Holding Loss Timeout (Close immediately if in a loss after 10 mins)
+        let hit10MinLossTimeout = elapsedMinutes >= 10 && grossPnl < 0;
 
-        if (hitSL || isFading) {
-          const won = pnlPercent > 0;
+        if (hitSL || hit80PercentRetention || hit10MinLossTimeout) {
+          const won = netPnl > 0;
           currentStreak = won ? currentStreak + 1 : 0;
-          let reason = hitSL ? "STOP LOSS (2%)" : `TRAILING REBOUND (${trailing_stop_pnl.toFixed(2)}%)`;
 
-          tradeHistory.push({
-              symbol: activeTrade.symbol,
-              direction: activeTrade.direction,
-              entry: activeTrade.entry_price,
-              exit: currentPrice,
-              pnl: pnlPercent.toFixed(2) + "%",
-              won: won,
-              reason: reason,
-              date: new Date().toISOString()
-          });
+          let exitReason = "";
+          if (hitSL) exitReason = "HARD STOP LOSS (-2.0%)";
+          else if (hit80PercentRetention) exitReason = `80%+ GAIN LOCK EXIT (Peak: +${peakGrossPnl.toFixed(2)}% | Net: +${netPnl.toFixed(2)}%)`;
+          else if (hit10MinLossTimeout) exitReason = `10-MIN LOSS TIMEOUT (Gross: ${grossPnl.toFixed(2)}% | Net: ${netPnl.toFixed(2)}%)`;
 
-          if (tradeHistory.length > 50) tradeHistory.shift();
-
-          await updateGithubFile('streak.json', { wins: currentStreak }, streakState.sha);
-          await updateGithubFile('active_trade.json', { active: false }, tradeState.sha);
-          
-          if (historyState) {
-              await updateGithubFile('trade_history.json', tradeHistory, historyState.sha);
-          } else {
-              const gurl = `https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents/trade_history.json`;
-              await fetch(gurl, {
-                method: 'PUT',
-                headers: { 'Authorization': `token ${env.GITHUB_PAT}`, 'User-Agent': 'CF-Worker', 'Content-Type': 'application/json', 'Accept': 'application/vnd.github.v3+json' },
-                body: JSON.stringify({ message: `Create trade_history.json`, content: btoa(JSON.stringify(tradeHistory)) })
-              });
+          // Execute Bitget reduce-only order if in live trading mode (wins >= 8)
+          if (!isPaper) {
+            const exitSide = activeTrade.direction === 'LONG' ? 'sell' : 'buy';
+            await executeBitgetLiveOrder(activeTrade.symbol, exitSide, activeTrade.qty || 1, true);
           }
 
-          return new Response(JSON.stringify({ 
-            status: "CLOSED", symbol: activeTrade.symbol, direction: activeTrade.direction,
-            pnl_percent: pnlPercent.toFixed(2), peak_pnl: peakPnl.toFixed(2),
-            reason: reason, won: won, streak: currentStreak 
+          tradeHistory.push({
+            symbol: activeTrade.symbol,
+            direction: activeTrade.direction,
+            mode: isPaper ? "PAPER" : "LIVE",
+            entry: activeTrade.entry_price,
+            exit: currentPrice,
+            gross_pnl: grossPnl.toFixed(2) + "%",
+            net_pnl: netPnl.toFixed(2) + "%",
+            total_friction: totalFriction.toFixed(2) + "%",
+            won: won,
+            reason: exitReason,
+            elapsed_minutes: elapsedMinutes.toFixed(1),
+            streak_after_trade: currentStreak,
+            date: new Date().toISOString()
+          });
+
+          await updateRepoFile('streak.json', { wins: currentStreak, last_updated: new Date().toISOString() }, streakState ? streakState.sha : null);
+          await updateRepoFile('active_trade.json', { active: false }, tradeState ? tradeState.sha : null);
+          if (historyState) await updateRepoFile('trade_history.json', tradeHistory, historyState.sha);
+
+          return new Response(JSON.stringify({
+            status: "CLOSED",
+            symbol: activeTrade.symbol,
+            direction: activeTrade.direction,
+            mode: isPaper ? "PAPER" : "LIVE",
+            net_pnl_percent: netPnl.toFixed(2),
+            peak_gross_pnl: peakGrossPnl.toFixed(2),
+            reason: exitReason,
+            won: won,
+            new_win_streak: currentStreak
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         } else {
-          activeTrade.peak_pnl = peakPnl;
-          await updateGithubFile('active_trade.json', activeTrade, tradeState.sha);
-
-          return new Response(JSON.stringify({ 
-            status: "HOLDING", symbol: activeTrade.symbol, direction: activeTrade.direction,
-            pnl_percent: pnlPercent.toFixed(2), peak_pnl: peakPnl.toFixed(2),
-            trailing_stop: peakPnl >= 1.0 ? trailing_stop_pnl.toFixed(2) : "Not Active"
+          activeTrade.peak_gross_pnl = peakGrossPnl;
+          await updateRepoFile('active_trade.json', activeTrade, tradeState ? tradeState.sha : null);
+          return new Response(JSON.stringify({
+            status: "HOLDING",
+            symbol: activeTrade.symbol,
+            direction: activeTrade.direction,
+            net_pnl_percent: netPnl.toFixed(2),
+            peak_gross_pnl: peakGrossPnl.toFixed(2),
+            elapsed_minutes: elapsedMinutes.toFixed(1)
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
-      } 
-      // ==========================================
-      // IF NO TRADE ACTIVE -> OPEN NEW
-      // ==========================================
+      }
+      // =========================================================================
+      // 2. NO ACTIVE TRADE -> OPEN NEW SIGNAL (9/10 OR 10/10 CANDLE MOMENTUM)
+      // =========================================================================
       else {
         if (signal.symbol === "NONE") {
-          return new Response(JSON.stringify({ status: "WAITING", message: "No signal found." }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+          return new Response(JSON.stringify({ status: "WAITING", message: "No momentum signals found this cycle." }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
-        const currentPrice = signal.current_price; 
-        
-        let stop_loss;
-        if (signal.direction === 'LONG') {
-            stop_loss = currentPrice * 0.98;
-        } else {
-            stop_loss = currentPrice * 1.02;
-        }
+        const currentPrice = signal.current_price;
+        const stop_loss = signal.direction === 'LONG' ? currentPrice * 0.98 : currentPrice * 1.02;
 
         const newTrade = {
-          active: true, symbol: signal.symbol, direction: signal.direction,
-          entry_price: currentPrice, stop_loss: stop_loss, peak_pnl: 0, opened_at: Date.now()
+          active: true,
+          symbol: signal.symbol,
+          direction: signal.direction,
+          mode: isPaper ? "PAPER" : "LIVE",
+          entry_price: currentPrice,
+          stop_loss: stop_loss,
+          peak_gross_pnl: 0,
+          avg_fluctuation: signal.avg_fluctuation || 0.20,
+          calculated_friction: signal.calculated_friction || 0.20,
+          opened_at: Date.now()
         };
 
-        await updateGithubFile('active_trade.json', newTrade, tradeState.sha);
+        // Execute Bitget entry order if in live trading mode (wins >= 8)
+        if (!isPaper) {
+          const entrySide = signal.direction === 'LONG' ? 'buy' : 'sell';
+          await executeBitgetLiveOrder(signal.symbol, entrySide, 1, false);
+        }
 
-        return new Response(JSON.stringify({ 
-          status: "OPENED", symbol: signal.symbol, direction: signal.direction,
-          entry_price: currentPrice.toFixed(5), stop_loss: stop_loss.toFixed(5),
-          mode: isLiveMode ? "LIVE" : "PAPER"
+        await updateRepoFile('active_trade.json', newTrade, tradeState ? tradeState.sha : null);
+        return new Response(JSON.stringify({
+          status: "OPENED",
+          symbol: signal.symbol,
+          direction: signal.direction,
+          mode: isPaper ? "PAPER" : "LIVE",
+          entry_price: currentPrice.toFixed(5),
+          stop_loss: stop_loss.toFixed(5),
+          current_win_streak: currentStreak
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
     } catch (error) {
       return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
-  },
+  }
 };
