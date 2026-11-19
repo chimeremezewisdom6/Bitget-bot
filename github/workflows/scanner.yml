@@ -1,0 +1,23 @@
+name: Run Trading Scanner
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Runs every 5 minutes
+  workflow_dispatch: # Allows manual testing
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Scanner
+        env:
+          COINALYZE_API_KEYS: ${{ secrets.COINALYZE_API_KEYS }}
+          CLOUDFLARE_URL: ${{ secrets.CLOUDFLARE_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: python scanner.py
