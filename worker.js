@@ -22,7 +22,7 @@ export default {
       // PAPER TRADING MODE (Streak < 8)
       // ==========================================
       if (is_paper) {
-        const mockBalance = 1.58; // Using your actual balance for simulation
+        const mockBalance = 1.58; // Your actual balance for simulation
         const mockPrice = 1.00;   
         const leverage = 5;
         
@@ -63,7 +63,6 @@ export default {
           return btoa(String.fromCharCode(...new Uint8Array(sigBuffer)));
         };
 
-        // Using api.bitget.cloud to try and bypass the block
         const BASE_URL = 'https://api.bitget.cloud'; 
 
         // 1. FETCH BALANCE
