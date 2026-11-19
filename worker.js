@@ -32,7 +32,7 @@ export default {
         if (data.code === '00000' && data.data && data.data.length > 0) {
             return parseFloat(data.data[0].lastPr);
         }
-        throw new Error(`Failed to get price for ${sym}`);
+        throw new Error(`Failed to get price for ${sym}. Bitget might be blocking Cloudflare IP.`);
       };
 
       const tradeState = await getGithubFile('active_trade.json');
@@ -42,9 +42,6 @@ export default {
       let currentStreak = streakState ? streakState.content.wins : 0;
       let isLiveMode = currentStreak >= 8;
 
-      // ==========================================
-      // IF TRADE ACTIVE -> CHECK TP/SL AND TRAILING
-      // ==========================================
       if (activeTrade.active) {
         const currentPrice = await getPrice(activeTrade.symbol);
         let pnlPercent = 0;
@@ -58,7 +55,6 @@ export default {
         let peakPnl = activeTrade.peak_pnl || 0;
         if (pnlPercent > peakPnl) peakPnl = pnlPercent;
 
-        // Check Hard Take Profit / Stop Loss
         let hitTP = false;
         let hitSL = false;
 
@@ -70,7 +66,6 @@ export default {
             if (currentPrice >= activeTrade.stop_loss) hitSL = true;
         }
 
-        // Check Trailing Stop (If profit drops by 0.2% from peak, but still positive)
         const isFading = peakPnl > 0.3 && pnlPercent < (peakPnl - 0.2) && pnlPercent > 0;
 
         if (hitTP || hitSL || isFading) {
@@ -88,7 +83,6 @@ export default {
             reason: reason, won: won, streak: currentStreak 
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         } else {
-          // Still holding. Update peak_pnl.
           activeTrade.peak_pnl = peakPnl;
           await updateGithubFile('active_trade.json', activeTrade, tradeState.sha);
 
@@ -98,24 +92,21 @@ export default {
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
       } 
-      // ==========================================
-      // IF NO TRADE ACTIVE -> OPEN NEW
-      // ==========================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({ status: "WAITING", message: "No signal found." }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
-        const currentPrice = await getPrice(signal.symbol);
+        // 🚨 USE THE PRICE PASSED FROM PYTHON INSTEAD OF FETCHING 🚨
+        const currentPrice = signal.current_price || await getPrice(signal.symbol); 
         
-        // DYNAMIC SL/TP BASED ON 15M CANDLE
         let take_profit, stop_loss;
         if (signal.direction === 'LONG') {
-            stop_loss = signal.low_15m * 0.999; // Just below the 15m low
-            take_profit = signal.high_15m * 1.002; // Breakout above 15m high
+            stop_loss = signal.low_15m * 0.999;
+            take_profit = signal.high_15m * 1.002;
         } else {
-            stop_loss = signal.high_15m * 1.001; // Just above the 15m high
-            take_profit = signal.low_15m * 0.998; // Breakdown below 15m low
+            stop_loss = signal.high_15m * 1.001;
+            take_profit = signal.low_15m * 0.998;
         }
 
         const newTrade = {
@@ -133,7 +124,7 @@ export default {
 
         return new Response(JSON.stringify({ 
           status: "OPENED", symbol: signal.symbol, direction: signal.direction,
-          entry_price: currentPrice, take_profit: take_profit.toFixed(5), stop_loss: stop_loss.toFixed(5),
+          entry_price: currentPrice.toFixed(5), take_profit: take_profit.toFixed(5), stop_loss: stop_loss.toFixed(5),
           mode: isLiveMode ? "LIVE" : "PAPER"
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
