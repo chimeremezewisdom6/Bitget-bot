@@ -1,11 +1,3 @@
 {
-  "active": true,
-  "symbol": "IRENUSDT",
-  "direction": "SHORT",
-  "mode": "PAPER",
-  "entry_price": 14.472,
-  "stop_loss": 14.76144,
-  "peak_gross_pnl": 0.4215035931453838,
-  "avg_fluctuation": 0.24,
-  "opened_at": 1795129821042
+  "active": false
 }
