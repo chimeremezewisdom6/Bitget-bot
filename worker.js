@@ -128,6 +128,8 @@ export default {
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
             mode: isPaper ? "PAPER" : "LIVE",
+            entry_price: activeTrade.entry_price,
+            exit_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
             peak_gross_pnl: peakGrossPnl.toFixed(2),
             reason: exitReason,
@@ -141,6 +143,8 @@ export default {
             status: "HOLDING",
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
+            entry_price: activeTrade.entry_price,
+            current_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
             peak_gross_pnl: peakGrossPnl.toFixed(2),
             elapsed_minutes: elapsedMinutes.toFixed(1)
