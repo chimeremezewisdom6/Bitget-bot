@@ -21,7 +21,7 @@ STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
 SEMAPHORE = asyncio.Semaphore(10)
 
-MAX_ALLOWED_FRICTION_PCT = 0.32  # Strict 0.32% Hard Cap on Friction (Fees + Spread)
+MAX_ALLOWED_FRICTION_PCT = 0.32  # Hard Cap on Friction (Fees + Spread)
 
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
@@ -49,9 +49,13 @@ async def fetch_single_price(session, symbol):
     try:
         async with session.get(BITGET_SINGLE_TICKER_URL, params=params, timeout=10) as r:
             if r.status == 200:
-                data = await r.json()
-                if data.get("code") == "00000" and data.get("data"):
-                    return float(data["data"]["lastPr"])
+                resp = await r.json()
+                if resp.get("code") == "00000" and resp.get("data"):
+                    d = resp["data"]
+                    if isinstance(d, list) and len(d) > 0:
+                        return float(d[0].get("lastPr") or d[0].get("last", 0.0))
+                    elif isinstance(d, dict):
+                        return float(d.get("lastPr") or d.get("last", 0.0))
     except Exception as e:
         log.error(f"Price fetch error for {symbol}: {e}")
     return None
@@ -87,23 +91,33 @@ async def main():
 
     log.info(f"🏆 Current Win Streak: {wins}/8 | Mode: {'PAPER TRADING' if is_paper else '🚨 LIVE REAL-MONEY BITGET TRADING'}")
 
+    # =========================================================================
+    # 1. TRADE IS ACTIVE -> FETCH LIVE PRICE & PING CLOUDFLARE WORKER
+    # =========================================================================
     if active_trade:
-        log.info(f"⏳ Trade active on {active_trade['symbol']} ({active_trade['direction']}). Fetching live price for ping...")
+        symbol = active_trade.get("symbol")
+        direction = active_trade.get("direction", "LONG")
+        log.info(f"⏳ Trade active on {symbol} ({direction}). Fetching live price for ping...")
+
         async with aiohttp.ClientSession() as session:
-            current_price = await fetch_single_price(session, active_trade['symbol'])
-            if current_price:
+            current_price = await fetch_single_price(session, symbol)
+            if current_price and current_price > 0:
                 payload = {
-                    "symbol": active_trade['symbol'],
-                    "direction": active_trade['direction'],
+                    "symbol": symbol,
+                    "direction": direction,
                     "is_paper": is_paper,
                     "current_price": current_price,
                     "is_ping": True
                 }
+                log.info(f"📍 Fetched live price for {symbol}: {current_price}")
             else:
-                log.error("Could not fetch current price for active trade.")
+                log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
+    # =========================================================================
+    # 2. NO ACTIVE TRADE -> SCAN TOP 200 VOLUME COINS & EVALUATE SIGNALS
+    # =========================================================================
     else:
-        log.info("🛰️ Scanning Bitget Top 200 Futures ($100k+ Volume, 9/10 Candle Momentum, Anti-Pump Filter, Friction <= 0.32%)...")
+        log.info("🛰️ Scanning Bitget Top 200 Futures ($100k+ Volume, 9/10 Candles, Anti-Spike Filter, Friction <= 0.32%)...")
         async with aiohttp.ClientSession() as session:
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
@@ -158,21 +172,21 @@ async def main():
 
                 avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
 
-                # RULE 1: Average per-minute fluctuation >= 0.20%
+                # FILTER 1: Average per-minute fluctuation >= 0.20%
                 if avg_fluctuation < 0.20:
                     continue
 
-                # RULE 2: Anti-Spike/Pump Filter
-                # If top 2 candles account for >= 80% of total 10-minute range sum, EXCLUDE coin!
+                # FILTER 2: Anti-Spike / 2-Candle Pump Filter
+                # If top 2 largest candles account for >= 80% of total 10m volatility range sum, EXCLUDE!
                 total_range_sum = sum(ranges)
                 sorted_ranges = sorted(ranges, reverse=True)
                 top_2_range_sum = sum(sorted_ranges[:2])
 
                 if total_range_sum > 0 and (top_2_range_sum / total_range_sum) >= 0.80:
-                    log.info(f"⛔ Excluded {symbol}: 2 candles account for {(top_2_range_sum/total_range_sum)*100:.1f}% of 10m move (Spike/Pump Filter).")
+                    log.info(f"⛔ Excluded {symbol}: Top 2 candles account for {(top_2_range_sum/total_range_sum)*100:.1f}% of 10m move (Spike/Pump Filter).")
                     continue
 
-                # RULE 3: Strict 9/10 or 10/10 Candle Consistency
+                # FILTER 3: Strict 9/10 or 10/10 Candle Consistency
                 if green_count >= 9:
                     direction = "LONG"
                     score = (green_count * 10.0) + (avg_fluctuation * 5.0)
@@ -182,7 +196,7 @@ async def main():
                 else:
                     continue
 
-                # RULE 4: Strict Friction Cap Check (Bitget Taker Fee 0.12% + Slippage <= 0.32%)
+                # FILTER 4: Dynamic Friction Hard Cap (Bitget Taker Fee 0.12% + Slippage <= 0.32%)
                 estimated_slippage = max(0.04, avg_fluctuation * 0.40)
                 calculated_friction = 0.12 + estimated_slippage
 
@@ -219,6 +233,9 @@ async def main():
                 log.info("No valid 9/10 momentum signals meeting friction & anti-spike criteria found this cycle.")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper, "is_ping": False}
 
+    # =========================================================================
+    # 3. POST PAYLOAD TO CLOUDFLARE WORKER WEBHOOK
+    # =========================================================================
     headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
     async with aiohttp.ClientSession() as session:
         async with session.post(CLOUDFLARE_URL, json=payload, headers=headers, timeout=15) as resp:
