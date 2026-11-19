@@ -37,9 +37,11 @@ export default {
 
       const tradeState = await getGithubFile('active_trade.json');
       const streakState = await getGithubFile('streak.json');
+      const historyState = await getGithubFile('trade_history.json');
       
       let activeTrade = tradeState ? tradeState.content : { active: false };
       let currentStreak = streakState ? streakState.content.wins : 0;
+      let tradeHistory = historyState ? historyState.content : [];
       let isLiveMode = currentStreak >= 8;
 
       if (activeTrade.active) {
@@ -55,27 +57,59 @@ export default {
         let peakPnl = activeTrade.peak_pnl || 0;
         if (pnlPercent > peakPnl) peakPnl = pnlPercent;
 
-        let hitTP = false;
         let hitSL = false;
-
         if (activeTrade.direction === 'LONG') {
-            if (currentPrice >= activeTrade.take_profit) hitTP = true;
             if (currentPrice <= activeTrade.stop_loss) hitSL = true;
         } else {
-            if (currentPrice <= activeTrade.take_profit) hitTP = true;
             if (currentPrice >= activeTrade.stop_loss) hitSL = true;
         }
 
-        const isFading = peakPnl > 0.3 && pnlPercent < (peakPnl - 0.2) && pnlPercent > 0;
+        let isFading = false;
+        let trailing_stop_pnl = -100; 
+        
+        if (peakPnl >= 2.0) {
+            trailing_stop_pnl = peakPnl - 0.5;
+            if (pnlPercent <= trailing_stop_pnl) isFading = true;
+        } else if (peakPnl >= 1.0) {
+            trailing_stop_pnl = Math.max(0.5, peakPnl * 0.6);
+            if (pnlPercent <= trailing_stop_pnl) isFading = true;
+        }
 
-        if (hitTP || hitSL || isFading) {
+        if (hitSL || isFading) {
           const won = pnlPercent > 0;
           currentStreak = won ? currentStreak + 1 : 0;
-          
-          let reason = hitTP ? "TAKE PROFIT" : hitSL ? "STOP LOSS" : "TRAILING STOP";
+          let reason = hitSL ? "STOP LOSS (2%)" : `TRAILING REBOUND (${trailing_stop_pnl.toFixed(2)}%)`;
 
+          // 🚨 ADD TO TRADE HISTORY 🚨
+          tradeHistory.push({
+              symbol: activeTrade.symbol,
+              direction: activeTrade.direction,
+              entry: activeTrade.entry_price,
+              exit: currentPrice,
+              pnl: pnlPercent.toFixed(2) + "%",
+              won: won,
+              reason: reason,
+              date: new Date().toISOString()
+          });
+
+          // Keep only the last 50 trades so the file doesn't get too big
+          if (tradeHistory.length > 50) tradeHistory.shift();
+
+          // Save files to GitHub
           await updateGithubFile('streak.json', { wins: currentStreak }, streakState.sha);
           await updateGithubFile('active_trade.json', { active: false }, tradeState.sha);
+          
+          // If trade_history.json doesn't exist yet, we have to create it
+          if (historyState) {
+              await updateGithubFile('trade_history.json', tradeHistory, historyState.sha);
+          } else {
+              const gurl = `https://api.github.com/repos/${env.GITHUB_REPO_OWNER}/${env.GITHUB_REPO_NAME}/contents/trade_history.json`;
+              await fetch(gurl, {
+                method: 'PUT',
+                headers: { 'Authorization': `token ${env.GITHUB_PAT}`, 'User-Agent': 'CF-Worker', 'Content-Type': 'application/json', 'Accept': 'application/vnd.github.v3+json' },
+                body: JSON.stringify({ message: `Create trade_history.json`, content: btoa(JSON.stringify(tradeHistory)) })
+              });
+          }
 
           return new Response(JSON.stringify({ 
             status: "CLOSED", symbol: activeTrade.symbol, direction: activeTrade.direction,
@@ -88,7 +122,8 @@ export default {
 
           return new Response(JSON.stringify({ 
             status: "HOLDING", symbol: activeTrade.symbol, direction: activeTrade.direction,
-            pnl_percent: pnlPercent.toFixed(2), peak_pnl: peakPnl.toFixed(2)
+            pnl_percent: pnlPercent.toFixed(2), peak_pnl: peakPnl.toFixed(2),
+            trailing_stop: peakPnl >= 1.0 ? trailing_stop_pnl.toFixed(2) : "Not Active"
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
       } 
@@ -97,34 +132,25 @@ export default {
           return new Response(JSON.stringify({ status: "WAITING", message: "No signal found." }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
-        // 🚨 USE THE PRICE PASSED FROM PYTHON INSTEAD OF FETCHING 🚨
         const currentPrice = signal.current_price || await getPrice(signal.symbol); 
         
-        let take_profit, stop_loss;
+        let stop_loss;
         if (signal.direction === 'LONG') {
-            stop_loss = signal.low_15m * 0.999;
-            take_profit = signal.high_15m * 1.002;
+            stop_loss = currentPrice * 0.98;
         } else {
-            stop_loss = signal.high_15m * 1.001;
-            take_profit = signal.low_15m * 0.998;
+            stop_loss = currentPrice * 1.02;
         }
 
         const newTrade = {
-          active: true, 
-          symbol: signal.symbol, 
-          direction: signal.direction,
-          entry_price: currentPrice, 
-          take_profit: take_profit,
-          stop_loss: stop_loss,
-          peak_pnl: 0, 
-          opened_at: Date.now()
+          active: true, symbol: signal.symbol, direction: signal.direction,
+          entry_price: currentPrice, stop_loss: stop_loss, peak_pnl: 0, opened_at: Date.now()
         };
 
         await updateGithubFile('active_trade.json', newTrade, tradeState.sha);
 
         return new Response(JSON.stringify({ 
           status: "OPENED", symbol: signal.symbol, direction: signal.direction,
-          entry_price: currentPrice.toFixed(5), take_profit: take_profit.toFixed(5), stop_loss: stop_loss.toFixed(5),
+          entry_price: currentPrice.toFixed(5), stop_loss: stop_loss.toFixed(5),
           mode: isLiveMode ? "LIVE" : "PAPER"
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
