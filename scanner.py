@@ -16,9 +16,9 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 BASE_URL = "https://api." + "coinalyze" + ".net/v1"
 STREAK_FILE = "streak.json"
 
-# ==========================================
-# SMART KEY MANAGER (Distributes requests across all 15 keys)
-# ==========================================
+# Allow a maximum of 5 simultaneous requests to prevent IP burst blocks
+SEMAPHORE = asyncio.Semaphore(5)
+
 class KeyManager:
     def __init__(self, keys):
         self.keys = keys
@@ -43,18 +43,26 @@ def get_win_streak():
     return 0
 
 async def fetch_coinalyze(session, target_url):
-    api_key = await key_manager.get_key()
-    try:
-        async with session.get(target_url, params={"api_key": api_key}, timeout=15) as r:
-            if r.status == 200:
-                return await r.json()
-            elif r.status == 429:
-                log.warning(f"⚠️ Burst limit hit on key {api_key[-4:]}! Retrying in 1s...")
-                await asyncio.sleep(1)
-                return await fetch_coinalyze(session, target_url) # Retry
-    except Exception:
-        pass
-    return None
+    async with SEMAPHORE:
+        api_key = await key_manager.get_key()
+        try:
+            # Strict 10-second timeout so it never hangs
+            async with session.get(target_url, params={"api_key": api_key}, timeout=10) as r:
+                if r.status == 200:
+                    return await r.json()
+                elif r.status == 429:
+                    log.warning(f"⚠️ Rate limit hit on key {api_key[-4:]}. Skipping batch.")
+                    return None # Skip instead of infinite retry
+                else:
+                    return None
+        except asyncio.TimeoutError:
+            log.error("⏳ Timeout on API request.")
+            return None
+        except Exception:
+            return None
+        finally:
+            # Tiny delay to space out requests
+            await asyncio.sleep(0.1)
 
 async def main():
     wins = get_win_streak()
@@ -84,16 +92,10 @@ async def main():
             target_url = f"{BASE_URL}/ohlcv-history?symbols={sym_str}&interval=15min&from={ts_24h_ago}&to={now_ts}"
             tasks.append(fetch_coinalyze(session, target_url))
 
-        log.info(f"⚡ Firing {len(tasks)} requests mapped across {len(COINALYZE_KEYS)} API keys...")
+        log.info(f"⚡ Firing {len(tasks)} requests safely mapped across {len(COINALYZE_KEYS)} API keys...")
         
-        # 2. Micro-Batch the requests to avoid IP burst limits
-        results = []
-        batch1 = tasks[:15] # Fire 15 at once (uses all keys)
-        batch2 = tasks[15:] # Fire remaining 
-        
-        results.extend(await asyncio.gather(*batch1))
-        await asyncio.sleep(0.5) # 500ms pause to trick the firewall
-        results.extend(await asyncio.gather(*batch2))
+        # Fire all tasks at once. The Semaphore will queue them 5 at a time.
+        results = await asyncio.gather(*tasks)
         
         scan_time = time.time() - start_time
         log.info(f"✅ Data gathered in {scan_time:.2f} seconds.")
