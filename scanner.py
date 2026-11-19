@@ -12,6 +12,8 @@ CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 BITGET_TICKERS_URL = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
 BITGET_CANDLES_URL = "https://api.bitget.com/api/v2/mix/market/candles"
+BITGET_SINGLE_TICKER_URL = "https://api.bitget.com/api/v2/mix/market/ticker"
+
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
 SEMAPHORE = asyncio.Semaphore(10)
@@ -25,14 +27,28 @@ def get_win_streak():
             return 0
     return 0
 
-def is_trade_active():
+def get_active_trade():
     if os.path.exists(ACTIVE_TRADE_FILE):
         try:
             with open(ACTIVE_TRADE_FILE, "r") as f:
-                return json.load(f).get("active", False)
+                data = json.load(f)
+                if data.get("active"):
+                    return data
         except Exception:
-            return False
-    return False
+            return None
+    return None
+
+async def fetch_single_price(session, symbol):
+    params = {"symbol": symbol, "productType": "USDT-FUTURES"}
+    try:
+        async with session.get(BITGET_SINGLE_TICKER_URL, params=params, timeout=10) as r:
+            if r.status == 200:
+                data = await r.json()
+                if data.get("code") == "00000" and data.get("data"):
+                    return float(data["data"][0]["lastPr"])
+    except Exception as e:
+        log.error(f"Failed to fetch price for {symbol}: {e}")
+    return None
 
 async def fetch_bitget_tickers(session):
     try:
@@ -47,7 +63,6 @@ async def fetch_bitget_tickers(session):
 
 async def fetch_bitget_1m_candles(session, symbol):
     async with SEMAPHORE:
-        # Look at the last 15 1-minute candles
         params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "15"}
         try:
             async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
@@ -64,9 +79,24 @@ async def main():
     is_paper = wins < 8
     mode_text = "📝 PAPER" if is_paper else "💵 LIVE"
     
-    if is_trade_active():
-        log.info(f"⏳ Active trade in progress. Pinging Cloudflare to manage TP/SL... (Streak: {wins}/8)")
-        payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
+    active_trade = get_active_trade()
+    
+    if active_trade:
+        log.info(f"⏳ Active trade in progress: {active_trade['symbol']}. Fetching live price from GitHub... (Streak: {wins}/8)")
+        async with aiohttp.ClientSession() as session:
+            current_price = await fetch_single_price(session, active_trade['symbol'])
+            
+            if current_price:
+                payload = {
+                    "symbol": active_trade['symbol'], 
+                    "direction": active_trade['direction'], 
+                    "is_paper": is_paper,
+                    "current_price": current_price,
+                    "is_ping": True
+                }
+            else:
+                log.error("❌ Failed to fetch active trade price from Bitget via GitHub.")
+                return
     else:
         log.info(f"🛰️ Scanning Bitget (Stealth Trap Engine)... (Streak: {wins}/8 | Mode: {mode_text})")
         start_time = time.time()
@@ -76,7 +106,6 @@ async def main():
             if not tickers:
                 return
 
-            # Filter by >$200k Volume and Top 200 Volatile
             valid_coins = []
             for t in tickers:
                 vol_24h = float(t.get("quoteVolume", 0))
@@ -98,7 +127,7 @@ async def main():
                     
                 coin_info = top_200[idx]
                 symbol = coin_info["symbol"]
-                candles = list(reversed(candle_data)) # Oldest to newest
+                candles = list(reversed(candle_data))
                 
                 open_15m = float(candles[0][1])
                 close_15m = float(candles[-1][4])
@@ -114,11 +143,8 @@ async def main():
                 for c in candles:
                     o = float(c[1])
                     cl = float(c[4])
-                    
-                    # Calculate single candle move %
                     candle_move_pct = abs(((cl - o) / o) * 100) if o > 0 else 0
                     
-                    # 🚨 NO SPIKE RULE 🚨
                     if candle_move_pct > 1.0:
                         is_spike = True
                         break
@@ -134,28 +160,21 @@ async def main():
                     else:
                         sequence.append("-")
                 
-                # Reject if there was a 1% spike
-                if is_spike:
+                if is_spike or up_steps == 0 or down_steps == 0:
                     continue
                     
-                if up_steps == 0 or down_steps == 0:
-                    continue
-                    
-                # --- STEALTH TRAP LOGIC ---
-                # LONG TRAP: Fewer green candles, but massive green bodies, price is going up
+                # LONG TRAP
                 if down_steps > up_steps and net_move_pct > 0.2 and up_body_pct > (down_body_pct * 1.5):
                     direction = "LONG"
                     dominance = up_body_pct / down_body_pct
                     trap_type = f"Only {up_steps} Green candles, but they are {dominance:.1f}x larger than the {down_steps} Red candles!"
-                    
-                # SHORT TRAP: Fewer red candles, but massive red bodies, price is going down
+                # SHORT TRAP
                 elif up_steps > down_steps and net_move_pct < -0.2 and down_body_pct > (up_body_pct * 1.5):
                     direction = "SHORT"
                     dominance = down_body_pct / up_body_pct
                     trap_type = f"Only {down_steps} Red candles, but they are {dominance:.1f}x larger than the {up_steps} Green candles!"
-                    
                 else:
-                    continue # No trap, skip
+                    continue 
                     
                 score = abs(net_move_pct) * dominance
                 
@@ -163,12 +182,8 @@ async def main():
                     "symbol": symbol,
                     "direction": direction,
                     "net_move": net_move_pct,
-                    "up_steps": up_steps,
-                    "down_steps": down_steps,
-                    "dominance": dominance,
                     "trap_type": trap_type,
                     "sequence": " ".join(sequence),
-                    "vol_24h_usd": coin_info["vol_24h"],
                     "current_price": close_15m,
                     "score": score
                 })
@@ -183,19 +198,18 @@ async def main():
             if top_signals:
                 best_signal = top_signals[0]
                 log.info(f"🏆 SELECTED BEST: {best_signal['symbol']} {best_signal['direction']}")
-                log.info(f"  [Sequence]    {best_signal['sequence']}")
-                log.info(f"  [Trap Found]  {best_signal['trap_type']}")
-                log.info(f"  [Net Move]    {best_signal['net_move']:+.2f}% (Price agrees with the strong side!)")
+                log.info(f"  [Trap Found] {best_signal['trap_type']}")
                 
                 payload = {
                     "symbol": best_signal["symbol"], 
                     "direction": best_signal["direction"], 
                     "is_paper": is_paper,
-                    "current_price": best_signal["current_price"]
+                    "current_price": best_signal["current_price"],
+                    "is_ping": False
                 }
             else:
-                log.warning("❌ No stealth traps found right now. (Market is too normal).")
-                payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper}
+                log.warning("❌ No stealth traps found right now.")
+                payload = {"symbol": "NONE", "direction": "NONE", "is_paper": is_paper, "is_ping": False}
 
     # Send to Cloudflare Webhook
     headers = {"X-Webhook-Secret": WEBHOOK_SECRET}
