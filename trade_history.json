@@ -797,5 +797,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 48,
     "date": "2026-11-20T21:00:25.600Z"
+  },
+  {
+    "symbol": "HUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.01077,
+    "exit": 0.01095,
+    "gross_pnl": "1.67%",
+    "net_pnl": "1.47%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.67% Gross | Net Cash Profit: +1.47%) -> Scanning next coin",
+    "elapsed_minutes": "4.6",
+    "streak_after_trade": 49,
+    "date": "2026-11-20T21:35:22.786Z"
   }
 ]
