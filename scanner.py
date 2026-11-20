@@ -14,10 +14,10 @@ log = logging.getLogger("scanner")
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# Bitget API Credentials (Injected from GitHub Secrets)
+# Bitget API Credentials (Supports BITGET_PASSPHRASE or BITGET_PASSWORD)
 BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
-BITGET_PASSPHRASE = os.environ.get("BITGET_PASSPHRASE", "").strip()
+BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("BITGET_PASSWORD", "")).strip()
 
 # Safety Toggle: Set to 'true' in GitHub env to allow live real-money trading after 8 paper wins
 ALLOW_LIVE_TRADING = os.environ.get("ALLOW_LIVE_TRADING", "false").lower() == "true"
@@ -162,8 +162,21 @@ async def main():
     wins = get_win_streak()
     is_paper = (wins < 8) or (not ALLOW_LIVE_TRADING)
 
-    auth_active = bool(BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE)
-    auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
+    # Check for keys (accepts either BITGET_PASSPHRASE or BITGET_PASSWORD)
+    has_key = bool(BITGET_API_KEY)
+    has_secret = bool(BITGET_SECRET_KEY)
+    has_pass = bool(BITGET_PASSPHRASE)
+    auth_active = has_key and has_secret and has_pass
+
+    if auth_active:
+        auth_status = "🔐 AUTHENTICATED (Bitget API Key active)"
+    else:
+        missing = []
+        if not has_key: missing.append("BITGET_API_KEY")
+        if not has_secret: missing.append("BITGET_SECRET_KEY")
+        if not has_pass: missing.append("BITGET_PASSPHRASE or BITGET_PASSWORD")
+        auth_status = f"🔓 PUBLIC API (Missing: {', '.join(missing)})"
+
     mode_status = "PAPER TRADING (Target: 8/8 Win Streak)" if is_paper else "🚨 LIVE REAL-MONEY BITGET TRADING (5x Leverage | Reduce-Only | One-Way Mode)"
 
     log.info(f"🏆 Current Paper Win Streak: {wins}/8 | Mode: {mode_status} | API: {auth_status}")
@@ -173,9 +186,9 @@ async def main():
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage, Reduce-Only, One-Way Mode ({acc_info['account_type']})")
         elif auth_active:
-            log.warning("⚠️ Could not fetch Bitget account balance. Verify API permissions.")
+            log.warning("⚠️ Could not fetch Bitget account balance. Verify API key permissions on Bitget.")
         else:
-            log.info("ℹ️ Running paper trading evaluation without Bitget API Keys.")
+            log.info(f"ℹ️ Running in Unauthenticated mode. Missing environment variables: {auth_status}")
 
         active_trade = get_active_trade()
 
