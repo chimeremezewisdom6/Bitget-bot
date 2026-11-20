@@ -657,5 +657,19 @@
     "elapsed_minutes": "4.8",
     "streak_after_trade": 38,
     "date": "2026-11-20T18:10:30.728Z"
+  },
+  {
+    "symbol": "OKLOUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 20.37,
+    "exit": 20.64,
+    "gross_pnl": "1.33%",
+    "net_pnl": "1.13%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.33% Gross | Net Cash Profit: +1.13%) -> Scanning next coin",
+    "elapsed_minutes": "4.6",
+    "streak_after_trade": 39,
+    "date": "2026-11-20T18:25:19.851Z"
   }
 ]
