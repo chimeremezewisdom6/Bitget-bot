@@ -1,11 +1,3 @@
 {
-  "active": true,
-  "symbol": "YBUSDT",
-  "direction": "SHORT",
-  "mode": "PAPER",
-  "entry_price": 0.05332,
-  "stop_loss": 0.0543864,
-  "peak_gross_pnl": 6.620405101275316,
-  "avg_fluctuation": 0.98,
-  "opened_at": 1795147539469
+  "active": false
 }
