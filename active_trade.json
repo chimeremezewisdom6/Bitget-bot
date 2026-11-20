@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "OKLOUSDT",
-  "direction": "LONG",
-  "mode": "LIVE",
-  "entry_price": 20.37,
-  "stop_loss": 19.962600000000002,
-  "peak_gross_pnl": 0,
-  "avg_fluctuation": 0.34,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795198840967
+  "active": false
 }
