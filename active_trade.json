@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "PROMUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 5.0061,
-  "stop_loss": 5.106222,
-  "peak_gross_pnl": 0,
-  "avg_fluctuation": 0.84,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795197945132
+  "active": false
 }
