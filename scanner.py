@@ -24,11 +24,9 @@ ALLOW_LIVE_TRADING = os.environ.get("ALLOW_LIVE_TRADING", "false").lower() == "t
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
-BITGET_ACCOUNT_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/account"
 BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType=USDT-FUTURES"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
-BITGET_ACCOUNT_URL = f"{BITGET_ACCOUNT_BASE}/accounts?productType=USDT-FUTURES"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
@@ -78,29 +76,52 @@ def get_active_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Fetches live Bitget Unified Trading Account equity balance and available USDT margin."""
+    """Queries Bitget account balance endpoints and logs raw API response for full diagnostic transparency."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
-    path = "/api/v2/mix/account/accounts?productType=USDT-FUTURES"
-    headers = get_bitget_headers("GET", path)
-    try:
-        async with session.get(BITGET_ACCOUNT_URL, headers=headers, timeout=10) as r:
-            if r.status == 200:
-                resp = await r.json()
-                if resp.get("code") == "00000" and resp.get("data"):
-                    accounts = resp["data"]
-                    if isinstance(accounts, list) and len(accounts) > 0:
-                        acc = accounts[0]
-                        usdt_equity = float(acc.get("usdtEquity") or acc.get("accountEquity") or acc.get("available", 0.0))
-                        available_margin = float(acc.get("available") or acc.get("maxTransferOut", 0.0))
+
+    endpoints = [
+        ("/api/v2/mix/account/accounts?productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/accounts?productType=USDT-FUTURES"),
+        ("/api/v2/user/account-balance", f"https://{BIT_DOMAIN}/api/v2/user/account-balance"),
+        ("/api/v2/account/all-account-balance", f"https://{BIT_DOMAIN}/api/v2/account/all-account-balance")
+    ]
+
+    for rel_path, full_url in endpoints:
+        headers = get_bitget_headers("GET", rel_path)
+        try:
+            async with session.get(full_url, headers=headers, timeout=10) as r:
+                resp_text = await r.text()
+                try:
+                    resp = json.loads(resp_text)
+                except Exception:
+                    resp = {}
+
+                if r.status == 200 and resp.get("code") == "00000" and resp.get("data"):
+                    data = resp["data"]
+                    if isinstance(data, list) and len(data) > 0:
+                        acc = data[0]
+                        equity = float(acc.get("usdtEquity") or acc.get("accountEquity") or acc.get("available") or acc.get("usdtBalance") or 0.0)
+                        available = float(acc.get("available") or acc.get("maxTransferOut") or acc.get("usdtBalance") or 0.0)
                         return {
-                            "equity": usdt_equity,
-                            "available": available_margin,
+                            "equity": equity,
+                            "available": available,
                             "margin_coin": acc.get("marginCoin", "USDT"),
                             "account_type": "Unified Trading Account (Futures)"
                         }
-    except Exception as e:
-        log.error(f"Bitget Account Balance Fetch Error: {e}")
+                    elif isinstance(data, dict):
+                        equity = float(data.get("usdtEquity") or data.get("accountEquity") or data.get("available") or 0.0)
+                        available = float(data.get("available") or data.get("maxTransferOut") or 0.0)
+                        return {
+                            "equity": equity,
+                            "available": available,
+                            "margin_coin": data.get("marginCoin", "USDT"),
+                            "account_type": "Unified Trading Account (Futures)"
+                        }
+                else:
+                    log.info(f"ℹ️ Bitget API Balance Check ({rel_path}) -> Status: {r.status} | Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+        except Exception as e:
+            log.error(f"Error querying balance endpoint {rel_path}: {e}")
+
     return None
 
 async def fetch_single_price(session, symbol):
@@ -162,7 +183,6 @@ async def main():
     wins = get_win_streak()
     is_paper = (wins < 8) or (not ALLOW_LIVE_TRADING)
 
-    # Check for keys (accepts either BITGET_PASSPHRASE or BITGET_PASSWORD)
     has_key = bool(BITGET_API_KEY)
     has_secret = bool(BITGET_SECRET_KEY)
     has_pass = bool(BITGET_PASSPHRASE)
@@ -186,7 +206,7 @@ async def main():
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage, Reduce-Only, One-Way Mode ({acc_info['account_type']})")
         elif auth_active:
-            log.warning("⚠️ Could not fetch Bitget account balance. Verify API key permissions on Bitget.")
+            log.warning("⚠️ Could not parse Bitget account balance. Check diagnostic endpoint status logs above.")
         else:
             log.info(f"ℹ️ Running in Unauthenticated mode. Missing environment variables: {auth_status}")
 
