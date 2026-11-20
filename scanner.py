@@ -27,12 +27,12 @@ BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
 BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType=USDT-FUTURES"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
-BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 
-# Bitget v2 Futures Order & Account Endpoints
-BITGET_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v2/mix/order/place-order"
-BITGET_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v2/mix/account/set-leverage"
-BITGET_SET_POSITION_MODE_URL = f"https://{BIT_DOMAIN}/api/v2/mix/account/set-position-mode"
+# Official Bitget v3 Unified Trading Account (UTA) API Endpoints
+BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
+BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
+BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
+BITGET_V3_SET_POS_MODE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-position-mode"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
@@ -122,37 +122,42 @@ async def fetch_bitget_account_balance(session):
     return None
 
 async def configure_bitget_symbol_settings(session, symbol):
-    """Ensures Bitget leverage is set to 5x and position mode is set to One-Way Mode before execution."""
+    """Ensures Bitget leverage is set to 5x and position mode is set to One-Way Mode using v3 UTA APIs."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return
 
-    path_pos = "/api/v2/mix/account/set-position-mode"
-    body_pos = json.dumps({"productType": "USDT-FUTURES", "posMode": "one_way"})
+    path_pos = "/api/v3/account/set-position-mode"
+    body_pos = json.dumps({"category": "USDT-FUTURES", "posMode": "one_way"})
     headers_pos = get_bitget_headers("POST", path_pos, body_pos)
     try:
-        async with session.post(BITGET_SET_POSITION_MODE_URL, data=body_pos, headers=headers_pos, timeout=5) as r:
+        async with session.post(BITGET_V3_SET_POS_MODE_URL, data=body_pos, headers=headers_pos, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚙️ Bitget Position Mode Check ({symbol}): {res.get('msg', 'OK')}")
+            log.info(f"⚙️ Bitget UTA v3 Position Mode Check ({symbol}): {res.get('msg', 'OK')}")
     except Exception as e:
         log.debug(f"Position mode setup notice: {e}")
 
-    path_lev = "/api/v2/mix/account/set-leverage"
+    path_lev = "/api/v3/account/set-leverage"
     body_lev = json.dumps({
+        "category": "USDT-FUTURES",
         "symbol": symbol,
-        "productType": "USDT-FUTURES",
-        "marginCoin": "USDT",
         "leverage": str(DEFAULT_LEVERAGE)
     })
     headers_lev = get_bitget_headers("POST", path_lev, body_lev)
     try:
-        async with session.post(BITGET_SET_LEVERAGE_URL, data=body_lev, headers=headers_lev, timeout=5) as r:
+        async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_lev, headers=headers_lev, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚡ Bitget 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
+            log.info(f"⚡ Bitget UTA v3 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
     except Exception as e:
         log.debug(f"Leverage setup notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, entry_price, available_balance):
-    """Executes a Real Live Order directly on Bitget Exchange Servers with 90% Balance Sizing and 5x Leverage."""
+    """
+    Executes a Real Live Real-Money Order directly on Bitget Exchange Servers via official v3 UTA API!
+    - Uses 90% of Available Account Balance with 5x Leverage.
+    - Attaches Exchange Preset Hard Stop-Loss (-2.00%) directly on Bitget v3 UTA matching engine.
+    - DYNAMIC TAKE-PROFIT: Omits static preset TP from Bitget's order placement so wins are NOT capped at +1.0%,
+      allowing the bot to ride momentum to +2%, +3.6%, +4.9%, +6.2%+!
+    """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
         return None
@@ -181,22 +186,20 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
 
     if direction == "LONG":
         side = "buy"
-        preset_tp = round(entry_price * 1.010, 5)  # +1.00%
-        preset_sl = round(entry_price * 0.980, 5)  # -2.00%
+        preset_sl = round(entry_price * 0.980, 5)  # Hard Emergency SL: -2.00%
     else:
         side = "sell"
-        preset_tp = round(entry_price * 0.990, 5)  # +1.00%
-        preset_sl = round(entry_price * 1.020, 5)  # -2.00%
+        preset_sl = round(entry_price * 1.020, 5)  # Hard Emergency SL: -2.00%
 
-    path = "/api/v2/mix/order/place-order"
+    # Official Bitget UTA v3 Order Placement Payload (Dynamic Uncapped TP!)
+    path = "/api/v3/trade/place-order"
     order_payload = {
+        "category": "USDT-FUTURES",
         "symbol": symbol,
-        "productType": "USDT-FUTURES",
         "marginCoin": "USDT",
-        "size": size_str,
+        "qty": size_str,
         "side": side,
         "orderType": "market",
-        "presetTakeProfitPrice": str(preset_tp),
         "presetStopLossPrice": str(preset_sl),
         "reduceOnly": "no"
     }
@@ -204,10 +207,10 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🚨 EXECUTING REAL LIVE ENTRY ON BITGET: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT (90% Equity @ 5x) | TP: {preset_tp} | SL: {preset_sl}")
+    log.info(f"🚨 EXECUTING REAL LIVE DYNAMIC MOMENTUM ENTRY ON BITGET: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT (90% Equity @ 5x) | Dynamic Take-Profit Active | SL: {preset_sl}")
 
     try:
-        async with session.post(BITGET_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
+        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -216,35 +219,33 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
-                log.info(f"✅ REAL BITGET EXCHANGE ORDER PLACED SUCCESSFULLY! Order ID: {order_id}")
+                log.info(f"✅ REAL BITGET UTA v3 DYNAMIC ORDER PLACED SUCCESSFULLY! Order ID: {order_id}")
                 return {
                     "order_id": order_id,
                     "notional_value": notional_value,
                     "contract_size": size_str,
-                    "preset_tp": preset_tp,
                     "preset_sl": preset_sl
                 }
             else:
-                log.error(f"❌ BITGET ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+                log.error(f"❌ BITGET UTA v3 ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
                 return None
     except Exception as e:
-        log.error(f"❌ Error submitting live Bitget order: {e}")
+        log.error(f"❌ Error submitting live Bitget UTA v3 order: {e}")
         return None
 
-async def close_bitget_live_position(session, symbol, direction):
-    """Executes an Immediate Live Market Close Order (reduceOnly: yes) when time-based exit triggers."""
+async def close_bitget_live_position(session, symbol, direction, size_str="0"):
+    """Executes an Immediate Live Market Close Order (reduceOnly: yes) via v3 UTA API when dynamic TP or time exit triggers."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
-    # Opposite side for close in One-Way mode: LONG -> sell, SHORT -> buy
     close_side = "sell" if direction == "LONG" else "buy"
-    path = "/api/v2/mix/order/place-order"
+    path = "/api/v3/trade/place-order"
 
     order_payload = {
+        "category": "USDT-FUTURES",
         "symbol": symbol,
-        "productType": "USDT-FUTURES",
         "marginCoin": "USDT",
-        "size": "0",  # Bitget size '0' with reduceOnly closes full position
+        "qty": size_str,
         "side": close_side,
         "orderType": "market",
         "reduceOnly": "yes"
@@ -253,10 +254,10 @@ async def close_bitget_live_position(session, symbol, direction):
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🛑 EXECUTING LIVE MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction})")
+    log.info(f"🛑 EXECUTING LIVE MARKET EXIT ON BITGET UTA v3 EXCHANGE: Closing {symbol} ({direction})")
 
     try:
-        async with session.post(BITGET_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
+        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -264,7 +265,7 @@ async def close_bitget_live_position(session, symbol, direction):
                 resp = {}
 
             if r.status == 200 and resp.get("code") == "00000":
-                log.info(f"✅ LIVE BITGET POSITION CLOSED ON EXCHANGE SUCCESSFULLY! Order ID: {resp.get('data', {}).get('orderId')}")
+                log.info(f"✅ LIVE BITGET UTA v3 POSITION CLOSED ON EXCHANGE SUCCESSFULLY! Order ID: {resp.get('data', {}).get('orderId')}")
             else:
                 log.debug(f"Notice on live exchange close: {resp.get('msg')}")
     except Exception as e:
@@ -492,7 +493,7 @@ async def main():
 
                 log.info(f"🔥 BEST ENTRY SIGNAL MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
 
-                # EXECUTE REAL LIVE BITGET EXCHANGE ORDER IF NOT PAPER TRADING
+                # EXECUTE REAL LIVE BITGET UTA v3 DYNAMIC ORDER IF NOT PAPER TRADING
                 live_order_result = None
                 if not is_paper:
                     avail_bal = acc_info["available"] if acc_info else 1.58
