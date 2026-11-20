@@ -109,5 +109,18 @@
     "elapsed_minutes": "19.9",
     "streak_after_trade": 2,
     "date": "2026-11-19T23:45:16.616Z"
+  },
+  {
+    "symbol": "SAMSUNGEMUSDT",
+    "direction": "SHORT",
+    "mode": "PAPER",
+    "entry": 616.2,
+    "exit": 599.9,
+    "gross_pnl": "2.65%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +3.60% | Exit: +2.65%)",
+    "elapsed_minutes": "49.7",
+    "streak_after_trade": 3,
+    "date": "2026-11-20T01:05:20.779Z"
   }
 ]
