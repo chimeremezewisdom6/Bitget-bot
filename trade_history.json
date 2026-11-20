@@ -187,5 +187,18 @@
     "elapsed_minutes": "9.5",
     "streak_after_trade": 4,
     "date": "2026-11-20T03:10:21.642Z"
+  },
+  {
+    "symbol": "ZKCUSDT",
+    "direction": "LONG",
+    "mode": "PAPER",
+    "entry": 0.02613,
+    "exit": 0.02642,
+    "gross_pnl": "1.11%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +1.57% | Exit: +1.11%)",
+    "elapsed_minutes": "9.5",
+    "streak_after_trade": 5,
+    "date": "2026-11-20T03:25:21.181Z"
   }
 ]
