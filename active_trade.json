@@ -1,11 +1,3 @@
 {
-  "active": true,
-  "symbol": "ZKCUSDT",
-  "direction": "LONG",
-  "mode": "PAPER",
-  "entry_price": 0.02613,
-  "stop_loss": 0.0256074,
-  "peak_gross_pnl": 1.5690776884806759,
-  "avg_fluctuation": 0.32,
-  "opened_at": 1795144548595
+  "active": false
 }
