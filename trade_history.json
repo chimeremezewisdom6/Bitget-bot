@@ -433,5 +433,19 @@
     "elapsed_minutes": "19.7",
     "streak_after_trade": 22,
     "date": "2026-11-20T13:05:26.439Z"
+  },
+  {
+    "symbol": "CARVUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.02515,
+    "exit": 0.0263,
+    "gross_pnl": "4.57%",
+    "net_pnl": "4.37%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+4.57% Gross | Net Cash Profit: +4.37%) -> Scanning next coin",
+    "elapsed_minutes": "4.8",
+    "streak_after_trade": 23,
+    "date": "2026-11-20T13:15:25.058Z"
   }
 ]
