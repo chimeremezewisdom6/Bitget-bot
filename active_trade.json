@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "COHRUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 190.95,
-  "stop_loss": 194.769,
-  "peak_gross_pnl": 0,
-  "avg_fluctuation": 0.47,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795191643498
+  "active": false
 }
