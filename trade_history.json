@@ -200,5 +200,18 @@
     "elapsed_minutes": "9.5",
     "streak_after_trade": 5,
     "date": "2026-11-20T03:25:21.181Z"
+  },
+  {
+    "symbol": "YBUSDT",
+    "direction": "SHORT",
+    "mode": "PAPER",
+    "entry": 0.05332,
+    "exit": 0.05084,
+    "gross_pnl": "4.65%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +6.62% | Exit: +4.65%)",
+    "elapsed_minutes": "54.8",
+    "streak_after_trade": 6,
+    "date": "2026-11-20T05:00:26.186Z"
   }
 ]
