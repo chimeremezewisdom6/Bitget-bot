@@ -252,5 +252,18 @@
     "elapsed_minutes": "24.5",
     "streak_after_trade": 9,
     "date": "2026-11-20T06:35:18.929Z"
+  },
+  {
+    "symbol": "MSTUUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 10.9104,
+    "exit": 10.914,
+    "gross_pnl": "0.03%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +0.72% | Exit: +0.03%)",
+    "elapsed_minutes": "9.7",
+    "streak_after_trade": 10,
+    "date": "2026-11-20T07:05:21.769Z"
   }
 ]
