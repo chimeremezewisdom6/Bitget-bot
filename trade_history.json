@@ -629,5 +629,19 @@
     "elapsed_minutes": "4.5",
     "streak_after_trade": 36,
     "date": "2026-11-20T17:35:20.152Z"
+  },
+  {
+    "symbol": "PROMUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 5.19,
+    "exit": 4.8736,
+    "gross_pnl": "6.10%",
+    "net_pnl": "5.90%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+6.10% Gross | Net Cash Profit: +5.90%) -> Scanning next coin",
+    "elapsed_minutes": "4.8",
+    "streak_after_trade": 37,
+    "date": "2026-11-20T18:00:27.899Z"
   }
 ]
