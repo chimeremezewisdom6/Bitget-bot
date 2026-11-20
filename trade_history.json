@@ -783,5 +783,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 47,
     "date": "2026-11-20T20:40:21.584Z"
+  },
+  {
+    "symbol": "MSTUUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 9.3164,
+    "exit": 9.0807,
+    "gross_pnl": "2.53%",
+    "net_pnl": "2.33%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.53% Gross | Net Cash Profit: +2.33%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 48,
+    "date": "2026-11-20T21:00:25.600Z"
   }
 ]
