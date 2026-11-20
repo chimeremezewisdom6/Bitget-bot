@@ -28,6 +28,9 @@ BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType=USDT-FUTURES"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
+# Official Bitget v3 Unified Trading Account (UTA) Assets Endpoint
+BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
+
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
 SEMAPHORE = asyncio.Semaphore(12)
@@ -76,64 +79,48 @@ def get_active_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Queries official Bitget v2 Unified Trading Account (UTA) balance endpoints."""
+    """Fetches live Bitget Unified Trading Account (UTA) assets using official v3 API (/api/v3/account/assets)."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
-    # Dedicated Bitget v2 Unified Trading Account (UTA) Endpoints
-    endpoints = [
-        ("/api/v2/user/user-balance", f"https://{BIT_DOMAIN}/api/v2/user/user-balance"),
-        ("/api/v2/mix/account/account-list?productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/account-list?productType=USDT-FUTURES"),
-        ("/api/v2/mix/account/single-account?symbol=BTCUSDT&productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/single-account?symbol=BTCUSDT&productType=USDT-FUTURES")
-    ]
+    path = "/api/v3/account/assets"
+    headers = get_bitget_headers("GET", path)
+    try:
+        async with session.get(BITGET_V3_UTA_ASSETS_URL, headers=headers, timeout=10) as r:
+            resp_text = await r.text()
+            try:
+                resp = json.loads(resp_text)
+            except Exception:
+                resp = {}
 
-    for rel_path, full_url in endpoints:
-        headers = get_bitget_headers("GET", rel_path)
-        try:
-            async with session.get(full_url, headers=headers, timeout=10) as r:
-                resp_text = await r.text()
-                try:
-                    resp = json.loads(resp_text)
-                except Exception:
-                    resp = {}
+            if r.status == 200 and resp.get("code") == "00000" and resp.get("data"):
+                data = resp["data"]
 
-                if r.status == 200 and resp.get("code") == "00000" and resp.get("data"):
-                    data = resp["data"]
+                # Extract Top-Level Unified Account Equity
+                usdt_equity = float(data.get("usdtEquity") or data.get("accountEquity") or 0.0)
 
-                    if isinstance(data, list):
-                        usdt_coin = next((c for c in data if c.get("coin") == "USDT" or c.get("marginCoin") == "USDT"), None)
-                        if usdt_coin:
-                            equity = float(usdt_coin.get("equity") or usdt_coin.get("available") or usdt_coin.get("usdtEquity") or usdt_coin.get("maxTransferOut") or 0.0)
-                            available = float(usdt_coin.get("available") or usdt_coin.get("maxTransferOut") or equity)
-                            return {
-                                "equity": equity,
-                                "available": available,
-                                "margin_coin": "USDT",
-                                "account_type": "Unified Trading Account (UTA)"
-                            }
-                        elif len(data) > 0:
-                            c = data[0]
-                            equity = float(c.get("equity") or c.get("available") or c.get("usdtEquity") or 0.0)
-                            return {
-                                "equity": equity,
-                                "available": equity,
-                                "margin_coin": c.get("coin", "USDT"),
-                                "account_type": "Unified Trading Account (UTA)"
-                            }
+                # Look for USDT breakdown inside 'assets' list
+                assets_list = data.get("assets", [])
+                usdt_asset = next((a for a in assets_list if a.get("coin") == "USDT"), None)
 
-                    elif isinstance(data, dict):
-                        equity = float(data.get("usdtEquity") or data.get("accountEquity") or data.get("equity") or data.get("available") or 0.0)
-                        available = float(data.get("available") or data.get("maxTransferOut") or equity)
-                        return {
-                            "equity": equity,
-                            "available": available,
-                            "margin_coin": data.get("marginCoin", "USDT"),
-                            "account_type": "Unified Trading Account (UTA)"
-                        }
-                else:
-                    log.info(f"ℹ️ Bitget UTA Balance Check ({rel_path}) -> Status: {r.status} | Code: {resp.get('code')} | Msg: {resp.get('msg')}")
-        except Exception as e:
-            log.error(f"Error querying balance endpoint {rel_path}: {e}")
+                available_margin = 0.0
+                if usdt_asset:
+                    available_margin = float(usdt_asset.get("available") or usdt_asset.get("equity") or 0.0)
+                    if usdt_equity == 0.0:
+                        usdt_equity = float(usdt_asset.get("equity") or available_margin)
+                elif usdt_equity > 0:
+                    available_margin = usdt_equity
+
+                return {
+                    "equity": usdt_equity,
+                    "available": available_margin,
+                    "margin_coin": "USDT",
+                    "account_type": "Unified Trading Account (UTA v3)"
+                }
+            else:
+                log.info(f"ℹ️ Bitget UTA v3 Assets Response -> Status: {r.status} | Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+    except Exception as e:
+        log.error(f"Error querying Bitget UTA v3 balance: {e}")
 
     return None
 
@@ -219,7 +206,7 @@ async def main():
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage, Reduce-Only, One-Way Mode ({acc_info['account_type']})")
         elif auth_active:
-            log.warning("⚠️ Could not parse Bitget account balance. Check diagnostic endpoint status logs above.")
+            log.warning("⚠️ Could not parse Bitget UTA v3 account balance. Check logs above.")
         else:
             log.info(f"ℹ️ Running in Unauthenticated mode. Missing environment variables: {auth_status}")
 
