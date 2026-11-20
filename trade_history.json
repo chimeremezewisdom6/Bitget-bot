@@ -727,5 +727,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 43,
     "date": "2026-11-20T19:10:22.572Z"
+  },
+  {
+    "symbol": "CBRSUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 87.52,
+    "exit": 85.79,
+    "gross_pnl": "1.98%",
+    "net_pnl": "1.78%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.98% Gross | Net Cash Profit: +1.78%) -> Scanning next coin",
+    "elapsed_minutes": "4.6",
+    "streak_after_trade": 44,
+    "date": "2026-11-20T19:20:19.361Z"
   }
 ]
