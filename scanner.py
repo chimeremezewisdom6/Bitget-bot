@@ -76,15 +76,15 @@ def get_active_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Fetches live Bitget Unified Trading Account (UTA) assets and USDT equity balance."""
+    """Queries official Bitget v2 Unified Trading Account (UTA) balance endpoints."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
     # Dedicated Bitget v2 Unified Trading Account (UTA) Endpoints
     endpoints = [
-        ("/api/v2/spot/account/assets", f"https://{BIT_DOMAIN}/api/v2/spot/account/assets"),
-        ("/api/v2/mix/account/account?symbol=BTCUSDT&productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/account?symbol=BTCUSDT&productType=USDT-FUTURES"),
-        ("/api/v2/account/assets", f"https://{BIT_DOMAIN}/api/v2/account/assets")
+        ("/api/v2/user/user-balance", f"https://{BIT_DOMAIN}/api/v2/user/user-balance"),
+        ("/api/v2/mix/account/account-list?productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/account-list?productType=USDT-FUTURES"),
+        ("/api/v2/mix/account/single-account?symbol=BTCUSDT&productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/single-account?symbol=BTCUSDT&productType=USDT-FUTURES")
     ]
 
     for rel_path, full_url in endpoints:
@@ -100,7 +100,6 @@ async def fetch_bitget_account_balance(session):
                 if r.status == 200 and resp.get("code") == "00000" and resp.get("data"):
                     data = resp["data"]
 
-                    # 1. Spot / Unified Assets List
                     if isinstance(data, list):
                         usdt_coin = next((c for c in data if c.get("coin") == "USDT" or c.get("marginCoin") == "USDT"), None)
                         if usdt_coin:
@@ -122,7 +121,6 @@ async def fetch_bitget_account_balance(session):
                                 "account_type": "Unified Trading Account (UTA)"
                             }
 
-                    # 2. Singular Account Detail Dict
                     elif isinstance(data, dict):
                         equity = float(data.get("usdtEquity") or data.get("accountEquity") or data.get("equity") or data.get("available") or 0.0)
                         available = float(data.get("available") or data.get("maxTransferOut") or equity)
