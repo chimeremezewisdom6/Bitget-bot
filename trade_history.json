@@ -699,5 +699,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 41,
     "date": "2026-11-20T18:50:25.343Z"
+  },
+  {
+    "symbol": "RAMUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 3.774,
+    "exit": 3.835,
+    "gross_pnl": "1.62%",
+    "net_pnl": "1.42%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.62% Gross | Net Cash Profit: +1.42%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 42,
+    "date": "2026-11-20T19:00:24.151Z"
   }
 ]
