@@ -531,5 +531,19 @@
     "elapsed_minutes": "4.9",
     "streak_after_trade": 29,
     "date": "2026-11-20T15:00:29.392Z"
+  },
+  {
+    "symbol": "AXTIUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 32.99,
+    "exit": 32.15,
+    "gross_pnl": "2.55%",
+    "net_pnl": "2.35%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.55% Gross | Net Cash Profit: +2.35%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 30,
+    "date": "2026-11-20T15:15:25.154Z"
   }
 ]
