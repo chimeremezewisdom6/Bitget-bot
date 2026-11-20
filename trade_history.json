@@ -405,5 +405,19 @@
     "elapsed_minutes": "4.8",
     "streak_after_trade": 20,
     "date": "2026-11-20T11:30:26.541Z"
+  },
+  {
+    "symbol": "BTWUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.60968,
+    "exit": 0.61991,
+    "gross_pnl": "1.68%",
+    "net_pnl": "1.48%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.68% Gross | Net Cash Profit: +1.48%) -> Scanning next coin",
+    "elapsed_minutes": "9.7",
+    "streak_after_trade": 21,
+    "date": "2026-11-20T12:15:21.670Z"
   }
 ]
