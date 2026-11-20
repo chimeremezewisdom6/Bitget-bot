@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "MSTUUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 10.9764,
-  "stop_loss": 11.195928,
-  "peak_gross_pnl": 0,
-  "avg_fluctuation": 0.28,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795159538268
+  "active": false
 }
