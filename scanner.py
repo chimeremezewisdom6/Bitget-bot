@@ -29,6 +29,11 @@ BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 
+# Bitget v2 Futures Order & Account Endpoints
+BITGET_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v2/mix/order/place-order"
+BITGET_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v2/mix/account/set-leverage"
+BITGET_SET_POSITION_MODE_URL = f"https://{BIT_DOMAIN}/api/v2/mix/account/set-position-mode"
+
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
 
@@ -37,6 +42,7 @@ MIN_24H_VOLUME = 100000    # Min $100k Volume
 MAX_24H_VOLUME = 10000000  # Max $10M Volume Range
 MIN_CANDLE_WINS = 9       # Requires 9 or 10 same-color candles for entry
 DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
+BALANCE_USAGE_PCT = 0.90   # Strictly 90% of available USDT equity allocated per trade
 
 def get_bitget_headers(method="GET", request_path="", body=""):
     headers = {"Content-Type": "application/json"}
@@ -114,6 +120,155 @@ async def fetch_bitget_account_balance(session):
     except Exception as e:
         log.error(f"Error querying Bitget UTA v3 balance: {e}")
     return None
+
+async def configure_bitget_symbol_settings(session, symbol):
+    """Ensures Bitget leverage is set to 5x and position mode is set to One-Way Mode before execution."""
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
+        return
+
+    path_pos = "/api/v2/mix/account/set-position-mode"
+    body_pos = json.dumps({"productType": "USDT-FUTURES", "posMode": "one_way"})
+    headers_pos = get_bitget_headers("POST", path_pos, body_pos)
+    try:
+        async with session.post(BITGET_SET_POSITION_MODE_URL, data=body_pos, headers=headers_pos, timeout=5) as r:
+            res = await r.json()
+            log.info(f"⚙️ Bitget Position Mode Check ({symbol}): {res.get('msg', 'OK')}")
+    except Exception as e:
+        log.debug(f"Position mode setup notice: {e}")
+
+    path_lev = "/api/v2/mix/account/set-leverage"
+    body_lev = json.dumps({
+        "symbol": symbol,
+        "productType": "USDT-FUTURES",
+        "marginCoin": "USDT",
+        "leverage": str(DEFAULT_LEVERAGE)
+    })
+    headers_lev = get_bitget_headers("POST", path_lev, body_lev)
+    try:
+        async with session.post(BITGET_SET_LEVERAGE_URL, data=body_lev, headers=headers_lev, timeout=5) as r:
+            res = await r.json()
+            log.info(f"⚡ Bitget 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
+    except Exception as e:
+        log.debug(f"Leverage setup notice: {e}")
+
+async def place_bitget_live_order(session, symbol, direction, entry_price, available_balance):
+    """Executes a Real Live Order directly on Bitget Exchange Servers with 90% Balance Sizing and 5x Leverage."""
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
+        log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
+        return None
+
+    await configure_bitget_symbol_settings(session, symbol)
+
+    used_margin = available_balance * BALANCE_USAGE_PCT
+    notional_value = used_margin * DEFAULT_LEVERAGE
+
+    if notional_value < 5.0:
+        notional_value = 5.50
+
+    contract_size = notional_value / entry_price
+
+    if entry_price > 1000:
+        size_str = f"{contract_size:.3f}"
+    elif entry_price > 10:
+        size_str = f"{contract_size:.2f}"
+    elif entry_price > 1:
+        size_str = f"{contract_size:.1f}"
+    else:
+        size_str = f"{int(contract_size)}"
+
+    if float(size_str) <= 0:
+        size_str = "1"
+
+    if direction == "LONG":
+        side = "buy"
+        preset_tp = round(entry_price * 1.010, 5)  # +1.00%
+        preset_sl = round(entry_price * 0.980, 5)  # -2.00%
+    else:
+        side = "sell"
+        preset_tp = round(entry_price * 0.990, 5)  # +1.00%
+        preset_sl = round(entry_price * 1.020, 5)  # -2.00%
+
+    path = "/api/v2/mix/order/place-order"
+    order_payload = {
+        "symbol": symbol,
+        "productType": "USDT-FUTURES",
+        "marginCoin": "USDT",
+        "size": size_str,
+        "side": side,
+        "orderType": "market",
+        "presetTakeProfitPrice": str(preset_tp),
+        "presetStopLossPrice": str(preset_sl),
+        "reduceOnly": "no"
+    }
+
+    body_json = json.dumps(order_payload)
+    headers = get_bitget_headers("POST", path, body_json)
+
+    log.info(f"🚨 EXECUTING REAL LIVE ENTRY ON BITGET: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT (90% Equity @ 5x) | TP: {preset_tp} | SL: {preset_sl}")
+
+    try:
+        async with session.post(BITGET_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
+            resp_text = await r.text()
+            try:
+                resp = json.loads(resp_text)
+            except Exception:
+                resp = {}
+
+            if r.status == 200 and resp.get("code") == "00000":
+                order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
+                log.info(f"✅ REAL BITGET EXCHANGE ORDER PLACED SUCCESSFULLY! Order ID: {order_id}")
+                return {
+                    "order_id": order_id,
+                    "notional_value": notional_value,
+                    "contract_size": size_str,
+                    "preset_tp": preset_tp,
+                    "preset_sl": preset_sl
+                }
+            else:
+                log.error(f"❌ BITGET ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+                return None
+    except Exception as e:
+        log.error(f"❌ Error submitting live Bitget order: {e}")
+        return None
+
+async def close_bitget_live_position(session, symbol, direction):
+    """Executes an Immediate Live Market Close Order (reduceOnly: yes) when time-based exit triggers."""
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
+        return None
+
+    # Opposite side for close in One-Way mode: LONG -> sell, SHORT -> buy
+    close_side = "sell" if direction == "LONG" else "buy"
+    path = "/api/v2/mix/order/place-order"
+
+    order_payload = {
+        "symbol": symbol,
+        "productType": "USDT-FUTURES",
+        "marginCoin": "USDT",
+        "size": "0",  # Bitget size '0' with reduceOnly closes full position
+        "side": close_side,
+        "orderType": "market",
+        "reduceOnly": "yes"
+    }
+
+    body_json = json.dumps(order_payload)
+    headers = get_bitget_headers("POST", path, body_json)
+
+    log.info(f"🛑 EXECUTING LIVE MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction})")
+
+    try:
+        async with session.post(BITGET_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
+            resp_text = await r.text()
+            try:
+                resp = json.loads(resp_text)
+            except Exception:
+                resp = {}
+
+            if r.status == 200 and resp.get("code") == "00000":
+                log.info(f"✅ LIVE BITGET POSITION CLOSED ON EXCHANGE SUCCESSFULLY! Order ID: {resp.get('data', {}).get('orderId')}")
+            else:
+                log.debug(f"Notice on live exchange close: {resp.get('msg')}")
+    except Exception as e:
+        log.error(f"Error executing live Bitget position close: {e}")
 
 async def fetch_single_price(session, symbol):
     params = {"symbol": symbol, "productType": "USDT-FUTURES"}
@@ -225,13 +380,8 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
     if not batch_evaluated:
         return []
 
-    # Find highest candle win count in this batch
     max_batch_wins = max(c["max_wins"] for c in batch_evaluated)
-
-    # Select all coins tying for top candle count in this batch
     top_candidates = [c for c in batch_evaluated if c["max_wins"] == max_batch_wins]
-
-    # Sort candidates by highest average fluctuation
     top_candidates.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
     return top_candidates
 
@@ -306,7 +456,6 @@ async def main():
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_coins = len(valid_coins)
 
-            # Divide coins evenly into NUM_BATCHES (20 separate batches)
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
@@ -316,23 +465,21 @@ async def main():
             batch_tasks = [process_coin_batch(i + 1, batch, session, semaphore) for i, batch in enumerate(coin_batches)]
             batch_results = await asyncio.gather(*batch_tasks)
 
-            # Collect top candidates across all 20 batches
             all_batch_candidates = []
             for batch_cand in batch_results:
                 all_batch_candidates.extend(batch_cand)
 
-            log.info("=================================================================================")
+            log.info("====================================================================================================")
             log.info(f"📊 20-BATCH TOP CANDIDATE SUMMARY TABLE (COLLECTED: {len(all_batch_candidates)} TOP PAIRS ACROSS 20 BATCHES):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'CANDLE PATTERN':<22} | {'AVG FLUCTUATION':<15}")
-            log.info("-" * 67)
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'10-CANDLE PATTERN BREAKDOWN':<36} | {'AVG FLUCTUATION':<15}")
+            log.info("-" * 88)
 
             for cand in all_batch_candidates:
-                pattern_str = f"{cand['green_count']} Green / {cand['red_count']} Red"
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {pattern_str:<22} | {cand['avg_fluctuation']:.2f}%")
+                pattern_str = f"{cand['green_count']} Green / {cand['red_count']} Red / {cand['doji_count']} Flat Doji"
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {pattern_str:<36} | {cand['avg_fluctuation']:.2f}%")
 
-            log.info("=================================================================================")
+            log.info("====================================================================================================")
 
-            # Filter batch candidates for strict entry criteria (>= 9 Green/Red candles AND >= 0.20% fluctuation)
             valid_entry_signals = [
                 c for c in all_batch_candidates
                 if c["max_wins"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20
@@ -345,6 +492,18 @@ async def main():
 
                 log.info(f"🔥 BEST ENTRY SIGNAL MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
 
+                # EXECUTE REAL LIVE BITGET EXCHANGE ORDER IF NOT PAPER TRADING
+                live_order_result = None
+                if not is_paper:
+                    avail_bal = acc_info["available"] if acc_info else 1.58
+                    live_order_result = await place_bitget_live_order(
+                        session=session,
+                        symbol=best_signal["symbol"],
+                        direction=best_signal["direction"],
+                        entry_price=best_signal["current_price"],
+                        available_balance=avail_bal
+                    )
+
                 payload = {
                     "symbol": best_signal["symbol"],
                     "direction": best_signal["direction"],
@@ -355,7 +514,8 @@ async def main():
                     "leverage": DEFAULT_LEVERAGE,
                     "position_mode": "one_way",
                     "reduce_only": True,
-                    "is_ping": False
+                    "is_ping": False,
+                    "live_order": live_order_result
                 }
             else:
                 log.info(f"ℹ️ No batch winners reached >= {MIN_CANDLE_WINS}/10 candles with >= 0.20% fluctuation this minute.")
@@ -382,6 +542,9 @@ async def main():
 
                 if worker_status == "CLOSED":
                     log.info(f"🛑 TRADE CLOSED: {symbol} ({direction}) | Closing Gross PnL: {gross_pnl}% | Peak PnL: {peak_pnl}% | Exit Reason: {reason} | Win Streak: {res_data.get('new_win_streak')}")
+                    # EXECUTE LIVE EXCHANGE MARKET CLOSE IF NOT PAPER TRADING
+                    if not is_paper:
+                        await close_bitget_live_position(session, symbol, direction)
                 elif worker_status == "HOLDING":
                     log.info(f"📈 TRADE HOLDING (5-MIN PING): {symbol} ({direction}) | Live Gross PnL: {gross_pnl}% | Peak PnL: {peak_pnl}% | Elapsed: {res_data.get('elapsed_minutes')}m")
 
