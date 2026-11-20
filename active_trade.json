@@ -1,3 +1,11 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "RAVEUSDT",
+  "direction": "LONG",
+  "mode": "PAPER",
+  "entry_price": 0.12157,
+  "stop_loss": 0.1191386,
+  "peak_gross_pnl": 0,
+  "avg_fluctuation": 0.43,
+  "opened_at": 1795143649709
 }
