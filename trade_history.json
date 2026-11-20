@@ -122,5 +122,18 @@
     "elapsed_minutes": "49.7",
     "streak_after_trade": 3,
     "date": "2026-11-20T01:05:20.779Z"
+  },
+  {
+    "symbol": "PIPPINUSDT",
+    "direction": "SHORT",
+    "mode": "PAPER",
+    "entry": 0.01894,
+    "exit": 0.01912,
+    "gross_pnl": "-0.95%",
+    "won": false,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +0.69% | Exit: +-0.95%)",
+    "elapsed_minutes": "14.6",
+    "streak_after_trade": 0,
+    "date": "2026-11-20T01:35:21.106Z"
   }
 ]
