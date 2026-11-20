@@ -85,8 +85,9 @@ export default {
         // EXIT CONDITION 1: INSTANT 1.0% TAKE PROFIT TARGET (+0.80% Net Cash Profit after 0.20% friction)
         let hitTakeProfit = grossPnl >= 1.00;
 
-        // EXIT CONDITION 2: 15-MINUTE STAGNANT PROFIT TIMEOUT (If in profit past 15 mins but hasn't hit 1.0%, close immediately!)
-        let hit15MinStagnantProfitExit = elapsedMinutes >= 15 && grossPnl > 0 && !hitTakeProfit;
+        // EXIT CONDITION 2: 10-MINUTE STAGNANT PROFIT TIMEOUT (<0.50% Gross PnL at 10+ mins)
+        // If trade passes 10 minutes with gross profit < 0.50%, close trade immediately at 10m rather than waiting 15m!
+        let hit10MinStagnantProfitExit = elapsedMinutes >= 10 && grossPnl > 0 && grossPnl < 0.50 && !hitTakeProfit;
 
         // EXIT CONDITION 3: FAST LOSS TIMEOUT (< 6 mins elapsed and loss > 1.0%, close immediately!)
         let hitFastLossExit = elapsedMinutes < 6 && grossPnl <= -1.00;
@@ -94,23 +95,29 @@ export default {
         // EXIT CONDITION 4: HARD STOP LOSS (-2.0%)
         let hitSL = grossPnl <= -2.00;
 
-        // EXIT CONDITION 5: 10+ MINUTE HOLDING LOSS TIMEOUT
-        let hit10MinLossTimeout = elapsedMinutes >= 10 && grossPnl < 0;
+        // EXIT CONDITION 5: 10+ MINUTE HOLDING LOSS TIMEOUT (Gross PnL <= 0)
+        let hit10MinLossTimeout = elapsedMinutes >= 10 && grossPnl <= 0;
 
-        if (hitTakeProfit || hit15MinStagnantProfitExit || hitFastLossExit || hitSL || hit10MinLossTimeout) {
-          const won = grossPnl > 0;
+        if (hitTakeProfit || hit10MinStagnantProfitExit || hitFastLossExit || hitSL || hit10MinLossTimeout) {
 
-          // Strict 8-win streak requirement counter
+          // STRICT WIN THRESHOLD RULE:
+          // Any gross PnL < 0.21% (after 0.20% friction fee) yields <= +0.00% Net Profit -> Counted as LOSS!
+          // Streak increments ONLY if gross PnL >= +0.21%. Otherwise streak resets to 0.
+          const won = grossPnl >= 0.21;
           currentStreak = won ? currentStreak + 1 : 0;
 
           const netCashProfit = (grossPnl - 0.20).toFixed(2);
 
           let exitReason = "";
           if (hitTakeProfit) exitReason = `1.0% TAKE PROFIT TARGET HIT (+${grossPnl.toFixed(2)}% Gross | Net Cash Profit: +${netCashProfit}%) -> Scanning next coin`;
-          else if (hit15MinStagnantProfitExit) exitReason = `15-MIN STAGNANT PROFIT EXIT (+${grossPnl.toFixed(2)}% Gross | Net Cash Profit: +${netCashProfit}% | Locked profit past 15m)`;
+          else if (hit10MinStagnantProfitExit) exitReason = `10-MIN STAGNANT PROFIT EXIT (<0.50% Gross at 10m | Exit: +${grossPnl.toFixed(2)}% | Net Cash Profit: +${netCashProfit}%)`;
           else if (hitFastLossExit) exitReason = `FAST LOSS EXIT (<6m Loss >1.0% | Exit: ${grossPnl.toFixed(2)}% | Cut fast loss)`;
           else if (hitSL) exitReason = "HARD STOP LOSS (-2.0%)";
           else if (hit10MinLossTimeout) exitReason = `10-MIN LOSS TIMEOUT (Gross: ${grossPnl.toFixed(2)}%)`;
+
+          if (!won && grossPnl > 0 && grossPnl < 0.21) {
+            exitReason += ` | [STREAK RESET TO 0: Gross PnL +${grossPnl.toFixed(2)}% < 0.21% friction threshold]`;
+          }
 
           tradeHistory.push({
             symbol: activeTrade.symbol,
