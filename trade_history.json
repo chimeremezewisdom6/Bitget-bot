@@ -825,5 +825,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 50,
     "date": "2026-11-20T21:45:27.738Z"
+  },
+  {
+    "symbol": "INITUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.08913,
+    "exit": 0.09112,
+    "gross_pnl": "2.23%",
+    "net_pnl": "2.03%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.23% Gross | Net Cash Profit: +2.03%) -> Scanning next coin",
+    "elapsed_minutes": "4.6",
+    "streak_after_trade": 51,
+    "date": "2026-11-20T22:10:21.732Z"
   }
 ]
