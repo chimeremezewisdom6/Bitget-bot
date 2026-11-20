@@ -1,11 +1,3 @@
 {
-  "active": true,
-  "symbol": "BLESSUSDT",
-  "direction": "LONG",
-  "mode": "PAPER",
-  "entry_price": 0.01172,
-  "stop_loss": 0.011485599999999999,
-  "peak_gross_pnl": 0.7167235494880609,
-  "avg_fluctuation": 0.49,
-  "opened_at": 1795141541454
+  "active": false
 }
