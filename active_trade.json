@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "CYBERUSDT",
+  "direction": "LONG",
+  "mode": "LIVE",
+  "entry_price": 0.2127,
+  "stop_loss": 0.208446,
+  "peak_gross_pnl": 0,
+  "avg_fluctuation": 2.05,
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795161940603
 }
