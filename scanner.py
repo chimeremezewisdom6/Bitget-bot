@@ -76,14 +76,15 @@ def get_active_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Queries Bitget account balance endpoints and logs raw API response for full diagnostic transparency."""
+    """Fetches live Bitget Unified Trading Account (UTA) assets and USDT equity balance."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
+    # Dedicated Bitget v2 Unified Trading Account (UTA) Endpoints
     endpoints = [
-        ("/api/v2/mix/account/accounts?productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/accounts?productType=USDT-FUTURES"),
-        ("/api/v2/user/account-balance", f"https://{BIT_DOMAIN}/api/v2/user/account-balance"),
-        ("/api/v2/account/all-account-balance", f"https://{BIT_DOMAIN}/api/v2/account/all-account-balance")
+        ("/api/v2/spot/account/assets", f"https://{BIT_DOMAIN}/api/v2/spot/account/assets"),
+        ("/api/v2/mix/account/account?symbol=BTCUSDT&productType=USDT-FUTURES", f"https://{BIT_DOMAIN}/api/v2/mix/account/account?symbol=BTCUSDT&productType=USDT-FUTURES"),
+        ("/api/v2/account/assets", f"https://{BIT_DOMAIN}/api/v2/account/assets")
     ]
 
     for rel_path, full_url in endpoints:
@@ -98,27 +99,41 @@ async def fetch_bitget_account_balance(session):
 
                 if r.status == 200 and resp.get("code") == "00000" and resp.get("data"):
                     data = resp["data"]
-                    if isinstance(data, list) and len(data) > 0:
-                        acc = data[0]
-                        equity = float(acc.get("usdtEquity") or acc.get("accountEquity") or acc.get("available") or acc.get("usdtBalance") or 0.0)
-                        available = float(acc.get("available") or acc.get("maxTransferOut") or acc.get("usdtBalance") or 0.0)
-                        return {
-                            "equity": equity,
-                            "available": available,
-                            "margin_coin": acc.get("marginCoin", "USDT"),
-                            "account_type": "Unified Trading Account (Futures)"
-                        }
+
+                    # 1. Spot / Unified Assets List
+                    if isinstance(data, list):
+                        usdt_coin = next((c for c in data if c.get("coin") == "USDT" or c.get("marginCoin") == "USDT"), None)
+                        if usdt_coin:
+                            equity = float(usdt_coin.get("equity") or usdt_coin.get("available") or usdt_coin.get("usdtEquity") or usdt_coin.get("maxTransferOut") or 0.0)
+                            available = float(usdt_coin.get("available") or usdt_coin.get("maxTransferOut") or equity)
+                            return {
+                                "equity": equity,
+                                "available": available,
+                                "margin_coin": "USDT",
+                                "account_type": "Unified Trading Account (UTA)"
+                            }
+                        elif len(data) > 0:
+                            c = data[0]
+                            equity = float(c.get("equity") or c.get("available") or c.get("usdtEquity") or 0.0)
+                            return {
+                                "equity": equity,
+                                "available": equity,
+                                "margin_coin": c.get("coin", "USDT"),
+                                "account_type": "Unified Trading Account (UTA)"
+                            }
+
+                    # 2. Singular Account Detail Dict
                     elif isinstance(data, dict):
-                        equity = float(data.get("usdtEquity") or data.get("accountEquity") or data.get("available") or 0.0)
-                        available = float(data.get("available") or data.get("maxTransferOut") or 0.0)
+                        equity = float(data.get("usdtEquity") or data.get("accountEquity") or data.get("equity") or data.get("available") or 0.0)
+                        available = float(data.get("available") or data.get("maxTransferOut") or equity)
                         return {
                             "equity": equity,
                             "available": available,
                             "margin_coin": data.get("marginCoin", "USDT"),
-                            "account_type": "Unified Trading Account (Futures)"
+                            "account_type": "Unified Trading Account (UTA)"
                         }
                 else:
-                    log.info(f"ℹ️ Bitget API Balance Check ({rel_path}) -> Status: {r.status} | Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+                    log.info(f"ℹ️ Bitget UTA Balance Check ({rel_path}) -> Status: {r.status} | Code: {resp.get('code')} | Msg: {resp.get('msg')}")
         except Exception as e:
             log.error(f"Error querying balance endpoint {rel_path}: {e}")
 
