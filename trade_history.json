@@ -741,5 +741,19 @@
     "elapsed_minutes": "4.6",
     "streak_after_trade": 44,
     "date": "2026-11-20T19:20:19.361Z"
+  },
+  {
+    "symbol": "VIRTUALUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.3738,
+    "exit": 0.3791,
+    "gross_pnl": "1.42%",
+    "net_pnl": "1.22%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.42% Gross | Net Cash Profit: +1.22%) -> Scanning next coin",
+    "elapsed_minutes": "5.0",
+    "streak_after_trade": 45,
+    "date": "2026-11-20T19:40:37.811Z"
   }
 ]
