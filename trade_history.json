@@ -377,5 +377,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 18,
     "date": "2026-11-20T10:30:21.691Z"
+  },
+  {
+    "symbol": "MUUUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 12.479,
+    "exit": 12.342,
+    "gross_pnl": "1.10%",
+    "net_pnl": "0.90%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.10% Gross | Net Cash Profit: +0.90%) -> Scanning next coin",
+    "elapsed_minutes": "4.8",
+    "streak_after_trade": 19,
+    "date": "2026-11-20T11:00:27.559Z"
   }
 ]
