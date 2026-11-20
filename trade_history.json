@@ -226,5 +226,18 @@
     "elapsed_minutes": "19.6",
     "streak_after_trade": 7,
     "date": "2026-11-20T05:30:23.821Z"
+  },
+  {
+    "symbol": "HANMIUSDT",
+    "direction": "SHORT",
+    "mode": "PAPER",
+    "entry": 114.71,
+    "exit": 113.73,
+    "gross_pnl": "0.85%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +1.38% | Exit: +0.85%)",
+    "elapsed_minutes": "14.2",
+    "streak_after_trade": 8,
+    "date": "2026-11-20T05:50:19.288Z"
   }
 ]
