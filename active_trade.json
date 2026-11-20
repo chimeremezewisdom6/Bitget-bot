@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "TTWOUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 211.36,
-  "stop_loss": 215.58720000000002,
-  "peak_gross_pnl": 0.6907645722937206,
-  "avg_fluctuation": 0.36,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795184440561
+  "active": false
 }
