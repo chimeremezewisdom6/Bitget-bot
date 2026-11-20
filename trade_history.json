@@ -419,5 +419,19 @@
     "elapsed_minutes": "9.7",
     "streak_after_trade": 21,
     "date": "2026-11-20T12:15:21.670Z"
+  },
+  {
+    "symbol": "AMZUUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 33.782,
+    "exit": 33.509,
+    "gross_pnl": "0.81%",
+    "net_pnl": "0.61%",
+    "won": true,
+    "reason": "15-MIN STAGNANT PROFIT EXIT (+0.81% Gross | Net Cash Profit: +0.61% | Locked profit past 15m)",
+    "elapsed_minutes": "19.7",
+    "streak_after_trade": 22,
+    "date": "2026-11-20T13:05:26.439Z"
   }
 ]
