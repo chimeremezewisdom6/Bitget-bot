@@ -713,5 +713,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 42,
     "date": "2026-11-20T19:00:24.151Z"
+  },
+  {
+    "symbol": "UVXYUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 26.387,
+    "exit": 27.68,
+    "gross_pnl": "4.90%",
+    "net_pnl": "4.70%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+4.90% Gross | Net Cash Profit: +4.70%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 43,
+    "date": "2026-11-20T19:10:22.572Z"
   }
 ]
