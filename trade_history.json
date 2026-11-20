@@ -363,5 +363,19 @@
     "elapsed_minutes": "19.6",
     "streak_after_trade": 17,
     "date": "2026-11-20T09:45:21.079Z"
+  },
+  {
+    "symbol": "PIPPINUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.01844,
+    "exit": 0.02029,
+    "gross_pnl": "10.03%",
+    "net_pnl": "9.83%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+10.03% Gross | Net Cash Profit: +9.83%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 18,
+    "date": "2026-11-20T10:30:21.691Z"
   }
 ]
