@@ -1,11 +1,3 @@
 {
-  "active": true,
-  "symbol": "INTWUSDT",
-  "direction": "SHORT",
-  "mode": "PAPER",
-  "entry_price": 4.886,
-  "stop_loss": 4.98372,
-  "peak_gross_pnl": 1.187065083913218,
-  "avg_fluctuation": 0.32,
-  "opened_at": 1795151447318
+  "active": false
 }
