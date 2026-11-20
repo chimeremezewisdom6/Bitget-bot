@@ -461,5 +461,19 @@
     "elapsed_minutes": "4.8",
     "streak_after_trade": 24,
     "date": "2026-11-20T13:45:30.788Z"
+  },
+  {
+    "symbol": "INTWUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 4.605,
+    "exit": 4.737,
+    "gross_pnl": "2.87%",
+    "net_pnl": "2.67%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.87% Gross | Net Cash Profit: +2.67%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 25,
+    "date": "2026-11-20T13:55:20.939Z"
   }
 ]
