@@ -573,5 +573,19 @@
     "elapsed_minutes": "4.6",
     "streak_after_trade": 32,
     "date": "2026-11-20T15:50:22.203Z"
+  },
+  {
+    "symbol": "COHRUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 190.95,
+    "exit": 186.93,
+    "gross_pnl": "2.11%",
+    "net_pnl": "1.91%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.11% Gross | Net Cash Profit: +1.91%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 33,
+    "date": "2026-11-20T16:25:24.105Z"
   }
 ]
