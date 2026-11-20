@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "INTWUSDT",
-  "direction": "LONG",
-  "mode": "LIVE",
-  "entry_price": 4.605,
-  "stop_loss": 4.5129,
-  "peak_gross_pnl": 0,
-  "avg_fluctuation": 0.51,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795182640375
+  "active": false
 }
