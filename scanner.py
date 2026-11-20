@@ -14,30 +14,36 @@ log = logging.getLogger("scanner")
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# Bitget API Credentials (Injected automatically from GitHub Secrets)
+# Bitget API Credentials (Injected from GitHub Secrets)
 BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = os.environ.get("BITGET_PASSPHRASE", "").strip()
 
+# Safety Toggle: Set to 'true' in GitHub env to allow live real-money trading after 8 paper wins
+ALLOW_LIVE_TRADING = os.environ.get("ALLOW_LIVE_TRADING", "false").lower() == "true"
+
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
+BITGET_ACCOUNT_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/account"
 BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType=USDT-FUTURES"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
+BITGET_ACCOUNT_URL = f"{BITGET_ACCOUNT_BASE}/accounts?productType=USDT-FUTURES"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
-SEMAPHORE = asyncio.Semaphore(12)  # Optimal concurrency for authenticated Bitget API calls
+SEMAPHORE = asyncio.Semaphore(12)
 
 MIN_24H_VOLUME = 100000     # Min $100k Volume
 MAX_24H_VOLUME = 10000000   # Max $10M Volume Range
 MIN_CANDLE_WINS = 9        # Requires 9 or 10 same-color candles (allowing Doji)
+DEFAULT_LEVERAGE = 5        # Strictly 5x Leverage
 
-def get_bitget_headers(method="GET", request_path=""):
+def get_bitget_headers(method="GET", request_path="", body=""):
     headers = {"Content-Type": "application/json"}
     if BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE:
         timestamp = str(int(time.time() * 1000))
-        message = timestamp + method.upper() + request_path
+        message = timestamp + method.upper() + request_path + body
         signature = base64.b64encode(
             hmac.new(BITGET_SECRET_KEY.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
         ).decode('utf-8')
@@ -69,6 +75,32 @@ def get_active_trade():
                     return data
         except Exception:
             return None
+    return None
+
+async def fetch_bitget_account_balance(session):
+    """Fetches live Bitget Unified Trading Account equity balance and available USDT margin."""
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
+        return None
+    path = "/api/v2/mix/account/accounts?productType=USDT-FUTURES"
+    headers = get_bitget_headers("GET", path)
+    try:
+        async with session.get(BITGET_ACCOUNT_URL, headers=headers, timeout=10) as r:
+            if r.status == 200:
+                resp = await r.json()
+                if resp.get("code") == "00000" and resp.get("data"):
+                    accounts = resp["data"]
+                    if isinstance(accounts, list) and len(accounts) > 0:
+                        acc = accounts[0]
+                        usdt_equity = float(acc.get("usdtEquity") or acc.get("accountEquity") or acc.get("available", 0.0))
+                        available_margin = float(acc.get("available") or acc.get("maxTransferOut", 0.0))
+                        return {
+                            "equity": usdt_equity,
+                            "available": available_margin,
+                            "margin_coin": acc.get("marginCoin", "USDT"),
+                            "account_type": "Unified Trading Account (Futures)"
+                        }
+    except Exception as e:
+        log.error(f"Bitget Account Balance Fetch Error: {e}")
     return None
 
 async def fetch_single_price(session, symbol):
@@ -128,20 +160,31 @@ async def fetch_bitget_1m_candles_with_retry(session, symbol, max_retries=3):
 
 async def main():
     wins = get_win_streak()
-    is_paper = wins < 8
-    active_trade = get_active_trade()
+    is_paper = (wins < 8) or (not ALLOW_LIVE_TRADING)
 
     auth_active = bool(BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE)
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    log.info(f"🏆 Current Win Streak: {wins}/8 | Mode: {'PAPER TRADING' if is_paper else '🚨 LIVE REAL-MONEY BITGET TRADING'} | API: {auth_status}")
+    mode_status = "PAPER TRADING (Target: 8/8 Win Streak)" if is_paper else "🚨 LIVE REAL-MONEY BITGET TRADING (5x Leverage | Reduce-Only | One-Way Mode)"
 
-    if active_trade:
-        symbol = active_trade.get("symbol")
-        direction = active_trade.get("direction", "LONG")
-        entry_price = float(active_trade.get("entry_price", 0.0))
-        log.info(f"⏳ Trade ACTIVE on {symbol} ({direction} @ {entry_price}). Fetching live price for 5-min ping...")
+    log.info(f"🏆 Current Paper Win Streak: {wins}/8 | Mode: {mode_status} | API: {auth_status}")
 
-        async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession() as session:
+        acc_info = await fetch_bitget_account_balance(session)
+        if acc_info:
+            log.info(f"💰 BITGET ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage, Reduce-Only, One-Way Mode ({acc_info['account_type']})")
+        elif auth_active:
+            log.warning("⚠️ Could not fetch Bitget account balance. Verify API permissions.")
+        else:
+            log.info("ℹ️ Running paper trading evaluation without Bitget API Keys.")
+
+        active_trade = get_active_trade()
+
+        if active_trade:
+            symbol = active_trade.get("symbol")
+            direction = active_trade.get("direction", "LONG")
+            entry_price = float(active_trade.get("entry_price", 0.0))
+            log.info(f"⏳ Trade ACTIVE on {symbol} ({direction} @ {entry_price}). Fetching live price for 5-min ping...")
+
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
                 if direction == "LONG":
@@ -159,14 +202,17 @@ async def main():
                     "entry_price": entry_price,
                     "current_price": current_price,
                     "live_pnl_pct": round(live_pnl_pct, 2),
+                    "account_equity": acc_info["equity"] if acc_info else None,
+                    "leverage": DEFAULT_LEVERAGE,
+                    "position_mode": "one_way",
+                    "reduce_only": True,
                     "is_ping": True
                 }
             else:
                 log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
-    else:
-        log.info(f"🛰️ Scanning Bitget Futures coins via Authenticated API ($100k to $10M Volume Range)...")
-        async with aiohttp.ClientSession() as session:
+        else:
+            log.info(f"🛰️ Scanning Bitget Futures coins ($100k to $10M Volume Range)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -206,7 +252,7 @@ async def main():
                 coin_info = valid_coins[idx]
                 symbol = coin_info["symbol"]
                 vol_24h = coin_info["vol_24h"]
-                candles = list(reversed(candle_data[:10]))  # oldest to newest (10 1m candles)
+                candles = list(reversed(candle_data[:10]))
 
                 green_count = 0
                 red_count = 0
@@ -300,6 +346,10 @@ async def main():
                     "is_paper": is_paper,
                     "avg_fluctuation": round(best_signal["avg_fluctuation"], 2),
                     "current_price": best_signal["current_price"],
+                    "account_equity": acc_info["equity"] if acc_info else None,
+                    "leverage": DEFAULT_LEVERAGE,
+                    "position_mode": "one_way",
+                    "reduce_only": True,
                     "is_ping": False
                 }
             else:
@@ -311,8 +361,7 @@ async def main():
                     "is_ping": False
                 }
 
-    headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
-    async with aiohttp.ClientSession() as session:
+        headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
         async with session.post(CLOUDFLARE_URL, json=payload, headers=headers, timeout=15) as resp:
             status_code = resp.status
             try:
