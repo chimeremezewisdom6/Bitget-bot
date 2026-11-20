@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "JUPUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 0.2283,
-  "stop_loss": 0.23286600000000002,
-  "peak_gross_pnl": 0,
-  "avg_fluctuation": 0.22,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795199739487
+  "active": false
 }
