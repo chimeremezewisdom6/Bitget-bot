@@ -755,5 +755,19 @@
     "elapsed_minutes": "5.0",
     "streak_after_trade": 45,
     "date": "2026-11-20T19:40:37.811Z"
+  },
+  {
+    "symbol": "GRAMUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.9741,
+    "exit": 0.9748,
+    "gross_pnl": "0.07%",
+    "net_pnl": "-0.13%",
+    "won": true,
+    "reason": "15-MIN STAGNANT PROFIT EXIT (+0.07% Gross | Net Cash Profit: +-0.13% | Locked profit past 15m)",
+    "elapsed_minutes": "19.5",
+    "streak_after_trade": 46,
+    "date": "2026-11-20T20:05:20.537Z"
   }
 ]
