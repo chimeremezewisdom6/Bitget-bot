@@ -1,11 +1,3 @@
 {
-  "active": true,
-  "symbol": "SAPIENUSDT",
-  "direction": "LONG",
-  "mode": "PAPER",
-  "entry_price": 0.04081,
-  "stop_loss": 0.039993799999999996,
-  "peak_gross_pnl": 6.27297231070816,
-  "avg_fluctuation": 0.64,
-  "opened_at": 1795142444572
+  "active": false
 }
