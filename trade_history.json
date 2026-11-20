@@ -489,5 +489,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 26,
     "date": "2026-11-20T14:10:19.562Z"
+  },
+  {
+    "symbol": "TTWOUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 211.36,
+    "exit": 206.43,
+    "gross_pnl": "2.33%",
+    "net_pnl": "2.13%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.33% Gross | Net Cash Profit: +2.13%) -> Scanning next coin",
+    "elapsed_minutes": "9.8",
+    "streak_after_trade": 27,
+    "date": "2026-11-20T14:30:27.146Z"
   }
 ]
