@@ -279,5 +279,19 @@
     "elapsed_minutes": "4.9",
     "streak_after_trade": 11,
     "date": "2026-11-20T07:30:30.355Z"
+  },
+  {
+    "symbol": "VELVETUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.0674,
+    "exit": 0.06918,
+    "gross_pnl": "2.64%",
+    "net_pnl": "2.44%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.64% Gross | Net Cash Profit: +2.44%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 12,
+    "date": "2026-11-20T07:45:21.129Z"
   }
 ]
