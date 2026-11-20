@@ -4,12 +4,20 @@ import json
 import asyncio
 import logging
 import aiohttp
+import hmac
+import hashlib
+import base64
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("scanner")
 
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+
+# Bitget API Credentials (Optional: Pass in GitHub Secrets for 10x higher rate limits!)
+BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
+BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
+BITGET_PASSPHRASE = os.environ.get("BITGET_PASSPHRASE", "").strip()
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
@@ -19,11 +27,28 @@ BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
-SEMAPHORE = asyncio.Semaphore(15)
+SEMAPHORE = asyncio.Semaphore(10)  # Smooth rate pacing to prevent IP rate-limiting
 
 MIN_24H_VOLUME = 100000     # Min $100k Volume
 MAX_24H_VOLUME = 10000000   # Max $10M Volume Range
 MIN_CANDLE_WINS = 9        # Requires 9 or 10 same-color candles (allowing Doji)
+
+def get_bitget_headers(method="GET", request_path=""):
+    headers = {"Content-Type": "application/json"}
+    if BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE:
+        timestamp = str(int(time.time() * 1000))
+        message = timestamp + method.upper() + request_path
+        signature = base64.b64encode(
+            hmac.new(BITGET_SECRET_KEY.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
+        ).decode('utf-8')
+        headers.update({
+            "ACCESS-KEY": BITGET_API_KEY,
+            "ACCESS-SIGN": signature,
+            "ACCESS-TIMESTAMP": timestamp,
+            "ACCESS-PASSPHRASE": BITGET_PASSPHRASE,
+            "locale": "en-US"
+        })
+    return headers
 
 def get_win_streak():
     if os.path.exists(STREAK_FILE):
@@ -48,8 +73,10 @@ def get_active_trade():
 
 async def fetch_single_price(session, symbol):
     params = {"symbol": symbol, "productType": "USDT-FUTURES"}
+    path = "/api/v2/mix/market/ticker?symbol=" + symbol + "&productType=USDT-FUTURES"
+    headers = get_bitget_headers("GET", path)
     try:
-        async with session.get(BITGET_SINGLE_TICKER_URL, params=params, timeout=10) as r:
+        async with session.get(BITGET_SINGLE_TICKER_URL, params=params, headers=headers, timeout=10) as r:
             if r.status == 200:
                 resp = await r.json()
                 if resp.get("code") == "00000" and resp.get("data"):
@@ -63,8 +90,10 @@ async def fetch_single_price(session, symbol):
     return None
 
 async def fetch_bitget_tickers(session):
+    path = "/api/v2/mix/market/tickers?productType=USDT-FUTURES"
+    headers = get_bitget_headers("GET", path)
     try:
-        async with session.get(BITGET_TICKERS_URL, timeout=10) as r:
+        async with session.get(BITGET_TICKERS_URL, headers=headers, timeout=10) as r:
             if r.status == 200:
                 data = await r.json()
                 if data.get("code") == "00000":
@@ -73,17 +102,28 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
-async def fetch_bitget_1m_candles(session, symbol):
+async def fetch_bitget_1m_candles_with_retry(session, symbol, max_retries=3):
     async with SEMAPHORE:
         params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "10"}
-        try:
-            async with session.get(BITGET_CANDLES_URL, params=params, timeout=10) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if data.get("code") == "00000":
-                        return data.get("data", [])
-        except Exception:
-            pass
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=10"
+
+        for attempt in range(max_retries):
+            headers = get_bitget_headers("GET", path)
+            try:
+                async with session.get(BITGET_CANDLES_URL, params=params, headers=headers, timeout=10) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        if data.get("code") == "00000":
+                            candles = data.get("data", [])
+                            if candles and len(candles) >= 10:
+                                return candles
+                    elif r.status in (429, 403):
+                        await asyncio.sleep(0.5 * (attempt + 1))
+            except Exception:
+                await asyncio.sleep(0.3 * (attempt + 1))
+
+            await asyncio.sleep(0.05)
+
         return []
 
 async def main():
@@ -91,7 +131,8 @@ async def main():
     is_paper = wins < 8
     active_trade = get_active_trade()
 
-    log.info(f"🏆 Current Win Streak: {wins}/8 | Mode: {'PAPER TRADING' if is_paper else '🚨 LIVE REAL-MONEY BITGET TRADING'}")
+    auth_status = "AUTHENTICATED (API Key active)" if (BITGET_API_KEY and BITGET_SECRET_KEY) else "PUBLIC API (Unauthenticated)"
+    log.info(f"🏆 Current Win Streak: {wins}/8 | Mode: {'PAPER TRADING' if is_paper else '🚨 LIVE REAL-MONEY BITGET TRADING'} | API: {auth_status}")
 
     if active_trade:
         symbol = active_trade.get("symbol")
@@ -102,7 +143,6 @@ async def main():
         async with aiohttp.ClientSession() as session:
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
-                # Calculate live gross PnL percentage
                 if direction == "LONG":
                     live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
                 else:
@@ -139,12 +179,11 @@ async def main():
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_scanned = len(valid_coins)
-            log.info(f"✅ Found {total_scanned} active altcoins in $100k-$10M volume range.")
+            log.info(f"✅ Found {total_scanned} active altcoins in $100k-$10M volume range. Fetching candles with rate-limit protection...")
 
-            tasks = [fetch_bitget_1m_candles(session, coin["symbol"]) for coin in valid_coins]
+            tasks = [fetch_bitget_1m_candles_with_retry(session, coin["symbol"]) for coin in valid_coins]
             all_candles = await asyncio.gather(*tasks)
 
-            # Category Counters
             cat_10_green = 0
             cat_9_green = 0
             cat_8_green = 0
@@ -156,15 +195,17 @@ async def main():
             cat_10_red = 0
 
             all_evaluated = []
+            dropped_count = 0
 
             for idx, candle_data in enumerate(all_candles):
                 if not candle_data or len(candle_data) < 10:
+                    dropped_count += 1
                     continue
 
                 coin_info = valid_coins[idx]
                 symbol = coin_info["symbol"]
                 vol_24h = coin_info["vol_24h"]
-                candles = list(reversed(candle_data))  # oldest to newest (10 1m candles)
+                candles = list(reversed(candle_data[:10]))  # oldest to newest (10 1m candles)
 
                 green_count = 0
                 red_count = 0
@@ -190,7 +231,6 @@ async def main():
                 avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
                 close_10m = float(candles[-1][4])
 
-                # Classify into aggregate count categories
                 if green_count == 10:
                     cat_10_green += 1
                 elif green_count == 9:
@@ -221,7 +261,7 @@ async def main():
                 })
 
             log.info("=================================================================================")
-            log.info(f"📊 MARKET CANDLE CATEGORY SUMMARY TABLE (TOTAL SCANNED: {len(all_evaluated)} COINS):")
+            log.info(f"📊 MARKET CANDLE CATEGORY SUMMARY TABLE (FULLY EVALUATED: {len(all_evaluated)} / {total_scanned} COINS | DROPPED: {dropped_count}):")
             log.info(f"{'CANDLE PATTERN CATEGORY':<42} | {'NUMBER OF COINS':<15}")
             log.info("-" * 62)
             log.info(f"{'10 Green / 0 Red (Extreme Bullish Momentum)':<42} | {cat_10_green:<15}")
@@ -235,7 +275,6 @@ async def main():
             log.info(f"{'10 Red / 0 Green (Extreme Bearish Momentum)':<42} | {cat_10_red:<15}")
             log.info("=================================================================================")
 
-            # Signal evaluation: 9+ Green OR 9+ Red (allowing Doji) with >= 0.20% avg fluctuation
             valid_longs = [c for c in all_evaluated if c["green_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
             valid_shorts = [c for c in all_evaluated if c["red_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
 
