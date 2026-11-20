@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "VELVETUSDT",
+  "direction": "LONG",
+  "mode": "LIVE",
+  "entry_price": 0.0674,
+  "stop_loss": 0.066052,
+  "peak_gross_pnl": 0,
+  "avg_fluctuation": 0.49,
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795160442102
 }
