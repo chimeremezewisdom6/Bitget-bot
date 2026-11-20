@@ -1,11 +1,3 @@
 {
-  "active": true,
-  "symbol": "MUUUSDT",
-  "direction": "SHORT",
-  "mode": "PAPER",
-  "entry_price": 12.982,
-  "stop_loss": 13.24164,
-  "peak_gross_pnl": 3.6589123401633006,
-  "avg_fluctuation": 0.44,
-  "opened_at": 1795138844948
+  "active": false
 }
