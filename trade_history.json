@@ -475,5 +475,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 25,
     "date": "2026-11-20T13:55:20.939Z"
+  },
+  {
+    "symbol": "METUUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 18.544,
+    "exit": 18.938,
+    "gross_pnl": "2.12%",
+    "net_pnl": "1.92%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.12% Gross | Net Cash Profit: +1.92%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 26,
+    "date": "2026-11-20T14:10:19.562Z"
   }
 ]
