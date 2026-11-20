@@ -33,6 +33,7 @@ BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
 BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
 BITGET_V3_SET_POS_MODE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-position-mode"
+BITGET_V3_ORDER_DETAIL_URL = f"https://{BIT_DOMAIN}/api/v3/trade/order-info"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
@@ -83,7 +84,7 @@ def get_active_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Fetches live Bitget Unified Trading Account (UTA) assets using official v3 API."""
+    """Queries official Bitget UTA v3 API and returns live equity & available USDT margin."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -121,6 +122,27 @@ async def fetch_bitget_account_balance(session):
         log.error(f"Error querying Bitget UTA v3 balance: {e}")
     return None
 
+async def fetch_bitget_order_details(session, symbol, order_id):
+    """Fetches exact fill price and executed contracts for an order from Bitget v3 UTA API."""
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
+        return None
+
+    path = f"/api/v3/trade/order-info?category=USDT-FUTURES&symbol={symbol}&orderId={order_id}"
+    full_url = f"https://{BIT_DOMAIN}{path}"
+    headers = get_bitget_headers("GET", path)
+    try:
+        async with session.get(full_url, headers=headers, timeout=8) as r:
+            if r.status == 200:
+                resp = await r.json()
+                if resp.get("code") == "00000" and resp.get("data"):
+                    d = resp["data"]
+                    fill_price = float(d.get("priceAvg") or d.get("fillPrice") or d.get("price") or 0.0)
+                    executed_qty = d.get("baseVolume") or d.get("qty") or d.get("size")
+                    return {"fill_price": fill_price, "executed_qty": executed_qty}
+    except Exception as e:
+        log.debug(f"Order detail fetch notice: {e}")
+    return None
+
 async def configure_bitget_symbol_settings(session, symbol):
     """Ensures Bitget leverage is set to 5x and position mode is set to One-Way Mode using v3 UTA APIs."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
@@ -150,13 +172,13 @@ async def configure_bitget_symbol_settings(session, symbol):
     except Exception as e:
         log.debug(f"Leverage setup notice: {e}")
 
-async def place_bitget_live_order(session, symbol, direction, entry_price, available_balance):
+async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    Executes a Real Live Real-Money Order directly on Bitget Exchange Servers via official v3 UTA API!
+    Executes Real Live Order on Bitget UTA v3 matching engine.
+    - Records Exact Pre-Trade USDT Account Balance.
     - Uses 90% of Available Account Balance with 5x Leverage.
-    - Attaches Exchange Preset Hard Stop-Loss (-2.00%) directly on Bitget v3 UTA matching engine.
-    - DYNAMIC TAKE-PROFIT: Omits static preset TP from Bitget's order placement so wins are NOT capped at +1.0%,
-      allowing the bot to ride momentum to +2%, +3.6%, +4.9%, +6.2%+!
+    - Attaches Preset Take Profit (+1.00%) & Hard Emergency Stop-Loss (-2.00%).
+    - Fetches Actual Executed Fill Price from Bitget.
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
@@ -170,13 +192,13 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
     if notional_value < 5.0:
         notional_value = 5.50
 
-    contract_size = notional_value / entry_price
+    contract_size = notional_value / market_price
 
-    if entry_price > 1000:
+    if market_price > 1000:
         size_str = f"{contract_size:.3f}"
-    elif entry_price > 10:
+    elif market_price > 10:
         size_str = f"{contract_size:.2f}"
-    elif entry_price > 1:
+    elif market_price > 1:
         size_str = f"{contract_size:.1f}"
     else:
         size_str = f"{int(contract_size)}"
@@ -186,12 +208,13 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
 
     if direction == "LONG":
         side = "buy"
-        preset_sl = round(entry_price * 0.980, 5)  # Hard Emergency SL: -2.00%
+        preset_tp = round(market_price * 1.010, 5)  # Take Profit: +1.00%
+        preset_sl = round(market_price * 0.980, 5)  # Hard SL: -2.00%
     else:
         side = "sell"
-        preset_sl = round(entry_price * 1.020, 5)  # Hard Emergency SL: -2.00%
+        preset_tp = round(market_price * 0.990, 5)  # Take Profit: +1.00%
+        preset_sl = round(market_price * 1.020, 5)  # Hard SL: -2.00%
 
-    # Official Bitget UTA v3 Order Placement Payload (Dynamic Uncapped TP!)
     path = "/api/v3/trade/place-order"
     order_payload = {
         "category": "USDT-FUTURES",
@@ -200,6 +223,7 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
         "qty": size_str,
         "side": side,
         "orderType": "market",
+        "presetTakeProfitPrice": str(preset_tp),
         "presetStopLossPrice": str(preset_sl),
         "reduceOnly": "no"
     }
@@ -207,7 +231,7 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🚨 EXECUTING REAL LIVE DYNAMIC MOMENTUM ENTRY ON BITGET: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT (90% Equity @ 5x) | Dynamic Take-Profit Active | SL: {preset_sl}")
+    log.info(f"🚨 EXECUTING REAL LIVE ORDER ON BITGET: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT | Pre-Check Equity: ${available_balance:.2f} USDT | TP: {preset_tp} | SL: {preset_sl}")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -219,12 +243,23 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
-                log.info(f"✅ REAL BITGET UTA v3 DYNAMIC ORDER PLACED SUCCESSFULLY! Order ID: {order_id}")
+                log.info(f"✅ REAL BITGET UTA v3 EXCHANGE ORDER PLACED! Order ID: {order_id}")
+
+                # Fetch actual executed fill price from Bitget API
+                await asyncio.sleep(0.5)
+                order_info = await fetch_bitget_order_details(session, symbol, order_id)
+                real_fill_price = order_info["fill_price"] if (order_info and order_info.get("fill_price")) else market_price
+
+                log.info(f"🎯 REAL BITGET EXECUTION ENTRY PRICE: ${real_fill_price:.5f} (Ticker market price was: ${market_price:.5f})")
+
                 return {
                     "order_id": order_id,
                     "notional_value": notional_value,
                     "contract_size": size_str,
-                    "preset_sl": preset_sl
+                    "preset_tp": preset_tp,
+                    "preset_sl": preset_sl,
+                    "real_fill_price": real_fill_price,
+                    "pre_trade_balance": available_balance
                 }
             else:
                 log.error(f"❌ BITGET UTA v3 ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
@@ -233,8 +268,8 @@ async def place_bitget_live_order(session, symbol, direction, entry_price, avail
         log.error(f"❌ Error submitting live Bitget UTA v3 order: {e}")
         return None
 
-async def close_bitget_live_position(session, symbol, direction, size_str="0"):
-    """Executes an Immediate Live Market Close Order (reduceOnly: yes) via v3 UTA API when dynamic TP or time exit triggers."""
+async def close_bitget_live_position(session, symbol, direction, contract_size=""):
+    """Executes an Immediate Live Market Close Order (reduceOnly: yes) using exact contract size on Bitget UTA v3 API."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -245,16 +280,20 @@ async def close_bitget_live_position(session, symbol, direction, size_str="0"):
         "category": "USDT-FUTURES",
         "symbol": symbol,
         "marginCoin": "USDT",
-        "qty": size_str,
         "side": close_side,
         "orderType": "market",
         "reduceOnly": "yes"
     }
 
+    if contract_size and contract_size != "0":
+        order_payload["qty"] = str(contract_size)
+    else:
+        order_payload["qty"] = "1"
+
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🛑 EXECUTING LIVE MARKET EXIT ON BITGET UTA v3 EXCHANGE: Closing {symbol} ({direction})")
+    log.info(f"🛑 EXECUTING LIVE MARKET EXIT ON BITGET UTA v3 EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload['qty']}")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -267,7 +306,7 @@ async def close_bitget_live_position(session, symbol, direction, size_str="0"):
             if r.status == 200 and resp.get("code") == "00000":
                 log.info(f"✅ LIVE BITGET UTA v3 POSITION CLOSED ON EXCHANGE SUCCESSFULLY! Order ID: {resp.get('data', {}).get('orderId')}")
             else:
-                log.debug(f"Notice on live exchange close: {resp.get('msg')}")
+                log.warning(f"⚠️ Bitget Exchange Close Notice: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
     except Exception as e:
         log.error(f"Error executing live Bitget position close: {e}")
 
@@ -402,8 +441,10 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
+        pre_trade_equity = acc_info["equity"] if acc_info else 1.54
+
         if acc_info:
-            log.info(f"💰 BITGET ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage, Reduce-Only, One-Way Mode ({acc_info['account_type']})")
+            log.info(f"💰 BITGET PRE-TRADE ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available Margin: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage ({acc_info['account_type']})")
         else:
             log.warning("⚠️ Account balance check pending...")
 
@@ -413,7 +454,10 @@ async def main():
             symbol = active_trade.get("symbol")
             direction = active_trade.get("direction", "LONG")
             entry_price = float(active_trade.get("entry_price", 0.0))
-            log.info(f"⏳ Trade ACTIVE on {symbol} ({direction} @ {entry_price}). Fetching live price for 5-min ping...")
+            contract_size = active_trade.get("contract_size", "79")
+            recorded_pre_bal = float(active_trade.get("pre_trade_balance", pre_trade_equity))
+
+            log.info(f"⏳ Trade ACTIVE on {symbol} ({direction} @ ${entry_price:.5f}). Pre-Trade Equity: ${recorded_pre_bal:.2f} USDT. Checking live price...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -423,7 +467,7 @@ async def main():
                     live_pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
 
                 pnl_str = f"{live_pnl_pct:+.2f}%"
-                log.info(f"📍 LIVE TRADE PING: {symbol} | Entry: {entry_price:.5f} | Current: {current_price:.5f} | Live PnL: {pnl_str}")
+                log.info(f"📍 LIVE TRADE PING: {symbol} | Entry Fill: ${entry_price:.5f} | Current Price: ${current_price:.5f} | Live PnL: {pnl_str}")
 
                 payload = {
                     "symbol": symbol,
@@ -433,10 +477,12 @@ async def main():
                     "current_price": current_price,
                     "live_pnl_pct": round(live_pnl_pct, 2),
                     "account_equity": acc_info["equity"] if acc_info else None,
+                    "pre_trade_balance": recorded_pre_bal,
                     "leverage": DEFAULT_LEVERAGE,
                     "position_mode": "one_way",
                     "reduce_only": True,
-                    "is_ping": True
+                    "is_ping": True,
+                    "contract_size": contract_size
                 }
             else:
                 log.error(f"Could not fetch live price for active trade {symbol}.")
@@ -493,30 +539,35 @@ async def main():
 
                 log.info(f"🔥 BEST ENTRY SIGNAL MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
 
-                # EXECUTE REAL LIVE BITGET UTA v3 DYNAMIC ORDER IF NOT PAPER TRADING
                 live_order_result = None
+                real_entry_fill_price = best_signal["current_price"]
+
                 if not is_paper:
-                    avail_bal = acc_info["available"] if acc_info else 1.58
+                    avail_bal = acc_info["available"] if acc_info else 1.54
                     live_order_result = await place_bitget_live_order(
                         session=session,
                         symbol=best_signal["symbol"],
                         direction=best_signal["direction"],
-                        entry_price=best_signal["current_price"],
+                        market_price=best_signal["current_price"],
                         available_balance=avail_bal
                     )
+                    if live_order_result and live_order_result.get("real_fill_price"):
+                        real_entry_fill_price = live_order_result["real_fill_price"]
 
                 payload = {
                     "symbol": best_signal["symbol"],
                     "direction": best_signal["direction"],
                     "is_paper": is_paper,
                     "avg_fluctuation": round(best_signal["avg_fluctuation"], 2),
-                    "current_price": best_signal["current_price"],
+                    "current_price": real_entry_fill_price,
                     "account_equity": acc_info["equity"] if acc_info else None,
+                    "pre_trade_balance": pre_trade_equity,
                     "leverage": DEFAULT_LEVERAGE,
                     "position_mode": "one_way",
                     "reduce_only": True,
                     "is_ping": False,
-                    "live_order": live_order_result
+                    "live_order": live_order_result,
+                    "contract_size": live_order_result.get("contract_size", "1") if live_order_result else "1"
                 }
             else:
                 log.info(f"ℹ️ No batch winners reached >= {MIN_CANDLE_WINS}/10 candles with >= 0.20% fluctuation this minute.")
@@ -542,10 +593,26 @@ async def main():
                 reason = res_data.get("reason", "")
 
                 if worker_status == "CLOSED":
-                    log.info(f"🛑 TRADE CLOSED: {symbol} ({direction}) | Closing Gross PnL: {gross_pnl}% | Peak PnL: {peak_pnl}% | Exit Reason: {reason} | Win Streak: {res_data.get('new_win_streak')}")
-                    # EXECUTE LIVE EXCHANGE MARKET CLOSE IF NOT PAPER TRADING
+                    log.info(f"🛑 TRADE CLOSED: {symbol} ({direction}) | Closing Gross PnL: {gross_pnl}% | Peak PnL: {peak_pnl}% | Exit Reason: {reason}")
                     if not is_paper:
-                        await close_bitget_live_position(session, symbol, direction)
+                        c_size = active_trade.get("contract_size") or res_data.get("contract_size", "79")
+                        await close_bitget_live_position(session, symbol, direction, contract_size=c_size)
+
+                        # Post-Trade USDT Balance & Real Net Profit Audit
+                        await asyncio.sleep(1.5)
+                        post_bal = await fetch_bitget_account_balance(session)
+                        if post_bal:
+                            final_eq = post_bal['equity']
+                            real_usdt_change = final_eq - recorded_pre_bal
+                            change_str = f"+${real_usdt_change:.4f}" if real_usdt_change >= 0 else f"-${abs(real_usdt_change):.4f}"
+
+                            log.info("====================================================================================================")
+                            log.info(f"💵 REAL BITGET ACCOUNT BALANCE AUDIT FOR {symbol}:")
+                            log.info(f"   • Pre-Trade Account Equity:  ${recorded_pre_bal:.4f} USDT")
+                            log.info(f"   • Post-Trade Account Equity: ${final_eq:.4f} USDT")
+                            log.info(f"   • ACTUAL NET CASH CHANGE:    {change_str} USDT")
+                            log.info("====================================================================================================")
+
                 elif worker_status == "HOLDING":
                     log.info(f"📈 TRADE HOLDING (5-MIN PING): {symbol} ({direction}) | Live Gross PnL: {gross_pnl}% | Peak PnL: {peak_pnl}% | Elapsed: {res_data.get('elapsed_minutes')}m")
 
