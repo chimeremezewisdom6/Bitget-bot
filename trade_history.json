@@ -293,5 +293,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 12,
     "date": "2026-11-20T07:45:21.129Z"
+  },
+  {
+    "symbol": "CYBERUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.2127,
+    "exit": 0.2422,
+    "gross_pnl": "13.87%",
+    "net_pnl": "13.67%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+13.87% Gross | Net Cash Profit: +13.67%) -> Scanning next coin",
+    "elapsed_minutes": "4.8",
+    "streak_after_trade": 13,
+    "date": "2026-11-20T08:10:26.829Z"
   }
 ]
