@@ -14,7 +14,7 @@ log = logging.getLogger("scanner")
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# Bitget API Credentials (Optional: Pass in GitHub Secrets for 10x higher rate limits!)
+# Bitget API Credentials (Injected automatically from GitHub Secrets)
 BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = os.environ.get("BITGET_PASSPHRASE", "").strip()
@@ -27,7 +27,7 @@ BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
-SEMAPHORE = asyncio.Semaphore(10)  # Smooth rate pacing to prevent IP rate-limiting
+SEMAPHORE = asyncio.Semaphore(12)  # Optimal concurrency for authenticated Bitget API calls
 
 MIN_24H_VOLUME = 100000     # Min $100k Volume
 MAX_24H_VOLUME = 10000000   # Max $10M Volume Range
@@ -73,7 +73,7 @@ def get_active_trade():
 
 async def fetch_single_price(session, symbol):
     params = {"symbol": symbol, "productType": "USDT-FUTURES"}
-    path = "/api/v2/mix/market/ticker?symbol=" + symbol + "&productType=USDT-FUTURES"
+    path = f"/api/v2/mix/market/ticker?symbol={symbol}&productType=USDT-FUTURES"
     headers = get_bitget_headers("GET", path)
     try:
         async with session.get(BITGET_SINGLE_TICKER_URL, params=params, headers=headers, timeout=10) as r:
@@ -118,11 +118,11 @@ async def fetch_bitget_1m_candles_with_retry(session, symbol, max_retries=3):
                             if candles and len(candles) >= 10:
                                 return candles
                     elif r.status in (429, 403):
-                        await asyncio.sleep(0.5 * (attempt + 1))
+                        await asyncio.sleep(0.4 * (attempt + 1))
             except Exception:
-                await asyncio.sleep(0.3 * (attempt + 1))
+                await asyncio.sleep(0.2 * (attempt + 1))
 
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.04)
 
         return []
 
@@ -131,7 +131,8 @@ async def main():
     is_paper = wins < 8
     active_trade = get_active_trade()
 
-    auth_status = "AUTHENTICATED (API Key active)" if (BITGET_API_KEY and BITGET_SECRET_KEY) else "PUBLIC API (Unauthenticated)"
+    auth_active = bool(BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE)
+    auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
     log.info(f"🏆 Current Win Streak: {wins}/8 | Mode: {'PAPER TRADING' if is_paper else '🚨 LIVE REAL-MONEY BITGET TRADING'} | API: {auth_status}")
 
     if active_trade:
@@ -164,7 +165,7 @@ async def main():
                 log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
     else:
-        log.info(f"🛰️ Scanning Bitget Futures coins ($100k to $10M Volume Range)...")
+        log.info(f"🛰️ Scanning Bitget Futures coins via Authenticated API ($100k to $10M Volume Range)...")
         async with aiohttp.ClientSession() as session:
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
@@ -179,7 +180,7 @@ async def main():
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_scanned = len(valid_coins)
-            log.info(f"✅ Found {total_scanned} active altcoins in $100k-$10M volume range. Fetching candles with rate-limit protection...")
+            log.info(f"✅ Found {total_scanned} active altcoins in $100k-$10M volume range. Fetching candle streams...")
 
             tasks = [fetch_bitget_1m_candles_with_retry(session, coin["symbol"]) for coin in valid_coins]
             all_candles = await asyncio.gather(*tasks)
