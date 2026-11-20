@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "ELSAUSDT",
+  "direction": "LONG",
+  "mode": "LIVE",
+  "entry_price": 0.06562,
+  "stop_loss": 0.06430759999999999,
+  "peak_gross_pnl": 0,
+  "avg_fluctuation": 0.83,
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795195849854
 }
