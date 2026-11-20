@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "CRWVUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 43.64,
-  "stop_loss": 44.5128,
-  "peak_gross_pnl": 0.8020164986251178,
-  "avg_fluctuation": 0.35,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795165841930
+  "active": false
 }
