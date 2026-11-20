@@ -503,5 +503,19 @@
     "elapsed_minutes": "9.8",
     "streak_after_trade": 27,
     "date": "2026-11-20T14:30:27.146Z"
+  },
+  {
+    "symbol": "NVDLUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 13.45,
+    "exit": 13.083,
+    "gross_pnl": "2.73%",
+    "net_pnl": "2.53%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.73% Gross | Net Cash Profit: +2.53%) -> Scanning next coin",
+    "elapsed_minutes": "5.0",
+    "streak_after_trade": 28,
+    "date": "2026-11-20T14:45:45.561Z"
   }
 ]
