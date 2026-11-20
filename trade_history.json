@@ -615,5 +615,19 @@
     "elapsed_minutes": "4.5",
     "streak_after_trade": 35,
     "date": "2026-11-20T16:55:17.721Z"
+  },
+  {
+    "symbol": "ELSAUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.06562,
+    "exit": 0.06837,
+    "gross_pnl": "4.19%",
+    "net_pnl": "3.99%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+4.19% Gross | Net Cash Profit: +3.99%) -> Scanning next coin",
+    "elapsed_minutes": "4.5",
+    "streak_after_trade": 36,
+    "date": "2026-11-20T17:35:20.152Z"
   }
 ]
