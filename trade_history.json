@@ -148,5 +148,18 @@
     "elapsed_minutes": "24.6",
     "streak_after_trade": 1,
     "date": "2026-11-20T02:05:19.981Z"
+  },
+  {
+    "symbol": "BLESSUSDT",
+    "direction": "LONG",
+    "mode": "PAPER",
+    "entry": 0.01172,
+    "exit": 0.011786,
+    "gross_pnl": "0.56%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +0.72% | Exit: +0.56%)",
+    "elapsed_minutes": "9.7",
+    "streak_after_trade": 2,
+    "date": "2026-11-20T02:35:20.529Z"
   }
 ]
