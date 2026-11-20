@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "AMZUUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 33.782,
-  "stop_loss": 34.45764,
-  "peak_gross_pnl": 0.7281984488780864,
-  "avg_fluctuation": 0.21,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795178744890
+  "active": false
 }
