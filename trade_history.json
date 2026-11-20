@@ -671,5 +671,19 @@
     "elapsed_minutes": "4.6",
     "streak_after_trade": 39,
     "date": "2026-11-20T18:25:19.851Z"
+  },
+  {
+    "symbol": "JUPUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 0.2283,
+    "exit": 0.2246,
+    "gross_pnl": "1.62%",
+    "net_pnl": "1.42%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+1.62% Gross | Net Cash Profit: +1.42%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 40,
+    "date": "2026-11-20T18:40:23.040Z"
   }
 ]
