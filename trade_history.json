@@ -811,5 +811,19 @@
     "elapsed_minutes": "4.6",
     "streak_after_trade": 49,
     "date": "2026-11-20T21:35:22.786Z"
+  },
+  {
+    "symbol": "LABUSDT",
+    "direction": "LONG",
+    "mode": "LIVE",
+    "entry": 0.03027,
+    "exit": 0.03215,
+    "gross_pnl": "6.21%",
+    "net_pnl": "6.01%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+6.21% Gross | Net Cash Profit: +6.01%) -> Scanning next coin",
+    "elapsed_minutes": "4.7",
+    "streak_after_trade": 50,
+    "date": "2026-11-20T21:45:27.738Z"
   }
 ]
