@@ -161,5 +161,18 @@
     "elapsed_minutes": "9.7",
     "streak_after_trade": 2,
     "date": "2026-11-20T02:35:20.529Z"
+  },
+  {
+    "symbol": "SAPIENUSDT",
+    "direction": "LONG",
+    "mode": "PAPER",
+    "entry": 0.04081,
+    "exit": 0.04181,
+    "gross_pnl": "2.45%",
+    "won": true,
+    "reason": "80% PROFIT RETENTION EXIT (Peak: +6.27% | Exit: +2.45%)",
+    "elapsed_minutes": "14.6",
+    "streak_after_trade": 3,
+    "date": "2026-11-20T02:55:22.038Z"
   }
 ]
