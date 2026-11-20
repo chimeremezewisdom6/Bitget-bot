@@ -27,18 +27,16 @@ BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
 BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType=USDT-FUTURES"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
-
-# Official Bitget v3 Unified Trading Account (UTA) Assets Endpoint
 BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
-SEMAPHORE = asyncio.Semaphore(12)
 
-MIN_24H_VOLUME = 100000     # Min $100k Volume
-MAX_24H_VOLUME = 10000000   # Max $10M Volume Range
-MIN_CANDLE_WINS = 9        # Requires 9 or 10 same-color candles (allowing Doji)
-DEFAULT_LEVERAGE = 5        # Strictly 5x Leverage
+NUM_PARALLEL_WORKERS = 25  # High-speed worker pool dividing coins into 25 parallel streams
+MIN_24H_VOLUME = 100000    # Min $100k Volume
+MAX_24H_VOLUME = 10000000  # Max $10M Volume Range
+MIN_CANDLE_WINS = 9       # Signal threshold: 9 or 10 same-color candles
+DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 
 def get_bitget_headers(method="GET", request_path="", body=""):
     headers = {"Content-Type": "application/json"}
@@ -79,7 +77,7 @@ def get_active_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Fetches live Bitget Unified Trading Account (UTA) assets using official v3 API (/api/v3/account/assets)."""
+    """Fetches live Bitget Unified Trading Account (UTA) assets using official v3 API."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -95,11 +93,7 @@ async def fetch_bitget_account_balance(session):
 
             if r.status == 200 and resp.get("code") == "00000" and resp.get("data"):
                 data = resp["data"]
-
-                # Extract Top-Level Unified Account Equity
                 usdt_equity = float(data.get("usdtEquity") or data.get("accountEquity") or 0.0)
-
-                # Look for USDT breakdown inside 'assets' list
                 assets_list = data.get("assets", [])
                 usdt_asset = next((a for a in assets_list if a.get("coin") == "USDT"), None)
 
@@ -117,11 +111,8 @@ async def fetch_bitget_account_balance(session):
                     "margin_coin": "USDT",
                     "account_type": "Unified Trading Account (UTA v3)"
                 }
-            else:
-                log.info(f"ℹ️ Bitget UTA v3 Assets Response -> Status: {r.status} | Code: {resp.get('code')} | Msg: {resp.get('msg')}")
     except Exception as e:
         log.error(f"Error querying Bitget UTA v3 balance: {e}")
-
     return None
 
 async def fetch_single_price(session, symbol):
@@ -155,29 +146,36 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
-async def fetch_bitget_1m_candles_with_retry(session, symbol, max_retries=3):
-    async with SEMAPHORE:
+async def candle_worker(worker_id, queue, session, results):
+    """Parallel worker node that processes queued coins rapidly with dedicated retries."""
+    while not queue.empty():
+        coin = await queue.get()
+        symbol = coin["symbol"]
         params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "10"}
         path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=10"
 
-        for attempt in range(max_retries):
+        fetched_candles = []
+        for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
-                async with session.get(BITGET_CANDLES_URL, params=params, headers=headers, timeout=10) as r:
+                async with session.get(BITGET_CANDLES_URL, params=params, headers=headers, timeout=8) as r:
                     if r.status == 200:
                         data = await r.json()
                         if data.get("code") == "00000":
-                            candles = data.get("data", [])
-                            if candles and len(candles) >= 10:
-                                return candles
+                            fetched_candles = data.get("data", [])
+                            if len(fetched_candles) >= 10:
+                                break
                     elif r.status in (429, 403):
-                        await asyncio.sleep(0.4 * (attempt + 1))
+                        await asyncio.sleep(0.15 * (attempt + 1))
             except Exception:
-                await asyncio.sleep(0.2 * (attempt + 1))
+                await asyncio.sleep(0.1 * (attempt + 1))
 
-            await asyncio.sleep(0.04)
+        if fetched_candles and len(fetched_candles) >= 10:
+            results.append({"coin": coin, "candles": fetched_candles})
+        else:
+            results.append({"coin": coin, "candles": []})
 
-        return []
+        queue.task_done()
 
 async def main():
     wins = get_win_streak()
@@ -188,15 +186,7 @@ async def main():
     has_pass = bool(BITGET_PASSPHRASE)
     auth_active = has_key and has_secret and has_pass
 
-    if auth_active:
-        auth_status = "🔐 AUTHENTICATED (Bitget API Key active)"
-    else:
-        missing = []
-        if not has_key: missing.append("BITGET_API_KEY")
-        if not has_secret: missing.append("BITGET_SECRET_KEY")
-        if not has_pass: missing.append("BITGET_PASSPHRASE or BITGET_PASSWORD")
-        auth_status = f"🔓 PUBLIC API (Missing: {', '.join(missing)})"
-
+    auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
     mode_status = "PAPER TRADING (Target: 8/8 Win Streak)" if is_paper else "🚨 LIVE REAL-MONEY BITGET TRADING (5x Leverage | Reduce-Only | One-Way Mode)"
 
     log.info(f"🏆 Current Paper Win Streak: {wins}/8 | Mode: {mode_status} | API: {auth_status}")
@@ -205,10 +195,8 @@ async def main():
         acc_info = await fetch_bitget_account_balance(session)
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage, Reduce-Only, One-Way Mode ({acc_info['account_type']})")
-        elif auth_active:
-            log.warning("⚠️ Could not parse Bitget UTA v3 account balance. Check logs above.")
         else:
-            log.info(f"ℹ️ Running in Unauthenticated mode. Missing environment variables: {auth_status}")
+            log.warning("⚠️ Running scan evaluation...")
 
         active_trade = get_active_trade()
 
@@ -259,10 +247,16 @@ async def main():
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_scanned = len(valid_coins)
-            log.info(f"✅ Found {total_scanned} active altcoins in $100k-$10M volume range. Fetching candle streams...")
+            log.info(f"✅ Found {total_scanned} active altcoins in $100k-$10M volume range. Dispatching across {NUM_PARALLEL_WORKERS} parallel workers...")
 
-            tasks = [fetch_bitget_1m_candles_with_retry(session, coin["symbol"]) for coin in valid_coins]
-            all_candles = await asyncio.gather(*tasks)
+            # Populate Worker Queue
+            queue = asyncio.Queue()
+            for c in valid_coins:
+                queue.put_nowait(c)
+
+            results = []
+            workers = [asyncio.create_task(candle_worker(i, queue, session, results)) for i in range(NUM_PARALLEL_WORKERS)]
+            await asyncio.gather(*workers)
 
             cat_10_green = 0
             cat_9_green = 0
@@ -277,12 +271,14 @@ async def main():
             all_evaluated = []
             dropped_count = 0
 
-            for idx, candle_data in enumerate(all_candles):
+            for res in results:
+                candle_data = res["candles"]
+                coin_info = res["coin"]
+
                 if not candle_data or len(candle_data) < 10:
                     dropped_count += 1
                     continue
 
-                coin_info = valid_coins[idx]
                 symbol = coin_info["symbol"]
                 vol_24h = coin_info["vol_24h"]
                 candles = list(reversed(candle_data[:10]))
