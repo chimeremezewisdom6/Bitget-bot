@@ -55,6 +55,7 @@ export default {
       let currentStreak = streakState ? streakState.content.wins : 0;
       let tradeHistory = historyState ? historyState.content : [];
 
+      // PAPER MODE LOCK: Must achieve 8 wins in a row before going live
       const isPaper = currentStreak < 8;
 
       // =========================================================================
@@ -81,28 +82,34 @@ export default {
         let peakGrossPnl = activeTrade.peak_gross_pnl || 0;
         if (grossPnl > peakGrossPnl) peakGrossPnl = grossPnl;
 
-        // Exit Condition 1: Hard Stop Loss (-2.0%)
-        let hitSL = grossPnl <= -2.0;
+        // EXIT CONDITION 1: INSTANT 1.0% TAKE PROFIT TARGET (+0.80% Net Cash Profit after 0.20% friction)
+        let hitTakeProfit = grossPnl >= 1.00;
 
-        // Exit Condition 2: 80% Peak Gain Retention (Triggers when gross PnL drops below 80% of peak, once peak >= 0.25%)
-        let hit80PercentRetention = false;
-        if (peakGrossPnl >= 0.25) {
-          const exitThreshold = peakGrossPnl * 0.80;
-          if (grossPnl <= exitThreshold) {
-            hit80PercentRetention = true;
-          }
-        }
+        // EXIT CONDITION 2: 15-MINUTE STAGNANT PROFIT TIMEOUT (If in profit past 15 mins but hasn't hit 1.0%, close immediately!)
+        let hit15MinStagnantProfitExit = elapsedMinutes >= 15 && grossPnl > 0 && !hitTakeProfit;
 
-        // Exit Condition 3: 10+ Minute Holding Loss Timeout (Close immediately if holding a loss after 10 mins)
+        // EXIT CONDITION 3: FAST LOSS TIMEOUT (< 6 mins elapsed and loss > 1.0%, close immediately!)
+        let hitFastLossExit = elapsedMinutes < 6 && grossPnl <= -1.00;
+
+        // EXIT CONDITION 4: HARD STOP LOSS (-2.0%)
+        let hitSL = grossPnl <= -2.00;
+
+        // EXIT CONDITION 5: 10+ MINUTE HOLDING LOSS TIMEOUT
         let hit10MinLossTimeout = elapsedMinutes >= 10 && grossPnl < 0;
 
-        if (hitSL || hit80PercentRetention || hit10MinLossTimeout) {
+        if (hitTakeProfit || hit15MinStagnantProfitExit || hitFastLossExit || hitSL || hit10MinLossTimeout) {
           const won = grossPnl > 0;
+
+          // Strict 8-win streak requirement counter
           currentStreak = won ? currentStreak + 1 : 0;
 
+          const netCashProfit = (grossPnl - 0.20).toFixed(2);
+
           let exitReason = "";
-          if (hitSL) exitReason = "HARD STOP LOSS (-2.0%)";
-          else if (hit80PercentRetention) exitReason = `80% PROFIT RETENTION EXIT (Peak: +${peakGrossPnl.toFixed(2)}% | Exit: +${grossPnl.toFixed(2)}%)`;
+          if (hitTakeProfit) exitReason = `1.0% TAKE PROFIT TARGET HIT (+${grossPnl.toFixed(2)}% Gross | Net Cash Profit: +${netCashProfit}%) -> Scanning next coin`;
+          else if (hit15MinStagnantProfitExit) exitReason = `15-MIN STAGNANT PROFIT EXIT (+${grossPnl.toFixed(2)}% Gross | Net Cash Profit: +${netCashProfit}% | Locked profit past 15m)`;
+          else if (hitFastLossExit) exitReason = `FAST LOSS EXIT (<6m Loss >1.0% | Exit: ${grossPnl.toFixed(2)}% | Cut fast loss)`;
+          else if (hitSL) exitReason = "HARD STOP LOSS (-2.0%)";
           else if (hit10MinLossTimeout) exitReason = `10-MIN LOSS TIMEOUT (Gross: ${grossPnl.toFixed(2)}%)`;
 
           tradeHistory.push({
@@ -112,6 +119,7 @@ export default {
             entry: activeTrade.entry_price,
             exit: currentPrice,
             gross_pnl: grossPnl.toFixed(2) + "%",
+            net_pnl: netCashProfit + "%",
             won: won,
             reason: exitReason,
             elapsed_minutes: elapsedMinutes.toFixed(1),
@@ -131,6 +139,7 @@ export default {
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
+            net_cash_profit: netCashProfit + "%",
             peak_gross_pnl: peakGrossPnl.toFixed(2),
             reason: exitReason,
             won: won,
@@ -174,6 +183,9 @@ export default {
           stop_loss: stop_loss,
           peak_gross_pnl: 0,
           avg_fluctuation: signal.avg_fluctuation || 0.20,
+          leverage: 5,
+          position_mode: "one_way",
+          reduce_only: true,
           opened_at: Date.now()
         };
 
@@ -185,7 +197,10 @@ export default {
           mode: isPaper ? "PAPER" : "LIVE",
           entry_price: currentPrice.toFixed(5),
           stop_loss: stop_loss.toFixed(5),
-          current_win_streak: currentStreak
+          current_win_streak: currentStreak,
+          leverage: "5x",
+          position_mode: "one_way (single_hold)",
+          reduce_only: true
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
