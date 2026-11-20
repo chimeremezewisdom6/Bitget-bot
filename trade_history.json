@@ -321,5 +321,19 @@
     "elapsed_minutes": "4.7",
     "streak_after_trade": 14,
     "date": "2026-11-20T08:30:23.287Z"
+  },
+  {
+    "symbol": "USELESSUSDT",
+    "direction": "SHORT",
+    "mode": "LIVE",
+    "entry": 0.09274,
+    "exit": 0.09073,
+    "gross_pnl": "2.17%",
+    "net_pnl": "1.97%",
+    "won": true,
+    "reason": "1.0% TAKE PROFIT TARGET HIT (+2.17% Gross | Net Cash Profit: +1.97%) -> Scanning next coin",
+    "elapsed_minutes": "4.5",
+    "streak_after_trade": 15,
+    "date": "2026-11-20T09:05:19.168Z"
   }
 ]
