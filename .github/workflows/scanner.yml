@@ -2,9 +2,8 @@ name: Crypto Order Book & Candle Scanner
 
 on:
   schedule:
-    # Runs every minute automatically on GitHub Actions
     - cron: '* * * * *'
-  workflow_dispatch: # Allows manual trigger anytime from GitHub Actions tab
+  workflow_dispatch:
 
 jobs:
   scan:
@@ -27,10 +26,12 @@ jobs:
         env:
           CLOUDFLARE_URL: ${{ secrets.CLOUDFLARE_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-          # Bitget API Keys (Pulls from Repository Secrets or Variables)
+          # Check Secrets or Variables for API Keys
           BITGET_API_KEY: ${{ secrets.BITGET_API_KEY || vars.BITGET_API_KEY }}
           BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY || vars.BITGET_SECRET_KEY }}
-          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE || vars.BITGET_PASSPHRASE }}
-          # Live Trading Enable Flag (Set to 'true' to allow live real-money execution after 8 wins)
+          # Support both BITGET_PASSPHRASE and BITGET_PASSWORD naming conventions!
+          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE || vars.BITGET_PASSPHRASE || secrets.BITGET_PASSWORD || vars.BITGET_PASSWORD }}
+          BITGET_PASSWORD: ${{ secrets.BITGET_PASSWORD || vars.BITGET_PASSWORD || secrets.BITGET_PASSPHRASE || vars.BITGET_PASSPHRASE }}
+          # Enable Live Real-Money Trading Mode (requires >= 8/8 streak)
           ALLOW_LIVE_TRADING: "true"
         run: python scanner.py
