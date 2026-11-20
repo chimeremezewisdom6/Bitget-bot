@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "NVDLUSDT",
-  "direction": "SHORT",
-  "mode": "LIVE",
-  "entry_price": 13.45,
-  "stop_loss": 13.719,
-  "peak_gross_pnl": 0,
-  "avg_fluctuation": 0.89,
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795185644267
+  "active": false
 }
