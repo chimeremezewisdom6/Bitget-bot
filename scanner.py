@@ -32,10 +32,10 @@ BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 STREAK_FILE = "streak.json"
 ACTIVE_TRADE_FILE = "active_trade.json"
 
-NUM_PARALLEL_WORKERS = 25  # High-speed worker pool dividing coins into 25 parallel streams
+NUM_BATCHES = 20           # Exactly 20 separate scanning batches / workers
 MIN_24H_VOLUME = 100000    # Min $100k Volume
 MAX_24H_VOLUME = 10000000  # Max $10M Volume Range
-MIN_CANDLE_WINS = 9       # Signal threshold: 9 or 10 same-color candles
+MIN_CANDLE_WINS = 9       # Requires 9 or 10 same-color candles for entry
 DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 
 def get_bitget_headers(method="GET", request_path="", body=""):
@@ -146,15 +146,11 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
-async def candle_worker(worker_id, queue, session, results):
-    """Parallel worker node that processes queued coins rapidly with dedicated retries."""
-    while not queue.empty():
-        coin = await queue.get()
-        symbol = coin["symbol"]
+async def fetch_candle_data_for_coin(session, symbol, semaphore):
+    """Fetches 10 1-minute candles for a single coin with retry handling."""
+    async with semaphore:
         params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "10"}
         path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=10"
-
-        fetched_candles = []
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -162,20 +158,82 @@ async def candle_worker(worker_id, queue, session, results):
                     if r.status == 200:
                         data = await r.json()
                         if data.get("code") == "00000":
-                            fetched_candles = data.get("data", [])
-                            if len(fetched_candles) >= 10:
-                                break
+                            candles = data.get("data", [])
+                            if candles and len(candles) >= 10:
+                                return candles
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
             except Exception:
                 await asyncio.sleep(0.1 * (attempt + 1))
+        return []
 
-        if fetched_candles and len(fetched_candles) >= 10:
-            results.append({"coin": coin, "candles": fetched_candles})
-        else:
-            results.append({"coin": coin, "candles": []})
+async def process_coin_batch(batch_id, coin_list, session, semaphore):
+    """Processes a single batch of coins, evaluating 10m candle patterns and returning top candidate(s)."""
+    batch_evaluated = []
 
-        queue.task_done()
+    tasks = [fetch_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
+    candles_results = await asyncio.gather(*tasks)
+
+    for idx, candle_data in enumerate(candles_results):
+        if not candle_data or len(candle_data) < 10:
+            continue
+
+        coin = coin_list[idx]
+        symbol = coin["symbol"]
+        vol_24h = coin["vol_24h"]
+        candles = list(reversed(candle_data[:10]))
+
+        green_count = 0
+        red_count = 0
+        doji_count = 0
+        fluctuations = []
+
+        for c in candles:
+            o = float(c[1])
+            h = float(c[2])
+            l = float(c[3])
+            cl = float(c[4])
+
+            if o > 0:
+                fluctuations.append(((h - l) / o) * 100.0)
+
+            if cl > o:
+                green_count += 1
+            elif cl < o:
+                red_count += 1
+            else:
+                doji_count += 1
+
+        avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
+        close_10m = float(candles[-1][4])
+        max_wins = max(green_count, red_count)
+        dominant_direction = "LONG" if green_count >= red_count else "SHORT"
+
+        batch_evaluated.append({
+            "batch_id": batch_id,
+            "symbol": symbol,
+            "vol_24h": vol_24h,
+            "green_count": green_count,
+            "red_count": red_count,
+            "doji_count": doji_count,
+            "max_wins": max_wins,
+            "direction": dominant_direction,
+            "avg_fluctuation": avg_fluctuation,
+            "current_price": close_10m
+        })
+
+    if not batch_evaluated:
+        return []
+
+    # Find highest candle win count in this batch
+    max_batch_wins = max(c["max_wins"] for c in batch_evaluated)
+
+    # Select all coins tying for top candle count in this batch
+    top_candidates = [c for c in batch_evaluated if c["max_wins"] == max_batch_wins]
+
+    # Sort candidates by highest average fluctuation
+    top_candidates.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
+    return top_candidates
 
 async def main():
     wins = get_win_streak()
@@ -196,7 +254,7 @@ async def main():
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT BALANCE: Equity: ${acc_info['equity']:.2f} USDT | Available: ${acc_info['available']:.2f} USDT | Setting: 5x Leverage, Reduce-Only, One-Way Mode ({acc_info['account_type']})")
         else:
-            log.warning("⚠️ Running scan evaluation...")
+            log.warning("⚠️ Account balance check pending...")
 
         active_trade = get_active_trade()
 
@@ -233,7 +291,7 @@ async def main():
                 log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Scanning Bitget Futures coins ($100k to $10M Volume Range)...")
+            log.info(f"🛰️ Fetching Bitget Futures coins ($100k to $10M Volume Range)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -246,129 +304,47 @@ async def main():
                     valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h})
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
-            total_scanned = len(valid_coins)
-            log.info(f"✅ Found {total_scanned} active altcoins in $100k-$10M volume range. Dispatching across {NUM_PARALLEL_WORKERS} parallel workers...")
+            total_coins = len(valid_coins)
 
-            # Populate Worker Queue
-            queue = asyncio.Queue()
-            for c in valid_coins:
-                queue.put_nowait(c)
+            # Divide coins evenly into NUM_BATCHES (20 separate batches)
+            chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
+            coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-            results = []
-            workers = [asyncio.create_task(candle_worker(i, queue, session, results)) for i in range(NUM_PARALLEL_WORKERS)]
-            await asyncio.gather(*workers)
+            log.info(f"✅ Found {total_coins} active altcoins. Dividing into {len(coin_batches)} parallel batch workers (~{chunk_size} coins/batch)...")
 
-            cat_10_green = 0
-            cat_9_green = 0
-            cat_8_green = 0
-            cat_6_7_green = 0
-            cat_neutral_chop = 0
-            cat_6_7_red = 0
-            cat_8_red = 0
-            cat_9_red = 0
-            cat_10_red = 0
+            semaphore = asyncio.Semaphore(15)
+            batch_tasks = [process_coin_batch(i + 1, batch, session, semaphore) for i, batch in enumerate(coin_batches)]
+            batch_results = await asyncio.gather(*batch_tasks)
 
-            all_evaluated = []
-            dropped_count = 0
-
-            for res in results:
-                candle_data = res["candles"]
-                coin_info = res["coin"]
-
-                if not candle_data or len(candle_data) < 10:
-                    dropped_count += 1
-                    continue
-
-                symbol = coin_info["symbol"]
-                vol_24h = coin_info["vol_24h"]
-                candles = list(reversed(candle_data[:10]))
-
-                green_count = 0
-                red_count = 0
-                doji_count = 0
-                fluctuations = []
-
-                for c in candles:
-                    o = float(c[1])
-                    h = float(c[2])
-                    l = float(c[3])
-                    cl = float(c[4])
-
-                    if o > 0:
-                        fluctuations.append(((h - l) / o) * 100.0)
-
-                    if cl > o:
-                        green_count += 1
-                    elif cl < o:
-                        red_count += 1
-                    else:
-                        doji_count += 1
-
-                avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
-                close_10m = float(candles[-1][4])
-
-                if green_count == 10:
-                    cat_10_green += 1
-                elif green_count == 9:
-                    cat_9_green += 1
-                elif green_count == 8:
-                    cat_8_green += 1
-                elif green_count in (6, 7):
-                    cat_6_7_green += 1
-                elif red_count == 10:
-                    cat_10_red += 1
-                elif red_count == 9:
-                    cat_9_red += 1
-                elif red_count == 8:
-                    cat_8_red += 1
-                elif red_count in (6, 7):
-                    cat_6_7_red += 1
-                else:
-                    cat_neutral_chop += 1
-
-                all_evaluated.append({
-                    "symbol": symbol,
-                    "vol_24h": vol_24h,
-                    "green_count": green_count,
-                    "red_count": red_count,
-                    "doji_count": doji_count,
-                    "avg_fluctuation": avg_fluctuation,
-                    "current_price": close_10m
-                })
+            # Collect top candidates across all 20 batches
+            all_batch_candidates = []
+            for batch_cand in batch_results:
+                all_batch_candidates.extend(batch_cand)
 
             log.info("=================================================================================")
-            log.info(f"📊 MARKET CANDLE CATEGORY SUMMARY TABLE (FULLY EVALUATED: {len(all_evaluated)} / {total_scanned} COINS | DROPPED: {dropped_count}):")
-            log.info(f"{'CANDLE PATTERN CATEGORY':<42} | {'NUMBER OF COINS':<15}")
-            log.info("-" * 62)
-            log.info(f"{'10 Green / 0 Red (Extreme Bullish Momentum)':<42} | {cat_10_green:<15}")
-            log.info(f"{'9 Green / 0-1 Red (Strong Bullish Momentum - LONG Signal)':<42} | {cat_9_green:<15}")
-            log.info(f"{'8 Green / 0-2 Red (High Bullish Momentum)':<42} | {cat_8_green:<15}")
-            log.info(f"{'6-7 Green Candles (Moderate Bullish Trend)':<42} | {cat_6_7_green:<15}")
-            log.info(f"{'4-5 Green / 4-5 Red (Sideways / Neutral Chop)':<42} | {cat_neutral_chop:<15}")
-            log.info(f"{'6-7 Red Candles (Moderate Bearish Trend)':<42} | {cat_6_7_red:<15}")
-            log.info(f"{'8 Red / 0-2 Green (High Bearish Momentum)':<42} | {cat_8_red:<15}")
-            log.info(f"{'9 Red / 0-1 Green (Strong Bearish Momentum - SHORT Signal)':<42} | {cat_9_red:<15}")
-            log.info(f"{'10 Red / 0 Green (Extreme Bearish Momentum)':<42} | {cat_10_red:<15}")
+            log.info(f"📊 20-BATCH TOP CANDIDATE SUMMARY TABLE (COLLECTED: {len(all_batch_candidates)} TOP PAIRS ACROSS 20 BATCHES):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'CANDLE PATTERN':<22} | {'AVG FLUCTUATION':<15}")
+            log.info("-" * 67)
+
+            for cand in all_batch_candidates:
+                pattern_str = f"{cand['green_count']} Green / {cand['red_count']} Red"
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {pattern_str:<22} | {cand['avg_fluctuation']:.2f}%")
+
             log.info("=================================================================================")
 
-            valid_longs = [c for c in all_evaluated if c["green_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
-            valid_shorts = [c for c in all_evaluated if c["red_count"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20]
+            # Filter batch candidates for strict entry criteria (>= 9 Green/Red candles AND >= 0.20% fluctuation)
+            valid_entry_signals = [
+                c for c in all_batch_candidates
+                if c["max_wins"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20
+            ]
 
-            for c in valid_longs:
-                c["direction"] = "LONG"
-                c["max_wins"] = c["green_count"]
-
-            for c in valid_shorts:
-                c["direction"] = "SHORT"
-                c["max_wins"] = c["red_count"]
-
-            all_signals = valid_longs + valid_shorts
-
-            if all_signals:
-                all_signals.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
-                best_signal = all_signals[0]
+            if valid_entry_signals:
+                valid_entry_signals.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
+                best_signal = valid_entry_signals[0]
                 doji_info = f" ({best_signal['doji_count']} Doji)" if best_signal['doji_count'] > 0 else ""
-                log.info(f"🔥 ENTRY SIGNAL MATCHED: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
+
+                log.info(f"🔥 BEST ENTRY SIGNAL MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
+
                 payload = {
                     "symbol": best_signal["symbol"],
                     "direction": best_signal["direction"],
@@ -382,7 +358,7 @@ async def main():
                     "is_ping": False
                 }
             else:
-                log.info(f"ℹ️ No signals reaching >= {MIN_CANDLE_WINS}/10 candles with >= 0.20% fluctuation this minute.")
+                log.info(f"ℹ️ No batch winners reached >= {MIN_CANDLE_WINS}/10 candles with >= 0.20% fluctuation this minute.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
