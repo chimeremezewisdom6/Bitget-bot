@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "ARBUSDT",
+  "direction": "SHORT",
+  "mode": "BITGET_DEMO_RED_CARD",
+  "entry_price": 0.10709,
+  "stop_loss": 0.108428625,
+  "pre_trade_balance": 1.38261197,
+  "contract_size": "58",
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795260642621
 }
