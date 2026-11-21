@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "ENSOUSDT",
-  "direction": "LONG",
-  "mode": "REAL_LIVE_REVERSAL",
-  "entry_price": 0.4404,
-  "stop_loss": 0.43159200000000003,
-  "pre_trade_balance": 1.38019043,
-  "contract_size": "1",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795235748207
+  "active": false
 }
