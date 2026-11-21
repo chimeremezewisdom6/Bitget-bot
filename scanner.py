@@ -25,9 +25,6 @@ BITGET_DEMO_MODE = os.environ.get("BITGET_DEMO_MODE", "true").lower() == "true"
 PRODUCT_TYPE = "USDT-FUTURES"
 ORDER_CATEGORY = "USDT-FUTURES"
 
-# Official Bitget Demo Pairs Supported on S-USDT Demo Margin
-BITGET_SUPPORTED_DEMO_PAIRS = ["SBTCUSDT", "SETHUSDT", "SSOLUSDT"]
-
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
 BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType={PRODUCT_TYPE}"
@@ -185,30 +182,17 @@ async def configure_bitget_symbol_settings(session, trade_symbol):
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    DYNAMIC N-CANDLE EXPANSION MARKET ORDER EXECUTION:
-    - Real Live Mode (BITGET_DEMO_MODE = False): Trades exact matched symbol.
-    - Demo Mode (BITGET_DEMO_MODE = True): Maps to SBTCUSDT if altcoin is not directly listed on demo.
+    EXACT SYMBOL MARKET ORDER EXECUTION ENGINE (BITGET UTA V3):
+    - Submits market orders directly on the matched symbol (e.g. KERNELUSDT, CPUSDT, BTCUSDT).
+    - Preset +2.50% Take-Profit & -1.25% Stop-Loss attached directly to Bitget matching engine!
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute order.")
         return None
 
-    if BITGET_DEMO_MODE:
-        candidate_demo_sym = f"S{symbol}" if not symbol.startswith("S") else symbol
-        if candidate_demo_sym in BITGET_SUPPORTED_DEMO_PAIRS:
-            trade_symbol = candidate_demo_sym
-        else:
-            trade_symbol = "SBTCUSDT"
-            log.info(f"ℹ️ Map Notice: Bitget Demo exchange supports SBTC/SETH/SSOL. Mapping matched {symbol} signal to demo pair {trade_symbol}.")
-    else:
-        trade_symbol = symbol
+    trade_symbol = symbol
 
     await configure_bitget_symbol_settings(session, trade_symbol)
-
-    if trade_symbol != symbol and BITGET_DEMO_MODE:
-        demo_price = await fetch_single_price(session, "BTCUSDT")
-        if demo_price and demo_price > 0:
-            market_price = demo_price
 
     used_margin = available_balance * BALANCE_USAGE_PCT
     notional_value = used_margin * DEFAULT_LEVERAGE
@@ -258,7 +242,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     headers = get_bitget_headers("POST", path, body_json)
 
     mode_label = "🎮 BITGET DEMO" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY"
-    log.info(f"🎯 SUBMITTING DYNAMIC N-CANDLE EXPANSION MARKET ORDER ({mode_label}): {trade_symbol} ({direction} | Matched: {symbol}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
+    log.info(f"🎯 SUBMITTING 0.5% BUILD-UP EXPANSION MARKET ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -283,7 +267,6 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 return {
                     "order_id": order_id,
                     "symbol": trade_symbol,
-                    "original_symbol": symbol,
                     "notional_value": notional_value,
                     "contract_size": size_str,
                     "preset_tp": preset_tp,
@@ -396,24 +379,20 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
     """
-    DYNAMIC N-CANDLE (5 TO 60 CANDLES) SMALL STRUCTURE TO BIG PRICE MOVE DETECTOR
-    -----------------------------------------------------------------------------
+    SMALL BUILD-UP (~0.5%) TO BIG EXPANSION DETECTOR ENGINE
+    --------------------------------------------------------
     Evaluates 60 1-minute OHLCV candles across all Bitget Futures pairs:
-      1. Scans ALL dynamic window lengths N from 6 to 59 candles (e.g. 6, 7, 12, 17, 23, 42 candles).
-      2. Excludes static fixed intervals (5, 10, 15, 20, 30, 60).
-      3. For each dynamic window N:
-         - Measures the SMALL compression structure range %: (High_N - Low_N) / Open_N * 100.
-         - Requires small compression range <= 0.85% (Tight Coiled Structure).
-         - Measures the BIG price expansion move % occurring right after/at the end of the window.
-         - Calculates Expansion Ratio = (Big Move %) / (Small Range % + 0.01) * (Volume Surge).
-      4. Ranks ALL market pairs across ALL dynamic N-window setups to pick the #1 EXPLOSIVE MOVE!
+      1. Scans dynamic N-candle buildup windows (from 5 to 55 candles).
+      2. Detects steady, controlled build-up moves of 0.25% to 0.85% (target ~0.50%).
+      3. Requires high directional candle consistency during the build-up phase (>= 70% same color candles).
+      4. Detects immediate explosive price expansion (+1.00% to +3.00%+) breaking out from the build-up phase on volume acceleration (>= 1.5x).
+      5. Calculates Score = (Big Expansion %) / (Build-Up Move %) * Volume Acceleration * Consistency.
+      6. Ranks ALL market pairs to select the #1 EXPLOSIVE SETUP!
     """
     batch_evaluated = []
 
     tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
-
-    EXCLUDED_FIXED_WINDOWS = {5, 10, 15, 20, 30, 60}
 
     for idx, candle_data in enumerate(candles_results):
         if not candle_data or len(candle_data) < 60:
@@ -427,69 +406,76 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
         candles_60m = list(reversed(candle_data[:60]))
 
         best_coin_setup = None
-        highest_expansion_score = 0.0
+        highest_buildup_score = 0.0
 
-        # Scan ALL dynamic N-candle window lengths from 6 to 55 (excluding fixed 5, 10, 15, 20, 30, 60)
-        for n_candles in range(6, 56):
-            if n_candles in EXCLUDED_FIXED_WINDOWS:
+        for n_candles in range(5, 50):
+            buildup_window = candles_60m[:n_candles]
+            expansion_window = candles_60m[n_candles:]
+
+            if not buildup_window or not expansion_window:
                 continue
 
-            comp_window = candles_60m[:n_candles]
-            trigger_window = candles_60m[n_candles:]
+            b_open = float(buildup_window[0][1])
+            b_close = float(buildup_window[-1][4])
+            b_high = max(float(c[2]) for c in buildup_window)
+            b_low = min(float(c[3]) for c in buildup_window)
 
-            if not comp_window or not trigger_window:
+            if b_open <= 0 or b_low <= 0:
                 continue
 
-            comp_high = max(float(c[2]) for c in comp_window)
-            comp_low = min(float(c[3]) for c in comp_window)
-            comp_open = float(comp_window[0][1])
+            # 1. MEASURE SMALL BUILD-UP MOVE % (~0.50% TARGET RANGE: 0.25% to 0.85%)
+            buildup_range_pct = ((b_high - b_low) / b_open) * 100.0
+            buildup_net_pct = ((b_close - b_open) / b_open) * 100.0
 
-            if comp_open <= 0 or comp_low <= 0:
+            if buildup_range_pct < 0.20 or buildup_range_pct > 0.90:
                 continue
 
-            # 1. SMALL CANDLE STRUCTURE RANGE %
-            comp_range_pct = ((comp_high - comp_low) / comp_open) * 100.0
-            if comp_range_pct > 0.90:  # Must be a tight small structure
+            # Directional Candle Consistency in Build-Up
+            green_candles = sum(1 for c in buildup_window if float(c[4]) > float(c[1]))
+            red_candles = sum(1 for c in buildup_window if float(c[4]) < float(c[1]))
+            consistency_ratio = max(green_candles, red_candles) / float(n_candles)
+
+            if consistency_ratio < 0.65:
                 continue
 
-            # Volume surge check
-            comp_vol_avg = sum(float(c[5]) for c in comp_window) / float(n_candles)
-            trig_vol_avg = sum(float(c[5]) for c in trigger_window) / float(len(trigger_window))
+            # Volume Acceleration
+            b_vol_avg = sum(float(c[5]) for c in buildup_window) / float(n_candles)
+            exp_vol_avg = sum(float(c[5]) for c in expansion_window) / float(len(expansion_window))
 
-            if comp_vol_avg <= 0:
+            if b_vol_avg <= 0:
                 continue
 
-            vol_surge = trig_vol_avg / comp_vol_avg
-            if vol_surge < 1.4:
+            vol_accel = exp_vol_avg / b_vol_avg
+            if vol_accel < 1.35:
                 continue
 
             p_current = float(candles_60m[-1][4])
 
-            move_up_pct = ((p_current - comp_high) / comp_high) * 100.0
-            move_down_pct = ((comp_low - p_current) / comp_low) * 100.0
+            exp_move_up = ((p_current - b_high) / b_high) * 100.0
+            exp_move_down = ((b_low - p_current) / b_low) * 100.0
 
-            is_bull_breakout = (p_current > comp_high) and (move_up_pct >= 0.35)
-            is_bear_breakout = (p_current < comp_low) and (move_down_pct >= 0.35)
+            is_bull_expansion = (p_current > b_high) and (exp_move_up >= 0.35) and (buildup_net_pct > 0)
+            is_bear_expansion = (p_current < b_low) and (exp_move_down >= 0.35) and (buildup_net_pct < 0)
 
-            if is_bull_breakout or is_bear_breakout:
-                direction = "LONG" if is_bull_breakout else "SHORT"
-                big_move_pct = move_up_pct if is_bull_breakout else move_down_pct
+            if is_bull_expansion or is_bear_expansion:
+                direction = "LONG" if is_bull_expansion else "SHORT"
+                big_expansion_pct = exp_move_up if is_bull_expansion else exp_move_down
 
-                # DYNAMIC EXPANSION SCORE = (Big Move %) / (Small Setup Range %) * Vol Surge
-                expansion_score = (big_move_pct / (comp_range_pct + 0.05)) * vol_surge
+                effective_buildup_pct = max(buildup_range_pct, 0.15)
+                buildup_score = (big_expansion_pct / effective_buildup_pct) * vol_accel * consistency_ratio
 
-                if expansion_score > highest_expansion_score:
-                    highest_expansion_score = expansion_score
+                if buildup_score > highest_buildup_score:
+                    highest_buildup_score = buildup_score
                     best_coin_setup = {
                         "batch_id": batch_id,
                         "symbol": symbol,
                         "vol_24h": vol_24h,
                         "direction": direction,
                         "n_candles": n_candles,
-                        "small_range_pct": comp_range_pct,
-                        "big_move_pct": big_move_pct,
-                        "vol_surge": vol_surge,
-                        "expansion_score": expansion_score,
+                        "buildup_range_pct": buildup_range_pct,
+                        "big_expansion_pct": big_expansion_pct,
+                        "vol_accel": vol_accel,
+                        "buildup_score": buildup_score,
                         "current_price": p_current
                     }
 
@@ -499,8 +485,8 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
     if not batch_evaluated:
         return []
 
-    # Sort candidates exchange-wide by highest Dynamic Expansion Score
-    batch_evaluated.sort(key=lambda x: x["expansion_score"], reverse=True)
+    # Sort candidates exchange-wide by highest Build-Up Score
+    batch_evaluated.sort(key=lambda x: x["buildup_score"], reverse=True)
     return [batch_evaluated[0]]
 
 async def main():
@@ -512,7 +498,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE ({ORDER_CATEGORY} | Dynamic 5-60 N-Candle Expansion Engine | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING"
+    mode_status = f"🎮 BITGET DEMO MODE ({ORDER_CATEGORY} | 0.5% Build-Up to Big Move Engine | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING"
 
     log.info(f"🏆 Current BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -535,7 +521,7 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ DYNAMIC N-CANDLE TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
+            log.info(f"⏳ 0.5% BUILD-UP TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -568,7 +554,7 @@ async def main():
                 log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({PRODUCT_TYPE} | Dynamic N-Candle Windows 5-60)...")
+            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({PRODUCT_TYPE} | Small 0.5% Build-Up to Big Move)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -597,22 +583,22 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 DYNAMIC N-CANDLE COMPRESSION-TO-EXPANSION CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'WINDOW (N)':<12} | {'SMALL RANGE':<14} | {'BIG MOVE':<12} | {'SCORE':<14}")
-            log.info("-" * 95)
+            log.info(f"📊 SMALL 0.5% BUILD-UP TO BIG EXPANSION CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'BUILDUP (N)':<12} | {'BUILDUP MOVE':<14} | {'BIG EXPANSION':<14} | {'SCORE':<14}")
+            log.info("-" * 100)
 
             for cand in all_batch_candidates:
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['n_candles']} Candles    | {cand['small_range_pct']:.2f}%         | {cand['big_move_pct']:+.2f}%     | {cand['expansion_score']:.4f}")
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['n_candles']} Candles    | {cand['buildup_range_pct']:.2f}%         | {cand['big_expansion_pct']:+.2f}%       | {cand['buildup_score']:.4f}")
 
             log.info("====================================================================================================")
 
             if all_batch_candidates:
-                all_batch_candidates.sort(key=lambda x: x["expansion_score"], reverse=True)
+                all_batch_candidates.sort(key=lambda x: x["buildup_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 DYNAMIC N-CANDLE EXPANSION MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['expansion_score']:.4f} | N={best_signal['n_candles']} Candles | Small Range: {best_signal['small_range_pct']:.2f}% | Big Move: {best_signal['big_move_pct']:+.2f}%)")
+                log.info(f"🔥 #1 SMALL 0.5% BUILD-UP EXPANSION MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['buildup_score']:.4f} | N={best_signal['n_candles']} Candles | Build-Up: {best_signal['buildup_range_pct']:.2f}% | Big Move: {best_signal['big_expansion_pct']:+.2f}%)")
 
-                # EXECUTE BITGET ORDER
+                # EXECUTE BITGET ORDER DIRECTLY ON PAIR SYMBOL
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
@@ -626,10 +612,10 @@ async def main():
 
                     payload = {
                         "symbol": live_order_result.get("symbol", best_signal["symbol"]),
-                        "direction": best_signal["direction"],
+                        "direction": live_order_result.get("direction", best_signal["direction"]),
                         "is_paper": False,
                         "is_demo": BITGET_DEMO_MODE,
-                        "avg_fluctuation": round(best_signal["expansion_score"] * 10, 2),
+                        "avg_fluctuation": round(best_signal["buildup_score"] * 10, 2),
                         "current_price": final_entry_fill,
                         "account_equity": current_equity,
                         "pre_trade_balance": current_equity,
@@ -643,7 +629,7 @@ async def main():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
             else:
-                log.info(f"ℹ️ No active dynamic N-candle expansion candidates matched across pairs this scan run.")
+                log.info(f"ℹ️ No active small build-up expansion candidates matched across pairs this scan run.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
