@@ -74,7 +74,7 @@ export default {
           grossPnl = ((activeTrade.entry_price - currentPrice) / activeTrade.entry_price) * 100;
         }
 
-        // STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS TRiggers
+        // STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS TRIGGERS
         let hitTakeProfit = grossPnl >= 1.00;
         let hitSL = grossPnl <= -1.00;
         let hit10MinTimeout = elapsedMinutes >= 10;
@@ -82,28 +82,28 @@ export default {
         if (hitTakeProfit || hitSL || hit10MinTimeout) {
 
           // REAL BITGET BALANCE GAIN EVALUATION:
-          // Check actual USDT cash equity change (Post-Trade Equity vs Pre-Trade Equity)
-          const preBalance = activeTrade.pre_trade_balance || signal.pre_trade_balance || 1.54;
+          // A WIN occurs ONLY if actual net USDT cash increases (netUsdtChange > 0).
+          const preBalance = activeTrade.pre_trade_balance || signal.pre_trade_balance || 1.35;
           const currentEquity = signal.account_equity || preBalance;
           const netUsdtChange = currentEquity - preBalance;
 
-          // A WIN occurs ONLY if actual net USDT cash increases (netUsdtChange > 0).
-          // Fee erosion or losses reset the live win streak to 0.
-          const isRealWin = grossPnl >= 0.21 || netUsdtChange > 0;
+          // STRICT CASH WIN RULE:
+          // If actual account cash decreased or stayed flat (netUsdtChange <= 0), it is a LOSS, period!
+          const isRealWin = netUsdtChange > 0;
 
           if (isRealWin) {
             liveWinStreak += 1;
           } else {
-            liveWinStreak = 0;
+            liveWinStreak = 0; // RESET STREAK STRICTLY TO 0 ON ANY CASH LOSS
           }
 
           let exitReason = "";
-          if (hitTakeProfit) exitReason = `1.0% ENGINE TAKE PROFIT HIT (+${grossPnl.toFixed(2)}% Price Move)`;
-          else if (hitSL) exitReason = `1.0% ENGINE STOP LOSS HIT (-${Math.abs(grossPnl).toFixed(2)}% Price Move)`;
-          else if (hit10MinTimeout) exitReason = `10-MINUTE TIME TIMEOUT EXIT (Gross: ${grossPnl.toFixed(2)}%)`;
+          if (hitTakeProfit) exitReason = `1.0% ENGINE TAKE PROFIT HIT (${grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hitSL) exitReason = `1.0% ENGINE STOP LOSS HIT (${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hit10MinTimeout) exitReason = `10-MINUTE TIME TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
 
           if (!isRealWin) {
-            exitReason += ` | [LIVE STREAK RESET TO 0: Account Equity Did Not Increase]`;
+            exitReason += ` | [STREAK RESET TO 0: Real Cash Equity Decreased by $${Math.abs(netUsdtChange).toFixed(4)}]`;
           }
 
           tradeHistory.push({
@@ -115,6 +115,7 @@ export default {
             price_gross_pnl: grossPnl.toFixed(2) + "%",
             pre_trade_usdt: preBalance.toFixed(4),
             post_trade_usdt: currentEquity.toFixed(4),
+            net_usdt_change: netUsdtChange.toFixed(4),
             won: isRealWin,
             reason: exitReason,
             elapsed_minutes: elapsedMinutes.toFixed(1),
@@ -135,6 +136,8 @@ export default {
             exit_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
             pre_trade_balance: preBalance,
+            post_trade_balance: currentEquity,
+            net_usdt_change: netUsdtChange.toFixed(4),
             reason: exitReason,
             won: isRealWin,
             live_win_streak: liveWinStreak
@@ -174,7 +177,7 @@ export default {
           mode: "REAL_LIVE_BITGET",
           entry_price: currentPrice,
           stop_loss: stop_loss,
-          pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 1.54,
+          pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 1.35,
           contract_size: signal.contract_size || "1",
           leverage: 5,
           position_mode: "one_way",
