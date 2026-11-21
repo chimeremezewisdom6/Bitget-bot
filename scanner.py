@@ -19,11 +19,15 @@ BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("BITGET_PASSWORD", "")).strip()
 
-ALLOW_LIVE_TRADING = os.environ.get("ALLOW_LIVE_TRADING", "true").lower() == "true"
+# BITGET DEMO MODE TOGGLE (Set BITGET_DEMO_MODE="false" in GitHub Secrets when ready for Real Money)
+BITGET_DEMO_MODE = os.environ.get("BITGET_DEMO_MODE", "true").lower() == "true"
+
+PRODUCT_TYPE = "SUSDT-FUTURES" if BITGET_DEMO_MODE else "USDT-FUTURES"
+CATEGORY_TYPE = "SUSDT-FUTURES" if BITGET_DEMO_MODE else "USDT-FUTURES"
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
-BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType=USDT-FUTURES"
+BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType={PRODUCT_TYPE}"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
@@ -38,7 +42,7 @@ LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
 
 NUM_BATCHES = 20            # Exactly 20 separate scanning batches / workers
-MIN_24H_VOLUME = 1000000    # Strict $1M+ Volume Filter for Deep Liquid Order Books & Zero Market Slippage
+MIN_24H_VOLUME = 500000     # Min $500k Volume Filter
 DEFAULT_LEVERAGE = 5        # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90    # Strictly 90% of available USDT equity allocated per trade
 
@@ -95,7 +99,7 @@ def get_active_live_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Queries official Bitget UTA v3 API and returns live USDT equity & available margin."""
+    """Queries official Bitget UTA v3 API and returns live Demo or Real USDT equity & available margin."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -113,7 +117,7 @@ async def fetch_bitget_account_balance(session):
                 data = resp["data"]
                 usdt_equity = float(data.get("usdtEquity") or data.get("accountEquity") or 0.0)
                 assets_list = data.get("assets", [])
-                usdt_asset = next((a for a in assets_list if a.get("coin") == "USDT"), None)
+                usdt_asset = next((a for a in assets_list if a.get("coin") == "USDT" or a.get("coin") == "S-USDT"), None)
 
                 available_margin = 0.0
                 if usdt_asset:
@@ -126,8 +130,8 @@ async def fetch_bitget_account_balance(session):
                 return {
                     "equity": usdt_equity,
                     "available": available_margin,
-                    "margin_coin": "USDT",
-                    "account_type": "Unified Trading Account (UTA v3)"
+                    "margin_coin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
+                    "account_type": f"Bitget UTA v3 {'DEMO (Simulated Trading)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
                 }
     except Exception as e:
         log.error(f"Error querying Bitget UTA v3 balance: {e}")
@@ -138,7 +142,7 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id):
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
         return None
 
-    path = f"/api/v3/trade/order-info?category=USDT-FUTURES&symbol={symbol}&orderId={order_id}"
+    path = f"/api/v3/trade/order-info?category={CATEGORY_TYPE}&symbol={symbol}&orderId={order_id}"
     full_url = f"https://{BIT_DOMAIN}{path}"
     headers = get_bitget_headers("GET", path)
 
@@ -158,23 +162,23 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id):
     return None
 
 async def configure_bitget_symbol_settings(session, symbol):
-    """Configures 5x Leverage and One-Way Mode on Bitget UTA v3."""
+    """Configures 5x Leverage and One-Way Mode on Bitget UTA v3 Demo Account."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return
 
     path_pos = "/api/v3/account/set-position-mode"
-    body_pos = json.dumps({"category": "USDT-FUTURES", "posMode": "one_way"})
+    body_pos = json.dumps({"category": CATEGORY_TYPE, "posMode": "one_way"})
     headers_pos = get_bitget_headers("POST", path_pos, body_pos)
     try:
         async with session.post(BITGET_V3_SET_POS_MODE_URL, data=body_pos, headers=headers_pos, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚙️ Bitget UTA v3 Position Mode Check ({symbol}): {res.get('msg', 'OK')}")
+            log.info(f"⚙️ Bitget UTA v3 ({CATEGORY_TYPE}) Position Mode Check ({symbol}): {res.get('msg', 'OK')}")
     except Exception as e:
         log.debug(f"Position mode notice: {e}")
 
     path_lev = "/api/v3/account/set-leverage"
     body_lev = json.dumps({
-        "category": "USDT-FUTURES",
+        "category": CATEGORY_TYPE,
         "symbol": symbol,
         "leverage": str(DEFAULT_LEVERAGE)
     })
@@ -182,18 +186,19 @@ async def configure_bitget_symbol_settings(session, symbol):
     try:
         async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_lev, headers=headers_lev, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚡ Bitget UTA v3 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
+            log.info(f"⚡ Bitget UTA v3 ({CATEGORY_TYPE}) 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
     except Exception as e:
         log.debug(f"Leverage notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    GUARANTEED INSTANT MARKET ORDER EXECUTION (100% FILL RATE):
-    - Uses orderType: "market" -> Microsecond execution on Bitget matching engine (<1ms).
-    - Hard Preset Engine Take-Profit (+2.50%) & Stop-Loss (-1.25%) attached directly to Bitget!
+    EXECUTING OFFICIAL BITGET DEMO / SIMULATED TRADING ORDER (100% REAL EXCHANGE ENGINE DYNAMICS):
+    - Submits order to Bitget's SUSDT-FUTURES Demo matching engine.
+    - Tests 5x Leverage, exact Order Book Spread, Fill Prices, Exchange Fees, and Demo USDT Equity tracking!
+    - Hard Preset Engine Take-Profit (+2.50%) & Stop-Loss (-1.25%) attached directly on Bitget!
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
-        log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
+        log.error("❌ Missing Bitget API Keys. Cannot execute demo trade.")
         return None
 
     await configure_bitget_symbol_settings(session, symbol)
@@ -231,9 +236,9 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     path = "/api/v3/trade/place-order"
     order_payload = {
-        "category": "USDT-FUTURES",
+        "category": CATEGORY_TYPE,
         "symbol": symbol,
-        "marginCoin": "USDT",
+        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
         "qty": size_str,
         "side": side,
         "orderType": "market",
@@ -245,7 +250,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🚨 SUBMITTING MASTER MOMENTUM MARKET ORDER TO BITGET: {symbol} ({direction}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
+    mode_label = "🎮 BITGET DEMO (SUSDT-FUTURES)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY"
+    log.info(f"🎯 SUBMITTING {mode_label} ORDER: {symbol} ({direction}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -256,15 +262,16 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 resp = {}
 
             if r.status == 200 and resp.get("code") == "00000":
-                order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
-                log.info(f"✅ REAL BITGET UTA v3 MASTER ORDER EXECUTED! Order ID: {order_id}")
+                order_id = resp.get("data", {}).get("orderId", "DEMO_ORDER_EXECUTED")
+                log.info(f"✅ BITGET MATCHING ENGINE ACCEPTED DEMO ORDER! Order ID: {order_id}")
 
                 await asyncio.sleep(0.5)
                 real_fill = await fetch_bitget_order_fill_price(session, symbol, order_id)
                 if not real_fill or real_fill <= 0:
                     real_fill = market_price
 
-                log.info(f"🎯 BITGET EXECUTED FILL PRICE VERIFIED: ${format_price(real_fill)}")
+                slippage = abs(real_fill - market_price) / market_price * 100.0
+                log.info(f"🎯 BITGET DEMO FILL PRICE: ${format_price(real_fill)} | Measured Order Book Slippage: {slippage:.3f}%")
 
                 return {
                     "order_id": order_id,
@@ -274,17 +281,18 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                     "preset_sl": preset_sl,
                     "real_fill_price": real_fill,
                     "pre_trade_balance": available_balance,
+                    "slippage_pct": round(slippage, 3),
                     "filled": True
                 }
             else:
-                log.error(f"❌ BITGET UTA v3 ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+                log.error(f"❌ BITGET DEMO ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
                 return None
     except Exception as e:
-        log.error(f"❌ Error submitting master order: {e}")
+        log.error(f"❌ Error submitting Bitget demo order: {e}")
         return None
 
 async def close_bitget_live_position(session, symbol, direction, contract_size=""):
-    """Executes an Immediate Live Market Close Order (reduceOnly: yes) via v3 UTA API."""
+    """Executes an Immediate Live/Demo Market Close Order via v3 UTA API."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -292,9 +300,9 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
     path = "/api/v3/trade/place-order"
 
     order_payload = {
-        "category": "USDT-FUTURES",
+        "category": CATEGORY_TYPE,
         "symbol": symbol,
-        "marginCoin": "USDT",
+        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
         "side": close_side,
         "orderType": "market",
         "reduceOnly": "yes"
@@ -308,7 +316,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🛑 EXECUTING LIVE MARKET EXIT ON BITGET UTA v3 EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload['qty']}")
+    log.info(f"🛑 EXECUTING DEMO MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload['qty']}")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -319,15 +327,15 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
                 resp = {}
 
             if r.status == 200 and resp.get("code") == "00000":
-                log.info(f"✅ LIVE BITGET UTA v3 POSITION CLOSED ON EXCHANGE! Order ID: {resp.get('data', {}).get('orderId')}")
+                log.info(f"✅ BITGET DEMO POSITION CLOSED ON EXCHANGE! Order ID: {resp.get('data', {}).get('orderId')}")
             else:
                 log.warning(f"Notice on exchange close: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
     except Exception as e:
-        log.error(f"Error executing live Bitget position close: {e}")
+        log.error(f"Error executing Bitget demo position close: {e}")
 
 async def fetch_single_price(session, symbol):
-    params = {"symbol": symbol, "productType": "USDT-FUTURES"}
-    path = f"/api/v2/mix/market/ticker?symbol={symbol}&productType=USDT-FUTURES"
+    params = {"symbol": symbol, "productType": PRODUCT_TYPE}
+    path = f"/api/v2/mix/market/ticker?symbol={symbol}&productType={PRODUCT_TYPE}"
     headers = get_bitget_headers("GET", path)
     try:
         async with session.get(BITGET_SINGLE_TICKER_URL, params=params, headers=headers, timeout=10) as r:
@@ -344,7 +352,7 @@ async def fetch_single_price(session, symbol):
     return None
 
 async def fetch_bitget_tickers(session):
-    path = "/api/v2/mix/market/tickers?productType=USDT-FUTURES"
+    path = f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}"
     headers = get_bitget_headers("GET", path)
     try:
         async with session.get(BITGET_TICKERS_URL, headers=headers, timeout=10) as r:
@@ -359,8 +367,8 @@ async def fetch_bitget_tickers(session):
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
     """Fetches 60 1-MINUTE candles (OHLCV) for a single coin with retry handling."""
     async with semaphore:
-        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "60"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=60"
+        params = {"symbol": symbol, "productType": PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={PRODUCT_TYPE}&granularity=1m&limit=60"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -379,18 +387,18 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
     """
-    BITGET NATIVE MASTER MOMENTUM & VOLATILITY RANKER ENGINE
-    --------------------------------------------------------
-    Evaluates 60 1-minute OHLCV candles across all Bitget Futures pairs ($1M+ Volume):
+    BITGET DEMO TRADING MASTER MOMENTUM & VOLATILITY RANKER ENGINE
+    --------------------------------------------------------------
+    Evaluates 60 1-minute OHLCV candles across all Bitget Futures pairs:
       1. Baseline Calculation (Minutes 0 to 45):
-         - Measures 45m Baseline Volume and 45m Price Range (channel).
-      2. Recent Expansion Calculation (Minutes 45 to 60 - Recent 15m):
-         - Measures recent 15m Price Move % and Volume Acceleration Ratio (15m Vol / 45m Vol).
-      3. Native Bitget Momentum Score:
-         - Score = (Recent 15m Move %) x (Volume Acceleration Ratio) x (15m Green/Red Win Ratio).
-         - LONG: Highest positive score (Strongest buyer acceleration breaking baseline).
-         - SHORT: Highest negative score (Strongest seller acceleration breaking baseline).
-      4. Ranks ALL market pairs to select the SINGLE #1 ABSOLUTE STRONGEST DIRECTIONAL MOVE!
+         - Measures 45m Baseline Volume and 45m Price Channel.
+      2. Recent Expansion Calculation (Minutes 45 to 60):
+         - Measures recent 15m Price Move % and Volume Acceleration Ratio.
+      3. Momentum Score:
+         - Score = (Recent 15m Move %) x (Volume Acceleration Ratio) x (15m Win Ratio).
+         - LONG: Highest positive score.
+         - SHORT: Highest negative score.
+      4. Ranks ALL market pairs to select the SINGLE #1 ABSOLUTE STRONGEST MOVE!
     """
     batch_evaluated = []
 
@@ -418,7 +426,6 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
         if p_base_open <= 0 or p_recent_open <= 0:
             continue
 
-        # 1. Volume Acceleration Ratio
         avg_vol_45m = sum(float(c[5]) for c in baseline_45m) / 45.0
         avg_vol_15m = sum(float(c[5]) for c in recent_15m) / 15.0
 
@@ -426,18 +433,15 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
             continue
 
         vol_accel = avg_vol_15m / avg_vol_45m
-        if vol_accel < 1.50:  # Must have active volume expansion
+        if vol_accel < 1.40:
             continue
 
-        # 2. Net Price Move % in Recent 15m
         move_15m_pct = ((p_current - p_recent_open) / p_recent_open) * 100.0
 
-        # 3. Candle Win Ratio in Recent 15m
         green_wins = sum(1 for c in recent_15m if float(c[4]) > float(c[1]))
         red_wins = sum(1 for c in recent_15m if float(c[4]) < float(c[1]))
 
-        # 4. Filter for True Momentum Breakthrough
-        if move_15m_pct >= 0.40 and green_wins >= 9:  # LONG
+        if move_15m_pct >= 0.35 and green_wins >= 9:  # LONG
             score = move_15m_pct * vol_accel * (green_wins / 15.0)
             batch_evaluated.append({
                 "batch_id": batch_id,
@@ -449,7 +453,7 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
                 "momentum_score": score,
                 "current_price": p_current
             })
-        elif move_15m_pct <= -0.40 and red_wins >= 9:  # SHORT
+        elif move_15m_pct <= -0.35 and red_wins >= 9:  # SHORT
             score = abs(move_15m_pct) * vol_accel * (red_wins / 15.0)
             batch_evaluated.append({
                 "batch_id": batch_id,
@@ -465,7 +469,6 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
     if not batch_evaluated:
         return []
 
-    # Sort candidates by highest Momentum Score to pick the #1 setup in the market
     batch_evaluated.sort(key=lambda x: x["momentum_score"], reverse=True)
     return [batch_evaluated[0]]
 
@@ -478,16 +481,16 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | Bitget Native Master Momentum Ranker)"
+    mode_status = f"🎮 OFFICIAL BITGET DEMO TRADING MODE ({PRODUCT_TYPE} | 5x Leverage | Real Order Book Spread & Fee Audit)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING"
 
-    log.info(f"🏆 Current REAL LIVE BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
+    log.info(f"🏆 Current BITGET DEMO WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
-        current_equity = acc_info["equity"] if acc_info else 1.32
+        current_equity = acc_info["equity"] if acc_info else 10000.0
 
         if acc_info:
-            log.info(f"💰 BITGET LIVE ACCOUNT EQUITY: ${acc_info['equity']:.4f} USDT | Available Margin: ${acc_info['available']:.4f} USDT ({acc_info['account_type']})")
+            log.info(f"💰 BITGET DEMO ACCOUNT EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f} ({acc_info['account_type']})")
         else:
             log.warning("⚠️ Bitget balance query pending...")
 
@@ -501,7 +504,7 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ MASTER MOMENTUM TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring price...")
+            log.info(f"⏳ DEMO TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -512,12 +515,13 @@ async def main():
                     live_pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
 
                 pnl_str = f"{live_pnl_pct:+.2f}%"
-                log.info(f"📍 LIVE TRADE PING: {symbol} | Entry Price: ${entry_p_str} | Current Price: ${curr_p_str} | Price Move: {pnl_str}")
+                log.info(f"📍 DEMO TRADE PING: {symbol} | Entry Price: ${entry_p_str} | Current Price: ${curr_p_str} | Price Move: {pnl_str}")
 
                 payload = {
                     "symbol": symbol,
                     "direction": direction,
                     "is_paper": False,
+                    "is_demo": BITGET_DEMO_MODE,
                     "entry_price": entry_price,
                     "current_price": current_price,
                     "live_pnl_pct": round(live_pnl_pct, 2),
@@ -530,10 +534,10 @@ async def main():
                     "contract_size": contract_size
                 }
             else:
-                log.error(f"Could not fetch live price for active trade {symbol}.")
+                log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Scanning High-Liquidity Bitget Futures Pairs ($1M+ Volume Range for Master Momentum)...")
+            log.info(f"🛰️ Scanning Bitget Futures Pairs ({PRODUCT_TYPE} | Min Volume: $500k)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -551,7 +555,7 @@ async def main():
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-            log.info(f"✅ Found {total_coins} high-liquidity pairs ($1M+ Volume). Dividing into 20 parallel batch workers (~{chunk_size} pairs/batch)...")
+            log.info(f"✅ Found {total_coins} pairs across Bitget Futures ({PRODUCT_TYPE}). Dividing into 20 batch workers...")
 
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
             batch_tasks = [process_coin_batch(i + 1, batch, session, semaphore) for i, batch in enumerate(coin_batches)]
@@ -562,7 +566,7 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 ALL-MARKET MASTER MOMENTUM CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
+            log.info(f"📊 BITGET DEMO MASTER MOMENTUM CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
             log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'15M MOVE':<12} | {'VOL ACCEL':<12} | {'MOMENTUM SCORE':<18}")
             log.info("-" * 88)
 
@@ -575,15 +579,15 @@ async def main():
                 all_batch_candidates.sort(key=lambda x: x["momentum_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 ABSOLUTE STRONGEST BITGET MOMENTUM PAIR MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['momentum_score']:.4f} | 15m Move: {best_signal['move_15m_pct']:+.2f}% | Vol Accel: {best_signal['vol_accel']:.2f}x)")
+                log.info(f"🔥 #1 ABSOLUTE STRONGEST BITGET DEMO PAIR MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['momentum_score']:.4f} | 15m Move: {best_signal['move_15m_pct']:+.2f}% | Vol Accel: {best_signal['vol_accel']:.2f}x)")
 
-                # EXECUTE GUARANTEED MARKET ORDER ON HIGH-LIQUIDITY COIN
+                # EXECUTE OFFICIAL BITGET DEMO ORDER
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
                     direction=best_signal["direction"],
                     market_price=best_signal["current_price"],
-                    available_balance=acc_info["available"] if acc_info else 1.32
+                    available_balance=acc_info["available"] if acc_info else 10000.0
                 )
 
                 if live_order_result and live_order_result.get("filled", False):
@@ -593,6 +597,7 @@ async def main():
                         "symbol": best_signal["symbol"],
                         "direction": best_signal["direction"],
                         "is_paper": False,
+                        "is_demo": BITGET_DEMO_MODE,
                         "avg_fluctuation": round(best_signal["momentum_score"] * 10, 2),
                         "current_price": final_entry_fill,
                         "account_equity": current_equity,
@@ -607,7 +612,7 @@ async def main():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
             else:
-                log.info(f"ℹ️ No active master momentum candidates matched across high-liquidity pairs this scan run.")
+                log.info(f"ℹ️ No active master momentum candidates matched across pairs this scan run.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
@@ -639,12 +644,12 @@ async def main():
                         is_win = net_cash_change > 0
 
                         log.info("====================================================================================================")
-                        log.info(f"💵 BITGET REAL ACCOUNT BALANCE AUDIT ({symbol}):")
+                        log.info(f"💵 BITGET DEMO ACCOUNT BALANCE AUDIT ({symbol}):")
                         log.info(f"   • Starting Account Equity: ${pre_trade_balance:.4f} USDT")
                         log.info(f"   • Closing Account Equity:  ${final_eq:.4f} USDT")
                         log.info(f"   • NET CASH CHANGE:         {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} USDT")
-                        log.info(f"   • TRADE RESULT:            {'🏆 WIN (MASTER MOMENTUM NET CASH GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
-                        log.info(f"   • NEW LIVE WIN STREAK:     {res_data.get('live_win_streak', 0)} WINS")
+                        log.info(f"   • DEMO TRADE RESULT:       {'🏆 WIN (DEMO USDT GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
+                        log.info(f"   • NEW DEMO WIN STREAK:     {res_data.get('live_win_streak', 0)} WINS")
                         log.info("====================================================================================================")
 
                 elif worker_status == "HOLDING":
