@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "LUNCUSDT",
-  "direction": "SHORT",
-  "mode": "REAL_LIVE_BITGET",
-  "entry_price": 0.00004109,
-  "stop_loss": 0.0000415009,
-  "pre_trade_balance": 1.43105736,
-  "contract_size": "156723",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795224643748
+  "active": false
 }
