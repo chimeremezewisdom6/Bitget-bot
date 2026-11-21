@@ -56,7 +56,7 @@ export default {
       let tradeHistory = historyState ? historyState.content : [];
 
       // =========================================================================
-      // 1. ACTIVE LIVE / DEMO TRADE MONITORING & BALANCE EVALUATION
+      // 1. ACTIVE RED-CARD COLLAPSE TRADE MONITORING & BALANCE EVALUATION
       // =========================================================================
       if (activeTrade.active) {
         const currentPrice = signal.current_price;
@@ -97,16 +97,16 @@ export default {
           let exitReason = "";
           if (hitTakeProfit) exitReason = `2.5% ENGINE TAKE PROFIT HIT (+${grossPnl.toFixed(2)}% Price Move)`;
           else if (hitSL) exitReason = `1.25% ENGINE STOP LOSS HIT (${grossPnl.toFixed(2)}% Price Move)`;
-          else if (hitTimeTimeout) exitReason = `20-MINUTE DEMO TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hitTimeTimeout) exitReason = `20-MINUTE RED-CARD TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
 
           if (!isRealWin) {
-            exitReason += ` | [STREAK RESET TO 0: Demo Balance Decreased by $${Math.abs(netUsdtChange).toFixed(4)}]`;
+            exitReason += ` | [STREAK RESET TO 0: Account Balance Decreased by $${Math.abs(netUsdtChange).toFixed(4)}]`;
           }
 
           tradeHistory.push({
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
+            mode: signal.is_demo ? "BITGET_DEMO_RED_CARD" : "REAL_LIVE_RED_CARD",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             price_gross_pnl: grossPnl.toFixed(2) + "%",
@@ -128,7 +128,7 @@ export default {
             status: "CLOSED",
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
+            mode: signal.is_demo ? "BITGET_DEMO_RED_CARD" : "REAL_LIVE_RED_CARD",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
@@ -154,13 +154,13 @@ export default {
         }
       }
       // =========================================================================
-      // 2. NO ACTIVE TRADE -> OPEN NEW DEMO / LIVE SIGNAL
+      // 2. NO ACTIVE TRADE -> OPEN NEW RED-CARD COLLAPSE SIGNAL
       // =========================================================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({
             status: "WAITING",
-            message: "No demo trading signals found."
+            message: "No red-card collapse signals found."
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
@@ -171,7 +171,7 @@ export default {
           active: true,
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
+          mode: signal.is_demo ? "BITGET_DEMO_RED_CARD" : "REAL_LIVE_RED_CARD",
           entry_price: currentPrice,
           stop_loss: stop_loss,
           pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 10000.0,
@@ -187,7 +187,7 @@ export default {
           status: "OPENED",
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
+          mode: signal.is_demo ? "BITGET_DEMO_RED_CARD" : "REAL_LIVE_RED_CARD",
           entry_price: currentPrice.toFixed(5),
           stop_loss: stop_loss.toFixed(5),
           live_win_streak: liveWinStreak,
