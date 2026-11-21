@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "PROMUSDT",
-  "direction": "SHORT",
-  "mode": "REAL_LIVE_BITGET",
-  "entry_price": 4.6656,
-  "stop_loss": 4.712256000000001,
-  "pre_trade_balance": 1.35618984,
-  "contract_size": "1.3",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795226146935
+  "active": false
 }
