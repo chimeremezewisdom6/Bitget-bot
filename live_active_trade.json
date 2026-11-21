@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "UNITASUSDT",
-  "direction": "LONG",
-  "mode": "REAL_LIVE_CAPITAL_ABSORPTION",
-  "entry_price": 0.2241,
-  "stop_loss": 0.2207385,
-  "pre_trade_balance": 1.38019043,
-  "contract_size": "27",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795239344015
+  "active": false
 }
