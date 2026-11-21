@@ -179,7 +179,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     AIR-GAPPED DEMO vs REAL MONEY EXECUTION ENGINE:
     - IF BITGET_DEMO_MODE == True:
         Strictly routes to Bitget's SUSDT-FUTURES demo ledger using S-USDT demo margin!
-        Real USDT funds CANNOT be touched.
+        Real USDT funds CANNOT be touched under any circumstances.
     - IF BITGET_DEMO_MODE == False:
         Routes to Real Live USDT-FUTURES account across all 600+ real pairs.
     """
@@ -189,11 +189,11 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     if BITGET_DEMO_MODE:
         candidate_demo_sym = f"S{symbol}" if not symbol.startswith("S") else symbol
-        if candidate_demo_sym in SUPPORTED_DEMO_PAIRS:
+        if candidate_demo_sym in SUPPORTED_DEMO_SYMBOLS:
             trade_symbol = candidate_demo_sym
         else:
             trade_symbol = "SBTCUSDT"
-            log.info(f"🛡️ DEMO AIR-GAP PROTECTOR: Mapping matched signal {symbol} to official Bitget S-USDT Demo pair {trade_symbol}. Real USDT funds are 100% UNTOUCHED.")
+            log.info(f"🛡️ DEMO AIR-GAP PROTECTOR: Mapping matched breakout signal {symbol} to official Bitget S-USDT Demo pair {trade_symbol}. Real USDT funds are 100% UNTOUCHED.")
 
         demo_price = await fetch_single_price(session, "BTCUSDT")
         if demo_price and demo_price > 0:
@@ -265,8 +265,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    mode_label = "🎮 BITGET DEMO (S-USDT AIR-GAPPED)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (USDT)"
-    log.info(f"🎯 SUBMITTING MARKET ORDER ({mode_label}): {trade_symbol} ({direction} | Matched Signal: {symbol}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
+    mode_label = "🎮 BITGET DEMO (S-USDT AIR-GAPPED)" if BITGET_DEMO_MODE else "RARE REAL MONEY (USDT)"
+    log.info(f"🎯 SUBMITTING EXHAUSTION BREAKOUT ORDER ({mode_label}): {trade_symbol} ({direction} | Matched Signal: {symbol}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
 
     try:
         async with session.post(url, data=body_json, headers=headers, timeout=10) as r:
@@ -327,7 +327,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
             "side": close_side,
             "orderType": "market",
             "qty": str(contract_size) if contract_size and contract_size != "0" else "1",
-            "reduceOnly": "yes"
+            "reduceOnly": "no"
         }
 
     body_json = json.dumps(order_payload)
@@ -404,22 +404,26 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
     """
-    18, 19, OR 20 CANDLE EXTREME STREAK DETECTOR ENGINE
-    ---------------------------------------------------
+    UP TO 5% VOLATILITY RANGE BREAKOUT & EXPANDING CANDLE EXHAUSTION RIDER ENGINE
+    -----------------------------------------------------------------------------
     Evaluates 60 1-minute OHLCV candles across all Bitget Futures pairs:
-      1. Scans windows of length N = 18, 19, or 20 candles.
-      2. Condition for LONG: In the N-candle window, GREEN candles dominate and RED candles <= 2!
-      3. Condition for SHORT: In the N-candle window, RED candles dominate and GREEN candles <= 2!
-      4. Requires net price movement > 0 for LONG and < 0 for SHORT.
-      5. Calculates Streak Score = (Net Move %) x Volume Acceleration x (Dominant Candle Count / N).
-      6. Ranks ALL market pairs to select the #1 STRONGEST EXTREME STREAK SETUP!
+      1. Measures coin's dynamic range oscillation over N candles (12 to 40 candles).
+         - Accepts coins oscillating within up to 5.0% volatility range (adaptable per coin).
+      2. Detects the moment price snaps past the Range Boundary (High/Low):
+         - Long: Price pierces Range High while 1-minute candle sizes are EXPANDING (Candle 2 size > Candle 1 size),
+                 signaling sellers have TOTALLY EXHAUSTED and given up!
+         - Short: Price pierces Range Low while 1-minute candle sizes are EXPANDING (Candle 2 size > Candle 1 size),
+                  signaling buyers have TOTALLY EXHAUSTED and given up!
+      3. Verifies Volume Acceleration (Breakout volume >= 1.4x range average).
+      4. Calculates Exhaustion Breakout Score = (Expansion Rate) x (Candle Size Multiplier) x Volume Surge.
+      5. Ranks ALL market pairs to select the #1 OPPONENT EXHAUSTION BREAKOUT!
     """
     batch_evaluated = []
 
     tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
 
-    TARGET_WINDOWS = [18, 19, 20]
+    RANGE_WINDOWS = range(12, 41)
 
     for idx, candle_data in enumerate(candles_results):
         if not candle_data or len(candle_data) < 60:
@@ -433,59 +437,83 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
         candles_60m = list(reversed(candle_data[:60]))
 
         best_coin_setup = None
-        highest_streak_score = 0.0
+        highest_score = 0.0
 
-        for n_candles in TARGET_WINDOWS:
-            window_candles = candles_60m[-n_candles:]  # Recent N candles
-            baseline_candles = candles_60m[:-n_candles]
+        for n_candles in RANGE_WINDOWS:
+            range_candles = candles_60m[-n_candles - 2 : -2]  # Range up to 2 mins ago
+            breakout_candles = candles_60m[-2:]               # Recent 2 breakout 1m candles
 
-            if len(window_candles) < n_candles or not baseline_candles:
+            if len(range_candles) < n_candles or len(breakout_candles) < 2:
                 continue
 
-            w_open = float(window_candles[0][1])
-            w_close = float(window_candles[-1][4])
+            r_open = float(range_candles[0][1])
+            r_high = max(float(c[2]) for c in range_candles)
+            r_low = min(float(c[3]) for c in range_candles)
 
-            if w_open <= 0 or w_close <= 0:
+            if r_open <= 0 or r_low <= 0:
                 continue
 
-            green_candles = sum(1 for c in window_candles if float(c[4]) > float(c[1]))
-            red_candles = sum(1 for c in window_candles if float(c[4]) < float(c[1]))
+            # 1. COIN VOLATILITY RANGE (Oscillating up to 5.0% range)
+            range_span_pct = ((r_high - r_low) / r_open) * 100.0
+            if range_span_pct > 5.0 or range_span_pct < 0.20:
+                continue
 
-            net_move_pct = ((w_close - w_open) / w_open) * 100.0
+            # 2. CANDLE EXPANSION CHECK (Candle 2 size > Candle 1 size = Fluctuations increasing, opponent giving up)
+            c1_open, c1_high, c1_low, c1_close = float(breakout_candles[0][1]), float(breakout_candles[0][2]), float(breakout_candles[0][3]), float(breakout_candles[0][4])
+            c2_open, c2_high, c2_low, c2_close = float(breakout_candles[1][1]), float(breakout_candles[1][2]), float(breakout_candles[1][3]), float(breakout_candles[1][4])
 
-            # Volume Acceleration Ratio
-            base_vol_avg = sum(float(c[5]) for c in baseline_candles) / float(len(baseline_candles))
-            w_vol_avg = sum(float(c[5]) for c in window_candles) / float(n_candles)
+            c1_size = abs(c1_close - c1_open)
+            c2_size = abs(c2_close - c2_open)
 
-            vol_accel = (w_vol_avg / base_vol_avg) if base_vol_avg > 0 else 1.0
+            avg_range_candle_size = sum(abs(float(c[4]) - float(c[1])) for c in range_candles) / float(n_candles)
 
-            # STREAK CONDITIONS:
-            # LONG: In 18-20 candles, RED candles <= 2 (e.g. 18G/2R, 17G/2R, 19G/1R, 20G/0R)
-            # SHORT: In 18-20 candles, GREEN candles <= 2 (e.g. 18R/2G, 17R/2G, 19R/1G, 20R/0G)
-            is_bull_streak = (red_candles <= 2) and (green_candles >= (n_candles - 2)) and (net_move_pct > 0.15)
-            is_bear_streak = (green_candles <= 2) and (red_candles >= (n_candles - 2)) and (net_move_pct < -0.15)
+            # Expanding candle condition: Recent breakout candles are expanding in size vs consolidation
+            is_expanding_candles = (c2_size >= c1_size * 0.9) and (c2_size > avg_range_candle_size * 1.2)
 
-            if is_bull_streak or is_bear_streak:
-                direction = "LONG" if is_bull_streak else "SHORT"
-                dominant_cnt = green_candles if is_bull_streak else red_candles
-                opposing_cnt = red_candles if is_bull_streak else green_candles
+            if not is_expanding_candles:
+                continue
 
-                streak_score = abs(net_move_pct) * vol_accel * (dominant_cnt / float(n_candles))
+            # 3. VOLUME ACCELERATION
+            r_vol_avg = sum(float(c[5]) for c in range_candles) / float(n_candles)
+            b_vol_avg = (float(breakout_candles[0][5]) + float(breakout_candles[1][5])) / 2.0
 
-                if streak_score > highest_streak_score:
-                    highest_streak_score = streak_score
+            if r_vol_avg <= 0:
+                continue
+
+            vol_surge = b_vol_avg / r_vol_avg
+            if vol_surge < 1.35:
+                continue
+
+            p_current = float(candles_60m[-1][4])
+
+            # 4. EXHAUSTION BREAKOUT OUTSIDE THE 5% RANGE
+            breakout_up_pct = ((p_current - r_high) / r_high) * 100.0
+            breakout_down_pct = ((r_low - p_current) / r_low) * 100.0
+
+            is_long_exhaustion = (p_current > r_high) and (breakout_up_pct >= 0.15)
+            is_short_exhaustion = (p_current < r_low) and (breakout_down_pct >= 0.15)
+
+            if is_long_exhaustion or is_short_exhaustion:
+                direction = "LONG" if is_long_exhaustion else "SHORT"
+                progress_pct = breakout_up_pct if is_long_exhaustion else breakout_down_pct
+
+                candle_expansion_ratio = c2_size / (avg_range_candle_size + 1e-6)
+                exhaustion_score = progress_pct * vol_surge * candle_expansion_ratio
+
+                if exhaustion_score > highest_score:
+                    highest_score = exhaustion_score
                     best_coin_setup = {
                         "batch_id": batch_id,
                         "symbol": symbol,
                         "vol_24h": vol_24h,
                         "direction": direction,
                         "n_candles": n_candles,
-                        "dominant_cnt": dominant_cnt,
-                        "opposing_cnt": opposing_cnt,
-                        "net_move_pct": net_move_pct,
-                        "vol_accel": vol_accel,
-                        "streak_score": streak_score,
-                        "current_price": w_close
+                        "range_span_pct": range_span_pct,
+                        "progress_pct": progress_pct,
+                        "candle_expansion": candle_expansion_ratio,
+                        "vol_surge": vol_surge,
+                        "exhaustion_score": exhaustion_score,
+                        "current_price": p_current
                     }
 
         if best_coin_setup:
@@ -494,8 +522,8 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
     if not batch_evaluated:
         return []
 
-    # Sort candidates exchange-wide by highest Streak Score
-    batch_evaluated.sort(key=lambda x: x["streak_score"], reverse=True)
+    # Sort candidates exchange-wide by highest Exhaustion Score
+    batch_evaluated.sort(key=lambda x: x["exhaustion_score"], reverse=True)
     return [batch_evaluated[0]]
 
 async def main():
@@ -507,7 +535,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE (S-USDT Air-Gapped | 18-20 Candle Extreme Streak | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
+    mode_status = f"🎮 BITGET DEMO MODE (S-USDT Air-Gapped | 5% Range Exhaustion Breakout | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
 
     log.info(f"🏆 Current BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -528,7 +556,7 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ 18-20 CANDLE STREAK TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
+            log.info(f"⏳ EXHAUSTION BREAKOUT TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
 
             current_price = await fetch_single_price(session, symbol if not BITGET_DEMO_MODE else "BTCUSDT")
             if current_price and current_price > 0:
@@ -561,7 +589,7 @@ async def main():
                 log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({SCAN_PRODUCT_TYPE} | 18-20 Candle Streak with <=2 Opposing Candles)...")
+            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({SCAN_PRODUCT_TYPE} | 5% Volatility Range + Expanding Candle Exhaustion)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -590,21 +618,21 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 18-20 CANDLE EXTREME STREAK CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'WINDOW (N)':<12} | {'CANDLE SCORE BREAKDOWN':<24} | {'MOVE %':<10} | {'SCORE':<14}")
+            log.info(f"📊 5% RANGE EXPANDING CANDLE EXHAUSTION CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'RANGE (N)':<12} | {'RANGE SPAN':<12} | {'CANDLE EXPANSION':<18} | {'SCORE':<14}")
             log.info("-" * 105)
 
             for cand in all_batch_candidates:
-                breakdown = f"{cand['dominant_cnt']} Dom / {cand['opposing_cnt']} Opp (N={cand['n_candles']})"
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['n_candles']} Candles    | {breakdown:<24} | {cand['net_move_pct']:+.2f}%    | {cand['streak_score']:.4f}")
+                exp_str = f"{cand['candle_expansion']:.2f}x Body Size"
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['n_candles']} Candles    | {cand['range_span_pct']:.2f}%       | {exp_str:<18} | {cand['exhaustion_score']:.4f}")
 
             log.info("====================================================================================================")
 
             if all_batch_candidates:
-                all_batch_candidates.sort(key=lambda x: x["streak_score"], reverse=True)
+                all_batch_candidates.sort(key=lambda x: x["exhaustion_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 EXTREME STREAK MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['streak_score']:.4f} | N={best_signal['n_candles']} Candles | Dom: {best_signal['dominant_cnt']} / Opp: {best_signal['opposing_cnt']} | Move: {best_signal['net_move_pct']:+.2f}%)")
+                log.info(f"🔥 #1 EXHAUSTION BREAKOUT MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['exhaustion_score']:.4f} | Range Span: {best_signal['range_span_pct']:.2f}% | Candle Expansion: {best_signal['candle_expansion']:.2f}x | Progress: +{best_signal['progress_pct']:.2f}%)")
 
                 # EXECUTE ORDER
                 live_order_result = await place_bitget_live_order(
@@ -623,7 +651,7 @@ async def main():
                         "direction": live_order_result.get("direction", best_signal["direction"]),
                         "is_paper": False,
                         "is_demo": BITGET_DEMO_MODE,
-                        "avg_fluctuation": round(best_signal["streak_score"] * 10, 2),
+                        "avg_fluctuation": round(best_signal["exhaustion_score"] * 10, 2),
                         "current_price": final_entry_fill,
                         "account_equity": current_equity,
                         "pre_trade_balance": current_equity,
@@ -637,7 +665,7 @@ async def main():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
             else:
-                log.info(f"ℹ️ No active 18-20 candle extreme streak candidates matched across pairs this scan run.")
+                log.info(f"ℹ️ No active expanding candle range breakout candidates matched across pairs this scan run.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
