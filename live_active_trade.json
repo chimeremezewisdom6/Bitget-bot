@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "YGGUSDT",
+  "direction": "LONG",
+  "mode": "REAL_LIVE_BITGET",
+  "entry_price": 0.01808,
+  "stop_loss": 0.017899199999999997,
+  "pre_trade_balance": 1.32575265,
+  "contract_size": "329",
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795227648912
 }
