@@ -39,10 +39,7 @@ LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
 
 NUM_BATCHES = 20           # Exactly 20 separate scanning batches / workers
-MIN_24H_VOLUME = 100000    # Min $100k Volume
-MAX_24H_VOLUME = 10000000  # Max $10M Volume Range
-MIN_RECENT_CANDLES = 9     # Requires 9 or 10 same-color candles in recent 10m
-MIN_20M_TREND_CANDLES = 14 # Requires >= 14/20 same-color candles over full 20m macro window
+MIN_24H_VOLUME = 100000    # Min $100k Volume (NO UPPER CAP: Scans ALL BTC, ETH, SOL, & Altcoins!)
 DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90   # Strictly 90% of available USDT equity allocated per trade
 
@@ -212,10 +209,10 @@ async def configure_bitget_symbol_settings(session, symbol):
 
 async def place_bitget_live_order(session, symbol, direction, target_limit_price, available_balance):
     """
-    Executes a ZERO-SLIPPAGE LIMIT ORDER on Bitget Engine at exact price.
+    Executes a ZERO-SLIPPAGE REVERSAL LIMIT ORDER on Bitget Engine at exact price.
     - Uses 90% of Available Balance at 5x Leverage.
     - 3-second Auto-Cancel Guard if not filled immediately.
-    - Preset +1.0% Engine Take-Profit & -1.0% Engine Stop-Loss attached directly to Bitget.
+    - Preset +2.0% Engine Take-Profit & -2.0% Engine Stop-Loss attached directly to Bitget.
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
@@ -247,15 +244,15 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
 
     limit_p_str = format_price(target_limit_price)
 
-    # STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS ATTACHED DIRECTLY TO BITGET ENGINE
+    # HARD 2.00% TAKE PROFIT AND HARD 2.00% STOP LOSS ATTACHED DIRECTLY TO BITGET MATCHING ENGINE
     if direction == "LONG":
         side = "buy"
-        preset_tp = format_price(target_limit_price * 1.010)  # Strict +1.00% TP
-        preset_sl = format_price(target_limit_price * 0.990)  # Strict -1.00% SL
+        preset_tp = format_price(target_limit_price * 1.020)  # Hard +2.00% TP
+        preset_sl = format_price(target_limit_price * 0.980)  # Hard -2.00% SL
     else:
         side = "sell"
-        preset_tp = format_price(target_limit_price * 0.990)  # Strict +1.00% TP
-        preset_sl = format_price(target_limit_price * 1.010)  # Strict -1.00% SL
+        preset_tp = format_price(target_limit_price * 0.980)  # Hard +2.00% TP
+        preset_sl = format_price(target_limit_price * 1.020)  # Hard -2.00% SL
 
     path = "/api/v3/trade/place-order"
     order_payload = {
@@ -274,7 +271,7 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🎯 SUBMITTING ZERO-SLIPPAGE LIMIT ORDER TO BITGET: {symbol} ({direction}) @ ${limit_p_str} | Size: {size_str} | 3s Fill Guard Active!")
+    log.info(f"🎯 SUBMITTING BEST REVERSAL LIMIT ORDER TO BITGET: {symbol} ({direction}) @ ${limit_p_str} | Size: {size_str} | 2% TP: {preset_tp} | 2% SL: {preset_sl}")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -286,14 +283,14 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
-                log.info(f"✅ LIMIT ORDER ACCEPTED BY BITGET MATCHING ENGINE! Order ID: {order_id}")
+                log.info(f"✅ REVERSAL LIMIT ORDER ACCEPTED BY BITGET MATCHING ENGINE! Order ID: {order_id}")
 
                 await asyncio.sleep(2.5)
                 order_info = await fetch_bitget_order_status_and_fill(session, symbol, order_id)
 
                 if order_info and order_info.get("executed_qty", 0) > 0:
                     real_fill = order_info["fill_price"] if order_info["fill_price"] > 0 else target_limit_price
-                    log.info(f"⚡ LIMIT ORDER FILLED AT EXACT PRICE: ${format_price(real_fill)}! ZERO SLIPPAGE TAKEN.")
+                    log.info(f"⚡ REVERSAL LIMIT ORDER FILLED AT EXACT PRICE: ${format_price(real_fill)}! ZERO SLIPPAGE TAKEN.")
                     return {
                         "order_id": order_id,
                         "notional_value": notional_value,
@@ -316,7 +313,7 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
         return None
 
 async def close_bitget_live_position(session, symbol, direction, contract_size=""):
-    """Executes an Immediate Live Market Close Order (reduceOnly: yes) via v3 UTA API for 10-minute timeout or manual exit."""
+    """Executes an Immediate Live Market Close Order (reduceOnly: yes) via v3 UTA API."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -343,7 +340,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
     log.info(f"🛑 EXECUTING LIVE MARKET EXIT ON BITGET UTA v3 EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload['qty']}")
 
     try:
-        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
+        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_payload, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -388,11 +385,11 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
-async def fetch_candle_data_for_coin(session, symbol, semaphore):
-    """Fetches 20 1-minute candles for a single coin with retry handling."""
+async def fetch_180m_candle_data_for_coin(session, symbol, semaphore):
+    """Fetches 180 1-MINUTE candles (representing the last 3 hours: 2h prior trend + 1h recent reversal) for a single coin with retry handling."""
     async with semaphore:
-        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "20"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=20"
+        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "180"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=180"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -401,7 +398,7 @@ async def fetch_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            if candles and len(candles) >= 20:
+                            if candles and len(candles) >= 180:
                                 return candles
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
@@ -411,95 +408,74 @@ async def fetch_candle_data_for_coin(session, symbol, semaphore):
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
     """
-    Processes a single batch of coins, evaluating 20-minute macro candle patterns.
-    Requires >=9/10 in recent 10m AND >=14/20 in full 20m macro window to prevent counter-trend spikes.
+    Processes a single batch of coins across ALL Bitget USDT-Futures pairs (BTC, ETH, SOL, & Altcoins).
+    Evaluates 3 Hours (180 1-minute candles):
+      - Prior 2 Hours (Candles 0-120): Baseline trend (e.g. dipping or longing).
+      - Recent 1 Hour (Candles 120-180): Strongest CANDLE REVERSAL score.
+    Calculates a dynamic Reversal Strength Score for every pair and ranks them to pick the BEST ONE!
     """
     batch_evaluated = []
 
-    tasks = [fetch_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
+    tasks = [fetch_180m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
 
     for idx, candle_data in enumerate(candles_results):
-        if not candle_data or len(candle_data) < 20:
+        if not candle_data or len(candle_data) < 180:
             continue
 
         coin = coin_list[idx]
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
 
-        candles_20m = list(reversed(candle_data[:20]))
-        recent_10m = candles_20m[10:]
+        # Reverse to chronological order (index 0 = 3h ago, index 179 = current 1m candle)
+        candles_180m = list(reversed(candle_data[:180]))
 
-        recent_green = 0
-        recent_red = 0
-        recent_doji = 0
-        fluctuations = []
+        prior_2h = candles_180m[:120]
+        recent_1h = candles_180m[120:]
 
-        for c in recent_10m:
-            o = float(c[1])
-            h = float(c[2])
-            l = float(c[3])
-            cl = float(c[4])
+        # 1. Prior 2-Hour Breakdown (Baseline Trend)
+        prior_green = sum(1 for c in prior_2h if float(c[4]) > float(c[1]))
+        prior_red = sum(1 for c in prior_2h if float(c[4]) < float(c[1]))
 
-            if o > 0:
-                fluctuations.append(((h - l) / o) * 100.0)
+        # 2. Recent 1-Hour Breakdown (Reversal Momentum)
+        recent_green = sum(1 for c in recent_1h if float(c[4]) > float(c[1]))
+        recent_red = sum(1 for c in recent_1h if float(c[4]) < float(c[1]))
 
-            if cl > o:
-                recent_green += 1
-            elif cl < o:
-                recent_red += 1
-            else:
-                recent_doji += 1
+        close_price = float(candles_180m[-1][4])
 
-        total_green = 0
-        total_red = 0
-        total_doji = 0
+        # 3. REVERSAL STRENGTH EVALUATION:
+        # Bullish Reversal: Prior 2h was Dipping (prior_red > prior_green) AND Recent 1h is strongly Green (recent_green >= 35/60)
+        # Bearish Reversal: Prior 2h was Longing (prior_green > prior_red) AND Recent 1h is strongly Red (recent_red >= 35/60)
+        is_bullish_reversal = (prior_red > prior_green) and (recent_green >= 35)
+        is_bearish_reversal = (prior_green > prior_red) and (recent_red >= 35)
 
-        for c in candles_20m:
-            o = float(c[1])
-            cl = float(c[4])
-            if cl > o:
-                total_green += 1
-            elif cl < o:
-                total_red += 1
-            else:
-                total_doji += 1
+        if is_bullish_reversal or is_bearish_reversal:
+            direction = "LONG" if is_bullish_reversal else "SHORT"
+            reversal_ratio = (recent_green / 60.0) if is_bullish_reversal else (recent_red / 60.0)
+            prior_opposite_ratio = (prior_red / 120.0) if is_bullish_reversal else (prior_green / 120.0)
 
-        avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
-        close_price = float(candles_20m[-1][4])
+            # Reversal Score combines recent candle dominance with prior trend depth
+            reversal_score = (reversal_ratio * 0.70) + (prior_opposite_ratio * 0.30)
 
-        max_recent_wins = max(recent_green, recent_red)
-        dominant_direction = "LONG" if recent_green >= recent_red else "SHORT"
-
-        macro_confirmed = False
-        if dominant_direction == "LONG" and recent_green >= MIN_RECENT_CANDLES and total_green >= MIN_20M_TREND_CANDLES:
-            macro_confirmed = True
-        elif dominant_direction == "SHORT" and recent_red >= MIN_RECENT_CANDLES and total_red >= MIN_20M_TREND_CANDLES:
-            macro_confirmed = True
-
-        if macro_confirmed:
             batch_evaluated.append({
                 "batch_id": batch_id,
                 "symbol": symbol,
                 "vol_24h": vol_24h,
-                "green_count": recent_green,
-                "red_count": recent_red,
-                "doji_count": recent_doji,
-                "total_green_20m": total_green,
-                "total_red_20m": total_red,
-                "max_wins": max_recent_wins,
-                "direction": dominant_direction,
-                "avg_fluctuation": avg_fluctuation,
+                "direction": direction,
+                "recent_green_1h": recent_green,
+                "recent_red_1h": recent_red,
+                "prior_green_2h": prior_green,
+                "prior_red_2h": prior_red,
+                "reversal_score": reversal_score,
                 "current_price": close_price
             })
 
     if not batch_evaluated:
         return []
 
-    max_batch_wins = max(c["max_wins"] for c in batch_evaluated)
-    top_candidates = [c for c in batch_evaluated if c["max_wins"] == max_batch_wins]
-    top_candidates.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
-    return top_candidates
+    # Sort candidates by highest Reversal Score to pick the strongest candidate in the batch
+    batch_evaluated.sort(key=lambda x: x["reversal_score"], reverse=True)
+    return [batch_evaluated[0]]
 
 async def main():
     live_streak = get_live_win_streak()
@@ -510,7 +486,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | 10-Min Stagnant Lock & Zero-Slippage Limit Entry)"
+    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | Market-Wide Best Reversal Finder & 2% Engine TP/SL)"
 
     log.info(f"🏆 Current REAL LIVE BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -533,7 +509,7 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ LIVE TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring 10-min timeout...")
+            log.info(f"⏳ REVERSAL TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring price...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -565,7 +541,7 @@ async def main():
                 log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Fetching Bitget Futures coins ($100k to $10M Volume Range)...")
+            log.info(f"🛰️ Fetching ALL Bitget USDT-Futures Pairs (BTC, ETH, SOL, Altcoins | Min Volume: $100k)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -574,7 +550,7 @@ async def main():
             valid_coins = []
             for t in tickers:
                 vol_24h = float(t.get("quoteVolume", 0.0) or (float(t.get("baseVolume", 0.0)) * float(t.get("lastPr", 0.0))))
-                if MIN_24H_VOLUME <= vol_24h <= MAX_24H_VOLUME:
+                if vol_24h >= MIN_24H_VOLUME:
                     valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h})
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
@@ -583,7 +559,7 @@ async def main():
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-            log.info(f"✅ Found {total_coins} active altcoins. Dividing into {len(coin_batches)} parallel batch workers (~{chunk_size} coins/batch)...")
+            log.info(f"✅ Found {total_coins} pairs across ALL Bitget USDT-Futures. Dividing into 20 parallel batch workers (~{chunk_size} pairs/batch)...")
 
             semaphore = asyncio.Semaphore(15)
             batch_tasks = [process_coin_batch(i + 1, batch, session, semaphore) for i, batch in enumerate(coin_batches)]
@@ -594,24 +570,25 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 20-BATCH TOP CANDIDATE SUMMARY TABLE (COLLECTED: {len(all_batch_candidates)} 20M MACRO TREND CONFIRMED PAIRS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'RECENT 10M BREAKDOWN':<28} | {'20M MACRO TREND':<18} | {'AVG FLUCTUATION':<15}")
+            log.info(f"📊 ALL-MARKET BEST REVERSAL CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP REVERSAL PAIRS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'RECENT 1H (CANDLES)':<22} | {'PRIOR 2H (TREND)':<20} | {'REVERSAL SCORE':<15}")
             log.info("-" * 105)
 
             for cand in all_batch_candidates:
-                pattern_str = f"{cand['green_count']} Green / {cand['red_count']} Red"
-                macro_str = f"{cand['total_green_20m']}G / {cand['total_red_20m']}R (20m)"
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {pattern_str:<28} | {macro_str:<18} | {cand['avg_fluctuation']:.2f}%")
+                recent_str = f"{cand['recent_green_1h']}G / {cand['recent_red_1h']}R"
+                prior_str = f"{cand['prior_green_2h']}G / {cand['prior_red_2h']}R"
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {recent_str:<22} | {prior_str:<20} | {cand['reversal_score']:.4f}")
 
             log.info("====================================================================================================")
 
             if all_batch_candidates:
-                all_batch_candidates.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
+                # RANK ALL COINS MARKET-WIDE AND PICK THE #1 STRONGEST REVERSAL PAIR IN THE ENTIRE EXCHANGE!
+                all_batch_candidates.sort(key=lambda x: x["reversal_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
-                macro_info = f"{best_signal['total_green_20m']} Green / {best_signal['total_red_20m']} Red in 20m"
 
-                log.info(f"🔥 BEST 20-CANDLE MACRO-CONFIRMED ENTRY SIGNAL FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']} | Macro: {macro_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
+                log.info(f"🔥 #1 STRONGEST REVERSAL PAIR IN THE ENTIRE MARKET MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['reversal_score']:.4f} | Recent 1h: {best_signal['recent_green_1h']}G/{best_signal['recent_red_1h']}R | Prior 2h: {best_signal['prior_green_2h']}G/{best_signal['prior_red_2h']}R)")
 
+                # EXECUTE ZERO-SLIPPAGE LIMIT ENTRY ORDER AT EXACT PRICE
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
@@ -621,7 +598,7 @@ async def main():
                 )
 
                 if live_order_result and not live_order_result.get("filled", False):
-                    log.info("🛡️ Limit Order was canceled by 3s Fill Guard. Skipping trade to protect account balance.")
+                    log.info("🛡️ Reversal Limit Order was canceled by 3s Fill Guard. Skipping trade to protect account balance.")
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
                 else:
                     final_entry_fill = live_order_result.get("real_fill_price", best_signal["current_price"]) if live_order_result else best_signal["current_price"]
@@ -630,7 +607,7 @@ async def main():
                         "symbol": best_signal["symbol"],
                         "direction": best_signal["direction"],
                         "is_paper": False,
-                        "avg_fluctuation": round(best_signal["avg_fluctuation"], 2),
+                        "avg_fluctuation": round(best_signal["reversal_score"] * 100, 2),
                         "current_price": final_entry_fill,
                         "account_equity": current_equity,
                         "pre_trade_balance": current_equity,
@@ -642,7 +619,7 @@ async def main():
                         "contract_size": live_order_result.get("contract_size", "1") if live_order_result else "1"
                     }
             else:
-                log.info(f"ℹ️ No batch winners reached >= 9/10 recent candles WITH >= 14/20 macro trend confirmation this minute.")
+                log.info(f"ℹ️ No active reversal candidates matched across the entire Bitget USDT-Futures market this scan run.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
@@ -665,7 +642,7 @@ async def main():
                     c_size = active_trade.get("contract_size") or res_data.get("contract_size", "1")
                     await close_bitget_live_position(session, symbol, direction, contract_size=c_size)
 
-                    # POST-TRADE BITGET BALANCE AUDIT & STRICT CASH GAIN WIN EVALUATION
+                    # POST-TRADE BITGET BALANCE AUDIT
                     await asyncio.sleep(1.5)
                     post_bal = await fetch_bitget_account_balance(session)
                     if post_bal:
@@ -678,7 +655,7 @@ async def main():
                         log.info(f"   • Starting Account Equity: ${pre_trade_balance:.4f} USDT")
                         log.info(f"   • Closing Account Equity:  ${final_eq:.4f} USDT")
                         log.info(f"   • NET CASH CHANGE:         {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} USDT")
-                        log.info(f"   • TRADE RESULT:            {'🏆 WIN (NET CASH PROFIT LOCKED AT 10M!)' if is_win else '❌ LOSS / FLAT EXIT (STREAK RESET TO 0)'}")
+                        log.info(f"   • TRADE RESULT:            {'🏆 WIN (BEST REVERSAL NET CASH GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
                         log.info(f"   • NEW LIVE WIN STREAK:     {res_data.get('live_win_streak', 0)} WINS")
                         log.info("====================================================================================================")
 
