@@ -56,7 +56,7 @@ export default {
       let tradeHistory = historyState ? historyState.content : [];
 
       // =========================================================================
-      // 1. ACTIVE LIVE MASTER MOMENTUM TRADE MONITORING & BALANCE EVALUATION
+      // 1. ACTIVE LIVE / DEMO TRADE MONITORING & BALANCE EVALUATION
       // =========================================================================
       if (activeTrade.active) {
         const currentPrice = signal.current_price;
@@ -74,14 +74,14 @@ export default {
           grossPnl = ((activeTrade.entry_price - currentPrice) / activeTrade.entry_price) * 100;
         }
 
-        // OPTIMAL TARGETS: +2.50% TAKE PROFIT, -1.25% STOP LOSS, 15 TO 20 MINUTE TIMEOUT RANGE
+        // OPTIMAL TARGETS: +2.50% TAKE PROFIT, -1.25% STOP LOSS, 20-MINUTE TIMEOUT
         let hitTakeProfit = grossPnl >= 2.50;
         let hitSL = grossPnl <= -1.25;
         let hitTimeTimeout = elapsedMinutes >= 20;
 
         if (hitTakeProfit || hitSL || hitTimeTimeout) {
 
-          const preBalance = activeTrade.pre_trade_balance || signal.pre_trade_balance || 1.32;
+          const preBalance = activeTrade.pre_trade_balance || signal.pre_trade_balance || 10000.0;
           const currentEquity = signal.account_equity || preBalance;
           const netUsdtChange = currentEquity - preBalance;
 
@@ -97,16 +97,16 @@ export default {
           let exitReason = "";
           if (hitTakeProfit) exitReason = `2.5% ENGINE TAKE PROFIT HIT (+${grossPnl.toFixed(2)}% Price Move)`;
           else if (hitSL) exitReason = `1.25% ENGINE STOP LOSS HIT (${grossPnl.toFixed(2)}% Price Move)`;
-          else if (hitTimeTimeout) exitReason = `20-MINUTE MASTER TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hitTimeTimeout) exitReason = `20-MINUTE DEMO TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
 
           if (!isRealWin) {
-            exitReason += ` | [STREAK RESET TO 0: Real Cash Equity Decreased by $${Math.abs(netUsdtChange).toFixed(4)}]`;
+            exitReason += ` | [STREAK RESET TO 0: Demo Balance Decreased by $${Math.abs(netUsdtChange).toFixed(4)}]`;
           }
 
           tradeHistory.push({
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: "REAL_LIVE_MASTER_MOMENTUM",
+            mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             price_gross_pnl: grossPnl.toFixed(2) + "%",
@@ -128,7 +128,7 @@ export default {
             status: "CLOSED",
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: "REAL_LIVE_MASTER_MOMENTUM",
+            mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
@@ -154,13 +154,13 @@ export default {
         }
       }
       // =========================================================================
-      // 2. NO ACTIVE TRADE -> OPEN NEW BITGET NATIVE MASTER MOMENTUM SIGNAL
+      // 2. NO ACTIVE TRADE -> OPEN NEW DEMO / LIVE SIGNAL
       // =========================================================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({
             status: "WAITING",
-            message: "No master momentum signals found."
+            message: "No demo trading signals found."
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
@@ -171,10 +171,10 @@ export default {
           active: true,
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: "REAL_LIVE_MASTER_MOMENTUM",
+          mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
           entry_price: currentPrice,
           stop_loss: stop_loss,
-          pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 1.32,
+          pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 10000.0,
           contract_size: signal.contract_size || "1",
           leverage: 5,
           position_mode: "one_way",
@@ -187,7 +187,7 @@ export default {
           status: "OPENED",
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: "REAL_LIVE_MASTER_MOMENTUM",
+          mode: signal.is_demo ? "BITGET_DEMO_TRADING" : "REAL_LIVE_TRADING",
           entry_price: currentPrice.toFixed(5),
           stop_loss: stop_loss.toFixed(5),
           live_win_streak: liveWinStreak,
