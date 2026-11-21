@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "IDOLUSDT",
+  "direction": "LONG",
+  "mode": "BITGET_DEMO_RED_CARD",
+  "entry_price": 0.040542,
+  "stop_loss": 0.040035225,
+  "pre_trade_balance": 1.30773321,
+  "contract_size": "145",
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795297536438
 }
