@@ -41,7 +41,8 @@ LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
 NUM_BATCHES = 20           # Exactly 20 separate scanning batches / workers
 MIN_24H_VOLUME = 100000    # Min $100k Volume
 MAX_24H_VOLUME = 10000000  # Max $10M Volume Range
-MIN_CANDLE_WINS = 9       # Requires 9 or 10 same-color candles for entry
+MIN_RECENT_CANDLES = 9     # Requires 9 or 10 same-color candles in recent 10m
+MIN_20M_TREND_CANDLES = 14 # Requires >= 14/20 same-color candles over full 20m macro window
 DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90   # Strictly 90% of available USDT equity allocated per trade
 
@@ -211,10 +212,10 @@ async def configure_bitget_symbol_settings(session, symbol):
 
 async def place_bitget_live_order(session, symbol, direction, target_limit_price, available_balance):
     """
-    Executes a ZERO-SLIPPAGE LIMIT ORDER on Bitget Engine at exact price (e.g., $4.68).
+    Executes a ZERO-SLIPPAGE LIMIT ORDER on Bitget Engine at exact price.
     - Uses 90% of Available Balance at 5x Leverage.
-    - If not filled within 3 seconds, automatically CANCELS the order to protect funds from slippage!
-    - Attaches Strict 1.00% Engine Take-Profit and 1.00% Engine Stop-Loss.
+    - 3-second Auto-Cancel Guard if not filled immediately.
+    - Preset +1.0% Engine Take-Profit & -1.0% Engine Stop-Loss attached directly to Bitget.
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
@@ -246,7 +247,7 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
 
     limit_p_str = format_price(target_limit_price)
 
-    # STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS ATTACHED DIRECTLY TO ENGINE
+    # STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS ATTACHED DIRECTLY TO BITGET ENGINE
     if direction == "LONG":
         side = "buy"
         preset_tp = format_price(target_limit_price * 1.010)  # Strict +1.00% TP
@@ -256,7 +257,6 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
         preset_tp = format_price(target_limit_price * 0.990)  # Strict +1.00% TP
         preset_sl = format_price(target_limit_price * 1.010)  # Strict -1.00% SL
 
-    # ZERO-SLIPPAGE EXACT LIMIT ORDER PAYLOAD
     path = "/api/v3/trade/place-order"
     order_payload = {
         "category": "USDT-FUTURES",
@@ -288,7 +288,6 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
                 order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
                 log.info(f"✅ LIMIT ORDER ACCEPTED BY BITGET MATCHING ENGINE! Order ID: {order_id}")
 
-                # Wait up to 3 seconds for exact limit fill
                 await asyncio.sleep(2.5)
                 order_info = await fetch_bitget_order_status_and_fill(session, symbol, order_id)
 
@@ -306,7 +305,6 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
                         "filled": True
                     }
                 else:
-                    # Order did not fill within 3s -> CANCEL IMMEDIATELY to prevent slippage/waiting!
                     log.warning(f"⚠️ LIMIT ORDER AT ${limit_p_str} NOT FILLED WITHIN 3 SECONDS. CANCELING NOW TO PROTECT FUNDS!")
                     await cancel_unfilled_bitget_order(session, symbol, order_id)
                     return {"filled": False, "canceled": True}
@@ -318,7 +316,7 @@ async def place_bitget_live_order(session, symbol, direction, target_limit_price
         return None
 
 async def close_bitget_live_position(session, symbol, direction, contract_size=""):
-    """Executes an Immediate Live Market Close Order (reduceOnly: yes) via v3 UTA API."""
+    """Executes an Immediate Live Market Close Order (reduceOnly: yes) via v3 UTA API for 10-minute timeout or manual exit."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -391,10 +389,10 @@ async def fetch_bitget_tickers(session):
     return []
 
 async def fetch_candle_data_for_coin(session, symbol, semaphore):
-    """Fetches 10 1-minute candles for a single coin with retry handling."""
+    """Fetches 20 1-minute candles for a single coin with retry handling."""
     async with semaphore:
-        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "10"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=10"
+        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "20"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=20"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -403,7 +401,7 @@ async def fetch_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            if candles and len(candles) >= 10:
+                            if candles and len(candles) >= 20:
                                 return candles
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
@@ -412,27 +410,32 @@ async def fetch_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
-    """Processes a single batch of coins, evaluating 10m candle patterns and returning top candidate(s)."""
+    """
+    Processes a single batch of coins, evaluating 20-minute macro candle patterns.
+    Requires >=9/10 in recent 10m AND >=14/20 in full 20m macro window to prevent counter-trend spikes.
+    """
     batch_evaluated = []
 
     tasks = [fetch_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
 
     for idx, candle_data in enumerate(candles_results):
-        if not candle_data or len(candle_data) < 10:
+        if not candle_data or len(candle_data) < 20:
             continue
 
         coin = coin_list[idx]
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
-        candles = list(reversed(candle_data[:10]))
 
-        green_count = 0
-        red_count = 0
-        doji_count = 0
+        candles_20m = list(reversed(candle_data[:20]))
+        recent_10m = candles_20m[10:]
+
+        recent_green = 0
+        recent_red = 0
+        recent_doji = 0
         fluctuations = []
 
-        for c in candles:
+        for c in recent_10m:
             o = float(c[1])
             h = float(c[2])
             l = float(c[3])
@@ -442,29 +445,53 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
                 fluctuations.append(((h - l) / o) * 100.0)
 
             if cl > o:
-                green_count += 1
+                recent_green += 1
             elif cl < o:
-                red_count += 1
+                recent_red += 1
             else:
-                doji_count += 1
+                recent_doji += 1
+
+        total_green = 0
+        total_red = 0
+        total_doji = 0
+
+        for c in candles_20m:
+            o = float(c[1])
+            cl = float(c[4])
+            if cl > o:
+                total_green += 1
+            elif cl < o:
+                total_red += 1
+            else:
+                total_doji += 1
 
         avg_fluctuation = (sum(fluctuations) / len(fluctuations)) if fluctuations else 0.0
-        close_10m = float(candles[-1][4])
-        max_wins = max(green_count, red_count)
-        dominant_direction = "LONG" if green_count >= red_count else "SHORT"
+        close_price = float(candles_20m[-1][4])
 
-        batch_evaluated.append({
-            "batch_id": batch_id,
-            "symbol": symbol,
-            "vol_24h": vol_24h,
-            "green_count": green_count,
-            "red_count": red_count,
-            "doji_count": doji_count,
-            "max_wins": max_wins,
-            "direction": dominant_direction,
-            "avg_fluctuation": avg_fluctuation,
-            "current_price": close_10m
-        })
+        max_recent_wins = max(recent_green, recent_red)
+        dominant_direction = "LONG" if recent_green >= recent_red else "SHORT"
+
+        macro_confirmed = False
+        if dominant_direction == "LONG" and recent_green >= MIN_RECENT_CANDLES and total_green >= MIN_20M_TREND_CANDLES:
+            macro_confirmed = True
+        elif dominant_direction == "SHORT" and recent_red >= MIN_RECENT_CANDLES and total_red >= MIN_20M_TREND_CANDLES:
+            macro_confirmed = True
+
+        if macro_confirmed:
+            batch_evaluated.append({
+                "batch_id": batch_id,
+                "symbol": symbol,
+                "vol_24h": vol_24h,
+                "green_count": recent_green,
+                "red_count": recent_red,
+                "doji_count": recent_doji,
+                "total_green_20m": total_green,
+                "total_red_20m": total_red,
+                "max_wins": max_recent_wins,
+                "direction": dominant_direction,
+                "avg_fluctuation": avg_fluctuation,
+                "current_price": close_price
+            })
 
     if not batch_evaluated:
         return []
@@ -483,7 +510,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | Zero-Slippage Limit Entry & 3s Guard)"
+    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | 10-Min Stagnant Lock & Zero-Slippage Limit Entry)"
 
     log.info(f"🏆 Current REAL LIVE BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -506,7 +533,7 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ LIVE TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring price...")
+            log.info(f"⏳ LIVE TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring 10-min timeout...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -567,29 +594,24 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 20-BATCH TOP CANDIDATE SUMMARY TABLE (COLLECTED: {len(all_batch_candidates)} TOP PAIRS ACROSS 20 BATCHES):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'10-CANDLE PATTERN BREAKDOWN':<36} | {'AVG FLUCTUATION':<15}")
-            log.info("-" * 88)
+            log.info(f"📊 20-BATCH TOP CANDIDATE SUMMARY TABLE (COLLECTED: {len(all_batch_candidates)} 20M MACRO TREND CONFIRMED PAIRS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'RECENT 10M BREAKDOWN':<28} | {'20M MACRO TREND':<18} | {'AVG FLUCTUATION':<15}")
+            log.info("-" * 105)
 
             for cand in all_batch_candidates:
-                pattern_str = f"{cand['green_count']} Green / {cand['red_count']} Red / {cand['doji_count']} Flat Doji"
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {pattern_str:<36} | {cand['avg_fluctuation']:.2f}%")
+                pattern_str = f"{cand['green_count']} Green / {cand['red_count']} Red"
+                macro_str = f"{cand['total_green_20m']}G / {cand['total_red_20m']}R (20m)"
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {pattern_str:<28} | {macro_str:<18} | {cand['avg_fluctuation']:.2f}%")
 
             log.info("====================================================================================================")
 
-            valid_entry_signals = [
-                c for c in all_batch_candidates
-                if c["max_wins"] >= MIN_CANDLE_WINS and c["avg_fluctuation"] >= 0.20
-            ]
+            if all_batch_candidates:
+                all_batch_candidates.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
+                best_signal = all_batch_candidates[0]
+                macro_info = f"{best_signal['total_green_20m']} Green / {best_signal['total_red_20m']} Red in 20m"
 
-            if valid_entry_signals:
-                valid_entry_signals.sort(key=lambda x: x["avg_fluctuation"], reverse=True)
-                best_signal = valid_entry_signals[0]
-                doji_info = f" ({best_signal['doji_count']} Doji)" if best_signal['doji_count'] > 0 else ""
+                log.info(f"🔥 BEST 20-CANDLE MACRO-CONFIRMED ENTRY SIGNAL FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']} | Macro: {macro_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
 
-                log.info(f"🔥 BEST ENTRY SIGNAL MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
-
-                # EXECUTE ZERO-SLIPPAGE LIMIT ENTRY ORDER AT EXACT PRICE
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
@@ -598,9 +620,8 @@ async def main():
                     available_balance=acc_info["available"] if acc_info else 1.32
                 )
 
-                # IF ORDER WAS UNFILLED AND CANCELED BY 3S GUARD -> SKIP PLAYLOAD & WAIT FOR NEXT MINUTE
                 if live_order_result and not live_order_result.get("filled", False):
-                    log.info("🛡️ Order was canceled by 3s Fill Guard. Skipping payload to protect account balance.")
+                    log.info("🛡️ Limit Order was canceled by 3s Fill Guard. Skipping trade to protect account balance.")
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
                 else:
                     final_entry_fill = live_order_result.get("real_fill_price", best_signal["current_price"]) if live_order_result else best_signal["current_price"]
@@ -621,7 +642,7 @@ async def main():
                         "contract_size": live_order_result.get("contract_size", "1") if live_order_result else "1"
                     }
             else:
-                log.info(f"ℹ️ No batch winners reached >= {MIN_CANDLE_WINS}/10 candles with >= 0.20% fluctuation this minute.")
+                log.info(f"ℹ️ No batch winners reached >= 9/10 recent candles WITH >= 14/20 macro trend confirmation this minute.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
@@ -644,7 +665,7 @@ async def main():
                     c_size = active_trade.get("contract_size") or res_data.get("contract_size", "1")
                     await close_bitget_live_position(session, symbol, direction, contract_size=c_size)
 
-                    # POST-TRADE BITGET BALANCE AUDIT
+                    # POST-TRADE BITGET BALANCE AUDIT & STRICT CASH GAIN WIN EVALUATION
                     await asyncio.sleep(1.5)
                     post_bal = await fetch_bitget_account_balance(session)
                     if post_bal:
@@ -657,7 +678,7 @@ async def main():
                         log.info(f"   • Starting Account Equity: ${pre_trade_balance:.4f} USDT")
                         log.info(f"   • Closing Account Equity:  ${final_eq:.4f} USDT")
                         log.info(f"   • NET CASH CHANGE:         {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} USDT")
-                        log.info(f"   • TRADE RESULT:            {'🏆 WIN (NET CASH GAINED)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
+                        log.info(f"   • TRADE RESULT:            {'🏆 WIN (NET CASH PROFIT LOCKED AT 10M!)' if is_win else '❌ LOSS / FLAT EXIT (STREAK RESET TO 0)'}")
                         log.info(f"   • NEW LIVE WIN STREAK:     {res_data.get('live_win_streak', 0)} WINS")
                         log.info("====================================================================================================")
 
