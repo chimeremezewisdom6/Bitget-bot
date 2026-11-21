@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "ICPUSDT",
-  "direction": "LONG",
-  "mode": "REAL_LIVE_MASTER_MOMENTUM",
-  "entry_price": 1.898,
-  "stop_loss": 1.874275,
-  "pre_trade_balance": 1.38019043,
-  "contract_size": "3.3",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795241131219
+  "active": false
 }
