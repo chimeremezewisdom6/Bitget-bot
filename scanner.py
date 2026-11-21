@@ -32,6 +32,7 @@ BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
 BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
 BITGET_V3_SET_POS_MODE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-position-mode"
+BITGET_V3_ORDER_INFO_URL = f"https://{BIT_DOMAIN}/api/v3/trade/order-info"
 
 LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
@@ -44,7 +45,7 @@ DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90   # Strictly 90% of available USDT equity allocated per trade
 
 def format_price(price):
-    """Formats price dynamically to avoid truncation on tiny altcoins like LUNC ($0.00004123)."""
+    """Formats price dynamically to avoid truncation or rounding issues."""
     p = float(price)
     if p < 0.0001:
         return f"{p:.8f}"
@@ -134,6 +135,30 @@ async def fetch_bitget_account_balance(session):
         log.error(f"Error querying Bitget UTA v3 balance: {e}")
     return None
 
+async def fetch_bitget_order_fill_price(session, symbol, order_id):
+    """Fetches the EXACT average executed fill price directly from Bitget v3 Order Info API."""
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
+        return None
+
+    path = f"/api/v3/trade/order-info?category=USDT-FUTURES&symbol={symbol}&orderId={order_id}"
+    full_url = f"https://{BIT_DOMAIN}{path}"
+    headers = get_bitget_headers("GET", path)
+
+    for _ in range(3):
+        try:
+            async with session.get(full_url, headers=headers, timeout=5) as r:
+                if r.status == 200:
+                    resp = await r.json()
+                    if resp.get("code") == "00000" and resp.get("data"):
+                        d = resp["data"]
+                        fill_price = float(d.get("priceAvg") or d.get("fillPrice") or d.get("price") or 0.0)
+                        if fill_price > 0:
+                            return fill_price
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+    return None
+
 async def configure_bitget_symbol_settings(session, symbol):
     """Configures 5x Leverage and One-Way Mode on Bitget UTA v3."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
@@ -165,9 +190,9 @@ async def configure_bitget_symbol_settings(session, symbol):
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    Executes a Real Live Order directly on Bitget Engine with STRICT 1.00% TP and STRICT 1.00% SL.
-    - Attached directly to Bitget's matching engine for instant <1ms execution.
-    - Uses 90% of Available Balance at 5x Leverage.
+    Executes a Real Live Order directly on Bitget Engine.
+    Queries Bitget Order Info API to fetch the EXACT executed fill price ($4.580 vs $4.666 ticker)
+    and saves the real fill price for 100% accurate PnL tracking!
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
@@ -236,12 +261,25 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
                 log.info(f"✅ REAL BITGET UTA v3 ORDER SUBMITTED TO MATCHING ENGINE! Order ID: {order_id}")
+
+                # Fetch EXACT Executed Fill Price from Bitget to eliminate slippage discrepancy!
+                await asyncio.sleep(0.5)
+                real_fill_price = await fetch_bitget_order_fill_price(session, symbol, order_id)
+
+                if real_fill_price and real_fill_price > 0:
+                    log.info(f"🎯 BITGET REAL EXECUTED FILL PRICE VERIFIED: ${format_price(real_fill_price)} (Ticker preview was: ${format_price(market_price)})")
+                    actual_entry = real_fill_price
+                else:
+                    log.warning(f"⚠️ Could not fetch order info immediately, using market ticker price: ${format_price(market_price)}")
+                    actual_entry = market_price
+
                 return {
                     "order_id": order_id,
                     "notional_value": notional_value,
                     "contract_size": size_str,
                     "preset_tp": preset_tp,
                     "preset_sl": preset_sl,
+                    "real_fill_price": actual_entry,
                     "pre_trade_balance": available_balance
                 }
             else:
@@ -423,7 +461,7 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
-        current_equity = acc_info["equity"] if acc_info else 1.35
+        current_equity = acc_info["equity"] if acc_info else 1.32
 
         if acc_info:
             log.info(f"💰 BITGET LIVE ACCOUNT EQUITY: ${acc_info['equity']:.4f} USDT | Available Margin: ${acc_info['available']:.4f} USDT ({acc_info['account_type']})")
@@ -529,15 +567,18 @@ async def main():
                     symbol=best_signal["symbol"],
                     direction=best_signal["direction"],
                     market_price=best_signal["current_price"],
-                    available_balance=acc_info["available"] if acc_info else 1.35
+                    available_balance=acc_info["available"] if acc_info else 1.32
                 )
+
+                # RECORD THE EXACT REAL EXECUTED FILL PRICE RETURNED FROM BITGET (e.g. $4.580 instead of $4.666)
+                final_entry_fill = live_order_result.get("real_fill_price", best_signal["current_price"]) if live_order_result else best_signal["current_price"]
 
                 payload = {
                     "symbol": best_signal["symbol"],
                     "direction": best_signal["direction"],
                     "is_paper": False,
                     "avg_fluctuation": round(best_signal["avg_fluctuation"], 2),
-                    "current_price": best_signal["current_price"],
+                    "current_price": final_entry_fill,
                     "account_equity": current_equity,
                     "pre_trade_balance": current_equity,
                     "leverage": DEFAULT_LEVERAGE,
