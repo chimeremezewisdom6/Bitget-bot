@@ -19,12 +19,14 @@ BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("BITGET_PASSWORD", "")).strip()
 
-# BITGET DEMO MODE TOGGLE (Set BITGET_DEMO_MODE="false" in GitHub Secrets for Real Money)
+# BITGET DEMO MODE TOGGLE (Set BITGET_DEMO_MODE="false" in GitHub Secrets for Real Money Live Trading)
 BITGET_DEMO_MODE = os.environ.get("BITGET_DEMO_MODE", "true").lower() == "true"
 
-# BITGET V3 API CONSTANTS (ALWAYS "USDT-FUTURES" FOR V3 API CATEGORY)
 PRODUCT_TYPE = "USDT-FUTURES"
 ORDER_CATEGORY = "USDT-FUTURES"
+
+# Official Bitget Demo Pairs Supported on S-USDT Demo Margin
+BITGET_SUPPORTED_DEMO_PAIRS = ["SBTCUSDT", "SETHUSDT", "SSOLUSDT"]
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
@@ -162,12 +164,10 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id):
         await asyncio.sleep(0.3)
     return None
 
-async def configure_bitget_symbol_settings(session, symbol):
-    """Configures 5x Leverage and Position Mode on Bitget UTA v3 API (Strictly Category: USDT-FUTURES)."""
+async def configure_bitget_symbol_settings(session, trade_symbol):
+    """Configures 5x Leverage on Bitget UTA v3 API."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return
-
-    trade_symbol = f"S{symbol}" if (BITGET_DEMO_MODE and not symbol.startswith("S")) else symbol
 
     path_lev = "/api/v3/account/set-leverage"
     body_lev = json.dumps({
@@ -185,18 +185,30 @@ async def configure_bitget_symbol_settings(session, symbol):
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    EXECUTING RED-CARD OPPONENT COLLAPSE MARKET ORDER (STRICT V3 CATEGORY: USDT-FUTURES):
-    - Submits order to Bitget matching engine in <1ms with valid 'category': 'USDT-FUTURES'.
-    - Automatically uses demo symbol prefix (e.g. SXAUUSDT) in Demo Mode.
-    - Hard Preset Engine Take-Profit (+2.50%) & Stop-Loss (-1.25%) attached directly on Bitget!
+    DYNAMIC N-CANDLE EXPANSION MARKET ORDER EXECUTION:
+    - Real Live Mode (BITGET_DEMO_MODE = False): Trades exact matched symbol.
+    - Demo Mode (BITGET_DEMO_MODE = True): Maps to SBTCUSDT if altcoin is not directly listed on demo.
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute order.")
         return None
 
-    trade_symbol = f"S{symbol}" if (BITGET_DEMO_MODE and not symbol.startswith("S")) else symbol
+    if BITGET_DEMO_MODE:
+        candidate_demo_sym = f"S{symbol}" if not symbol.startswith("S") else symbol
+        if candidate_demo_sym in BITGET_SUPPORTED_DEMO_PAIRS:
+            trade_symbol = candidate_demo_sym
+        else:
+            trade_symbol = "SBTCUSDT"
+            log.info(f"ℹ️ Map Notice: Bitget Demo exchange supports SBTC/SETH/SSOL. Mapping matched {symbol} signal to demo pair {trade_symbol}.")
+    else:
+        trade_symbol = symbol
 
-    await configure_bitget_symbol_settings(session, symbol)
+    await configure_bitget_symbol_settings(session, trade_symbol)
+
+    if trade_symbol != symbol and BITGET_DEMO_MODE:
+        demo_price = await fetch_single_price(session, "BTCUSDT")
+        if demo_price and demo_price > 0:
+            market_price = demo_price
 
     used_margin = available_balance * BALANCE_USAGE_PCT
     notional_value = used_margin * DEFAULT_LEVERAGE
@@ -231,7 +243,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     path = "/api/v3/trade/place-order"
     order_payload = {
-        "category": "USDT-FUTURES",  # ALWAYS STRICTLY 'USDT-FUTURES' FOR BITGET V3 UTA API!
+        "category": "USDT-FUTURES",
         "symbol": trade_symbol,
         "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
         "qty": size_str,
@@ -246,7 +258,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     headers = get_bitget_headers("POST", path, body_json)
 
     mode_label = "🎮 BITGET DEMO" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY"
-    log.info(f"🎯 SUBMITTING RED-CARD COLLAPSE MARKET ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
+    log.info(f"🎯 SUBMITTING DYNAMIC N-CANDLE EXPANSION MARKET ORDER ({mode_label}): {trade_symbol} ({direction} | Matched: {symbol}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -271,6 +283,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 return {
                     "order_id": order_id,
                     "symbol": trade_symbol,
+                    "original_symbol": symbol,
                     "notional_value": notional_value,
                     "contract_size": size_str,
                     "preset_tp": preset_tp,
@@ -360,11 +373,11 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
-async def fetch_30m_candle_data_for_coin(session, symbol, semaphore):
-    """Fetches 30 1-MINUTE candles (OHLCV) for a single coin with retry handling."""
+async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
+    """Fetches 60 1-MINUTE candles (OHLCV) for a single coin with retry handling."""
     async with semaphore:
-        params = {"symbol": symbol, "productType": PRODUCT_TYPE, "granularity": "1m", "limit": "30"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={PRODUCT_TYPE}&granularity=1m&limit=30"
+        params = {"symbol": symbol, "productType": PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={PRODUCT_TYPE}&granularity=1m&limit=60"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -373,7 +386,7 @@ async def fetch_30m_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            if candles and len(candles) >= 30:
+                            if candles and len(candles) >= 60:
                                 return candles
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
@@ -383,99 +396,111 @@ async def fetch_30m_candle_data_for_coin(session, symbol, semaphore):
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
     """
-    RED-CARD OPPONENT CANDLE STRUCTURE COLLAPSE & AGGREGATED WINNER ENGINE
-    -----------------------------------------------------------------------
-    Evaluates 30 1-minute OHLCV candles across all Bitget Futures pairs:
-      1. First 15m Half (Candles 0-15): Benchmark boundary for opponent defense.
-      2. Second 15m Half (Candles 15-30): Blowout momentum & opponent structural collapse.
-
-      Condition A (Blowout Win Count):
-        - Dominant side wins >= 9 out of 15 1-minute candles in current 15m half.
-
-      Condition B (Opponent Red-Card Handicap - Structural Breakdown):
-        - Opposing side's push distance (wick/body height) is CRIPPLED (<= 32% of total 15m range).
-        - Opponent has lost all defensive volume & liquidity.
-
-      Condition C (Volume Dominance):
-        - Dominant volume >= 1.4x opposing volume.
-
-      Condition D ("One Goal Needed to Win Aggregated"):
-        - Price is pressing within 0.40% of breaking the prior 15m boundary or already broke out!
-
-      Ranks ALL 370+ market pairs by Aggregated Dominance Score to pick the #1 GUARANTEED MATCH WINNER!
+    DYNAMIC N-CANDLE (5 TO 60 CANDLES) SMALL STRUCTURE TO BIG PRICE MOVE DETECTOR
+    -----------------------------------------------------------------------------
+    Evaluates 60 1-minute OHLCV candles across all Bitget Futures pairs:
+      1. Scans ALL dynamic window lengths N from 6 to 59 candles (e.g. 6, 7, 12, 17, 23, 42 candles).
+      2. Excludes static fixed intervals (5, 10, 15, 20, 30, 60).
+      3. For each dynamic window N:
+         - Measures the SMALL compression structure range %: (High_N - Low_N) / Open_N * 100.
+         - Requires small compression range <= 0.85% (Tight Coiled Structure).
+         - Measures the BIG price expansion move % occurring right after/at the end of the window.
+         - Calculates Expansion Ratio = (Big Move %) / (Small Range % + 0.01) * (Volume Surge).
+      4. Ranks ALL market pairs across ALL dynamic N-window setups to pick the #1 EXPLOSIVE MOVE!
     """
     batch_evaluated = []
 
-    tasks = [fetch_30m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
+    tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
 
+    EXCLUDED_FIXED_WINDOWS = {5, 10, 15, 20, 30, 60}
+
     for idx, candle_data in enumerate(candles_results):
-        if not candle_data or len(candle_data) < 30:
+        if not candle_data or len(candle_data) < 60:
             continue
 
         coin = coin_list[idx]
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
 
-        # Reverse to chronological order (index 0 = 30m ago, index 29 = current 1m candle)
-        candles_30m = list(reversed(candle_data[:30]))
+        # Reverse to chronological order (index 0 = 60m ago, index 59 = current 1m candle)
+        candles_60m = list(reversed(candle_data[:60]))
 
-        first_half_15m = candles_30m[:15]   # Prior 15m
-        second_half_15m = candles_30m[15:]  # Current 15m
+        best_coin_setup = None
+        highest_expansion_score = 0.0
 
-        green_wins = sum(1 for c in second_half_15m if float(c[4]) > float(c[1]))
-        red_wins = sum(1 for c in second_half_15m if float(c[4]) < float(c[1]))
+        # Scan ALL dynamic N-candle window lengths from 6 to 55 (excluding fixed 5, 10, 15, 20, 30, 60)
+        for n_candles in range(6, 56):
+            if n_candles in EXCLUDED_FIXED_WINDOWS:
+                continue
 
-        vol_green = sum(float(c[5]) for c in second_half_15m if float(c[4]) > float(c[1]))
-        vol_red = sum(float(c[5]) for c in second_half_15m if float(c[4]) < float(c[1]))
+            comp_window = candles_60m[:n_candles]
+            trigger_window = candles_60m[n_candles:]
 
-        p_first_high = max(float(c[2]) for c in first_half_15m)
-        p_first_low = min(float(c[3]) for c in first_half_15m)
-        p_current = float(second_half_15m[-1][4])
+            if not comp_window or not trigger_window:
+                continue
 
-        opp_push_green = sum((float(c[2]) - max(float(c[1]), float(c[4]))) for c in second_half_15m)  # Top wicks for bears
-        opp_push_red = sum((min(float(c[1]), float(c[4])) - float(c[3])) for c in second_half_15m)   # Bottom wicks for bulls
+            comp_high = max(float(c[2]) for c in comp_window)
+            comp_low = min(float(c[3]) for c in comp_window)
+            comp_open = float(comp_window[0][1])
 
-        total_range_second = max(float(c[2]) for c in second_half_15m) - min(float(c[3]) for c in second_half_15m)
-        if total_range_second <= 0:
-            continue
+            if comp_open <= 0 or comp_low <= 0:
+                continue
 
-        # BULLISH AGGREGATED MATCH WINNER (LONG)
-        is_bullish_aggregated = (
-            (green_wins >= 9) and
-            (vol_green >= 1.4 * (vol_red + 1e-6)) and
-            (opp_push_red / total_range_second <= 0.32) and
-            (p_current >= p_first_high * 0.996)
-        )
+            # 1. SMALL CANDLE STRUCTURE RANGE %
+            comp_range_pct = ((comp_high - comp_low) / comp_open) * 100.0
+            if comp_range_pct > 0.90:  # Must be a tight small structure
+                continue
 
-        # BEARISH AGGREGATED MATCH WINNER (SHORT)
-        is_bearish_aggregated = (
-            (red_wins >= 9) and
-            (vol_red >= 1.4 * (vol_green + 1e-6)) and
-            (opp_push_green / total_range_second <= 0.32) and
-            (p_current <= p_first_low * 1.004)
-        )
+            # Volume surge check
+            comp_vol_avg = sum(float(c[5]) for c in comp_window) / float(n_candles)
+            trig_vol_avg = sum(float(c[5]) for c in trigger_window) / float(len(trigger_window))
 
-        if is_bullish_aggregated or is_bearish_aggregated:
-            direction = "LONG" if is_bullish_aggregated else "SHORT"
-            win_score = (green_wins / 15.0) * (vol_green / (vol_red + 1.0)) if is_bullish_aggregated else (red_wins / 15.0) * (vol_red / (vol_green + 1.0))
+            if comp_vol_avg <= 0:
+                continue
 
-            batch_evaluated.append({
-                "batch_id": batch_id,
-                "symbol": symbol,
-                "vol_24h": vol_24h,
-                "direction": direction,
-                "green_wins": green_wins,
-                "red_wins": red_wins,
-                "win_score": win_score,
-                "current_price": p_current
-            })
+            vol_surge = trig_vol_avg / comp_vol_avg
+            if vol_surge < 1.4:
+                continue
+
+            p_current = float(candles_60m[-1][4])
+
+            move_up_pct = ((p_current - comp_high) / comp_high) * 100.0
+            move_down_pct = ((comp_low - p_current) / comp_low) * 100.0
+
+            is_bull_breakout = (p_current > comp_high) and (move_up_pct >= 0.35)
+            is_bear_breakout = (p_current < comp_low) and (move_down_pct >= 0.35)
+
+            if is_bull_breakout or is_bear_breakout:
+                direction = "LONG" if is_bull_breakout else "SHORT"
+                big_move_pct = move_up_pct if is_bull_breakout else move_down_pct
+
+                # DYNAMIC EXPANSION SCORE = (Big Move %) / (Small Setup Range %) * Vol Surge
+                expansion_score = (big_move_pct / (comp_range_pct + 0.05)) * vol_surge
+
+                if expansion_score > highest_expansion_score:
+                    highest_expansion_score = expansion_score
+                    best_coin_setup = {
+                        "batch_id": batch_id,
+                        "symbol": symbol,
+                        "vol_24h": vol_24h,
+                        "direction": direction,
+                        "n_candles": n_candles,
+                        "small_range_pct": comp_range_pct,
+                        "big_move_pct": big_move_pct,
+                        "vol_surge": vol_surge,
+                        "expansion_score": expansion_score,
+                        "current_price": p_current
+                    }
+
+        if best_coin_setup:
+            batch_evaluated.append(best_coin_setup)
 
     if not batch_evaluated:
         return []
 
-    # Sort candidates by highest Aggregated Match Score
-    batch_evaluated.sort(key=lambda x: x["win_score"], reverse=True)
+    # Sort candidates exchange-wide by highest Dynamic Expansion Score
+    batch_evaluated.sort(key=lambda x: x["expansion_score"], reverse=True)
     return [batch_evaluated[0]]
 
 async def main():
@@ -487,7 +512,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE ({ORDER_CATEGORY} | 370+ Real Pairs Scanned | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING"
+    mode_status = f"🎮 BITGET DEMO MODE ({ORDER_CATEGORY} | Dynamic 5-60 N-Candle Expansion Engine | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING"
 
     log.info(f"🏆 Current BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -510,7 +535,7 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ RED-CARD MATCH WINNER TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
+            log.info(f"⏳ DYNAMIC N-CANDLE TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -543,7 +568,7 @@ async def main():
                 log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({PRODUCT_TYPE} | Min Volume: $300k)...")
+            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({PRODUCT_TYPE} | Dynamic N-Candle Windows 5-60)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -572,23 +597,22 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 RED-CARD OPPONENT COLLAPSE CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'15M BREAKDOWN':<20} | {'WIN SCORE':<18}")
-            log.info("-" * 75)
+            log.info(f"📊 DYNAMIC N-CANDLE COMPRESSION-TO-EXPANSION CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'WINDOW (N)':<12} | {'SMALL RANGE':<14} | {'BIG MOVE':<12} | {'SCORE':<14}")
+            log.info("-" * 95)
 
             for cand in all_batch_candidates:
-                breakdown_str = f"{cand['green_wins']}G / {cand['red_wins']}R (15m)"
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {breakdown_str:<20} | {cand['win_score']:.4f}")
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['n_candles']} Candles    | {cand['small_range_pct']:.2f}%         | {cand['big_move_pct']:+.2f}%     | {cand['expansion_score']:.4f}")
 
             log.info("====================================================================================================")
 
             if all_batch_candidates:
-                all_batch_candidates.sort(key=lambda x: x["win_score"], reverse=True)
+                all_batch_candidates.sort(key=lambda x: x["expansion_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 RED-CARD OPPONENT COLLAPSE MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['win_score']:.4f} | 15m Breakdown: {best_signal['green_wins']}G / {best_signal['red_wins']}R)")
+                log.info(f"🔥 #1 DYNAMIC N-CANDLE EXPANSION MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['expansion_score']:.4f} | N={best_signal['n_candles']} Candles | Small Range: {best_signal['small_range_pct']:.2f}% | Big Move: {best_signal['big_move_pct']:+.2f}%)")
 
-                # EXECUTE BITGET ORDER (AUTOMATICALLY PREFIXES DEMO SYMBOL IF DEMO MODE IS ACTIVE)
+                # EXECUTE BITGET ORDER
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
@@ -605,7 +629,7 @@ async def main():
                         "direction": best_signal["direction"],
                         "is_paper": False,
                         "is_demo": BITGET_DEMO_MODE,
-                        "avg_fluctuation": round(best_signal["win_score"] * 10, 2),
+                        "avg_fluctuation": round(best_signal["expansion_score"] * 10, 2),
                         "current_price": final_entry_fill,
                         "account_equity": current_equity,
                         "pre_trade_balance": current_equity,
@@ -619,7 +643,7 @@ async def main():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
             else:
-                log.info(f"ℹ️ No active red-card opponent collapse candidates matched across pairs this scan run.")
+                log.info(f"ℹ️ No active dynamic N-candle expansion candidates matched across pairs this scan run.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
