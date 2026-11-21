@@ -56,7 +56,7 @@ export default {
       let tradeHistory = historyState ? historyState.content : [];
 
       // =========================================================================
-      // 1. ACTIVE LIVE REVERSAL TRADE MONITORING & BALANCE EVALUATION
+      // 1. ACTIVE LIVE ABSORPTION TRADE MONITORING & BALANCE EVALUATION
       // =========================================================================
       if (activeTrade.active) {
         const currentPrice = signal.current_price;
@@ -74,14 +74,14 @@ export default {
           grossPnl = ((activeTrade.entry_price - currentPrice) / activeTrade.entry_price) * 100;
         }
 
-        // STRICT 2.00% ENGINE TAKE PROFIT AND 2.00% ENGINE STOP LOSS TRIGGERS
-        let hitTakeProfit = grossPnl >= 2.00;
-        let hitSL = grossPnl <= -2.00;
+        // STRICT 2.50% ENGINE TAKE PROFIT, -1.50% ENGINE STOP LOSS, AND 30-MIN TIMEOUT
+        let hitTakeProfit = grossPnl >= 2.50;
+        let hitSL = grossPnl <= -1.50;
         let hitTimeTimeout = elapsedMinutes >= 30;
 
         if (hitTakeProfit || hitSL || hitTimeTimeout) {
 
-          const preBalance = activeTrade.pre_trade_balance || signal.pre_trade_balance || 1.35;
+          const preBalance = activeTrade.pre_trade_balance || signal.pre_trade_balance || 1.32;
           const currentEquity = signal.account_equity || preBalance;
           const netUsdtChange = currentEquity - preBalance;
 
@@ -95,9 +95,9 @@ export default {
           }
 
           let exitReason = "";
-          if (hitTakeProfit) exitReason = `2.0% ENGINE TAKE PROFIT HIT (+${grossPnl.toFixed(2)}% Price Move)`;
-          else if (hitSL) exitReason = `2.0% ENGINE STOP LOSS HIT (${grossPnl.toFixed(2)}% Price Move)`;
-          else if (hitTimeTimeout) exitReason = `30-MINUTE REVERSAL TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
+          if (hitTakeProfit) exitReason = `2.5% ENGINE TAKE PROFIT HIT (+${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hitSL) exitReason = `1.5% ENGINE STOP LOSS HIT (${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hitTimeTimeout) exitReason = `30-MINUTE ABSORPTION TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
 
           if (!isRealWin) {
             exitReason += ` | [STREAK RESET TO 0: Real Cash Equity Decreased by $${Math.abs(netUsdtChange).toFixed(4)}]`;
@@ -106,7 +106,7 @@ export default {
           tradeHistory.push({
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: "REAL_LIVE_REVERSAL",
+            mode: "REAL_LIVE_CAPITAL_ABSORPTION",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             price_gross_pnl: grossPnl.toFixed(2) + "%",
@@ -128,7 +128,7 @@ export default {
             status: "CLOSED",
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: "REAL_LIVE_REVERSAL",
+            mode: "REAL_LIVE_CAPITAL_ABSORPTION",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
@@ -154,27 +154,27 @@ export default {
         }
       }
       // =========================================================================
-      // 2. NO ACTIVE TRADE -> OPEN NEW MARKET-WIDE BEST REVERSAL SIGNAL
+      // 2. NO ACTIVE TRADE -> OPEN NEW UNEXPLODED CAPITAL ABSORPTION SIGNAL
       // =========================================================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({
             status: "WAITING",
-            message: "No market-wide reversal signals found."
+            message: "No unexploded capital absorption signals found."
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
         const currentPrice = signal.current_price;
-        const stop_loss = signal.direction === 'LONG' ? currentPrice * 0.98 : currentPrice * 1.02;
+        const stop_loss = signal.direction === 'LONG' ? currentPrice * 0.985 : currentPrice * 1.015;
 
         const newLiveTrade = {
           active: true,
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: "REAL_LIVE_REVERSAL",
+          mode: "REAL_LIVE_CAPITAL_ABSORPTION",
           entry_price: currentPrice,
           stop_loss: stop_loss,
-          pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 1.35,
+          pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 1.32,
           contract_size: signal.contract_size || "1",
           leverage: 5,
           position_mode: "one_way",
@@ -187,7 +187,7 @@ export default {
           status: "OPENED",
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: "REAL_LIVE_REVERSAL",
+          mode: "REAL_LIVE_CAPITAL_ABSORPTION",
           entry_price: currentPrice.toFixed(5),
           stop_loss: stop_loss.toFixed(5),
           live_win_streak: liveWinStreak,
