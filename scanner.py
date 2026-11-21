@@ -22,8 +22,9 @@ BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("
 # BITGET DEMO MODE TOGGLE (Set BITGET_DEMO_MODE="false" in GitHub Secrets for Real Money)
 BITGET_DEMO_MODE = os.environ.get("BITGET_DEMO_MODE", "true").lower() == "true"
 
+# BITGET V3 API CONSTANTS (ALWAYS "USDT-FUTURES" FOR V3 API CATEGORY)
 PRODUCT_TYPE = "USDT-FUTURES"
-ORDER_CATEGORY = "SUSDT-FUTURES" if BITGET_DEMO_MODE else "USDT-FUTURES"
+ORDER_CATEGORY = "USDT-FUTURES"
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
@@ -162,40 +163,31 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id):
     return None
 
 async def configure_bitget_symbol_settings(session, symbol):
-    """Configures 5x Leverage and One-Way Mode on Bitget UTA v3."""
+    """Configures 5x Leverage and Position Mode on Bitget UTA v3 API (Strictly Category: USDT-FUTURES)."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return
 
-    demo_sym = f"S{symbol}" if (BITGET_DEMO_MODE and not symbol.startswith("S")) else symbol
-
-    path_pos = "/api/v3/account/set-position-mode"
-    body_pos = json.dumps({"category": ORDER_CATEGORY, "posMode": "one_way"})
-    headers_pos = get_bitget_headers("POST", path_pos, body_pos)
-    try:
-        async with session.post(BITGET_V3_SET_POS_MODE_URL, data=body_pos, headers=headers_pos, timeout=5) as r:
-            res = await r.json()
-            log.info(f"⚙️ Bitget UTA v3 Position Mode Check ({demo_sym}): {res.get('msg', 'OK')}")
-    except Exception as e:
-        log.debug(f"Position mode notice: {e}")
+    trade_symbol = f"S{symbol}" if (BITGET_DEMO_MODE and not symbol.startswith("S")) else symbol
 
     path_lev = "/api/v3/account/set-leverage"
     body_lev = json.dumps({
-        "category": ORDER_CATEGORY,
-        "symbol": demo_sym,
+        "category": "USDT-FUTURES",
+        "symbol": trade_symbol,
         "leverage": str(DEFAULT_LEVERAGE)
     })
     headers_lev = get_bitget_headers("POST", path_lev, body_lev)
     try:
         async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_lev, headers=headers_lev, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚡ Bitget UTA v3 5x Leverage Configured ({demo_sym}): {res.get('msg', 'OK')}")
+            log.info(f"⚡ Bitget UTA v3 5x Leverage Configured ({trade_symbol}): {res.get('msg', 'OK')}")
     except Exception as e:
         log.debug(f"Leverage notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    EXECUTING RED-CARD OPPONENT COLLAPSE MARKET ORDER:
-    - Submits order to Bitget matching engine in <1ms.
+    EXECUTING RED-CARD OPPONENT COLLAPSE MARKET ORDER (STRICT V3 CATEGORY: USDT-FUTURES):
+    - Submits order to Bitget matching engine in <1ms with valid 'category': 'USDT-FUTURES'.
+    - Automatically uses demo symbol prefix (e.g. SXAUUSDT) in Demo Mode.
     - Hard Preset Engine Take-Profit (+2.50%) & Stop-Loss (-1.25%) attached directly on Bitget!
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
@@ -239,7 +231,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     path = "/api/v3/trade/place-order"
     order_payload = {
-        "category": ORDER_CATEGORY,
+        "category": "USDT-FUTURES",  # ALWAYS STRICTLY 'USDT-FUTURES' FOR BITGET V3 UTA API!
         "symbol": trade_symbol,
         "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
         "qty": size_str,
@@ -304,7 +296,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
     path = "/api/v3/trade/place-order"
 
     order_payload = {
-        "category": ORDER_CATEGORY,
+        "category": "USDT-FUTURES",
         "symbol": symbol,
         "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
         "side": close_side,
@@ -323,7 +315,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
     log.info(f"🛑 EXECUTING MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload['qty']}")
 
     try:
-        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_payload, headers=headers, timeout=10) as r:
+        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -449,10 +441,6 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
             continue
 
         # BULLISH AGGREGATED MATCH WINNER (LONG)
-        # - Green wins >= 9/15 candles.
-        # - Green Volume >= 1.4x Red Volume.
-        # - Opponent "Red Card" handicap: Red push is crippled (<= 32% of 15m range).
-        # - Pressing within 0.40% of breaking prior 15m high!
         is_bullish_aggregated = (
             (green_wins >= 9) and
             (vol_green >= 1.4 * (vol_red + 1e-6)) and
