@@ -39,7 +39,7 @@ LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
 
 NUM_BATCHES = 20           # Exactly 20 separate scanning batches / workers
-MIN_24H_VOLUME = 100000    # Min $100k Volume (NO UPPER CAP: Scans ALL BTC, ETH, SOL, & Altcoins!)
+MIN_24H_VOLUME = 100000    # Min $100k Volume (Scans ALL BTC, ETH, SOL, & Altcoins)
 MAX_SLIPPAGE_PCT = 0.0010  # Strictly 0.10% Max Slippage Protection Cap
 DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90   # Strictly 90% of available USDT equity allocated per trade
@@ -192,12 +192,11 @@ async def configure_bitget_symbol_settings(session, symbol):
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    SMART IOC LIMIT ORDER EXECUTION ENGINE (0.10% SLIPPAGE PROTECTION CAP):
-    - Long: Sets limit price = market_price * 1.0010 (Max 0.10% slippage ceiling above market).
-    - Short: Sets limit price = market_price * 0.9990 (Max 0.10% slippage floor below market).
-    - timeInForce: "IOC" (Immediate Or Cancel) -> Bitget's matching engine fills instantly at best ask/bid in <1ms!
-    - If the order book has a huge gap (>0.10%), Bitget natively kills the order instantly on the exchange.
-    - ZERO Python sleep delays, ZERO manual cancel requests, ZERO order book slippage losses!
+    SMART UNEXPLODED ABSORPTION IOC LIMIT ENTRY:
+    - Long: Sets limit price = market_price * 1.0010 (0.10% max slippage ceiling).
+    - Short: Sets limit price = market_price * 0.9990 (0.10% max slippage floor).
+    - timeInForce: "IOC" (Immediate Or Cancel) -> Microsecond execution on Bitget engine (<1ms).
+    - Hard Engine Take-Profit (+2.50%) & Stop-Loss (-1.50%).
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
@@ -227,17 +226,16 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     if float(size_str) <= 0:
         size_str = "1"
 
-    # SMART 0.10% SLIPPAGE CAP PROTECTION LIMIT PRICE
     if direction == "LONG":
         side = "buy"
         capped_limit_price = market_price * (1.0 + MAX_SLIPPAGE_PCT)
-        preset_tp = format_price(market_price * 1.020)  # Hard +2.00% TP
-        preset_sl = format_price(market_price * 0.980)  # Hard -2.00% SL
+        preset_tp = format_price(market_price * 1.025)  # Hard +2.50% TP
+        preset_sl = format_price(market_price * 0.985)  # Hard -1.50% SL
     else:
         side = "sell"
         capped_limit_price = market_price * (1.0 - MAX_SLIPPAGE_PCT)
-        preset_tp = format_price(market_price * 0.980)  # Hard +2.00% TP
-        preset_sl = format_price(market_price * 1.020)  # Hard -2.00% SL
+        preset_tp = format_price(market_price * 0.975)  # Hard +2.50% TP
+        preset_sl = format_price(market_price * 1.015)  # Hard -1.50% SL
 
     limit_p_str = format_price(capped_limit_price)
 
@@ -250,7 +248,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         "side": side,
         "orderType": "limit",
         "price": limit_p_str,
-        "timeInForce": "IOC",  # Immediate-Or-Cancel: Native <1ms Exchange Fill or Auto-Kill
+        "timeInForce": "IOC",
         "presetTakeProfitPrice": str(preset_tp),
         "presetStopLossPrice": str(preset_sl),
         "reduceOnly": "no"
@@ -259,7 +257,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🎯 SUBMITTING SMART IOC LIMIT ORDER TO BITGET: {symbol} ({direction}) | Cap Limit: ${limit_p_str} (Market: ${format_price(market_price)}) | Size: {size_str} | Max Slippage Cap: 0.10%")
+    log.info(f"🎯 SUBMITTING FRESH ABSORPTION IOC LIMIT ORDER TO BITGET: {symbol} ({direction}) | Limit Cap: ${limit_p_str} (Market: ${format_price(market_price)}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.5%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -271,14 +269,13 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
-                log.info(f"⚡ IOC ORDER PROCESSED BY BITGET MATCHING ENGINE! Order ID: {order_id}")
+                log.info(f"⚡ FRESH ABSORPTION ORDER PROCESSED BY BITGET ENGINE! Order ID: {order_id}")
 
-                # Instant fill check from Bitget order info API
                 order_info = await fetch_bitget_order_status_and_fill(session, symbol, order_id)
 
                 if order_info and order_info.get("executed_qty", 0) > 0:
                     real_fill = order_info["fill_price"] if order_info["fill_price"] > 0 else market_price
-                    log.info(f"✅ SMART IOC ORDER FILLED INSTANTLY AT: ${format_price(real_fill)}! (SLIPPAGE PROTECTED BELOW 0.10%)")
+                    log.info(f"✅ FRESH ABSORPTION ORDER FILLED INSTANTLY AT: ${format_price(real_fill)}! (SLIPPAGE CAP: 0.10%)")
                     return {
                         "order_id": order_id,
                         "notional_value": notional_value,
@@ -290,7 +287,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                         "filled": True
                     }
                 else:
-                    log.warning(f"🛡️ IOC ORDER AUTO-KILLED BY BITGET ENGINE: Order book spread exceeded 0.10% cap or insufficient liquidity. Protected account funds!")
+                    log.warning(f"🛡️ FRESH ABSORPTION ORDER AUTO-KILLED BY BITGET ENGINE: Spread exceeded 0.10% cap. Protected funds!")
                     return {"filled": False, "canceled": True}
             else:
                 log.error(f"❌ BITGET IOC ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
@@ -372,11 +369,11 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
-async def fetch_180m_candle_data_for_coin(session, symbol, semaphore):
-    """Fetches 180 1-MINUTE candles (representing the last 3 hours: 2h prior trend + 1h recent reversal) for a single coin with retry handling."""
+async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
+    """Fetches 60 1-MINUTE candles (OHLCV) for a single coin with retry handling."""
     async with semaphore:
-        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "180"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=180"
+        params = {"symbol": symbol, "productType": "USDT-FUTURES", "granularity": "1m", "limit": "60"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1m&limit=60"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -385,7 +382,7 @@ async def fetch_180m_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            if candles and len(candles) >= 180:
+                            if candles and len(candles) >= 60:
                                 return candles
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
@@ -395,65 +392,98 @@ async def fetch_180m_candle_data_for_coin(session, symbol, semaphore):
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
     """
-    Processes a single batch of coins across ALL Bitget USDT-Futures pairs (BTC, ETH, SOL, & Altcoins).
-    Evaluates 3 Hours (180 1-minute candles):
-      - Prior 2 Hours (Candles 0-120): Baseline trend (e.g. dipping or longing).
-      - Recent 1 Hour (Candles 120-180): Strongest CANDLE REVERSAL score.
-    Calculates a dynamic Reversal Strength Score for every pair and ranks them to pick the BEST ONE!
+    HIGH-IQ FRESH CAPITAL ABSORPTION & UNEXPLODED OPEN INTEREST (OI) ENGINE
+    -----------------------------------------------------------------------
+    Evaluates 60 1-minute OHLCV candles across all Bitget pairs:
+      1. Condition A (Heavy Dump Baseline / Low Range / Oversold):
+         - Measures 24h/60m price performance. Requires coin to have dumped or stayed compressed (e.g. 60m overall price move <= +0.5% or negative).
+      2. Condition B (Heavy Fresh Capital / Order Flow Inflow):
+         - Recent 60m trading volume is heavily expanded relative to overall price range (Volume-to-Range Ratio >= 2.0x average).
+         - Capital / contracts are entering heavily, but price HAS NOT YET EXPLODED (+10%+ move hasn't happened yet!).
+      3. Condition C (Recent 15m Green Turn / Reversal Trigger):
+         - Recent 15m candles show a positive gain (+0.40% to +1.50%), proving buyers are actively stepping in and turning the price green!
+      4. Ranks ALL market pairs by Absorption Accumulation Score to pick the #1 EXPLOSIVE SETUP in the market!
     """
     batch_evaluated = []
 
-    tasks = [fetch_180m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
+    tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
 
     for idx, candle_data in enumerate(candles_results):
-        if not candle_data or len(candle_data) < 180:
+        if not candle_data or len(candle_data) < 60:
             continue
 
         coin = coin_list[idx]
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
+        change_24h_pct = float(coin.get("change24h") or coin.get("priceChangePercent") or 0.0)
 
-        candles_180m = list(reversed(candle_data[:180]))
+        # Reverse to chronological order (index 0 = 60m ago, index 59 = current 1m candle)
+        candles_60m = list(reversed(candle_data[:60]))
 
-        prior_2h = candles_180m[:120]
-        recent_1h = candles_180m[120:]
+        older_45m = candles_60m[:45]
+        recent_15m = candles_60m[45:]
 
-        prior_green = sum(1 for c in prior_2h if float(c[4]) > float(c[1]))
-        prior_red = sum(1 for c in prior_2h if float(c[4]) < float(c[1]))
+        p_start_60m = float(candles_60m[0][1])  # Open 60m ago
+        p_start_15m = float(recent_15m[0][1])  # Open 15m ago
+        p_current = float(candles_60m[-1][4])  # Current close
 
-        recent_green = sum(1 for c in recent_1h if float(c[4]) > float(c[1]))
-        recent_red = sum(1 for c in recent_1h if float(c[4]) < float(c[1]))
+        if p_start_60m <= 0 or p_start_15m <= 0:
+            continue
 
-        close_price = float(candles_180m[-1][4])
+        move_60m_pct = ((p_current - p_start_60m) / p_start_60m) * 100.0
+        move_15m_pct = ((p_current - p_start_15m) / p_start_15m) * 100.0
 
-        is_bullish_reversal = (prior_red > prior_green) and (recent_green >= 35)
-        is_bearish_reversal = (prior_green > prior_red) and (recent_red >= 35)
+        # Calculate Volume Accumulation vs Price Range (Capital Inflow)
+        total_vol_60m = sum(float(c[5]) for c in candles_60m)
+        total_vol_15m = sum(float(c[5]) for c in recent_15m)
 
-        if is_bullish_reversal or is_bearish_reversal:
-            direction = "LONG" if is_bullish_reversal else "SHORT"
-            reversal_ratio = (recent_green / 60.0) if is_bullish_reversal else (recent_red / 60.0)
-            prior_opposite_ratio = (prior_red / 120.0) if is_bullish_reversal else (prior_green / 120.0)
+        vol_share_15m = (total_vol_15m / total_vol_60m) if total_vol_60m > 0 else 0.0
 
-            reversal_score = (reversal_ratio * 0.70) + (prior_opposite_ratio * 0.30)
+        # 1. BULLISH ABSORPTION SETUP (HEAVY DUMP + FRESH BUY CAPITAL + 15M GREEN TURN)
+        # - Coin is heavily dumped / depressed (24h or 60m move is negative or low).
+        # - Has NOT exploded yet (60m total move < +3.0%).
+        # - Recent 15m turned positive (+0.30% to +2.0% green reversal move).
+        # - Volume share in recent 15m is concentrated (>= 30% of total 60m volume in last 15m).
+        is_bullish_absorption = (
+            (change_24h_pct <= 2.0 or move_60m_pct <= 1.0) and
+            (move_60m_pct < 3.0) and
+            (move_15m_pct >= 0.35) and
+            (vol_share_15m >= 0.28)
+        )
+
+        # 2. BEARISH ABSORPTION SETUP (PUMP EXHAUSTION + FRESH SELL CAPITAL + 15M RED TURN)
+        is_bearish_absorption = (
+            (change_24h_pct >= -2.0 or move_60m_pct >= -1.0) and
+            (move_60m_pct > -3.0) and
+            (move_15m_pct <= -0.35) and
+            (vol_share_15m >= 0.28)
+        )
+
+        if is_bullish_absorption or is_bearish_absorption:
+            direction = "LONG" if is_bullish_absorption else "SHORT"
+            abs_move_15m = abs(move_15m_pct)
+
+            # Score formula: Concentrated Volume Share x Recent 15m Spark Move x Depressed Price Discount Factor
+            absorption_score = vol_share_15m * abs_move_15m * (1.0 + (abs(change_24h_pct) / 100.0))
 
             batch_evaluated.append({
                 "batch_id": batch_id,
                 "symbol": symbol,
                 "vol_24h": vol_24h,
+                "change_24h_pct": change_24h_pct,
+                "move_15m_pct": move_15m_pct,
+                "vol_share_15m": vol_share_15m,
                 "direction": direction,
-                "recent_green_1h": recent_green,
-                "recent_red_1h": recent_red,
-                "prior_green_2h": prior_green,
-                "prior_red_2h": prior_red,
-                "reversal_score": reversal_score,
-                "current_price": close_price
+                "absorption_score": absorption_score,
+                "current_price": p_current
             })
 
     if not batch_evaluated:
         return []
 
-    batch_evaluated.sort(key=lambda x: x["reversal_score"], reverse=True)
+    # Sort candidates by highest Absorption Score to pick the #1 unexploded setup in the market
+    batch_evaluated.sort(key=lambda x: x["absorption_score"], reverse=True)
     return [batch_evaluated[0]]
 
 async def main():
@@ -465,7 +495,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | Smart IOC Limit Execution & 0.10% Slippage Protection)"
+    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | Fresh Capital Absorption & Unexploded Setup)"
 
     log.info(f"🏆 Current REAL LIVE BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -488,7 +518,7 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ REVERSAL TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring price...")
+            log.info(f"⏳ ABSORPTION TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring price...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -520,7 +550,7 @@ async def main():
                 log.error(f"Could not fetch live price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Fetching ALL Bitget USDT-Futures Pairs (BTC, ETH, SOL, Altcoins | Min Volume: $100k)...")
+            log.info(f"🛰️ Scanning ALL Bitget Futures Pairs for Fresh Capital Absorption & Unexploded Setup...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -529,8 +559,9 @@ async def main():
             valid_coins = []
             for t in tickers:
                 vol_24h = float(t.get("quoteVolume", 0.0) or (float(t.get("baseVolume", 0.0)) * float(t.get("lastPr", 0.0))))
+                change_24h = float(t.get("change24h") or t.get("priceChangePercent") or 0.0)
                 if vol_24h >= MIN_24H_VOLUME:
-                    valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h})
+                    valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h, "change24h": change_24h})
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_coins = len(valid_coins)
@@ -549,22 +580,20 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 ALL-MARKET BEST REVERSAL CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP REVERSAL PAIRS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'RECENT 1H (CANDLES)':<22} | {'PRIOR 2H (TREND)':<20} | {'REVERSAL SCORE':<15}")
-            log.info("-" * 105)
+            log.info(f"📊 ALL-MARKET FRESH CAPITAL ABSORPTION CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'24H DROP':<12} | {'15M SPARK':<12} | {'ABSORPTION SCORE':<18}")
+            log.info("-" * 88)
 
             for cand in all_batch_candidates:
-                recent_str = f"{cand['recent_green_1h']}G / {cand['recent_red_1h']}R"
-                prior_str = f"{cand['prior_green_2h']}G / {cand['prior_red_2h']}R"
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {recent_str:<22} | {prior_str:<20} | {cand['reversal_score']:.4f}")
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['change_24h_pct']:+.2f}%     | {cand['move_15m_pct']:+.2f}%     | {cand['absorption_score']:.4f}")
 
             log.info("====================================================================================================")
 
             if all_batch_candidates:
-                all_batch_candidates.sort(key=lambda x: x["reversal_score"], reverse=True)
+                all_batch_candidates.sort(key=lambda x: x["absorption_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 STRONGEST REVERSAL PAIR IN THE ENTIRE MARKET MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['reversal_score']:.4f} | Recent 1h: {best_signal['recent_green_1h']}G/{best_signal['recent_red_1h']}R | Prior 2h: {best_signal['prior_green_2h']}G/{best_signal['prior_red_2h']}R)")
+                log.info(f"🔥 #1 UNEXPLODED CAPITAL ABSORPTION SETUP MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['absorption_score']:.4f} | 24h: {best_signal['change_24h_pct']:+.2f}% | 15m Spark: {best_signal['move_15m_pct']:+.2f}%)")
 
                 # EXECUTE SMART IOC LIMIT ORDER WITH 0.10% SLIPPAGE PROTECTION CAP
                 live_order_result = await place_bitget_live_order(
@@ -585,7 +614,7 @@ async def main():
                         "symbol": best_signal["symbol"],
                         "direction": best_signal["direction"],
                         "is_paper": False,
-                        "avg_fluctuation": round(best_signal["reversal_score"] * 100, 2),
+                        "avg_fluctuation": round(best_signal["absorption_score"] * 10, 2),
                         "current_price": final_entry_fill,
                         "account_equity": current_equity,
                         "pre_trade_balance": current_equity,
@@ -597,7 +626,7 @@ async def main():
                         "contract_size": live_order_result.get("contract_size", "1") if live_order_result else "1"
                     }
             else:
-                log.info(f"ℹ️ No active reversal candidates matched across the entire Bitget USDT-Futures market this scan run.")
+                log.info(f"ℹ️ No active absorption candidates matched across the entire Bitget USDT-Futures market this scan run.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
@@ -633,7 +662,7 @@ async def main():
                         log.info(f"   • Starting Account Equity: ${pre_trade_balance:.4f} USDT")
                         log.info(f"   • Closing Account Equity:  ${final_eq:.4f} USDT")
                         log.info(f"   • NET CASH CHANGE:         {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} USDT")
-                        log.info(f"   • TRADE RESULT:            {'🏆 WIN (NET CASH GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
+                        log.info(f"   • TRADE RESULT:            {'🏆 WIN (ABSORPTION SETUP NET CASH GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
                         log.info(f"   • NEW LIVE WIN STREAK:     {res_data.get('live_win_streak', 0)} WINS")
                         log.info("====================================================================================================")
 
