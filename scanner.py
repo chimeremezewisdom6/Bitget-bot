@@ -19,7 +19,6 @@ BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("BITGET_PASSWORD", "")).strip()
 
-# Safety Toggle: Set to 'true' in GitHub env to allow live real-money trading
 ALLOW_LIVE_TRADING = os.environ.get("ALLOW_LIVE_TRADING", "true").lower() == "true"
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
@@ -33,7 +32,6 @@ BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
 BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
 BITGET_V3_SET_POS_MODE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-position-mode"
-BITGET_V3_ORDER_DETAIL_URL = f"https://{BIT_DOMAIN}/api/v3/trade/order-info"
 
 LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
@@ -44,6 +42,20 @@ MAX_24H_VOLUME = 10000000  # Max $10M Volume Range
 MIN_CANDLE_WINS = 9       # Requires 9 or 10 same-color candles for entry
 DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90   # Strictly 90% of available USDT equity allocated per trade
+
+def format_price(price):
+    """Formats price dynamically to avoid truncation on tiny altcoins like LUNC ($0.00004123)."""
+    p = float(price)
+    if p < 0.0001:
+        return f"{p:.8f}"
+    elif p < 0.01:
+        return f"{p:.6f}"
+    elif p < 1.0:
+        return f"{p:.4f}"
+    elif p < 100.0:
+        return f"{p:.3f}"
+    else:
+        return f"{p:.2f}"
 
 def get_bitget_headers(method="GET", request_path="", body=""):
     headers = {"Content-Type": "application/json"}
@@ -171,7 +183,9 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     contract_size = notional_value / market_price
 
-    if market_price > 1000:
+    if market_price < 0.001:
+        size_str = f"{int(contract_size)}"
+    elif market_price > 1000:
         size_str = f"{contract_size:.3f}"
     elif market_price > 10:
         size_str = f"{contract_size:.2f}"
@@ -186,12 +200,12 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     # STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS ON BITGET ENGINE
     if direction == "LONG":
         side = "buy"
-        preset_tp = round(market_price * 1.010, 5)  # Strict +1.00% TP
-        preset_sl = round(market_price * 0.990, 5)  # Strict -1.00% SL
+        preset_tp = format_price(market_price * 1.010)  # Strict +1.00% TP
+        preset_sl = format_price(market_price * 0.990)  # Strict -1.00% SL
     else:
         side = "sell"
-        preset_tp = round(market_price * 0.990, 5)  # Strict +1.00% TP
-        preset_sl = round(market_price * 1.010, 5)  # Strict -1.00% SL
+        preset_tp = format_price(market_price * 0.990)  # Strict +1.00% TP
+        preset_sl = format_price(market_price * 1.010)  # Strict -1.00% SL
 
     path = "/api/v3/trade/place-order"
     order_payload = {
@@ -209,7 +223,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🚨 EXECUTING REAL LIVE ORDER ON BITGET ENGINE: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT (90% Equity @ 5x) | Strict TP: {preset_tp} (+1.00%) | Strict SL: {preset_sl} (-1.00%)")
+    log.info(f"🚨 EXECUTING REAL LIVE ORDER ON BITGET ENGINE: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT (90% Equity @ 5x) | Strict TP: {preset_tp} | Strict SL: {preset_sl}")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -409,7 +423,7 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
-        current_equity = acc_info["equity"] if acc_info else 1.54
+        current_equity = acc_info["equity"] if acc_info else 1.35
 
         if acc_info:
             log.info(f"💰 BITGET LIVE ACCOUNT EQUITY: ${acc_info['equity']:.4f} USDT | Available Margin: ${acc_info['available']:.4f} USDT ({acc_info['account_type']})")
@@ -425,17 +439,19 @@ async def main():
             contract_size = active_trade.get("contract_size", "1")
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
-            log.info(f"⏳ LIVE TRADE ACTIVE on {symbol} ({direction} @ ${entry_price:.5f}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring price...")
+            entry_p_str = format_price(entry_price)
+            log.info(f"⏳ LIVE TRADE ACTIVE on {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f} USDT. Monitoring price...")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
+                curr_p_str = format_price(current_price)
                 if direction == "LONG":
                     live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
                 else:
                     live_pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
 
                 pnl_str = f"{live_pnl_pct:+.2f}%"
-                log.info(f"📍 LIVE TRADE PING: {symbol} | Entry Price: ${entry_price:.5f} | Current Price: ${current_price:.5f} | Price Move: {pnl_str}")
+                log.info(f"📍 LIVE TRADE PING: {symbol} | Entry Price: ${entry_p_str} | Current Price: ${curr_p_str} | Price Move: {pnl_str}")
 
                 payload = {
                     "symbol": symbol,
@@ -513,7 +529,7 @@ async def main():
                     symbol=best_signal["symbol"],
                     direction=best_signal["direction"],
                     market_price=best_signal["current_price"],
-                    available_balance=acc_info["available"] if acc_info else 1.54
+                    available_balance=acc_info["available"] if acc_info else 1.35
                 )
 
                 payload = {
@@ -550,13 +566,12 @@ async def main():
 
             if active_trade and res_data:
                 worker_status = res_data.get("status", "")
-                reason = res_data.get("reason", "")
 
                 if worker_status == "CLOSED":
                     c_size = active_trade.get("contract_size") or res_data.get("contract_size", "1")
                     await close_bitget_live_position(session, symbol, direction, contract_size=c_size)
 
-                    # POST-TRADE BITGET BALANCE AUDIT & STREAK EVALUATION BASED ON REAL CASH NET CHANGE
+                    # POST-TRADE BITGET BALANCE AUDIT
                     await asyncio.sleep(1.5)
                     post_bal = await fetch_bitget_account_balance(session)
                     if post_bal:
