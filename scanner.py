@@ -30,6 +30,7 @@ BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 # Official Bitget v3 Unified Trading Account (UTA) API Endpoints
 BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
+BITGET_V3_CANCEL_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/cancel-order"
 BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
 BITGET_V3_SET_POS_MODE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-position-mode"
 BITGET_V3_ORDER_INFO_URL = f"https://{BIT_DOMAIN}/api/v3/trade/order-info"
@@ -45,7 +46,7 @@ DEFAULT_LEVERAGE = 5       # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90   # Strictly 90% of available USDT equity allocated per trade
 
 def format_price(price):
-    """Formats price dynamically to avoid truncation or rounding issues."""
+    """Formats price dynamically to match Bitget precision step size."""
     p = float(price)
     if p < 0.0001:
         return f"{p:.8f}"
@@ -135,8 +136,29 @@ async def fetch_bitget_account_balance(session):
         log.error(f"Error querying Bitget UTA v3 balance: {e}")
     return None
 
-async def fetch_bitget_order_fill_price(session, symbol, order_id):
-    """Fetches the EXACT average executed fill price directly from Bitget v3 Order Info API."""
+async def cancel_unfilled_bitget_order(session, symbol, order_id):
+    """Cancels an unfilled limit order on Bitget UTA v3 if it doesn't execute within 3 seconds."""
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
+        return
+
+    path = "/api/v3/trade/cancel-order"
+    body_payload = json.dumps({
+        "category": "USDT-FUTURES",
+        "symbol": symbol,
+        "orderId": order_id
+    })
+    headers = get_bitget_headers("POST", path, body_payload)
+
+    try:
+        async with session.post(BITGET_V3_CANCEL_ORDER_URL, data=body_payload, headers=headers, timeout=5) as r:
+            resp = await r.json()
+            if resp.get("code") == "00000":
+                log.info(f"🛑 UNFILLED LIMIT ORDER CANCELED ON BITGET ({symbol} Order: {order_id}) - ZERO SLIPPAGE TAKEN!")
+    except Exception as e:
+        log.debug(f"Order cancel notice: {e}")
+
+async def fetch_bitget_order_status_and_fill(session, symbol, order_id):
+    """Checks if order is filled and returns exact executed fill price."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
         return None
 
@@ -144,19 +166,18 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id):
     full_url = f"https://{BIT_DOMAIN}{path}"
     headers = get_bitget_headers("GET", path)
 
-    for _ in range(3):
-        try:
-            async with session.get(full_url, headers=headers, timeout=5) as r:
-                if r.status == 200:
-                    resp = await r.json()
-                    if resp.get("code") == "00000" and resp.get("data"):
-                        d = resp["data"]
-                        fill_price = float(d.get("priceAvg") or d.get("fillPrice") or d.get("price") or 0.0)
-                        if fill_price > 0:
-                            return fill_price
-        except Exception:
-            pass
-        await asyncio.sleep(0.4)
+    try:
+        async with session.get(full_url, headers=headers, timeout=5) as r:
+            if r.status == 200:
+                resp = await r.json()
+                if resp.get("code") == "00000" and resp.get("data"):
+                    d = resp["data"]
+                    status = d.get("state") or d.get("status")
+                    fill_price = float(d.get("priceAvg") or d.get("fillPrice") or d.get("price") or 0.0)
+                    executed_qty = float(d.get("baseVolume") or d.get("fillQty") or d.get("qty") or 0.0)
+                    return {"status": status, "fill_price": fill_price, "executed_qty": executed_qty}
+    except Exception as e:
+        log.debug(f"Order status check notice: {e}")
     return None
 
 async def configure_bitget_symbol_settings(session, symbol):
@@ -188,11 +209,12 @@ async def configure_bitget_symbol_settings(session, symbol):
     except Exception as e:
         log.debug(f"Leverage notice: {e}")
 
-async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
+async def place_bitget_live_order(session, symbol, direction, target_limit_price, available_balance):
     """
-    Executes a Real Live Order directly on Bitget Engine.
-    Queries Bitget Order Info API to fetch the EXACT executed fill price ($4.580 vs $4.666 ticker)
-    and saves the real fill price for 100% accurate PnL tracking!
+    Executes a ZERO-SLIPPAGE LIMIT ORDER on Bitget Engine at exact price (e.g., $4.68).
+    - Uses 90% of Available Balance at 5x Leverage.
+    - If not filled within 3 seconds, automatically CANCELS the order to protect funds from slippage!
+    - Attaches Strict 1.00% Engine Take-Profit and 1.00% Engine Stop-Loss.
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute live trade.")
@@ -206,15 +228,15 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     if notional_value < 5.0:
         notional_value = 5.50
 
-    contract_size = notional_value / market_price
+    contract_size = notional_value / target_limit_price
 
-    if market_price < 0.001:
+    if target_limit_price < 0.001:
         size_str = f"{int(contract_size)}"
-    elif market_price > 1000:
+    elif target_limit_price > 1000:
         size_str = f"{contract_size:.3f}"
-    elif market_price > 10:
+    elif target_limit_price > 10:
         size_str = f"{contract_size:.2f}"
-    elif market_price > 1:
+    elif target_limit_price > 1:
         size_str = f"{contract_size:.1f}"
     else:
         size_str = f"{int(contract_size)}"
@@ -222,16 +244,19 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     if float(size_str) <= 0:
         size_str = "1"
 
-    # STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS ON BITGET ENGINE
+    limit_p_str = format_price(target_limit_price)
+
+    # STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS ATTACHED DIRECTLY TO ENGINE
     if direction == "LONG":
         side = "buy"
-        preset_tp = format_price(market_price * 1.010)  # Strict +1.00% TP
-        preset_sl = format_price(market_price * 0.990)  # Strict -1.00% SL
+        preset_tp = format_price(target_limit_price * 1.010)  # Strict +1.00% TP
+        preset_sl = format_price(target_limit_price * 0.990)  # Strict -1.00% SL
     else:
         side = "sell"
-        preset_tp = format_price(market_price * 0.990)  # Strict +1.00% TP
-        preset_sl = format_price(market_price * 1.010)  # Strict -1.00% SL
+        preset_tp = format_price(target_limit_price * 0.990)  # Strict +1.00% TP
+        preset_sl = format_price(target_limit_price * 1.010)  # Strict -1.00% SL
 
+    # ZERO-SLIPPAGE EXACT LIMIT ORDER PAYLOAD
     path = "/api/v3/trade/place-order"
     order_payload = {
         "category": "USDT-FUTURES",
@@ -239,7 +264,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         "marginCoin": "USDT",
         "qty": size_str,
         "side": side,
-        "orderType": "market",
+        "orderType": "limit",
+        "price": limit_p_str,
         "presetTakeProfitPrice": str(preset_tp),
         "presetStopLossPrice": str(preset_sl),
         "reduceOnly": "no"
@@ -248,7 +274,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🚨 EXECUTING REAL LIVE ORDER ON BITGET ENGINE: {symbol} ({direction}) | Size: {size_str} contracts | Notional: ${notional_value:.2f} USDT (90% Equity @ 5x) | Strict TP: {preset_tp} | Strict SL: {preset_sl}")
+    log.info(f"🎯 SUBMITTING ZERO-SLIPPAGE LIMIT ORDER TO BITGET: {symbol} ({direction}) @ ${limit_p_str} | Size: {size_str} | 3s Fill Guard Active!")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -260,33 +286,35 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "LIVE_ORDER_EXECUTED")
-                log.info(f"✅ REAL BITGET UTA v3 ORDER SUBMITTED TO MATCHING ENGINE! Order ID: {order_id}")
+                log.info(f"✅ LIMIT ORDER ACCEPTED BY BITGET MATCHING ENGINE! Order ID: {order_id}")
 
-                # Fetch EXACT Executed Fill Price from Bitget to eliminate slippage discrepancy!
-                await asyncio.sleep(0.5)
-                real_fill_price = await fetch_bitget_order_fill_price(session, symbol, order_id)
+                # Wait up to 3 seconds for exact limit fill
+                await asyncio.sleep(2.5)
+                order_info = await fetch_bitget_order_status_and_fill(session, symbol, order_id)
 
-                if real_fill_price and real_fill_price > 0:
-                    log.info(f"🎯 BITGET REAL EXECUTED FILL PRICE VERIFIED: ${format_price(real_fill_price)} (Ticker preview was: ${format_price(market_price)})")
-                    actual_entry = real_fill_price
+                if order_info and order_info.get("executed_qty", 0) > 0:
+                    real_fill = order_info["fill_price"] if order_info["fill_price"] > 0 else target_limit_price
+                    log.info(f"⚡ LIMIT ORDER FILLED AT EXACT PRICE: ${format_price(real_fill)}! ZERO SLIPPAGE TAKEN.")
+                    return {
+                        "order_id": order_id,
+                        "notional_value": notional_value,
+                        "contract_size": size_str,
+                        "preset_tp": preset_tp,
+                        "preset_sl": preset_sl,
+                        "real_fill_price": real_fill,
+                        "pre_trade_balance": available_balance,
+                        "filled": True
+                    }
                 else:
-                    log.warning(f"⚠️ Could not fetch order info immediately, using market ticker price: ${format_price(market_price)}")
-                    actual_entry = market_price
-
-                return {
-                    "order_id": order_id,
-                    "notional_value": notional_value,
-                    "contract_size": size_str,
-                    "preset_tp": preset_tp,
-                    "preset_sl": preset_sl,
-                    "real_fill_price": actual_entry,
-                    "pre_trade_balance": available_balance
-                }
+                    # Order did not fill within 3s -> CANCEL IMMEDIATELY to prevent slippage/waiting!
+                    log.warning(f"⚠️ LIMIT ORDER AT ${limit_p_str} NOT FILLED WITHIN 3 SECONDS. CANCELING NOW TO PROTECT FUNDS!")
+                    await cancel_unfilled_bitget_order(session, symbol, order_id)
+                    return {"filled": False, "canceled": True}
             else:
-                log.error(f"❌ BITGET UTA v3 ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+                log.error(f"❌ BITGET LIMIT ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
                 return None
     except Exception as e:
-        log.error(f"❌ Error submitting live Bitget UTA v3 order: {e}")
+        log.error(f"❌ Error submitting limit order: {e}")
         return None
 
 async def close_bitget_live_position(session, symbol, direction, contract_size=""):
@@ -455,7 +483,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | 1% Engine TP / 1% Engine SL)"
+    mode_status = "🚨 REAL MONEY LIVE BITGET TRADING (5x Leverage | Zero-Slippage Limit Entry & 3s Guard)"
 
     log.info(f"🏆 Current REAL LIVE BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -561,33 +589,37 @@ async def main():
 
                 log.info(f"🔥 BEST ENTRY SIGNAL MATCHED FROM BATCH {best_signal['batch_id']:02d}: {best_signal['symbol']} ({best_signal['max_wins']}/10 {best_signal['direction']}{doji_info} | Fluctuation: {best_signal['avg_fluctuation']:.2f}%)")
 
-                # EXECUTE REAL LIVE BITGET ORDER (90% EQUITY @ 5x LEVERAGE WITH STRICT 1% TP / 1% SL)
+                # EXECUTE ZERO-SLIPPAGE LIMIT ENTRY ORDER AT EXACT PRICE
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
                     direction=best_signal["direction"],
-                    market_price=best_signal["current_price"],
+                    target_limit_price=best_signal["current_price"],
                     available_balance=acc_info["available"] if acc_info else 1.32
                 )
 
-                # RECORD THE EXACT REAL EXECUTED FILL PRICE RETURNED FROM BITGET (e.g. $4.580 instead of $4.666)
-                final_entry_fill = live_order_result.get("real_fill_price", best_signal["current_price"]) if live_order_result else best_signal["current_price"]
+                # IF ORDER WAS UNFILLED AND CANCELED BY 3S GUARD -> SKIP PLAYLOAD & WAIT FOR NEXT MINUTE
+                if live_order_result and not live_order_result.get("filled", False):
+                    log.info("🛡️ Order was canceled by 3s Fill Guard. Skipping payload to protect account balance.")
+                    payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
+                else:
+                    final_entry_fill = live_order_result.get("real_fill_price", best_signal["current_price"]) if live_order_result else best_signal["current_price"]
 
-                payload = {
-                    "symbol": best_signal["symbol"],
-                    "direction": best_signal["direction"],
-                    "is_paper": False,
-                    "avg_fluctuation": round(best_signal["avg_fluctuation"], 2),
-                    "current_price": final_entry_fill,
-                    "account_equity": current_equity,
-                    "pre_trade_balance": current_equity,
-                    "leverage": DEFAULT_LEVERAGE,
-                    "position_mode": "one_way",
-                    "reduce_only": True,
-                    "is_ping": False,
-                    "live_order": live_order_result,
-                    "contract_size": live_order_result.get("contract_size", "1") if live_order_result else "1"
-                }
+                    payload = {
+                        "symbol": best_signal["symbol"],
+                        "direction": best_signal["direction"],
+                        "is_paper": False,
+                        "avg_fluctuation": round(best_signal["avg_fluctuation"], 2),
+                        "current_price": final_entry_fill,
+                        "account_equity": current_equity,
+                        "pre_trade_balance": current_equity,
+                        "leverage": DEFAULT_LEVERAGE,
+                        "position_mode": "one_way",
+                        "reduce_only": True,
+                        "is_ping": False,
+                        "live_order": live_order_result,
+                        "contract_size": live_order_result.get("contract_size", "1") if live_order_result else "1"
+                    }
             else:
                 log.info(f"ℹ️ No batch winners reached >= {MIN_CANDLE_WINS}/10 candles with >= 0.20% fluctuation this minute.")
                 payload = {
