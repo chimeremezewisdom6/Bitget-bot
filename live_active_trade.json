@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "MSTUUSDT",
+  "direction": "SHORT",
+  "mode": "REAL_LIVE_BITGET",
+  "entry_price": 9.154,
+  "stop_loss": 9.24554,
+  "pre_trade_balance": 1.38019043,
+  "contract_size": "0.7",
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795230944237
 }
