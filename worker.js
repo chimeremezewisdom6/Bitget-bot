@@ -56,7 +56,7 @@ export default {
       let tradeHistory = historyState ? historyState.content : [];
 
       // =========================================================================
-      // 1. ACTIVE LIVE TRADE MONITORING & BALANCE EVALUATION
+      // 1. ACTIVE LIVE REVERSAL TRADE MONITORING & BALANCE EVALUATION
       // =========================================================================
       if (activeTrade.active) {
         const currentPrice = signal.current_price;
@@ -74,33 +74,30 @@ export default {
           grossPnl = ((activeTrade.entry_price - currentPrice) / activeTrade.entry_price) * 100;
         }
 
-        // STRICT 1.00% TAKE PROFIT AND STRICT 1.00% STOP LOSS TRIGGERS
-        let hitTakeProfit = grossPnl >= 1.00;
-        let hitSL = grossPnl <= -1.00;
-        let hit10MinTimeout = elapsedMinutes >= 10;
+        // STRICT 2.00% ENGINE TAKE PROFIT AND 2.00% ENGINE STOP LOSS TRIGGERS
+        let hitTakeProfit = grossPnl >= 2.00;
+        let hitSL = grossPnl <= -2.00;
+        let hitTimeTimeout = elapsedMinutes >= 30;
 
-        if (hitTakeProfit || hitSL || hit10MinTimeout) {
+        if (hitTakeProfit || hitSL || hitTimeTimeout) {
 
-          // REAL BITGET BALANCE GAIN EVALUATION:
-          // A WIN occurs ONLY if actual net USDT cash increases (netUsdtChange > 0).
           const preBalance = activeTrade.pre_trade_balance || signal.pre_trade_balance || 1.35;
           const currentEquity = signal.account_equity || preBalance;
           const netUsdtChange = currentEquity - preBalance;
 
           // STRICT CASH WIN RULE:
-          // If actual account cash decreased or stayed flat (netUsdtChange <= 0), it is a LOSS, period!
           const isRealWin = netUsdtChange > 0;
 
           if (isRealWin) {
             liveWinStreak += 1;
           } else {
-            liveWinStreak = 0; // RESET STREAK STRICTLY TO 0 ON ANY CASH LOSS
+            liveWinStreak = 0;
           }
 
           let exitReason = "";
-          if (hitTakeProfit) exitReason = `1.0% ENGINE TAKE PROFIT HIT (${grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(2)}% Price Move)`;
-          else if (hitSL) exitReason = `1.0% ENGINE STOP LOSS HIT (${grossPnl.toFixed(2)}% Price Move)`;
-          else if (hit10MinTimeout) exitReason = `10-MINUTE TIME TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
+          if (hitTakeProfit) exitReason = `2.0% ENGINE TAKE PROFIT HIT (+${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hitSL) exitReason = `2.0% ENGINE STOP LOSS HIT (${grossPnl.toFixed(2)}% Price Move)`;
+          else if (hitTimeTimeout) exitReason = `30-MINUTE REVERSAL TIMEOUT EXIT (${grossPnl.toFixed(2)}% Price Move)`;
 
           if (!isRealWin) {
             exitReason += ` | [STREAK RESET TO 0: Real Cash Equity Decreased by $${Math.abs(netUsdtChange).toFixed(4)}]`;
@@ -109,7 +106,7 @@ export default {
           tradeHistory.push({
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: "REAL_LIVE_BITGET",
+            mode: "REAL_LIVE_REVERSAL",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             price_gross_pnl: grossPnl.toFixed(2) + "%",
@@ -131,7 +128,7 @@ export default {
             status: "CLOSED",
             symbol: activeTrade.symbol,
             direction: activeTrade.direction,
-            mode: "REAL_LIVE_BITGET",
+            mode: "REAL_LIVE_REVERSAL",
             entry_price: activeTrade.entry_price,
             exit_price: currentPrice,
             gross_pnl_percent: grossPnl.toFixed(2),
@@ -157,24 +154,24 @@ export default {
         }
       }
       // =========================================================================
-      // 2. NO ACTIVE TRADE -> OPEN NEW LIVE SIGNAL
+      // 2. NO ACTIVE TRADE -> OPEN NEW MARKET-WIDE BEST REVERSAL SIGNAL
       // =========================================================================
       else {
         if (signal.symbol === "NONE") {
           return new Response(JSON.stringify({
             status: "WAITING",
-            message: "No momentum signals found."
+            message: "No market-wide reversal signals found."
           }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
         const currentPrice = signal.current_price;
-        const stop_loss = signal.direction === 'LONG' ? currentPrice * 0.99 : currentPrice * 1.01;
+        const stop_loss = signal.direction === 'LONG' ? currentPrice * 0.98 : currentPrice * 1.02;
 
         const newLiveTrade = {
           active: true,
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: "REAL_LIVE_BITGET",
+          mode: "REAL_LIVE_REVERSAL",
           entry_price: currentPrice,
           stop_loss: stop_loss,
           pre_trade_balance: signal.pre_trade_balance || signal.account_equity || 1.35,
@@ -190,7 +187,7 @@ export default {
           status: "OPENED",
           symbol: signal.symbol,
           direction: signal.direction,
-          mode: "REAL_LIVE_BITGET",
+          mode: "REAL_LIVE_REVERSAL",
           entry_price: currentPrice.toFixed(5),
           stop_loss: stop_loss.toFixed(5),
           live_win_streak: liveWinStreak,
