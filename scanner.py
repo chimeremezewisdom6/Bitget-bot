@@ -23,10 +23,7 @@ BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("
 BITGET_DEMO_MODE = os.environ.get("BITGET_DEMO_MODE", "true").lower() == "true"
 
 SCAN_PRODUCT_TYPE = "USDT-FUTURES"
-
-DEMO_PRODUCT_TYPE = "SUSDT-FUTURES"
-DEMO_MARGIN_COIN = "S-USDT"
-SUPPORTED_DEMO_SYMBOLS = ["SBTCUSDT", "SETHUSDT", "SSOLUSDT"]
+ORDER_CATEGORY = "USDT-FUTURES"
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
@@ -34,24 +31,25 @@ BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType={SCAN_PRODUCT_TYPE}"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
-# Official Bitget v2 & v3 Endpoints
+# Official Bitget v3 Unified Trading Account (UTA) Endpoints
 BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
 BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
-
-BITGET_V2_DEMO_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v2/mix/order/place-order"
-BITGET_V2_DEMO_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v2/mix/account/set-leverage"
+BITGET_V3_ORDER_INFO_URL = f"https://{BIT_DOMAIN}/api/v3/trade/order-info"
 
 LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
+LIVE_HISTORY_FILE = "live_trade_history.json"
 
 NUM_BATCHES = 20            # Exactly 20 separate scanning batches / workers
 MIN_24H_VOLUME = 300000     # Min $300k Volume Filter
 DEFAULT_LEVERAGE = 5        # Strictly 5x Leverage
 BALANCE_USAGE_PCT = 0.90    # Strictly 90% of available equity allocated per trade
 
+MIN_FLUCTUATION_PCT = 0.10  # Minimum 0.10% price fluctuation per 1m candle
+MIN_ACTIVE_CANDLES = 30     # Strictly REQUIRES >= 30 candles out of 60 to have >= 0.10% fluctuation!
+
 def format_price(price):
-    """Formats price dynamically to match Bitget precision step size."""
     p = float(price)
     if p < 0.0001:
         return f"{p:.8f}"
@@ -81,6 +79,20 @@ def get_bitget_headers(method="GET", request_path="", body=""):
         })
     return headers
 
+def get_consecutive_losses():
+    """Checks local trade history to verify if last 2 consecutive trades were losses."""
+    if os.path.exists(LIVE_HISTORY_FILE):
+        try:
+            with open(LIVE_HISTORY_FILE, "r") as f:
+                history = json.load(f)
+                if isinstance(history, list) and len(history) >= 2:
+                    last_two = history[-2:]
+                    if all(t.get("won") == False for t in last_two):
+                        return 2
+        except Exception:
+            return 0
+    return 0
+
 def get_live_win_streak():
     if os.path.exists(LIVE_STREAK_FILE):
         try:
@@ -103,7 +115,6 @@ def get_active_live_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Queries official Bitget API and returns live Demo (S-USDT) or Real (USDT) equity & available margin."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -122,85 +133,79 @@ async def fetch_bitget_account_balance(session):
                 usdt_equity = float(data.get("usdtEquity") or data.get("accountEquity") or 0.0)
                 assets_list = data.get("assets", [])
 
-                target_coin = "S-USDT" if BITGET_DEMO_MODE else "USDT"
-                asset_obj = next((a for a in assets_list if a.get("coin") == target_coin), None)
-                if not asset_obj and BITGET_DEMO_MODE:
-                    asset_obj = next((a for a in assets_list if "S-" in str(a.get("coin"))), None)
+                margin_coin_type = "S-USDT" if BITGET_DEMO_MODE else "USDT"
+                asset_obj = next((a for a in assets_list if a.get("coin") in ("USDT", "S-USDT")), None)
 
                 available_margin = 0.0
                 if asset_obj:
                     available_margin = float(asset_obj.get("available") or asset_obj.get("equity") or 0.0)
-                    usdt_equity = float(asset_obj.get("equity") or available_margin)
+                    if usdt_equity == 0.0:
+                        usdt_equity = float(asset_obj.get("equity") or available_margin)
 
                 return {
                     "equity": usdt_equity if usdt_equity > 0 else 10000.0,
                     "available": available_margin if available_margin > 0 else 10000.0,
-                    "margin_coin": target_coin,
-                    "account_type": f"Bitget {'DEMO (S-USDT Air-Gapped)' if BITGET_DEMO_MODE else 'REAL LIVE (USDT)'}"
+                    "margin_coin": margin_coin_type,
+                    "account_type": f"Bitget UTA v3 {'DEMO (Simulated)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
                 }
     except Exception as e:
-        log.error(f"Error querying Bitget balance: {e}")
+        log.error(f"Error querying Bitget UTA v3 balance: {e}")
+    return None
+
+async def fetch_bitget_order_fill_price(session, symbol, order_id):
+    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
+        return None
+
+    path = f"/api/v3/trade/order-info?category={ORDER_CATEGORY}&symbol={symbol}&orderId={order_id}"
+    full_url = f"https://{BIT_DOMAIN}{path}"
+    headers = get_bitget_headers("GET", path)
+
+    for _ in range(3):
+        try:
+            async with session.get(full_url, headers=headers, timeout=5) as r:
+                if r.status == 200:
+                    resp = await r.json()
+                    if resp.get("code") == "00000" and resp.get("data"):
+                        d = resp["data"]
+                        fill_price = float(d.get("priceAvg") or d.get("fillPrice") or d.get("price") or 0.0)
+                        if fill_price > 0:
+                            return fill_price
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
     return None
 
 async def configure_bitget_leverage(session, symbol):
-    """Configures 5x Leverage on Bitget Exchange."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return
 
-    if BITGET_DEMO_MODE:
-        path = "/api/v2/mix/account/set-leverage"
-        payload = {
-            "productType": DEMO_PRODUCT_TYPE,
-            "symbol": symbol,
-            "marginCoin": DEMO_MARGIN_COIN,
-            "leverage": str(DEFAULT_LEVERAGE)
-        }
-        url = BITGET_V2_DEMO_LEVERAGE_URL
-    else:
-        path = "/api/v3/account/set-leverage"
-        payload = {
-            "category": "USDT-FUTURES",
-            "symbol": symbol,
-            "leverage": str(DEFAULT_LEVERAGE)
-        }
-        url = BITGET_V3_SET_LEVERAGE_URL
+    path = "/api/v3/account/set-leverage"
+    payload = {
+        "category": ORDER_CATEGORY,
+        "symbol": symbol,
+        "leverage": str(DEFAULT_LEVERAGE)
+    }
 
     body_json = json.dumps(payload)
     headers = get_bitget_headers("POST", path, body_json)
     try:
-        async with session.post(url, data=body_json, headers=headers, timeout=5) as r:
+        async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_json, headers=headers, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚡ Bitget 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
+            log.info(f"⚡ Bitget UTA v3 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
     except Exception as e:
         log.debug(f"Leverage notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    AIR-GAPPED DEMO vs REAL MONEY EXECUTION ENGINE:
-    - IF BITGET_DEMO_MODE == True:
-        Strictly routes to Bitget's SUSDT-FUTURES demo ledger using S-USDT demo margin!
-        Real USDT funds CANNOT be touched under any circumstances.
-    - IF BITGET_DEMO_MODE == False:
-        Routes to Real Live USDT-FUTURES account across all 600+ real pairs.
+    BITGET NATIVE ENGINE ORDER EXECUTION:
+    - Submits direct order payload to Bitget UTA v3 matching engine.
+    - Attaches hard preset Take-Profit (+2.50%) & Stop-Loss (-1.25%) on Bitget servers.
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute order.")
         return None
 
-    if BITGET_DEMO_MODE:
-        candidate_demo_sym = f"S{symbol}" if not symbol.startswith("S") else symbol
-        if candidate_demo_sym in SUPPORTED_DEMO_SYMBOLS:
-            trade_symbol = candidate_demo_sym
-        else:
-            trade_symbol = "SBTCUSDT"
-            log.info(f"🛡️ DEMO AIR-GAP PROTECTOR: Mapping matched breakout signal {symbol} to official Bitget S-USDT Demo pair {trade_symbol}. Real USDT funds are 100% UNTOUCHED.")
-
-        demo_price = await fetch_single_price(session, "BTCUSDT")
-        if demo_price and demo_price > 0:
-            market_price = demo_price
-    else:
-        trade_symbol = symbol
-
+    trade_symbol = symbol
     await configure_bitget_leverage(session, trade_symbol)
 
     used_margin = available_balance * BALANCE_USAGE_PCT
@@ -234,42 +239,27 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         preset_tp = format_price(market_price * 0.975)  # Hard +2.50% TP
         preset_sl = format_price(market_price * 1.0125) # Hard -1.25% SL
 
-    if BITGET_DEMO_MODE:
-        path = "/api/v2/mix/order/place-order"
-        url = BITGET_V2_DEMO_PLACE_ORDER_URL
-        order_payload = {
-            "productType": DEMO_PRODUCT_TYPE,
-            "symbol": trade_symbol,
-            "marginCoin": DEMO_MARGIN_COIN,
-            "size": size_str,
-            "side": side,
-            "orderType": "market",
-            "presetTakeProfitPrice": str(preset_tp),
-            "presetStopLossPrice": str(preset_sl)
-        }
-    else:
-        path = "/api/v3/trade/place-order"
-        url = BITGET_V3_PLACE_ORDER_URL
-        order_payload = {
-            "category": "USDT-FUTURES",
-            "symbol": trade_symbol,
-            "marginCoin": "USDT",
-            "qty": size_str,
-            "side": side,
-            "orderType": "market",
-            "presetTakeProfitPrice": str(preset_tp),
-            "presetStopLossPrice": str(preset_sl),
-            "reduceOnly": "no"
-        }
+    path = "/api/v3/trade/place-order"
+    order_payload = {
+        "category": ORDER_CATEGORY,
+        "symbol": trade_symbol,
+        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
+        "qty": size_str,
+        "side": side,
+        "orderType": "market",
+        "presetTakeProfitPrice": str(preset_tp),
+        "presetStopLossPrice": str(preset_sl),
+        "reduceOnly": "no"
+    }
 
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    mode_label = "🎮 BITGET DEMO (S-USDT AIR-GAPPED)" if BITGET_DEMO_MODE else "RARE REAL MONEY (USDT)"
-    log.info(f"🎯 SUBMITTING EXHAUSTION BREAKOUT ORDER ({mode_label}): {trade_symbol} ({direction} | Matched Signal: {symbol}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
+    mode_label = "🎮 BITGET DEMO (UTA v3)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (UTA v3)"
+    log.info(f"🎯 SUBMITTING BITGET ENGINE ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
 
     try:
-        async with session.post(url, data=body_json, headers=headers, timeout=10) as r:
+        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -278,65 +268,59 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "ORDER_EXECUTED")
-                log.info(f"✅ BITGET DEMO MATCHING ENGINE ACCEPTED ORDER! Order ID: {order_id}")
+                log.info(f"✅ BITGET UTA v3 MATCHING ENGINE ACCEPTED ORDER! Order ID: {order_id}")
+
+                await asyncio.sleep(0.5)
+                real_fill = await fetch_bitget_order_fill_price(session, trade_symbol, order_id)
+                if not real_fill or real_fill <= 0:
+                    real_fill = market_price
+
+                slippage = abs(real_fill - market_price) / market_price * 100.0
+                log.info(f"🎯 BITGET FILL PRICE VERIFIED: ${format_price(real_fill)} | Measured Slippage: {slippage:.3f}%")
+
                 return {
                     "order_id": order_id,
                     "symbol": trade_symbol,
-                    "original_symbol": symbol,
                     "notional_value": notional_value,
                     "contract_size": size_str,
                     "preset_tp": preset_tp,
                     "preset_sl": preset_sl,
-                    "real_fill_price": market_price,
+                    "real_fill_price": real_fill,
                     "pre_trade_balance": available_balance,
+                    "slippage_pct": round(slippage, 3),
                     "filled": True
                 }
             else:
-                log.error(f"❌ BITGET ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+                log.error(f"❌ BITGET UTA v3 ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
                 return None
     except Exception as e:
         log.error(f"❌ Error submitting Bitget order: {e}")
         return None
 
 async def close_bitget_live_position(session, symbol, direction, contract_size=""):
-    """Executes an Immediate Market Close Order."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
     close_side = "sell" if direction == "LONG" else "buy"
+    path = "/api/v3/trade/place-order"
 
-    if BITGET_DEMO_MODE:
-        path = "/api/v2/mix/order/place-order"
-        url = BITGET_V2_DEMO_PLACE_ORDER_URL
-        order_payload = {
-            "productType": DEMO_PRODUCT_TYPE,
-            "symbol": symbol,
-            "marginCoin": DEMO_MARGIN_COIN,
-            "side": close_side,
-            "orderType": "market",
-            "size": str(contract_size) if contract_size and contract_size != "0" else "1",
-            "reduceOnly": "yes"
-        }
-    else:
-        path = "/api/v3/trade/place-order"
-        url = BITGET_V3_PLACE_ORDER_URL
-        order_payload = {
-            "category": "USDT-FUTURES",
-            "symbol": symbol,
-            "marginCoin": "USDT",
-            "side": close_side,
-            "orderType": "market",
-            "qty": str(contract_size) if contract_size and contract_size != "0" else "1",
-            "reduceOnly": "no"
-        }
+    order_payload = {
+        "category": ORDER_CATEGORY,
+        "symbol": symbol,
+        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
+        "side": close_side,
+        "orderType": "market",
+        "qty": str(contract_size) if contract_size and contract_size != "0" else "1",
+        "reduceOnly": "yes"
+    }
 
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🛑 EXECUTING MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload.get('qty') or order_payload.get('size')}")
+    log.info(f"🛑 EXECUTING MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload['qty']}")
 
     try:
-        async with session.post(url, data=body_json, headers=headers, timeout=10) as r:
+        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -382,7 +366,6 @@ async def fetch_bitget_tickers(session):
     return []
 
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
-    """Fetches 60 1-MINUTE candles (OHLCV) for a single coin with retry handling."""
     async with semaphore:
         params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
         path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}&granularity=1m&limit=60"
@@ -404,26 +387,22 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
 
 async def process_coin_batch(batch_id, coin_list, session, semaphore):
     """
-    UP TO 5% VOLATILITY RANGE BREAKOUT & EXPANDING CANDLE EXHAUSTION RIDER ENGINE
-    -----------------------------------------------------------------------------
-    Evaluates 60 1-minute OHLCV candles across all Bitget Futures pairs:
-      1. Measures coin's dynamic range oscillation over N candles (12 to 40 candles).
-         - Accepts coins oscillating within up to 5.0% volatility range (adaptable per coin).
-      2. Detects the moment price snaps past the Range Boundary (High/Low):
-         - Long: Price pierces Range High while 1-minute candle sizes are EXPANDING (Candle 2 size > Candle 1 size),
-                 signaling sellers have TOTALLY EXHAUSTED and given up!
-         - Short: Price pierces Range Low while 1-minute candle sizes are EXPANDING (Candle 2 size > Candle 1 size),
-                  signaling buyers have TOTALLY EXHAUSTED and given up!
-      3. Verifies Volume Acceleration (Breakout volume >= 1.4x range average).
-      4. Calculates Exhaustion Breakout Score = (Expansion Rate) x (Candle Size Multiplier) x Volume Surge.
-      5. Ranks ALL market pairs to select the #1 OPPONENT EXHAUSTION BREAKOUT!
+    30+ HIGH-FLUCTUATION CANDLE & SINGLE-COLOR DOMINANCE ENGINE
+    ----------------------------------------------------------
+    1. Evaluates last 60 1-minute candles for each Bitget Futures pair.
+    2. Calculates per-minute candle fluctuation %: (High - Low) / Open * 100.
+    3. Counts how many 1m candles in the 60m window have fluctuation >= 0.10%.
+    4. STRICT FILTER: If active high-fluctuation candles < 30, EXCLUDE COIN IMMEDIATELY!
+    5. For qualified coins (>= 30 candles with >= 0.10% fluctuation):
+       - Counts total GREEN vs RED candles.
+       - Selects the dominant color (LONG if Green > Red, SHORT if Red > Green).
+       - Dominance Score = (Dominant Color Count) x (Avg Fluctuation %) x (Active Candle Count / 60).
+    6. Ranks ALL qualified coins across Bitget market pairs to pick the #1 SINGLE-COLOR DOMINANT MATCH!
     """
     batch_evaluated = []
 
     tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
-
-    RANGE_WINDOWS = range(12, 41)
 
     for idx, candle_data in enumerate(candles_results):
         if not candle_data or len(candle_data) < 60:
@@ -433,101 +412,71 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
 
-        # Reverse to chronological order (index 0 = 60m ago, index 59 = current 1m candle)
-        candles_60m = list(reversed(candle_data[:60]))
+        candles_60m = list(reversed(candle_data[:60]))  # Chronological index 0 to 59
 
-        best_coin_setup = None
-        highest_score = 0.0
+        # Calculate fluctuation per 1m candle
+        active_fluct_candles = 0
+        fluctuations = []
+        green_cnt = 0
+        red_cnt = 0
 
-        for n_candles in RANGE_WINDOWS:
-            range_candles = candles_60m[-n_candles - 2 : -2]  # Range up to 2 mins ago
-            breakout_candles = candles_60m[-2:]               # Recent 2 breakout 1m candles
+        for c in candles_60m:
+            c_open = float(c[1])
+            c_high = float(c[2])
+            c_low = float(c[3])
+            c_close = float(c[4])
 
-            if len(range_candles) < n_candles or len(breakout_candles) < 2:
+            if c_open <= 0:
                 continue
 
-            r_open = float(range_candles[0][1])
-            r_high = max(float(c[2]) for c in range_candles)
-            r_low = min(float(c[3]) for c in range_candles)
+            fluct_pct = ((c_high - c_low) / c_open) * 100.0
+            fluctuations.append(fluct_pct)
 
-            if r_open <= 0 or r_low <= 0:
-                continue
+            if fluct_pct >= MIN_FLUCTUATION_PCT:
+                active_fluct_candles += 1
 
-            # 1. COIN VOLATILITY RANGE (Oscillating up to 5.0% range)
-            range_span_pct = ((r_high - r_low) / r_open) * 100.0
-            if range_span_pct > 5.0 or range_span_pct < 0.20:
-                continue
+            if c_close > c_open:
+                green_cnt += 1
+            elif c_close < c_open:
+                red_cnt += 1
 
-            # 2. CANDLE EXPANSION CHECK (Candle 2 size > Candle 1 size = Fluctuations increasing, opponent giving up)
-            c1_open, c1_high, c1_low, c1_close = float(breakout_candles[0][1]), float(breakout_candles[0][2]), float(breakout_candles[0][3]), float(breakout_candles[0][4])
-            c2_open, c2_high, c2_low, c2_close = float(breakout_candles[1][1]), float(breakout_candles[1][2]), float(breakout_candles[1][3]), float(breakout_candles[1][4])
+        # STRICT FILTER: Exclude coins with LESS THAN 30 candles having >= 0.10% fluctuation
+        if active_fluct_candles < MIN_ACTIVE_CANDLES:
+            continue
 
-            c1_size = abs(c1_close - c1_open)
-            c2_size = abs(c2_close - c2_open)
+        avg_fluctuation = sum(fluctuations) / float(len(fluctuations)) if fluctuations else 0.0
 
-            avg_range_candle_size = sum(abs(float(c[4]) - float(c[1])) for c in range_candles) / float(n_candles)
+        # Determine dominant color direction
+        dominant_cnt = max(green_cnt, red_cnt)
+        opposing_cnt = min(green_cnt, red_cnt)
+        direction = "LONG" if green_cnt >= red_cnt else "SHORT"
 
-            # Expanding candle condition: Recent breakout candles are expanding in size vs consolidation
-            is_expanding_candles = (c2_size >= c1_size * 0.9) and (c2_size > avg_range_candle_size * 1.2)
+        # Calculate Color Dominance Score
+        dominance_score = dominant_cnt * avg_fluctuation * (active_fluct_candles / 60.0)
 
-            if not is_expanding_candles:
-                continue
-
-            # 3. VOLUME ACCELERATION
-            r_vol_avg = sum(float(c[5]) for c in range_candles) / float(n_candles)
-            b_vol_avg = (float(breakout_candles[0][5]) + float(breakout_candles[1][5])) / 2.0
-
-            if r_vol_avg <= 0:
-                continue
-
-            vol_surge = b_vol_avg / r_vol_avg
-            if vol_surge < 1.35:
-                continue
-
-            p_current = float(candles_60m[-1][4])
-
-            # 4. EXHAUSTION BREAKOUT OUTSIDE THE 5% RANGE
-            breakout_up_pct = ((p_current - r_high) / r_high) * 100.0
-            breakout_down_pct = ((r_low - p_current) / r_low) * 100.0
-
-            is_long_exhaustion = (p_current > r_high) and (breakout_up_pct >= 0.15)
-            is_short_exhaustion = (p_current < r_low) and (breakout_down_pct >= 0.15)
-
-            if is_long_exhaustion or is_short_exhaustion:
-                direction = "LONG" if is_long_exhaustion else "SHORT"
-                progress_pct = breakout_up_pct if is_long_exhaustion else breakout_down_pct
-
-                candle_expansion_ratio = c2_size / (avg_range_candle_size + 1e-6)
-                exhaustion_score = progress_pct * vol_surge * candle_expansion_ratio
-
-                if exhaustion_score > highest_score:
-                    highest_score = exhaustion_score
-                    best_coin_setup = {
-                        "batch_id": batch_id,
-                        "symbol": symbol,
-                        "vol_24h": vol_24h,
-                        "direction": direction,
-                        "n_candles": n_candles,
-                        "range_span_pct": range_span_pct,
-                        "progress_pct": progress_pct,
-                        "candle_expansion": candle_expansion_ratio,
-                        "vol_surge": vol_surge,
-                        "exhaustion_score": exhaustion_score,
-                        "current_price": p_current
-                    }
-
-        if best_coin_setup:
-            batch_evaluated.append(best_coin_setup)
+        batch_evaluated.append({
+            "batch_id": batch_id,
+            "symbol": symbol,
+            "vol_24h": vol_24h,
+            "direction": direction,
+            "active_fluct_candles": active_fluct_candles,
+            "dominant_cnt": dominant_cnt,
+            "opposing_cnt": opposing_cnt,
+            "avg_fluctuation": avg_fluctuation,
+            "dominance_score": dominance_score,
+            "current_price": float(candles_60m[-1][4])
+        })
 
     if not batch_evaluated:
         return []
 
-    # Sort candidates exchange-wide by highest Exhaustion Score
-    batch_evaluated.sort(key=lambda x: x["exhaustion_score"], reverse=True)
+    # Sort candidates exchange-wide by highest Color Dominance Score
+    batch_evaluated.sort(key=lambda x: x["dominance_score"], reverse=True)
     return [batch_evaluated[0]]
 
 async def main():
     live_streak = get_live_win_streak()
+    recent_loss_count = get_consecutive_losses()
 
     has_key = bool(BITGET_API_KEY)
     has_secret = bool(BITGET_SECRET_KEY)
@@ -535,9 +484,21 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE (S-USDT Air-Gapped | 5% Range Exhaustion Breakout | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
+    mode_status = f"🎮 BITGET DEMO MODE (UTA v3 | 30+ Fluctuation Color Dominance | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
 
-    log.info(f"🏆 Current BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
+    log.info(f"🏆 Current BITGET WIN STREAK: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_status} | API: {auth_status}")
+
+    # CIRCUIT BREAKER: BLOCK NEW TRADES IF 2 CONSECUTIVE LOSSES DETECTED
+    if recent_loss_count >= 2:
+        log.warning("====================================================================================================")
+        log.warning("⛔ CIRCUIT BREAKER ACTIVATED: ACCOUNT REDUCED ON 2 CONSECUTIVE TRADES!")
+        log.warning("🚫 NEW TRADES ARE BLOCKED TO PROTECT ACCOUNT FROM DRAWDOWN.")
+        log.warning("====================================================================================================")
+        payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False, "blocked": True}
+        headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
+        async with aiohttp.ClientSession() as session:
+            await session.post(CLOUDFLARE_URL, json=payload, headers=headers, timeout=15)
+        return
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
@@ -556,9 +517,9 @@ async def main():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ EXHAUSTION BREAKOUT TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
+            log.info(f"⏳ COLOR DOMINANCE TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
 
-            current_price = await fetch_single_price(session, symbol if not BITGET_DEMO_MODE else "BTCUSDT")
+            current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
                 curr_p_str = format_price(current_price)
                 if direction == "LONG":
@@ -589,7 +550,7 @@ async def main():
                 log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({SCAN_PRODUCT_TYPE} | 5% Volatility Range + Expanding Candle Exhaustion)...")
+            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({SCAN_PRODUCT_TYPE} | 60m Window | >=30 Candles with >=0.10% Fluctuation + Max Color Dominance)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -618,23 +579,23 @@ async def main():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 5% RANGE EXPANDING CANDLE EXHAUSTION CANDIDATES (COLLECTED: {len(all_batch_candidates)} TOP SETUPS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'RANGE (N)':<12} | {'RANGE SPAN':<12} | {'CANDLE EXPANSION':<18} | {'SCORE':<14}")
-            log.info("-" * 105)
+            log.info(f"📊 30+ HIGH-FLUCTUATION COLOR DOMINANCE CANDIDATES (COLLECTED: {len(all_batch_candidates)} QUALIFIED SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'0.1%+ CANDLES':<16} | {'COLOR BREAKDOWN':<20} | {'AVG FLUCT %':<12} | {'SCORE':<14}")
+            log.info("-" * 110)
 
             for cand in all_batch_candidates:
-                exp_str = f"{cand['candle_expansion']:.2f}x Body Size"
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['n_candles']} Candles    | {cand['range_span_pct']:.2f}%       | {exp_str:<18} | {cand['exhaustion_score']:.4f}")
+                color_str = f"{cand['dominant_cnt']} Dom / {cand['opposing_cnt']} Opp"
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | {cand['active_fluct_candles']}/60 Candles     | {color_str:<20} | {cand['avg_fluctuation']:.2f}%        | {cand['dominance_score']:.4f}")
 
             log.info("====================================================================================================")
 
             if all_batch_candidates:
-                all_batch_candidates.sort(key=lambda x: x["exhaustion_score"], reverse=True)
+                all_batch_candidates.sort(key=lambda x: x["dominance_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 EXHAUSTION BREAKOUT MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['exhaustion_score']:.4f} | Range Span: {best_signal['range_span_pct']:.2f}% | Candle Expansion: {best_signal['candle_expansion']:.2f}x | Progress: +{best_signal['progress_pct']:.2f}%)")
+                log.info(f"🔥 #1 COLOR DOMINANT MATCH: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['dominance_score']:.4f} | 0.1%+ Fluctuation Candles: {best_signal['active_fluct_candles']}/60 | Dominant Candles: {best_signal['dominant_cnt']} | Avg Fluct: {best_signal['avg_fluctuation']:.2f}%)")
 
-                # EXECUTE ORDER
+                # EXECUTE ORDER VIA BITGET V3 UTA API
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
@@ -651,7 +612,7 @@ async def main():
                         "direction": live_order_result.get("direction", best_signal["direction"]),
                         "is_paper": False,
                         "is_demo": BITGET_DEMO_MODE,
-                        "avg_fluctuation": round(best_signal["exhaustion_score"] * 10, 2),
+                        "avg_fluctuation": round(best_signal["dominance_score"] * 10, 2),
                         "current_price": final_entry_fill,
                         "account_equity": current_equity,
                         "pre_trade_balance": current_equity,
@@ -665,7 +626,7 @@ async def main():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
             else:
-                log.info(f"ℹ️ No active expanding candle range breakout candidates matched across pairs this scan run.")
+                log.info(f"ℹ️ No qualified candidates with >=30 high-fluctuation candles matched across pairs this scan run.")
                 payload = {
                     "symbol": "NONE",
                     "direction": "NONE",
