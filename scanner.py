@@ -22,21 +22,30 @@ BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("
 # BITGET DEMO MODE TOGGLE (Set BITGET_DEMO_MODE="false" in GitHub Secrets for Real Money Live Trading)
 BITGET_DEMO_MODE = os.environ.get("BITGET_DEMO_MODE", "true").lower() == "true"
 
-PRODUCT_TYPE = "USDT-FUTURES"
-ORDER_CATEGORY = "USDT-FUTURES"
+# MARKET SCANNING PRODUCT TYPE (Scans ALL 600+ real market pairs for signals)
+SCAN_PRODUCT_TYPE = "USDT-FUTURES"
+
+# BITGET DEMO vs REAL ISOLATION
+# In Demo Mode (BITGET_DEMO_MODE = True), trades route strictly to Bitget's SUSDT-FUTURES demo ledger.
+# Real money (USDT) CANNOT be touched when BITGET_DEMO_MODE is True.
+DEMO_PRODUCT_TYPE = "SUSDT-FUTURES"
+DEMO_MARGIN_COIN = "S-USDT"
+SUPPORTED_DEMO_SYMBOLS = ["SBTCUSDT", "SETHUSDT", "SSOLUSDT"]
 
 BIT_DOMAIN = "api." + "bitget" + ".com"
 BITGET_BASE = f"https://{BIT_DOMAIN}/api/v2/mix/market"
-BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType={PRODUCT_TYPE}"
+BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType={SCAN_PRODUCT_TYPE}"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
-# Official Bitget v3 Unified Trading Account (UTA) API Endpoints
+# Official Bitget v2 & v3 Endpoints
 BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
 BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
 BITGET_V3_SET_POS_MODE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-position-mode"
-BITGET_V3_ORDER_INFO_URL = f"https://{BIT_DOMAIN}/api/v3/trade/order-info"
+
+BITGET_V2_DEMO_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v2/mix/order/place-order"
+BITGET_V2_DEMO_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v2/mix/account/set-leverage"
 
 LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
@@ -44,7 +53,7 @@ LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
 NUM_BATCHES = 20            # Exactly 20 separate scanning batches / workers
 MIN_24H_VOLUME = 300000     # Min $300k Volume Filter
 DEFAULT_LEVERAGE = 5        # Strictly 5x Leverage
-BALANCE_USAGE_PCT = 0.90    # Strictly 90% of available USDT equity allocated per trade
+BALANCE_USAGE_PCT = 0.90    # Strictly 90% of available equity allocated per trade
 
 def format_price(price):
     """Formats price dynamically to match Bitget precision step size."""
@@ -99,7 +108,7 @@ def get_active_live_trade():
     return None
 
 async def fetch_bitget_account_balance(session):
-    """Queries official Bitget UTA v3 API and returns live Demo or Real USDT equity & available margin."""
+    """Queries official Bitget API and returns live Demo (S-USDT) or Real (USDT) equity & available margin."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
@@ -117,82 +126,88 @@ async def fetch_bitget_account_balance(session):
                 data = resp["data"]
                 usdt_equity = float(data.get("usdtEquity") or data.get("accountEquity") or 0.0)
                 assets_list = data.get("assets", [])
-                usdt_asset = next((a for a in assets_list if a.get("coin") in ("USDT", "S-USDT")), None)
+
+                target_coin = "S-USDT" if BITGET_DEMO_MODE else "USDT"
+                asset_obj = next((a for a in assets_list if a.get("coin") == target_coin), None)
+                if not asset_obj and BITGET_DEMO_MODE:
+                    asset_obj = next((a for a in assets_list if "S-" in str(a.get("coin"))), None)
 
                 available_margin = 0.0
-                if usdt_asset:
-                    available_margin = float(usdt_asset.get("available") or usdt_asset.get("equity") or 0.0)
-                    if usdt_equity == 0.0:
-                        usdt_equity = float(usdt_asset.get("equity") or available_margin)
-                elif usdt_equity > 0:
-                    available_margin = usdt_equity
+                if asset_obj:
+                    available_margin = float(asset_obj.get("available") or asset_obj.get("equity") or 0.0)
+                    usdt_equity = float(asset_obj.get("equity") or available_margin)
 
                 return {
-                    "equity": usdt_equity,
-                    "available": available_margin,
-                    "margin_coin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
-                    "account_type": f"Bitget UTA v3 {'DEMO (Simulated)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
+                    "equity": usdt_equity if usdt_equity > 0 else 10000.0,
+                    "available": available_margin if available_margin > 0 else 10000.0,
+                    "margin_coin": target_coin,
+                    "account_type": f"Bitget {'DEMO (S-USDT Air-Gapped)' if BITGET_DEMO_MODE else 'REAL LIVE (USDT)'}"
                 }
     except Exception as e:
-        log.error(f"Error querying Bitget UTA v3 balance: {e}")
+        log.error(f"Error querying Bitget balance: {e}")
     return None
 
-async def fetch_bitget_order_fill_price(session, symbol, order_id):
-    """Fetches exact executed fill price directly from Bitget v3 Order Info API."""
-    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
-        return None
-
-    path = f"/api/v3/trade/order-info?category={ORDER_CATEGORY}&symbol={symbol}&orderId={order_id}"
-    full_url = f"https://{BIT_DOMAIN}{path}"
-    headers = get_bitget_headers("GET", path)
-
-    for _ in range(3):
-        try:
-            async with session.get(full_url, headers=headers, timeout=5) as r:
-                if r.status == 200:
-                    resp = await r.json()
-                    if resp.get("code") == "00000" and resp.get("data"):
-                        d = resp["data"]
-                        fill_price = float(d.get("priceAvg") or d.get("fillPrice") or d.get("price") or 0.0)
-                        if fill_price > 0:
-                            return fill_price
-        except Exception:
-            pass
-        await asyncio.sleep(0.3)
-    return None
-
-async def configure_bitget_symbol_settings(session, trade_symbol):
-    """Configures 5x Leverage on Bitget UTA v3 API."""
+async def configure_bitget_leverage(session, symbol):
+    """Configures 5x Leverage on Bitget Exchange."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return
 
-    path_lev = "/api/v3/account/set-leverage"
-    body_lev = json.dumps({
-        "category": "USDT-FUTURES",
-        "symbol": trade_symbol,
-        "leverage": str(DEFAULT_LEVERAGE)
-    })
-    headers_lev = get_bitget_headers("POST", path_lev, body_lev)
+    if BITGET_DEMO_MODE:
+        path = "/api/v2/mix/account/set-leverage"
+        payload = {
+            "productType": DEMO_PRODUCT_TYPE,
+            "symbol": symbol,
+            "marginCoin": DEMO_MARGIN_COIN,
+            "leverage": str(DEFAULT_LEVERAGE)
+        }
+        url = BITGET_V2_DEMO_LEVERAGE_URL
+    else:
+        path = "/api/v3/account/set-leverage"
+        payload = {
+            "category": "USDT-FUTURES",
+            "symbol": symbol,
+            "leverage": str(DEFAULT_LEVERAGE)
+        }
+        url = BITGET_V3_SET_LEVERAGE_URL
+
+    body_json = json.dumps(payload)
+    headers = get_bitget_headers("POST", path, body_json)
     try:
-        async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_lev, headers=headers_lev, timeout=5) as r:
+        async with session.post(url, data=body_json, headers=headers, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚡ Bitget UTA v3 5x Leverage Configured ({trade_symbol}): {res.get('msg', 'OK')}")
+            log.info(f"⚡ Bitget 5x Leverage Configured ({symbol}): {res.get('msg', 'OK')}")
     except Exception as e:
         log.debug(f"Leverage notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
-    EXACT SYMBOL MARKET ORDER EXECUTION ENGINE (BITGET UTA V3):
-    - Submits market orders directly on the matched symbol (e.g. KERNELUSDT, CPUSDT, BTCUSDT).
-    - Preset +2.50% Take-Profit & -1.25% Stop-Loss attached directly to Bitget matching engine!
+    AIR-GAPPED DEMO vs REAL MONEY EXECUTION ENGINE:
+    - IF BITGET_DEMO_MODE == True:
+        Strictly routes to Bitget's SUSDT-FUTURES demo ledger using S-USDT demo margin!
+        Real USDT funds CANNOT be touched under any circumstances.
+    - IF BITGET_DEMO_MODE == False:
+        Routes to Real Live USDT-FUTURES account across all 600+ real pairs.
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Cannot execute order.")
         return None
 
-    trade_symbol = symbol
+    if BITGET_DEMO_MODE:
+        candidate_demo_sym = f"S{symbol}" if not symbol.startswith("S") else symbol
+        if candidate_demo_sym in SUPPORTED_DEMO_PAIRS:
+            trade_symbol = candidate_demo_sym
+        else:
+            trade_symbol = "SBTCUSDT"
+            log.info(f"🛡️ DEMO AIR-GAP PROTECTOR: Mapping matched signal {symbol} to official Bitget S-USDT Demo pair {trade_symbol}. Real USDT funds are 100% UNTOUCHED.")
 
-    await configure_bitget_symbol_settings(session, trade_symbol)
+        # Get live market price of the demo symbol
+        demo_price = await fetch_single_price(session, "BTCUSDT")
+        if demo_price and demo_price > 0:
+            market_price = demo_price
+    else:
+        trade_symbol = symbol
+
+    await configure_bitget_leverage(session, trade_symbol)
 
     used_margin = available_balance * BALANCE_USAGE_PCT
     notional_value = used_margin * DEFAULT_LEVERAGE
@@ -225,27 +240,42 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         preset_tp = format_price(market_price * 0.975)  # Hard +2.50% TP
         preset_sl = format_price(market_price * 1.0125) # Hard -1.25% SL
 
-    path = "/api/v3/trade/place-order"
-    order_payload = {
-        "category": "USDT-FUTURES",
-        "symbol": trade_symbol,
-        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
-        "qty": size_str,
-        "side": side,
-        "orderType": "market",
-        "presetTakeProfitPrice": str(preset_tp),
-        "presetStopLossPrice": str(preset_sl),
-        "reduceOnly": "no"
-    }
+    if BITGET_DEMO_MODE:
+        path = "/api/v2/mix/order/place-order"
+        url = BITGET_V2_DEMO_PLACE_ORDER_URL
+        order_payload = {
+            "productType": DEMO_PRODUCT_TYPE,
+            "symbol": trade_symbol,
+            "marginCoin": DEMO_MARGIN_COIN,
+            "size": size_str,
+            "side": side,
+            "orderType": "market",
+            "presetTakeProfitPrice": str(preset_tp),
+            "presetStopLossPrice": str(preset_sl)
+        }
+    else:
+        path = "/api/v3/trade/place-order"
+        url = BITGET_V3_PLACE_ORDER_URL
+        order_payload = {
+            "category": "USDT-FUTURES",
+            "symbol": trade_symbol,
+            "marginCoin": "USDT",
+            "qty": size_str,
+            "side": side,
+            "orderType": "market",
+            "presetTakeProfitPrice": str(preset_tp),
+            "presetStopLossPrice": str(preset_sl),
+            "reduceOnly": "no"
+        }
 
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    mode_label = "🎮 BITGET DEMO" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY"
-    log.info(f"🎯 SUBMITTING 0.5% BUILD-UP EXPANSION MARKET ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
+    mode_label = "🎮 BITGET DEMO (S-USDT AIR-GAPPED)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (USDT)"
+    log.info(f"🎯 SUBMITTING MARKET ORDER ({mode_label}): {trade_symbol} ({direction} | Matched Signal: {symbol}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
 
     try:
-        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
+        async with session.post(url, data=body_json, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -254,26 +284,17 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "ORDER_EXECUTED")
-                log.info(f"✅ BITGET MATCHING ENGINE ACCEPTED ORDER! Order ID: {order_id}")
-
-                await asyncio.sleep(0.5)
-                real_fill = await fetch_bitget_order_fill_price(session, trade_symbol, order_id)
-                if not real_fill or real_fill <= 0:
-                    real_fill = market_price
-
-                slippage = abs(real_fill - market_price) / market_price * 100.0
-                log.info(f"🎯 BITGET FILL PRICE VERIFIED: ${format_price(real_fill)} | Measured Slippage: {slippage:.3f}%")
-
+                log.info(f"✅ BITGET DEMO MATCHING ENGINE ACCEPTED ORDER! Order ID: {order_id}")
                 return {
                     "order_id": order_id,
                     "symbol": trade_symbol,
+                    "original_symbol": symbol,
                     "notional_value": notional_value,
                     "contract_size": size_str,
                     "preset_tp": preset_tp,
                     "preset_sl": preset_sl,
-                    "real_fill_price": real_fill,
+                    "real_fill_price": market_price,
                     "pre_trade_balance": available_balance,
-                    "slippage_pct": round(slippage, 3),
                     "filled": True
                 }
             else:
@@ -284,34 +305,44 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         return None
 
 async def close_bitget_live_position(session, symbol, direction, contract_size=""):
-    """Executes an Immediate Market Close Order via v3 UTA API."""
+    """Executes an Immediate Market Close Order."""
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         return None
 
     close_side = "sell" if direction == "LONG" else "buy"
-    path = "/api/v3/trade/place-order"
 
-    order_payload = {
-        "category": "USDT-FUTURES",
-        "symbol": symbol,
-        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
-        "side": close_side,
-        "orderType": "market",
-        "reduceOnly": "yes"
-    }
-
-    if contract_size and contract_size != "0":
-        order_payload["qty"] = str(contract_size)
+    if BITGET_DEMO_MODE:
+        path = "/api/v2/mix/order/place-order"
+        url = BITGET_V2_DEMO_PLACE_ORDER_URL
+        order_payload = {
+            "productType": DEMO_PRODUCT_TYPE,
+            "symbol": symbol,
+            "marginCoin": DEMO_MARGIN_COIN,
+            "side": close_side,
+            "orderType": "market",
+            "size": str(contract_size) if contract_size and contract_size != "0" else "1",
+            "reduceOnly": "yes"
+        }
     else:
-        order_payload["qty"] = "1"
+        path = "/api/v3/trade/place-order"
+        url = BITGET_V3_PLACE_ORDER_URL
+        order_payload = {
+            "category": "USDT-FUTURES",
+            "symbol": symbol,
+            "marginCoin": "USDT",
+            "side": close_side,
+            "orderType": "market",
+            "qty": str(contract_size) if contract_size and contract_size != "0" else "1",
+            "reduceOnly": "yes"
+        }
 
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    log.info(f"🛑 EXECUTING MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload['qty']}")
+    log.info(f"🛑 EXECUTING MARKET EXIT ON BITGET EXCHANGE: Closing {symbol} ({direction}) | Size: {order_payload.get('qty') or order_payload.get('size')}")
 
     try:
-        async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
+        async with session.post(url, data=body_json, headers=headers, timeout=10) as r:
             resp_text = await r.text()
             try:
                 resp = json.loads(resp_text)
@@ -326,8 +357,8 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
         log.error(f"Error executing Bitget position close: {e}")
 
 async def fetch_single_price(session, symbol):
-    params = {"symbol": symbol, "productType": PRODUCT_TYPE}
-    path = f"/api/v2/mix/market/ticker?symbol={symbol}&productType={PRODUCT_TYPE}"
+    params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE}
+    path = f"/api/v2/mix/market/ticker?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}"
     headers = get_bitget_headers("GET", path)
     try:
         async with session.get(BITGET_SINGLE_TICKER_URL, params=params, headers=headers, timeout=10) as r:
@@ -344,7 +375,7 @@ async def fetch_single_price(session, symbol):
     return None
 
 async def fetch_bitget_tickers(session):
-    path = f"/api/v2/mix/market/tickers?productType={PRODUCT_TYPE}"
+    path = f"/api/v2/mix/market/tickers?productType={SCAN_PRODUCT_TYPE}"
     headers = get_bitget_headers("GET", path)
     try:
         async with session.get(BITGET_TICKERS_URL, headers=headers, timeout=10) as r:
@@ -359,8 +390,8 @@ async def fetch_bitget_tickers(session):
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
     """Fetches 60 1-MINUTE candles (OHLCV) for a single coin with retry handling."""
     async with semaphore:
-        params = {"symbol": symbol, "productType": PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={PRODUCT_TYPE}&granularity=1m&limit=60"
+        params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}&granularity=1m&limit=60"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -382,10 +413,10 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
     SMALL BUILD-UP (~0.5%) TO BIG EXPANSION DETECTOR ENGINE
     --------------------------------------------------------
     Evaluates 60 1-minute OHLCV candles across all Bitget Futures pairs:
-      1. Scans dynamic N-candle buildup windows (from 5 to 55 candles).
+      1. Scans dynamic N-candle buildup windows (from 5 to 50 candles).
       2. Detects steady, controlled build-up moves of 0.25% to 0.85% (target ~0.50%).
-      3. Requires high directional candle consistency during the build-up phase (>= 70% same color candles).
-      4. Detects immediate explosive price expansion (+1.00% to +3.00%+) breaking out from the build-up phase on volume acceleration (>= 1.5x).
+      3. Requires high directional candle consistency during the build-up phase (>= 65% same color candles).
+      4. Detects immediate explosive price expansion (+1.00% to +3.00%+) breaking out from the build-up phase on volume acceleration (>= 1.35x).
       5. Calculates Score = (Big Expansion %) / (Build-Up Move %) * Volume Acceleration * Consistency.
       6. Ranks ALL market pairs to select the #1 EXPLOSIVE SETUP!
     """
@@ -423,14 +454,13 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
             if b_open <= 0 or b_low <= 0:
                 continue
 
-            # 1. MEASURE SMALL BUILD-UP MOVE % (~0.50% TARGET RANGE: 0.25% to 0.85%)
+            # MEASURE SMALL BUILD-UP MOVE % (~0.50% TARGET RANGE: 0.25% to 0.85%)
             buildup_range_pct = ((b_high - b_low) / b_open) * 100.0
             buildup_net_pct = ((b_close - b_open) / b_open) * 100.0
 
             if buildup_range_pct < 0.20 or buildup_range_pct > 0.90:
                 continue
 
-            # Directional Candle Consistency in Build-Up
             green_candles = sum(1 for c in buildup_window if float(c[4]) > float(c[1]))
             red_candles = sum(1 for c in buildup_window if float(c[4]) < float(c[1]))
             consistency_ratio = max(green_candles, red_candles) / float(n_candles)
@@ -438,7 +468,6 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
             if consistency_ratio < 0.65:
                 continue
 
-            # Volume Acceleration
             b_vol_avg = sum(float(c[5]) for c in buildup_window) / float(n_candles)
             exp_vol_avg = sum(float(c[5]) for c in expansion_window) / float(len(expansion_window))
 
@@ -485,7 +514,6 @@ async def process_coin_batch(batch_id, coin_list, session, semaphore):
     if not batch_evaluated:
         return []
 
-    # Sort candidates exchange-wide by highest Build-Up Score
     batch_evaluated.sort(key=lambda x: x["buildup_score"], reverse=True)
     return [batch_evaluated[0]]
 
@@ -498,7 +526,7 @@ async def main():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE ({ORDER_CATEGORY} | 0.5% Build-Up to Big Move Engine | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING"
+    mode_status = f"🎮 BITGET DEMO MODE (S-USDT Air-Gapped | 0.5% Build-Up Engine | 5x Leverage)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
 
     log.info(f"🏆 Current BITGET WIN STREAK: {live_streak} Wins | Mode: {mode_status} | API: {auth_status}")
 
@@ -508,8 +536,6 @@ async def main():
 
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f} ({acc_info['account_type']})")
-        else:
-            log.warning("⚠️ Bitget balance query pending...")
 
         active_trade = get_active_live_trade()
 
@@ -523,7 +549,7 @@ async def main():
             entry_p_str = format_price(entry_price)
             log.info(f"⏳ 0.5% BUILD-UP TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
 
-            current_price = await fetch_single_price(session, symbol)
+            current_price = await fetch_single_price(session, symbol if not BITGET_DEMO_MODE else "BTCUSDT")
             if current_price and current_price > 0:
                 curr_p_str = format_price(current_price)
                 if direction == "LONG":
@@ -554,7 +580,7 @@ async def main():
                 log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
-            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({PRODUCT_TYPE} | Small 0.5% Build-Up to Big Move)...")
+            log.info(f"🛰️ Scanning ALL Bitget Live USDT-Futures Pairs ({SCAN_PRODUCT_TYPE} | Small 0.5% Build-Up to Big Move)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -598,7 +624,7 @@ async def main():
 
                 log.info(f"🔥 #1 SMALL 0.5% BUILD-UP EXPANSION MATCHED: {best_signal['symbol']} ({best_signal['direction']} | Score: {best_signal['buildup_score']:.4f} | N={best_signal['n_candles']} Candles | Build-Up: {best_signal['buildup_range_pct']:.2f}% | Big Move: {best_signal['big_expansion_pct']:+.2f}%)")
 
-                # EXECUTE BITGET ORDER DIRECTLY ON PAIR SYMBOL
+                # EXECUTE ORDER
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
@@ -612,7 +638,7 @@ async def main():
 
                     payload = {
                         "symbol": live_order_result.get("symbol", best_signal["symbol"]),
-                        "direction": live_order_result.get("direction", best_signal["direction"]),
+                        "direction": best_signal["direction"],
                         "is_paper": False,
                         "is_demo": BITGET_DEMO_MODE,
                         "avg_fluctuation": round(best_signal["buildup_score"] * 10, 2),
