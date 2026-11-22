@@ -319,9 +319,8 @@ def clear_active_trade_state():
 
 def get_active_live_trade():
     """
-    AUTO-PURGE STALE GIT STATE:
-    If live_active_trade.json was checked into git or contains an old start_time (>60 mins ago),
-    automatically purge it on startup to prevent repeated execution loops!
+    Read persisted trade state without age-based deletion.
+    Exchange position checks in the main loop decide whether the state is still valid.
     """
     if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
         try:
@@ -851,15 +850,6 @@ async def run_scanner_iteration():
 
     log.info(f"🏆 Win Streak: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_label} | Keys: {auth_status}")
 
-    # CIRCUIT BREAKER GUARD
-    if recent_loss_count >= 2:
-        log.warning("====================================================================================================")
-        log.warning("⛔ AI CIRCUIT BREAKER ACTIVATED: 2 CONSECUTIVE LOSSES DETECTED!")
-        log.warning("🚫 PAUSING NEW TRADES UNTIL HUMAN SAFETY OVERRIDE TO PRESERVE ACCOUNT CAPITAL.")
-        log.warning("====================================================================================================")
-        log_ai_decision("GLOBAL", "CIRCUIT_BREAKER", "2 Consecutive Losses", "Paused New Trade Entries")
-        return
-
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
         if not acc_info:
@@ -1057,6 +1047,12 @@ async def run_scanner_iteration():
                 log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
+            # Circuit breaker blocks new entries only; existing positions must still be supervised.
+            if recent_loss_count >= 2:
+                log.warning("Circuit breaker: two consecutive losses. New entries paused; no position is open.")
+                log_ai_decision("GLOBAL", "CIRCUIT_BREAKER", "2 Consecutive Losses", "Paused new entries")
+                return
+
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
             log.info(f"🕯️ TRUTH-ENGINE SCANNER: Evaluating all 600+ Bitget pairs for OVER 42+ candles of SAME color in last 60m...")
