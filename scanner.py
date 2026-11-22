@@ -597,11 +597,46 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         log.error(f"❌ Error submitting Bitget order: {e}")
         return None
 
+async def fetch_current_positions(session, symbol=None, key_set=None):
+    key_set = key_set or get_next_bitget_key()
+    if not key_set:
+        return None
+    query_parts = [f"category={ORDER_CATEGORY}"]
+    if symbol:
+        query_parts.append(f"symbol={symbol}")
+    query = "&".join(query_parts)
+    path = f"/api/v3/position/current-position?{query}"
+    headers = get_bitget_headers("GET", path, key_set=key_set)
+    try:
+        async with session.get(f"https://{BIT_DOMAIN}{path}", headers=headers, timeout=8) as response:
+            payload = await response.json()
+            if response.status == 200 and payload.get("code") == "00000":
+                return (payload.get("data") or {}).get("list") or []
+            log.error(f"Bitget position query failed: {payload.get('msg')}")
+    except Exception as exc:
+        log.error(f"Bitget position query error: {exc}")
+    return None
+
 async def close_bitget_live_position(session, symbol, direction, contract_size=""):
     key_set = get_next_bitget_key()
     if not key_set:
-        return None
+        return False
 
+    positions = await fetch_current_positions(session, symbol=symbol, key_set=key_set)
+    if positions is None:
+        log.error(f"Cannot verify current {symbol} position; refusing an unverified close.")
+        return False
+    position = next((p for p in positions if p.get("symbol") == symbol and float(p.get("total") or 0) > 0), None)
+    if not position:
+        log.warning(f"No open {symbol} position remains on Bitget; treating it as already flat.")
+        return True
+
+    expected_side = "long" if direction == "LONG" else "short"
+    if position.get("posSide") and position.get("posSide") != expected_side:
+        log.error(f"Position side mismatch for {symbol}; refusing to close the wrong side.")
+        return False
+
+    live_qty = str(position.get("total"))
     close_side = "sell" if direction == "LONG" else "buy"
     path = "/api/v3/trade/place-order"
 
@@ -611,7 +646,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
         "side": close_side,
         "orderType": "market",
         "timeInForce": "ioc",
-        "qty": str(contract_size) if contract_size and contract_size != "0" else "1",
+        "qty": live_qty,
         "reduceOnly": "yes"
     }
 
@@ -630,12 +665,13 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
 
             if r.status == 200 and resp.get("code") == "00000":
                 close_order_id = (resp.get("data") or {}).get("orderId")
-                close_info = await fetch_bitget_order_info(session, close_order_id, key_set=key_set)
-                if close_info and close_info.get("orderStatus") == "filled":
-                    log.info(f"Bitget confirmed reduce-only close fill for {symbol}.")
-                    log_ai_decision(symbol, "POSITION_CLOSED", f"Close order {close_order_id} filled", "Active trade state may now be cleared")
+                await fetch_bitget_order_info(session, close_order_id, key_set=key_set)
+                remaining = await fetch_current_positions(session, symbol=symbol, key_set=key_set)
+                if remaining is not None and not any(p.get("symbol") == symbol and float(p.get("total") or 0) > 0 for p in remaining):
+                    log.info(f"Bitget position {symbol} is confirmed flat after reduce-only close.")
+                    log_ai_decision(symbol, "POSITION_CLOSED", f"Close order {close_order_id} completed; position endpoint confirms zero size", "Active trade state may now be cleared")
                     return True
-                log.error(f"Close order {close_order_id} was accepted but is not confirmed filled. Keeping active state.")
+                log.error(f"Bitget still reports an open {symbol} position after close request. Keeping state for retry.")
                 return False
             log.error(f"Bitget rejected close order: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
             return False
@@ -830,8 +866,31 @@ async def run_scanner_iteration():
             return
         log.info(f"💰 {mode_label} EQUITY: ${current_equity:.4f} {acc_info['margin_coin']} | Available Margin: ${available_margin:.4f}")
 
-        # Check and auto-purge stale git active trade state
+        # Exchange positions are authoritative; never open a second trade if state is missing.
         active_trade = get_active_live_trade()
+        exchange_positions = await fetch_current_positions(session)
+        if exchange_positions is None:
+            log.error("Could not verify open Bitget positions. Skipping all trade actions.")
+            return
+
+        nonzero_positions = [p for p in exchange_positions if float(p.get("total") or 0) > 0]
+        if active_trade:
+            matching_position = next(
+                (p for p in nonzero_positions
+                 if p.get("symbol") == active_trade.get("symbol")
+                 and p.get("posSide") == ("long" if active_trade.get("direction") == "LONG" else "short")),
+                None
+            )
+            if not matching_position:
+                log.error(f"Local state says {active_trade.get('symbol')} is active, but Bitget does not show the matching position. Clearing stale state and skipping this scan.")
+                clear_active_trade_state()
+                return
+            if len(nonzero_positions) != 1:
+                log.error("More than one Bitget futures position is open. Bot will not manage an ambiguous account.")
+                return
+        elif nonzero_positions:
+            log.error("Bitget has an open futures position but no matching bot state. Refusing to open another trade; manual reconciliation is required.")
+            return
 
         if active_trade:
             symbol = active_trade.get("symbol")
