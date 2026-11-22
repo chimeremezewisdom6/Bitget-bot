@@ -1,0 +1,34 @@
+name: Validate Bitget Demo Scanner
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile scanner
+        run: python -m py_compile scanner.py
+      - name: Verify demo-only strategy safeguards
+        run: |
+          python - <<'PY'
+          import scanner
+          assert scanner.BITGET_DEMO_MODE is True
+          assert scanner.MIN_24H_VOLUME == 500000
+          assert scanner.MIN_REQUIRED_COLOR_COUNT == 42
+          assert scanner.TARGET_COLOR_COUNT == 30
+          assert scanner.MAX_TRADE_DURATION_MIN == 54.0
+          assert scanner.DEFAULT_LEVERAGE == 5
+          print("Safety configuration checks passed.")
+          PY
