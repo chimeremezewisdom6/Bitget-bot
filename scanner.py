@@ -492,7 +492,7 @@ async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
             log.error(f"Leverage setup failed for {symbol} at {selected}x: {e}")
     return 0
 
-async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, dynamic_tp=0.0, dynamic_sl=0.0, sl_pct_val=1.5, dominant_color="GREEN", dominant_count=0):
+async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, dynamic_tp=0.0, dynamic_sl=0.0, sl_pct_val=1.5, dominant_color="GREEN", dominant_count=0, account_equity=None):
     key_set = get_next_bitget_key()
     trade_symbol = symbol
 
@@ -552,7 +552,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     log.info(f"   • 60m Candle Color:     {dominant_count} {dominant_color} Candles out of 60 (PASSED >42 THRESHOLD!)")
     log.info(f"   • Exit Target Rule:     Form 30+ {dominant_color} Candles SINCE ENTRY in < 54 Minutes")
     log.info(f"   • Dynamic Stop Loss:    ${preset_sl} (-{sl_pct_val:.2f}% Risk Floor)")
-    log.info(f"   • Account Opening Equity: ${available_balance:.4f} {margin_currency}")
+    log.info(f"   • Available Margin:         ${available_balance:.4f} {margin_currency}")
     log.info(f"   • Margin Used for Trade:  ${req_margin:.4f} {margin_currency} ({adaptive_leverage}x Leverage)")
     log.info(f"   • Remaining Free Margin:  ${available_balance - req_margin:.4f} {margin_currency}")
     log.info(f"   • Entry Fill Price:       ${format_price(market_price)}")
@@ -583,7 +583,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
                 filled_size_str = f"{filled_qty:.{quantity_precision}f}"
                 actual_notional = filled_qty * real_fill
-                save_active_trade_state(trade_symbol, direction, real_fill, filled_size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=False)
+                pre_trade_equity = float(account_equity) if account_equity is not None else float(available_balance)
+                save_active_trade_state(trade_symbol, direction, real_fill, filled_size_str, pre_trade_equity, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=False)
                 log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} matching {dominant_color} direction ({dominant_count} candles > 42)", "Active 54m / 30-Candle Color Supervision Engaged")
 
                 return {
@@ -593,7 +594,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                     "contract_size": filled_size_str,
                     "stop_loss": preset_sl,
                     "real_fill_price": real_fill,
-                    "pre_trade_balance": available_balance,
+                    "pre_trade_balance": pre_trade_equity,
                     "is_virtual": False,
                     "filled": True
                 }
@@ -878,7 +879,7 @@ async def run_scanner_iteration():
             matching_position = next(
                 (p for p in nonzero_positions
                  if p.get("symbol") == active_trade.get("symbol")
-                 and p.get("posSide") == ("long" if active_trade.get("direction") == "LONG" else "short")),
+                 and (not p.get("posSide") or p.get("posSide") == ("long" if active_trade.get("direction") == "LONG" else "short"))),
                 None
             )
             if not matching_position:
@@ -944,8 +945,8 @@ async def run_scanner_iteration():
                     log.info(f"   • Exit Price:                   ${curr_p_str} (PnL: {live_pnl_pct:.2f}%)")
                     log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
                     log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
-                    log.info(f"   • NET LOSS SUFFERED:            -${abs(pnl_cash):.4f} {margin_currency}")
-                    log.info(f"   • TRADE RESULT:                  ❌ LOSS (STREAK RESET TO 0)")
+                    log.info(f"   • NET RESULT:                   ${pnl_cash:+.4f} {margin_currency} ({'exchange verified' if pnl_verified else 'estimated'})")
+                    log.info(f"   • TRADE RESULT:                  {'WIN' if is_win else 'LOSS'} (streak: {new_streak})")
                     log.info("====================================================================================================")
                     clear_active_trade_state()
                     return
@@ -990,7 +991,7 @@ async def run_scanner_iteration():
                     log.info(f"   • Time Elapsed:                 {elapsed_minutes:.1f} Minutes (Target: < 54.0m)")
                     log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
                     log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
-                    log.info(f"   • ESTIMATED GROSS PNL:          ${pnl_cash:+.4f} {margin_currency} ({live_pnl_pct:+.2f}% price move)")
+                    log.info(f"   • NET RESULT:                   ${pnl_cash:+.4f} {margin_currency} ({'exchange verified' if pnl_verified else 'estimated'})")
                     log.info(f"   • TRADE RESULT:                  {'WIN' if is_win else 'LOSS'}")
                     log.info(f"   • WIN STREAK:                   {new_streak}")
                     log.info("====================================================================================================")
@@ -1098,7 +1099,8 @@ async def run_scanner_iteration():
                     dynamic_sl=best_signal["dynamic_sl"],
                     sl_pct_val=best_signal["sl_pct_val"],
                     dominant_color=best_signal["dominant_color"],
-                    dominant_count=best_signal["dominant_count"]
+                    dominant_count=best_signal["dominant_count"],
+                    account_equity=current_equity
                 )
 
                 if live_order_result and live_order_result.get("filled", False):
