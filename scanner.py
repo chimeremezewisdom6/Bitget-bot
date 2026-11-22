@@ -357,7 +357,7 @@ async def fetch_bitget_account_balance(session):
                 v_bal = usdt_equity if usdt_equity > 0 else (10000.0 if BITGET_DEMO_MODE else 1.17)
                 return {
                     "equity": v_bal,
-                    "available": available_margin if available_margin > 0 else v_bal * 0.90,
+                    "available": available_margin,
                     "margin_coin": margin_coin_type,
                     "account_type": f"Bitget UTA v3 {'DEMO (Key #' + str(key_set['id']) + ')' if BITGET_DEMO_MODE else 'REAL LIVE'}"
                 }
@@ -733,11 +733,6 @@ async def run_scanner_iteration():
         log.warning("🚫 PAUSING NEW TRADES UNTIL HUMAN SAFETY OVERRIDE TO PRESERVE ACCOUNT CAPITAL.")
         log.warning("====================================================================================================")
         log_ai_decision("GLOBAL", "CIRCUIT_BREAKER", "2 Consecutive Losses", "Paused New Trade Entries")
-        payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False, "blocked": True}
-        if CLOUDFLARE_URL:
-            headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
-            async with aiohttp.ClientSession() as session:
-                await session.post(CLOUDFLARE_URL, json=payload, headers=headers, timeout=15)
         return
 
     async with aiohttp.ClientSession() as session:
