@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "CYPHUSDT",
-  "direction": "LONG",
-  "mode": "REAL_LIVE_RED_CARD",
-  "entry_price": 1.5291,
-  "stop_loss": 1.5099862499999999,
-  "pre_trade_balance": 1.17216598,
-  "contract_size": "3.3",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795362629407
+  "active": false
 }
