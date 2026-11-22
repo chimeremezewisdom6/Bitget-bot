@@ -507,6 +507,26 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         log_ai_decision(symbol, "INVALID_CONTRACT_SIZE", "Could not calculate a valid quantity from Bitget contract rules", "Skipped; no order submitted")
         return None
     req_margin, exact_qty, actual_notional, adaptive_leverage = position_params
+    margin_currency = "USDT"
+
+    # Fail closed before any account-changing request.
+    if available_balance <= 0 or req_margin > (available_balance * 0.85):
+        log_ai_decision(symbol, "INSUFFICIENT_MARGIN", f"Required margin ${req_margin:.2f} exceeds safe available balance", "Skipped; no order submitted")
+        return None
+
+    quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
+    size_str = f"{exact_qty:.{quantity_precision}f}"
+    preset_sl = format_instrument_price(dynamic_sl, contract_rules, direction)
+
+    # A dry run must be strictly read-only: do not configure leverage or submit orders.
+    if DRY_RUN:
+        log.info(f"DRY RUN: {symbol} {direction}; qty={size_str}; notional approximately ${actual_notional:.4f}; leverage target at most {adaptive_leverage}x; stop={preset_sl}. No account changes or orders will be sent.")
+        return None
+
+    if not key_set:
+        log_ai_decision(symbol, "NO_API_KEY", "No Bitget API credentials configured", "Skipped; no order submitted")
+        return None
+
     configured_leverage = await configure_bitget_leverage(session, trade_symbol, leverage=adaptive_leverage, key_set=key_set)
     if not configured_leverage:
         log_ai_decision(symbol, "LEVERAGE_SETUP_FAILED", "Bitget rejected all safe leverage settings", "Skipped; no order submitted")
@@ -514,20 +534,9 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     adaptive_leverage = configured_leverage
     req_margin = actual_notional / adaptive_leverage
 
-    margin_currency = "USDT"
-
-    # Fail closed: never simulate a fill or open a shadow trade.
-    if available_balance <= 0 or req_margin > (available_balance * 0.85):
-        log_ai_decision(symbol, "INSUFFICIENT_MARGIN", f"Required margin ${req_margin:.2f} exceeds safe available balance", "Skipped; no order submitted")
-        return None
-
-    quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
-    size_str = f"{exact_qty:.{quantity_precision}f}"
-
-    preset_sl = format_instrument_price(dynamic_sl, contract_rules, direction)
-
-    if DRY_RUN:
-        log.info(f"DRY RUN: {symbol} {direction}; qty={size_str}; notional approximately ${actual_notional:.4f}; leverage at most {adaptive_leverage}x; stop={preset_sl}. No leverage change or order will be sent.")
+    # Re-check after the exchange selects the final leverage.
+    if req_margin > (available_balance * 0.85):
+        log_ai_decision(symbol, "INSUFFICIENT_MARGIN", f"Final required margin ${req_margin:.2f} exceeds safe available balance", "Skipped; no order submitted")
         return None
 
     if not key_set:
