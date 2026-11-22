@@ -10,11 +10,11 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION & AUTONOMOUS AI TRADER ENGINE WITH CLEAR NOTIFICATIONS
+# ZERO-CONFIGURATION & NO-PULLBACK AUTONOMOUS AI ENGINE
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v121_trade_notifier_scanner")
+log = logging.getLogger("v125_no_pullback_scanner")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -78,6 +78,9 @@ NUM_BATCHES = 20
 MIN_24H_VOLUME = 300000
 DEFAULT_LEVERAGE = 5
 
+# AI Minimum Acceptable Risk-to-Reward Ratio (Must be at least 1.5x Reward vs Risk)
+MIN_RISK_REWARD_RATIO = 1.5
+
 # ====================================================================================================
 # UTILITY & AUTONOMOUS DECISION LOGGING FUNCTIONS
 # ====================================================================================================
@@ -103,7 +106,7 @@ def log_ai_decision(symbol, decision_type, reason, action_taken):
         "reason": reason,
         "action": action_taken
     }
-    log.info(f"🧠 [AI TRADER DECISION] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
+    log.info(f"🧠 [NO-PULLBACK AI ENGINE] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
 
     logs = []
     if os.path.exists(AI_DECISION_LOG_FILE):
@@ -413,7 +416,7 @@ async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
     except Exception as e:
         log.debug(f"Leverage notice: {e}")
 
-async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, ai_tp_target=0.03, ai_sl_floor=0.015):
+async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, dynamic_tp=0.0, dynamic_sl=0.0, rr_ratio=2.0, red_to_green_flips=0, green_to_red_flips=0):
     key_set = get_next_bitget_key()
     trade_symbol = symbol
 
@@ -425,14 +428,14 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     # Virtual Shadow Tracker if required margin exceeds balance
     if req_margin > (available_balance * 0.85):
         log_ai_decision(symbol, "MARGIN_SHADOW_FALLBACK", f"Required margin ${req_margin:.2f} > Balance limit", "Opened Virtual Shadow Trade Tracker")
-        save_active_trade_state(symbol, direction, market_price, exact_qty, available_balance, ai_tp_target, ai_sl_floor, adaptive_leverage, is_virtual=True)
+        save_active_trade_state(symbol, direction, market_price, exact_qty, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, is_virtual=True)
         return {
             "order_id": "VIRTUAL_SHADOW_ORDER",
             "symbol": trade_symbol,
             "notional_value": actual_notional,
             "contract_size": str(exact_qty),
-            "preset_tp": format_price(market_price * (1.0 + ai_tp_target)),
-            "preset_sl": format_price(market_price * (1.0 - ai_sl_floor)),
+            "preset_tp": format_price(dynamic_tp),
+            "preset_sl": format_price(dynamic_sl),
             "real_fill_price": market_price,
             "pre_trade_balance": available_balance,
             "is_virtual": True,
@@ -450,12 +453,12 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     else:
         size_str = f"{exact_qty:.2f}"
 
-    preset_tp = format_price(market_price * (1.0 + ai_tp_target)) if direction == "LONG" else format_price(market_price * (1.0 - ai_tp_target))
-    preset_sl = format_price(market_price * (1.0 - ai_sl_floor)) if direction == "LONG" else format_price(market_price * (1.0 + ai_sl_floor))
+    preset_tp = format_price(dynamic_tp)
+    preset_sl = format_price(dynamic_sl)
 
     if not key_set:
         log_ai_decision(symbol, "NO_API_KEY_FALLBACK", "No active Pollination Key set provided", "Executing Virtual AI Trade")
-        save_active_trade_state(symbol, direction, market_price, size_str, available_balance, ai_tp_target, ai_sl_floor, adaptive_leverage, is_virtual=True)
+        save_active_trade_state(symbol, direction, market_price, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, is_virtual=True)
         return {
             "order_id": "VIRTUAL_SHADOW_ORDER",
             "symbol": trade_symbol,
@@ -490,13 +493,15 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     log.info("====================================================================================================")
     log.info(f"🚨 TRADE IS HAPPENING NOW! ({mode_label})")
     log.info(f"   • Symbol Pair Opened:   {trade_symbol} ({direction})")
+    log.info(f"   • Risk-to-Reward Ratio: {rr_ratio:.2f}:1 (Passed AI Risk Filter)")
+    log.info(f"   • 60-Candle Flips:      Red-to-Green: {red_to_green_flips} Flips | Green-to-Red: {green_to_red_flips} Flips")
     log.info(f"   • Account Opening Equity: ${available_balance:.4f} {margin_currency}")
     log.info(f"   • Margin Used for Trade:  ${req_margin:.4f} {margin_currency} ({adaptive_leverage}x Leverage)")
     log.info(f"   • Remaining Free Margin:  ${available_balance - req_margin:.4f} {margin_currency}")
     log.info(f"   • Entry Fill Price:       ${format_price(market_price)}")
     log.info(f"   • Order Position Size:    {size_str} (${actual_notional:.2f} Notional Value)")
-    log.info(f"   • Initial AI Target TP:   ${preset_tp} (+{ai_tp_target*100:.2f}%)")
-    log.info(f"   • Initial AI Risk SL:     ${preset_sl} (-{ai_sl_floor*100:.2f}%)")
+    log.info(f"   • Dynamic Target TP:      ${preset_tp} (Structure Projection Target)")
+    log.info(f"   • Dynamic Risk SL Floor:  ${preset_sl} (60m Support Floor)")
     log.info("====================================================================================================")
 
     try:
@@ -516,8 +521,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 if not real_fill or real_fill <= 0:
                     real_fill = market_price
 
-                save_active_trade_state(trade_symbol, direction, real_fill, size_str, available_balance, ai_tp_target, ai_sl_floor, adaptive_leverage, is_virtual=False)
-                log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} with {adaptive_leverage}x leverage", "Active AI Position Supervision Engaged")
+                save_active_trade_state(trade_symbol, direction, real_fill, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, is_virtual=False)
+                log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} with {adaptive_leverage}x leverage (R:R Ratio {rr_ratio:.2f}:1)", "Active AI Position Supervision Engaged")
 
                 return {
                     "order_id": order_id,
@@ -535,7 +540,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 err_msg = f"Code: {resp.get('code')} | Msg: {resp.get('msg')}"
                 log.error(f"❌ BITGET ORDER REJECTED: {err_msg}")
                 log_ai_decision(trade_symbol, "ORDER_REJECTED", err_msg, "Switched to Virtual Shadow Trade Tracker")
-                save_active_trade_state(symbol, direction, market_price, size_str, available_balance, ai_tp_target, ai_sl_floor, adaptive_leverage, is_virtual=True)
+                save_active_trade_state(symbol, direction, market_price, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, is_virtual=True)
                 return {
                     "order_id": "VIRTUAL_SHADOW_ORDER",
                     "symbol": trade_symbol,
@@ -592,7 +597,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
         log.error(f"Error executing Bitget position close: {e}")
 
 # ====================================================================================================
-# MARKET DATA FETCHERS & RECENT TRAJECTORY ANALYZER
+# MARKET DATA FETCHERS & 60-CANDLE PRICE STRUCTURE CALCULATOR
 # ====================================================================================================
 
 async def fetch_single_price(session, symbol):
@@ -641,7 +646,7 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            if candles and len(candles) >= 15:
+                            if candles and len(candles) >= 30:
                                 return candles
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
@@ -650,17 +655,17 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# AUTONOMOUS AI MARKET SCANNER & PATTERN DISCOVERY
+# 60-CANDLE PRICE STRUCTURE & NO-PULLBACK RISK-TO-REWARD ENGINE
 # ====================================================================================================
 
-async def process_autonomous_ai_market_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
+async def process_structure_tp_sl_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
     batch_evaluated = []
 
     tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
 
     for idx, candle_data in enumerate(candles_results):
-        if not candle_data or len(candle_data) < 15:
+        if not candle_data or len(candle_data) < 30:
             continue
 
         coin = coin_list[idx]
@@ -670,40 +675,70 @@ async def process_autonomous_ai_market_batch(batch_id, coin_list, session, semap
         if symbol == last_symbol and last_won:
             continue
 
-        candles_chrono = list(reversed(candle_data[:20]))
-        close_prices = [float(c[4]) for c in candles_chrono]
-        high_prices = [float(c[2]) for c in candles_chrono]
-        low_prices = [float(c[3]) for c in candles_chrono]
+        candles_chrono = list(reversed(candle_data[:60]))
 
-        current_price = close_prices[-1]
-        prev_price = close_prices[-2]
-        recent_low = min(low_prices)
-        recent_high = max(high_prices)
+        candle_colors = []
+        for c in candles_chrono:
+            open_p = float(c[1])
+            close_p = float(c[4])
+            color = "GREEN" if close_p >= open_p else "RED"
+            candle_colors.append(color)
 
-        if current_price <= 0 or recent_low <= 0 or current_price <= prev_price:
+        red_to_green_flips = 0
+        green_to_red_flips = 0
+
+        for i in range(1, len(candle_colors)):
+            if candle_colors[i-1] == "RED" and candle_colors[i] == "GREEN":
+                red_to_green_flips += 1
+            elif candle_colors[i-1] == "GREEN" and candle_colors[i] == "RED":
+                green_to_red_flips += 1
+
+        current_price = float(candles_chrono[-1][4])
+        prev_price = float(candles_chrono[-2][4])
+        low_60m = min(float(c[3]) for c in candles_chrono)
+        high_60m = max(float(c[2]) for c in candles_chrono)
+
+        if current_price <= 0 or low_60m <= 0 or current_price <= prev_price:
             continue
 
-        volatility_pct = ((recent_high - recent_low) / recent_low) * 100.0
-        rebound_impulse_pct = ((current_price - recent_low) / recent_low) * 100.0
+        latest_flip_is_red_to_green = (candle_colors[-2] == "RED" and candle_colors[-1] == "GREEN") or (candle_colors[-3] == "RED" and candle_colors[-1] == "GREEN")
 
-        if rebound_impulse_pct >= 0.80 and volatility_pct >= 1.2:
-            velocity_3m = ((current_price - close_prices[-4]) / close_prices[-4]) * 100.0 if len(close_prices) >= 4 else 0.5
-            confidence_score = min(99.0, 80.0 + (rebound_impulse_pct * 4.0) + (velocity_3m * 5.0))
+        if latest_flip_is_red_to_green:
+            volatility_pct = ((high_60m - low_60m) / low_60m) * 100.0
+            rebound_impulse_pct = ((current_price - low_60m) / low_60m) * 100.0
 
-            ai_tp_target = max(0.025, min(0.080, rebound_impulse_pct * 0.015))
-            ai_sl_floor = max(0.010, min(0.025, volatility_pct * 0.005))
+            # 1. Dynamic SL = Place directly below the 60m lowest low wick
+            dynamic_sl = low_60m * 0.998
+            potential_risk = max(0.0001, current_price - dynamic_sl)
 
-            if confidence_score >= 85.0:
+            # 2. Dynamic TP Target
+            dynamic_tp = max(high_60m, current_price + (potential_risk * 2.0))
+            potential_reward = max(0.0001, dynamic_tp - current_price)
+
+            # 3. AI RISK-TO-REWARD RATIO CHECK
+            rr_ratio = potential_reward / potential_risk
+
+            # REJECT TRADE IF STOP LOSS IS TOO FAR AWAY AND TAKE PROFIT IS TOO CLOSE (R:R < 1.5:1)
+            if rr_ratio < MIN_RISK_REWARD_RATIO:
+                log_ai_decision(symbol, "REJECTED_BAD_RR", f"R:R Ratio {rr_ratio:.2f}:1 < {MIN_RISK_REWARD_RATIO:.1f}:1 (SL too far away, TP too close)", "Trade Skipped for Risk Protection")
+                continue
+
+            confidence_score = min(99.0, 75.0 + (red_to_green_flips * 2.5) + (rebound_impulse_pct * 5.0))
+
+            if confidence_score >= 80.0:
                 batch_evaluated.append({
                     "batch_id": batch_id,
                     "symbol": symbol,
                     "vol_24h": vol_24h,
                     "direction": "LONG",
+                    "red_to_green_flips": red_to_green_flips,
+                    "green_to_red_flips": green_to_red_flips,
                     "rebound_impulse_pct": rebound_impulse_pct,
                     "volatility_pct": volatility_pct,
                     "confidence_score": confidence_score,
-                    "ai_tp_target": ai_tp_target,
-                    "ai_sl_floor": ai_sl_floor,
+                    "dynamic_tp": dynamic_tp,
+                    "dynamic_sl": dynamic_sl,
+                    "rr_ratio": rr_ratio,
                     "current_price": current_price
                 })
 
@@ -767,7 +802,7 @@ async def run_scanner_iteration():
 
             entry_p_str = format_price(entry_price)
             trade_type_label = "🔮 VIRTUAL SHADOW TRADE" if is_virtual else f"🎮 LIVE {margin_currency} DEMO TRADE"
-            log.info(f"⏳ {trade_type_label} SUPERVISION ({symbol}): Entry @ ${entry_p_str} | Opening Equity: ${pre_trade_balance:.4f} {margin_currency} | Peak: ${format_price(peak_price)} | AI TP: ${format_price(ai_target_tp)} | AI SL: ${format_price(ai_floor_sl)}")
+            log.info(f"⏳ {trade_type_label} SUPERVISION ({symbol}): Entry @ ${entry_p_str} | Opening Equity: ${pre_trade_balance:.4f} {margin_currency} | Peak: ${format_price(peak_price)} | Self-Calculated TP: ${format_price(ai_target_tp)} | Dynamic SL: ${format_price(ai_floor_sl)}")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
@@ -781,39 +816,14 @@ async def run_scanner_iteration():
                     lowest_price = current_price
                     update_active_trade_dynamics(symbol, new_lowest=lowest_price)
 
-                # RULE A: RIDING STRONG WINNERS
+                # RULE A: RIDING STRONG WINNERS (Dynamic TP Expansion)
                 if current_price >= (ai_target_tp * 0.995) and live_pnl_pct >= 2.0:
                     new_expanded_tp = ai_target_tp * 1.02
                     update_active_trade_dynamics(symbol, new_tp=new_expanded_tp)
                     log_ai_decision(symbol, "DYNAMIC_TP_EXPANSION", f"Surging momentum (PnL: +{live_pnl_pct:.2f}%). Raising TP target", f"Expanded Target to ${format_price(new_expanded_tp)}")
                     ai_target_tp = new_expanded_tp
 
-                # RULE B: EXHAUSTION EXIT / TRAILING PROFIT LOCK
-                pullback_from_peak_pct = ((peak_price - current_price) / peak_price) * 100.0 if peak_price > 0 else 0.0
-                if live_pnl_pct >= 1.20 and pullback_from_peak_pct >= 0.75:
-                    log_ai_decision(symbol, "EXHAUSTION_PROFIT_LOCK", f"Price pulled back {pullback_from_peak_pct:.2f}% from peak ${format_price(peak_price)}", "Closing Trade Early to Lock Profit")
-
-                    pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
-                    closing_equity = pre_trade_balance + pnl_cash
-
-                    if not is_virtual:
-                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
-
-                    update_virtual_demo_balance(closing_equity)
-                    new_streak = update_live_win_streak(True)
-                    record_trade_history(symbol, True, live_pnl_pct * leverage, pnl_cash)
-
-                    log.info("====================================================================================================")
-                    log.info(f"🏁 TRADE CLOSED & AUDITED! ({symbol})")
-                    log.info(f"   • Trade Opening Account Balance: ${pre_trade_balance:.4f} {margin_currency}")
-                    log.info(f"   • Trade Closing Account Balance: ${closing_equity:.4f} {margin_currency}")
-                    log.info(f"   • NET PROFIT GAINED:            +${pnl_cash:.4f} {margin_currency} (+{live_pnl_pct*leverage:.2f}%)")
-                    log.info(f"   • TRADE RESULT:                  🏆 WIN (TRAILING PROFIT LOCKED IN)")
-                    log.info(f"   • NEW WIN STREAK:                {new_streak} WINS IN A ROW")
-                    log.info("====================================================================================================")
-
-                    clear_active_trade_state()
-                    return
+                # NO PULLBACK EXIT: PULLBACK EXIT TRIGGER IS REMOVED! TRADES RUN FREELY TO FULL TARGET OR RISK STRUCTURE.
 
                 # RULE C: IMPATIENT EARLY CUT (Cutting Weak / Dying Trades)
                 if live_pnl_pct <= -0.80 and current_price < lowest_price * 1.002:
@@ -841,7 +851,7 @@ async def run_scanner_iteration():
                     clear_active_trade_state()
                     return
 
-                # RULE D: FAILSAFE BOUNDARY CHECK
+                # RULE D: FAILSAFE BOUNDARY CHECK (Full Target / SL Hit)
                 is_win_hit = current_price >= ai_target_tp if direction == "LONG" else current_price <= ai_target_tp
                 is_loss_hit = current_price <= ai_floor_sl if direction == "LONG" else current_price >= ai_floor_sl
 
@@ -895,7 +905,7 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info(f"🧠 AUTONOMOUS AI ENGINE: Scanning all 600+ Bitget pairs for High-Impulse Momentum & Velocity...")
+            log.info(f"🕯️ NO-PULLBACK AI ENGINE: Evaluating 60-candle price structures for R:R >= 1.5:1...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -913,7 +923,7 @@ async def run_scanner_iteration():
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-            batch_tasks = [process_autonomous_ai_market_batch(i + 1, batch, session, semaphore, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
+            batch_tasks = [process_structure_tp_sl_batch(i + 1, batch, session, semaphore, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
             batch_results = await asyncio.gather(*batch_tasks)
 
             all_batch_candidates = []
@@ -924,7 +934,7 @@ async def run_scanner_iteration():
                 all_batch_candidates.sort(key=lambda x: x["confidence_score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 AUTONOMOUS AI MATCH: {best_signal['symbol']} (Confidence: {best_signal['confidence_score']:.1f}% | Impulse: +{best_signal['rebound_impulse_pct']:.2f}% | Volatility: {best_signal['volatility_pct']:.2f}%)")
+                log.info(f"🔥 #1 APPROVED R:R MATCH: {best_signal['symbol']} (R:R Ratio: {best_signal['rr_ratio']:.2f}:1 | TP: ${format_price(best_signal['dynamic_tp'])} | SL: ${format_price(best_signal['dynamic_sl'])})")
 
                 live_order_result = await place_bitget_live_order(
                     session=session,
@@ -934,8 +944,11 @@ async def run_scanner_iteration():
                     available_balance=current_equity,
                     confidence_score=best_signal["confidence_score"],
                     volatility_pct=best_signal["volatility_pct"],
-                    ai_tp_target=best_signal["ai_tp_target"],
-                    ai_sl_floor=best_signal["ai_sl_floor"]
+                    dynamic_tp=best_signal["dynamic_tp"],
+                    dynamic_sl=best_signal["dynamic_sl"],
+                    rr_ratio=best_signal["rr_ratio"],
+                    red_to_green_flips=best_signal["red_to_green_flips"],
+                    green_to_red_flips=best_signal["green_to_red_flips"]
                 )
 
                 if live_order_result and live_order_result.get("filled", False):
@@ -960,7 +973,7 @@ async def run_scanner_iteration():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
             else:
-                log.info("ℹ️ No altcoins currently matched autonomous AI trading criteria (High Impulse + High Confidence).")
+                log.info("ℹ️ No altcoins currently passed AI Risk-to-Reward Ratio filter (Min 1.5:1 R:R required).")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
 
         if CLOUDFLARE_URL:
@@ -1007,7 +1020,7 @@ async def run_scanner_iteration():
 
 async def main():
     if CONTINUOUS_247_LOOP:
-        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND Autonomous AI Loop ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND No-Pullback AI Loop ({len(BITGET_KEYS)} Pollination Keys)...")
         while True:
             try:
                 await run_scanner_iteration()
@@ -1015,7 +1028,7 @@ async def main():
                 log.error(f"Error during scan iteration: {e}")
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
     else:
-        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan Autonomous Execution ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan No-Pullback AI Execution ({len(BITGET_KEYS)} Pollination Keys)...")
         await run_scanner_iteration()
 
 if __name__ == "__main__":
