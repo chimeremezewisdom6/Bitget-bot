@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "EVAAUSDT",
+  "direction": "LONG",
+  "mode": "BITGET_DEMO_RED_CARD",
+  "entry_price": 4.1345,
+  "stop_loss": 4.08281875,
+  "pre_trade_balance": 1.17216598,
+  "contract_size": "1.3",
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795356036284
 }
