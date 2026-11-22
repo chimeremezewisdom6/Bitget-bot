@@ -1,4 +1,6 @@
+import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 import scanner
 
@@ -59,6 +61,25 @@ class ScannerSafetyTests(unittest.TestCase):
         self.assertEqual(
             scanner.format_instrument_price(1.234, self.rules, "SHORT"), "1.24"
         )
+
+    def test_dry_run_never_attempts_to_change_leverage(self):
+        async def run_dry_order():
+            with patch.object(scanner, "DRY_RUN", True), \
+                 patch.object(scanner, "fetch_contract_rules", new_callable=AsyncMock) as rules_mock, \
+                 patch.object(scanner, "configure_bitget_leverage", new_callable=AsyncMock) as leverage_mock:
+                rules_mock.return_value = self.rules
+                result = await scanner.place_bitget_live_order(
+                    session=None,
+                    symbol="TESTUSDT",
+                    direction="LONG",
+                    market_price=2.0,
+                    available_balance=100.0,
+                    dynamic_sl=1.90,
+                )
+                self.assertIsNone(result)
+                leverage_mock.assert_not_awaited()
+
+        asyncio.run(run_dry_order())
 
 
 if __name__ == "__main__":
