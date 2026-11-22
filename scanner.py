@@ -53,8 +53,8 @@ def get_next_bitget_key():
     return key_set
 
 # FORCE DEMO MODE DEFAULT TO TRUE TO PROTECT REAL ACCOUNT EQUITY
-BITGET_DEMO_ENV = os.environ.get("BITGET_DEMO_MODE", "true").lower()
-BITGET_DEMO_MODE = BITGET_DEMO_ENV != "false"
+# HARD LOCK: this repository is demo-only. Environment variables cannot enable live trading.
+BITGET_DEMO_MODE = True
 
 SCAN_PRODUCT_TYPE = "USDT-FUTURES"
 ORDER_CATEGORY = "USDT-FUTURES"
@@ -77,7 +77,7 @@ VIRTUAL_DEMO_BAL_FILE = "virtual_demo_balance.json"
 AI_DECISION_LOG_FILE = "ai_trader_decisions.json"
 
 NUM_BATCHES = 20
-MIN_24H_VOLUME = 300000
+MIN_24H_VOLUME = 500000
 DEFAULT_LEVERAGE = 5
 
 MIN_REQUIRED_COLOR_COUNT = 42    # Must have over 42 candles of SAME color out of 60 to enter
@@ -536,20 +536,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
             else:
                 err_msg = f"Code: {resp.get('code')} | Msg: {resp.get('msg')}"
                 log.error(f"❌ BITGET ORDER REJECTED: {err_msg}")
-                log_ai_decision(trade_symbol, "ORDER_REJECTED", err_msg, "Switched to Virtual Shadow Trade Tracker")
-                save_active_trade_state(symbol, direction, market_price, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=True)
-                return {
-                    "order_id": "VIRTUAL_SHADOW_ORDER",
-                    "symbol": trade_symbol,
-                    "notional_value": actual_notional,
-                    "contract_size": size_str,
-                    "preset_tp": preset_tp,
-                    "preset_sl": preset_sl,
-                    "real_fill_price": market_price,
-                    "pre_trade_balance": available_balance,
-                    "is_virtual": True,
-                    "filled": True
-                }
+                log_ai_decision(trade_symbol, "ORDER_REJECTED", err_msg, "No trade opened; scanner remains flat")
+                return None
     except Exception as e:
         log.error(f"❌ Error submitting Bitget order: {e}")
         return None
@@ -634,8 +622,8 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
     """Fetches exactly 60 1-minute candles for full 60-candle window analysis."""
     async with semaphore:
         key_set = get_next_bitget_key()
-        params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}&granularity=1m&limit=60"
+        params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "61"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}&granularity=1m&limit=61"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path, key_set=key_set)
             try:
@@ -644,8 +632,11 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            if candles and len(candles) >= 30:
-                                return candles
+                            # Exclude the currently forming 1-minute candle.
+                            now_ms = int(time.time() * 1000)
+                            completed = [c for c in candles if len(c) >= 5 and int(float(c[0])) + 60000 <= now_ms]
+                            if len(completed) >= 60:
+                                return completed[:60]
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
             except Exception:
@@ -663,7 +654,7 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
     candles_results = await asyncio.gather(*tasks)
 
     for idx, candle_data in enumerate(candles_results):
-        if not candle_data or len(candle_data) < 30:
+        if not candle_data or len(candle_data) < 60:
             continue
 
         coin = coin_list[idx]
@@ -736,7 +727,7 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
     if not batch_evaluated:
         return []
 
-    batch_evaluated.sort(key=lambda x: x["dominant_count"], reverse=True)
+    batch_evaluated.sort(key=lambda x: (x["dominant_count"], x["vol_24h"]), reverse=True)
     return [batch_evaluated[0]]
 
 # ====================================================================================================
@@ -951,7 +942,7 @@ async def run_scanner_iteration():
                 all_batch_candidates.extend(batch_cand)
 
             if all_batch_candidates:
-                all_batch_candidates.sort(key=lambda x: x["dominant_count"], reverse=True)
+                all_batch_candidates.sort(key=lambda x: (x["dominant_count"], x["vol_24h"]), reverse=True)
                 best_signal = all_batch_candidates[0]
 
                 log.info(f"🔥 #1 APPROVED 42+ CANDLE COLOR MATCH: {best_signal['symbol']} ({best_signal['dominant_count']}/60 {best_signal['dominant_color']} Candles | Direction: {best_signal['direction']} | Dynamic SL: -{best_signal['sl_pct_val']:.2f}%)")
