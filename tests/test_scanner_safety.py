@@ -53,6 +53,12 @@ class ScannerSafetyTests(unittest.TestCase):
         self.assertEqual(leverage, 3)
         self.assertAlmostEqual(margin, notional / leverage)
 
+    def test_leverage_fallback_only_steps_down(self):
+        self.assertEqual(scanner.safe_leverage_attempts(1), [1])
+        self.assertEqual(scanner.safe_leverage_attempts(2), [2, 1])
+        self.assertEqual(scanner.safe_leverage_attempts(3), [3, 2, 1])
+        self.assertEqual(scanner.safe_leverage_attempts(5), [5, 3, 2, 1])
+
     def test_contract_max_leverage_is_never_exceeded(self):
         rules = dict(self.rules, maxLeverage="1")
         result = scanner.calculate_ai_position_parameters(
