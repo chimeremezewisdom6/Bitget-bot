@@ -398,9 +398,14 @@ async def fetch_bitget_account_balance(session):
                 asset_obj = next((a for a in assets_list if a.get("coin") in ("USDT", "S-USDT")), None)
 
                 available_margin = float(asset_obj.get("available") or 0.0) if asset_obj else 0.0
-                if usdt_equity <= 0:
-                    log.error("Bitget returned no positive USDT equity; refusing to trade.")
+                if not math.isfinite(usdt_equity) or usdt_equity < 0:
+                    log.error("Bitget returned invalid USDT equity; refusing all trade actions.")
                     return None
+                if usdt_equity <= 0:
+                    log.warning(
+                        "Bitget reports zero USDT equity. Existing positions may still be "
+                        "supervised, but new entries will be blocked."
+                    )
 
                 return {
                     "equity": usdt_equity,
@@ -530,15 +535,23 @@ async def recover_and_save_confirmed_position(
     dominant_color, dominant_count
 ):
     """Recover bot state from an exchange-confirmed position after an ambiguous order result."""
-    positions = await fetch_current_positions(session, symbol=symbol, key_set=key_set)
+    positions = None
+    recovered = None
+    for attempt in range(3):
+        positions = await fetch_current_positions(session, symbol=symbol, key_set=key_set)
+        if positions is not None:
+            recovered = extract_confirmed_position_fill(positions, symbol, direction)
+            if recovered:
+                break
+        if attempt < 2:
+            await asyncio.sleep(0.4)
+
     if positions is None:
         log.critical(
             f"Cannot reconcile {symbol} after an ambiguous order result: "
             "the Bitget position endpoint is unavailable."
         )
         return None
-
-    recovered = extract_confirmed_position_fill(positions, symbol, direction)
     if not recovered:
         return None
 
@@ -1037,8 +1050,13 @@ async def run_scanner_iteration():
             return
         current_equity = float(acc_info["equity"])
         available_margin = float(acc_info["available"])
-        if current_equity < 0 or available_margin < 0:
-            log.error("Bitget returned invalid negative equity or available margin. Skipping this run.")
+        if (
+            not math.isfinite(current_equity)
+            or not math.isfinite(available_margin)
+            or current_equity < 0
+            or available_margin < 0
+        ):
+            log.error("Bitget returned invalid equity or available margin. Skipping this run.")
             return
         if available_margin <= 0:
             log.warning("No free margin is available. Existing positions will still be supervised; new entries are blocked.")
