@@ -42,15 +42,15 @@ def load_bitget_api_keys():
     return keys
 
 BITGET_KEYS = load_bitget_api_keys()
-KEY_ROTATION_INDEX = 0
-
 def get_next_bitget_key():
-    global KEY_ROTATION_INDEX
-    if not BITGET_KEYS:
-        return None
-    key_set = BITGET_KEYS[KEY_ROTATION_INDEX % len(BITGET_KEYS)]
-    KEY_ROTATION_INDEX += 1
-    return key_set
+    """
+    Return one stable account identity for the entire scanner process.
+
+    Rotating keys between balance, position, order and close requests can
+    mix different accounts and invalidate every safety check. Additional
+    configured keys are intentionally not rotated automatically.
+    """
+    return BITGET_KEYS[0] if BITGET_KEYS else None
 
 # FORCE DEMO MODE DEFAULT TO TRUE TO PROTECT REAL ACCOUNT EQUITY
 # HARD LOCK: this repository is demo-only. Environment variables cannot enable live trading.
