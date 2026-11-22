@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime-generated scanner output
+ai_trader_decisions.json
+virtual_demo_balance.json
+live_trade_history.json
