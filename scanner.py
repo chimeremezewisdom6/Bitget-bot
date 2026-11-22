@@ -433,7 +433,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     adaptive_leverage = configured_leverage
     req_margin = actual_notional / adaptive_leverage
 
-    margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
+    margin_currency = "USDT"
 
     # Fail closed: never simulate a fill or open a shadow trade.
     if available_balance <= 0 or req_margin > (available_balance * 0.80):
@@ -502,7 +502,9 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 await asyncio.sleep(0.5)
                 real_fill = await fetch_bitget_order_fill_price(session, trade_symbol, order_id, key_set=key_set)
                 if not real_fill or real_fill <= 0:
-                    real_fill = market_price
+                    log.error(f"Order {order_id} was accepted but Bitget has not confirmed a filled status. Refusing to invent a fill or mark a trade active.")
+                    log_ai_decision(trade_symbol, "FILL_NOT_CONFIRMED", f"Order {order_id} status was not confirmed as filled", "No local trade marked as filled")
+                    return None
 
                 save_active_trade_state(trade_symbol, direction, real_fill, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=False)
                 log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} matching {dominant_color} direction ({dominant_count} candles > 42)", "Active 54m / 30-Candle Color Supervision Engaged")
@@ -559,9 +561,14 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
                 resp = {}
 
             if r.status == 200 and resp.get("code") == "00000":
-                log.info(f"✅ Bitget accepted reduce-only close order for {symbol}.")
-                log_ai_decision(symbol, "CLOSE_ORDER_ACCEPTED", f"Reduce-only close submitted for size {order_payload['qty']}", "Will clear local state after exchange response")
-                return True
+                close_order_id = (resp.get("data") or {}).get("orderId")
+                close_info = await fetch_bitget_order_info(session, close_order_id, key_set=key_set)
+                if close_info:
+                    log.info(f"Bitget confirmed reduce-only close fill for {symbol}.")
+                    log_ai_decision(symbol, "POSITION_CLOSED", f"Close order {close_order_id} filled", "Active trade state may now be cleared")
+                    return True
+                log.error(f"Close order {close_order_id} was accepted but is not confirmed filled. Keeping active state.")
+                return False
             log.error(f"Bitget rejected close order: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
             return False
     except Exception as e:
@@ -728,7 +735,7 @@ async def run_scanner_iteration():
 
     num_active_keys = len(BITGET_KEYS)
     auth_status = f"🔐 AUTHENTICATED ({num_active_keys} Bitget Pollination Key Sets Active)" if num_active_keys > 0 else "🔓 PUBLIC API (Unauthenticated)"
-    margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
+    margin_currency = "USDT"
     mode_label = f"🎮 BITGET DEMO MODE (UTA v3 | {margin_currency})" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
 
     log.info(f"🏆 Win Streak: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_label} | Keys: {auth_status}")
@@ -795,8 +802,6 @@ async def run_scanner_iteration():
                     if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
-
-                    update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(False)
                     record_trade_history(symbol, False, live_pnl_pct * leverage, pnl_cash)
 
@@ -868,8 +873,6 @@ async def run_scanner_iteration():
                     if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
-
-                    update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(is_win)
                     record_trade_history(symbol, is_win, live_pnl_pct * leverage, pnl_cash)
 
