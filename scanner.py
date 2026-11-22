@@ -392,36 +392,42 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id, key_set=None)
 
 async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
     if not key_set:
-        return False
+        return 0
 
     path = "/api/v3/account/set-leverage"
-    payload = {
-        "category": ORDER_CATEGORY,
-        "symbol": symbol,
-        "leverage": str(leverage)
-    }
-
-    body_json = json.dumps(payload)
-    headers = get_bitget_headers("POST", path, body_json, key_set=key_set)
-    try:
-        async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_json, headers=headers, timeout=5) as r:
-            res = await r.json()
-            ok = r.status == 200 and res.get("code") == "00000"
-            log.info(f"⚡ Bitget leverage setup for {symbol}: {res.get('msg', 'OK')}")
-            return ok
-    except Exception as e:
-        log.error(f"Leverage setup failed for {symbol}: {e}")
-        return False
+    # Some contracts have a lower maximum. Step down safely rather than failing
+    # the entire scan or ever increasing leverage above the requested value.
+    attempts = list(dict.fromkeys([int(leverage), 3, 2, 1]))
+    for selected in attempts:
+        payload = {
+            "category": ORDER_CATEGORY,
+            "symbol": symbol,
+            "leverage": str(selected)
+        }
+        body_json = json.dumps(payload)
+        headers = get_bitget_headers("POST", path, body_json, key_set=key_set)
+        try:
+            async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_json, headers=headers, timeout=5) as r:
+                res = await r.json()
+                if r.status == 200 and res.get("code") == "00000":
+                    log.info(f"Bitget confirmed {selected}x leverage for {symbol}.")
+                    return selected
+                log.warning(f"Bitget rejected {selected}x leverage for {symbol}: {res.get('msg')}")
+        except Exception as e:
+            log.error(f"Leverage setup failed for {symbol} at {selected}x: {e}")
+    return 0
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, dynamic_tp=0.0, dynamic_sl=0.0, sl_pct_val=1.5, dominant_color="GREEN", dominant_count=0):
     key_set = get_next_bitget_key()
     trade_symbol = symbol
 
     req_margin, exact_qty, actual_notional, adaptive_leverage = calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score)
-    leverage_ok = await configure_bitget_leverage(session, trade_symbol, leverage=adaptive_leverage, key_set=key_set)
-    if not leverage_ok:
-        log_ai_decision(symbol, "LEVERAGE_SETUP_FAILED", "Bitget did not confirm requested leverage", "Skipped; no order submitted")
+    configured_leverage = await configure_bitget_leverage(session, trade_symbol, leverage=adaptive_leverage, key_set=key_set)
+    if not configured_leverage:
+        log_ai_decision(symbol, "LEVERAGE_SETUP_FAILED", "Bitget rejected all safe leverage settings", "Skipped; no order submitted")
         return None
+    adaptive_leverage = configured_leverage
+    req_margin = actual_notional / adaptive_leverage
 
     margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
 
@@ -780,8 +786,9 @@ async def run_scanner_iteration():
                 # STEP 1: RISK-FIRST CHECK: EVALUATE STOP LOSS BEFORE ANYTHING ELSE!
                 is_sl_breached = current_price <= ai_floor_sl if direction == "LONG" else current_price >= ai_floor_sl
 
-                if is_sl_breached or live_pnl_pct <= -5.0:
-                    pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
+                if is_sl_breached:
+                    position_notional = float(contract_size) * entry_price
+                    pnl_cash = position_notional * (live_pnl_pct / 100.0)
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
 
                     if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
@@ -823,18 +830,19 @@ async def run_scanner_iteration():
 
                 # STEP 3: COLOR TARGET EXIT
                 if candles_since_entry >= TARGET_COLOR_COUNT and elapsed_minutes < MAX_TRADE_DURATION_MIN:
-                    pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
-                    closing_equity = pre_trade_balance + pnl_cash
+                    position_notional = float(contract_size) * entry_price
+                    pnl_cash = position_notional * (live_pnl_pct / 100.0)
+                    closing_equity = max(0.0, pre_trade_balance + pnl_cash)
+                    is_win = pnl_cash > 0
 
                     if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
 
-                    update_virtual_demo_balance(closing_equity)
-                    new_streak = update_live_win_streak(True)
-                    record_trade_history(symbol, True, live_pnl_pct * leverage, pnl_cash)
+                    new_streak = update_live_win_streak(is_win)
+                    record_trade_history(symbol, is_win, live_pnl_pct, pnl_cash)
 
-                    log_ai_decision(symbol, "COLOR_TARGET_ACHIEVED", f"Formed {candles_since_entry} {dominant_color} candles since entry in {elapsed_minutes:.1f}m (PnL: +{live_pnl_pct:.2f}%)", "Target Achieved: Closing for Profit")
+                    log_ai_decision(symbol, "COLOR_TARGET_ACHIEVED", f"Formed {candles_since_entry} {dominant_color} candles in {elapsed_minutes:.1f}m; estimated gross PnL {live_pnl_pct:+.2f}%", "Target achieved; closing regardless of profit or loss")
 
                     log.info("====================================================================================================")
                     log.info(f"🏆 COLOR TARGET ACHIEVED & TRADE CLOSED! ({symbol})")
@@ -842,18 +850,19 @@ async def run_scanner_iteration():
                     log.info(f"   • Time Elapsed:                 {elapsed_minutes:.1f} Minutes (Target: < 54.0m)")
                     log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
                     log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
-                    log.info(f"   • NET PROFIT GAINED:            +${pnl_cash:.4f} {margin_currency} (+{live_pnl_pct*leverage:.2f}%)")
-                    log.info(f"   • TRADE RESULT:                  🏆 WIN")
-                    log.info(f"   • NEW WIN STREAK:                {new_streak} WINS IN A ROW")
+                    log.info(f"   • ESTIMATED GROSS PNL:          ${pnl_cash:+.4f} {margin_currency} ({live_pnl_pct:+.2f}% price move)")
+                    log.info(f"   • TRADE RESULT:                  {'WIN' if is_win else 'LOSS'}")
+                    log.info(f"   • WIN STREAK:                   {new_streak}")
                     log.info("====================================================================================================")
                     clear_active_trade_state()
                     return
 
                 # STEP 4: TIME LIMIT EXPIRED (54-Minute Cutoff)
                 if elapsed_minutes >= MAX_TRADE_DURATION_MIN:
-                    pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
+                    position_notional = float(contract_size) * entry_price
+                    pnl_cash = position_notional * (live_pnl_pct / 100.0)
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
-                    is_win = pnl_cash >= 0
+                    is_win = pnl_cash > 0
 
                     if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
