@@ -438,7 +438,9 @@ async def fetch_bitget_order_info(session, order_id, key_set=None):
                     resp = await r.json()
                     if resp.get("code") == "00000" and resp.get("data"):
                         data = resp["data"]
-                        if data.get("orderStatus") == "filled":
+                        status = data.get("orderStatus")
+                        executed_qty = float(data.get("cumExecQty") or 0)
+                        if status == "filled" or (status in ("partially_filled", "cancelled") and executed_qty > 0):
                             return data
         except Exception as e:
             log.debug(f"Order-info check failed: {e}")
@@ -525,6 +527,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         "qty": size_str,
         "side": "buy" if direction == "LONG" else "sell",
         "orderType": "market",
+        "timeInForce": "ioc",
         "stopLoss": str(preset_sl),
         "reduceOnly": "no"
     }
@@ -560,20 +563,25 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 log.info(f"✅ BITGET MATCHING ENGINE ACCEPTED ORDER (Key #{key_set['id']})! Order ID: {order_id}")
 
                 await asyncio.sleep(0.5)
-                real_fill = await fetch_bitget_order_fill_price(session, trade_symbol, order_id, key_set=key_set)
-                if not real_fill or real_fill <= 0:
-                    log.error(f"Order {order_id} was accepted but Bitget has not confirmed a filled status. Refusing to invent a fill or mark a trade active.")
-                    log_ai_decision(trade_symbol, "FILL_NOT_CONFIRMED", f"Order {order_id} status was not confirmed as filled", "No local trade marked as filled")
+                order_info = await fetch_bitget_order_info(session, order_id, key_set=key_set)
+                real_fill = float(order_info.get("avgPrice") or 0) if order_info else 0.0
+                filled_qty = float(order_info.get("cumExecQty") or 0) if order_info else 0.0
+                if real_fill <= 0 or filled_qty <= 0:
+                    log.error(f"Order {order_id} was accepted but no executed quantity was confirmed. Refusing to invent a fill or mark a trade active.")
+                    log_ai_decision(trade_symbol, "FILL_NOT_CONFIRMED", f"Order {order_id} has no confirmed executed quantity", "No local trade marked as filled")
                     return None
 
-                save_active_trade_state(trade_symbol, direction, real_fill, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=False)
+                quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
+                filled_size_str = f"{filled_qty:.{quantity_precision}f}"
+                actual_notional = filled_qty * real_fill
+                save_active_trade_state(trade_symbol, direction, real_fill, filled_size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=False)
                 log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} matching {dominant_color} direction ({dominant_count} candles > 42)", "Active 54m / 30-Candle Color Supervision Engaged")
 
                 return {
                     "order_id": order_id,
                     "symbol": trade_symbol,
                     "notional_value": actual_notional,
-                    "contract_size": size_str,
+                    "contract_size": filled_size_str,
                     "stop_loss": preset_sl,
                     "real_fill_price": real_fill,
                     "pre_trade_balance": available_balance,
@@ -602,6 +610,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
         "symbol": symbol,
         "side": close_side,
         "orderType": "market",
+        "timeInForce": "ioc",
         "qty": str(contract_size) if contract_size and contract_size != "0" else "1",
         "reduceOnly": "yes"
     }
@@ -622,7 +631,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
             if r.status == 200 and resp.get("code") == "00000":
                 close_order_id = (resp.get("data") or {}).get("orderId")
                 close_info = await fetch_bitget_order_info(session, close_order_id, key_set=key_set)
-                if close_info:
+                if close_info and close_info.get("orderStatus") == "filled":
                     log.info(f"Bitget confirmed reduce-only close fill for {symbol}.")
                     log_ai_decision(symbol, "POSITION_CLOSED", f"Close order {close_order_id} filled", "Active trade state may now be cleared")
                     return True
