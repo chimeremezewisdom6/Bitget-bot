@@ -771,6 +771,17 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
+def select_latest_completed_candles(candles, now_ms=None, count=60):
+    """Return the latest completed candles in ascending timestamp order."""
+    now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    completed = [
+        candle for candle in candles
+        if len(candle) >= 5 and int(float(candle[0])) + 60000 <= now_ms
+    ]
+    completed.sort(key=lambda candle: int(float(candle[0])))
+    return completed[-count:] if len(completed) >= count else []
+
+
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
     """Fetches exactly 60 1-minute candles for full 60-candle window analysis."""
     async with semaphore:
@@ -785,11 +796,11 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            # Exclude the currently forming 1-minute candle.
-                            now_ms = int(time.time() * 1000)
-                            completed = [c for c in candles if len(c) >= 5 and int(float(c[0])) + 60000 <= now_ms]
-                            if len(completed) >= 60:
-                                return completed[:60]
+                            # Bitget returns candles in timestamp order (oldest first).
+                            # Keep the latest 60 completed candles, not the oldest.
+                            completed = select_latest_completed_candles(candles, count=60)
+                            if len(completed) == 60:
+                                return completed
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
             except Exception:
@@ -814,7 +825,7 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
 
-        candles_chrono = list(reversed(candle_data[:60]))
+        candles_chrono = candle_data[-60:]
 
         green_count = 0
         red_count = 0
@@ -1009,7 +1020,7 @@ async def run_scanner_iteration():
                 # STEP 2: COUNT CANDLES FORMED SINCE ENTRY
                 candles_since_entry = 0
                 if candle_data:
-                    candles_chrono = list(reversed(candle_data[:60]))
+                    candles_chrono = candle_data[-60:]
                     for c in candles_chrono:
                         c_timestamp_sec = float(c[0]) / 1000.0 if float(c[0]) > 1e11 else float(c[0])
                         if c_timestamp_sec >= math.ceil(start_time / 60.0) * 60.0:
