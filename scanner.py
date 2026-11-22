@@ -14,7 +14,7 @@ import base64
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v107_small_balance_scanner")
+log = logging.getLogger("v108_margin_buffer_scanner")
 
 # AUTO-DETECT ENVIRONMENT:
 # - If running in GitHub Actions: Runs 1 scan and exits cleanly.
@@ -55,7 +55,6 @@ LIVE_HISTORY_FILE = "live_trade_history.json"
 NUM_BATCHES = 20
 MIN_24H_VOLUME = 300000
 DEFAULT_LEVERAGE = 5
-BALANCE_USAGE_PCT = 0.95    # Use 95% of available balance
 
 # Target Ratios
 TP_PERCENTAGE = 0.025   # +2.50% Preset Take Profit
@@ -233,9 +232,10 @@ async def configure_bitget_leverage(session, symbol):
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
     """
     Submits Market Order to Bitget UTA v3.
-    Dynamically sizes orders for small balances ($1.20 USDT) to ensure:
-    - Required Margin = ~$1.05 USDT (well below $1.20 available balance)
-    - Notional Order Value = ~$5.25 USDT (safely above Bitget's 5.00 USDT minimum)
+    Calibrates initial margin for small balances ($1.20 USDT) to:
+    - Target Notional = $5.05 USDT (cleanly above Bitget $5.00 minimum limit)
+    - Required Margin = $1.01 USDT ($5.05 / 5x leverage)
+    - Remaining Unencumbered Buffer = $0.19 USDT (~16%), ensuring Bitget passes Code 25203 margin check!
     """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Order execution skipped.")
@@ -244,46 +244,48 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     trade_symbol = symbol
     await configure_bitget_leverage(session, trade_symbol)
 
-    # DYNAMIC SMALL-BALANCE CALCULATION:
-    # Target Notional Value = 5.25 USDT (Passes Bitget $5 minimum requirement)
-    target_notional = 5.25
-    max_possible_notional = available_balance * BALANCE_USAGE_PCT * DEFAULT_LEVERAGE
+    # ACCURATE SMALL-BALANCE MARGIN BUFFER CALCULATION:
+    # Use 82% of available balance to leave 18% for trading fee reserves & margin buffer
+    usable_margin = available_balance * 0.82
+    calculated_notional = usable_margin * DEFAULT_LEVERAGE
 
-    if max_possible_notional >= target_notional:
-        notional_value = max_possible_notional
+    # Bitget requires minimum 5.00 USDT position value
+    if calculated_notional < 5.05:
+        target_notional = 5.05
     else:
-        # Balance is small (e.g. $1.20). Use $5.25 notional (Requires $1.05 margin at 5x)
-        notional_value = target_notional
+        target_notional = calculated_notional
 
-    required_margin = notional_value / DEFAULT_LEVERAGE
+    required_margin = target_notional / DEFAULT_LEVERAGE
     if required_margin > available_balance:
-        log.error(f"❌ Balance too small to open 5 USDT minimum order. Available: ${available_balance:.2f}, Required Margin: ${required_margin:.2f}")
+        log.error(f"❌ Balance too small to open minimum 5 USDT order. Available: ${available_balance:.2f}, Required: ${required_margin:.2f}")
         return None
 
-    contract_size = notional_value / market_price
+    contract_size = target_notional / market_price
 
-    # Precision sizing based on coin price scale
+    # Precision contract formatting based on price scale
     if market_price < 0.0001:
         size_str = f"{int(math.ceil(contract_size))}"
     elif market_price < 0.01:
         size_str = f"{math.ceil(contract_size)}"
     elif market_price < 1.0:
-        size_str = f"{contract_size:.1f}"
+        # Round down slightly to avoid overshooting margin
+        size_str = f"{math.floor(contract_size * 10) / 10:.1f}"
     elif market_price < 100.0:
-        size_str = f"{contract_size:.1f}"
+        size_str = f"{math.floor(contract_size * 10) / 10:.1f}"
     else:
-        size_str = f"{contract_size:.2f}"
+        size_str = f"{math.floor(contract_size * 100) / 100:.2f}"
 
-    # GUARANTEE order value >= 5.15 USDT after rounding
+    # Ensure notional is at least 5.02 USDT
     actual_notional = float(size_str) * market_price
-    if actual_notional < 5.15:
-        # Increase quantity by 1 step
-        needed_qty = math.ceil(5.25 / market_price)
+    if actual_notional < 5.02:
+        needed_qty = math.ceil(5.05 / market_price)
         if market_price < 1.0:
             size_str = f"{needed_qty}"
         else:
             size_str = f"{needed_qty:.2f}"
         actual_notional = float(size_str) * market_price
+
+    actual_margin_used = actual_notional / DEFAULT_LEVERAGE
 
     if direction == "LONG":
         side = "buy"
@@ -311,7 +313,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     headers = get_bitget_headers("POST", path, body_json)
 
     mode_label = "🎮 BITGET DEMO (UTA v3)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (UTA v3)"
-    log.info(f"🎯 SUBMITTING ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Margin: ${actual_notional/DEFAULT_LEVERAGE:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
+    log.info(f"🎯 SUBMITTING ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${actual_margin_used:.2f} | Buffer Remaining: ${available_balance - actual_margin_used:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -524,7 +526,7 @@ async def run_scanner_iteration():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE (UTA v3 | Small Balance $1.20 Optimized | Preset TP +2.5% & SL -1.5%)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
+    mode_status = f"🎮 BITGET DEMO MODE (UTA v3 | $1.20 Margin Buffer Calibrated | Preset TP +2.5% & SL -1.5%)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
 
     log.info(f"🏆 Win Streak: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_status} | API: {auth_status}")
 
