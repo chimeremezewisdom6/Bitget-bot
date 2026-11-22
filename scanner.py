@@ -14,7 +14,7 @@ import base64
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v111_affordability_scanner")
+log = logging.getLogger("v112_shadow_tracker_scanner")
 
 # AUTO-DETECT ENVIRONMENT:
 # - If running in GitHub Actions: Runs 1 scan and exits cleanly.
@@ -57,8 +57,8 @@ MIN_24H_VOLUME = 300000
 DEFAULT_LEVERAGE = 5
 
 # Target Ratios
-TP_PERCENTAGE = 0.025   # +2.50% Preset Take Profit
-SL_PERCENTAGE = 0.015   # -1.50% Preset Stop Loss
+TP_PERCENTAGE = 0.025   # +2.50% Take Profit
+SL_PERCENTAGE = 0.015   # -1.50% Stop Loss
 
 # ====================================================================================================
 # UTILITY FUNCTIONS
@@ -95,14 +95,10 @@ def get_bitget_headers(method="GET", request_path="", body=""):
     return headers
 
 def calculate_min_required_margin_for_price(market_price, leverage=DEFAULT_LEVERAGE):
-    """
-    Calculates the exact minimum required margin to satisfy Bitget's 5.01 USDT notional minimum.
-    Prevents step-rounding jumps (like $3.65 EVAA requiring 2 contracts = $7.30 Notional = $1.46 Margin).
-    """
+    """Calculates min required margin to reach $5.01 USDT Notional."""
     if market_price <= 0:
-        return 999.0
+        return 999.0, 1.0, 5.01
 
-    # Calculate min contract quantity needed to reach $5.01 USDT notional
     raw_qty = 5.01 / market_price
 
     if market_price < 0.0001:
@@ -124,7 +120,7 @@ def calculate_min_required_margin_for_price(market_price, leverage=DEFAULT_LEVER
     return required_margin, qty, notional
 
 # ====================================================================================================
-# STATE & HISTORY MANAGEMENT
+# STATE & VIRTUAL TRACKING MANAGEMENT
 # ====================================================================================================
 
 def get_last_traded_coin_status():
@@ -172,6 +168,33 @@ def get_active_live_trade():
         except Exception:
             return None
     return None
+
+def save_active_trade_state(symbol, direction, entry_price, contract_size, pre_trade_balance, is_virtual=False):
+    tp_price = entry_price * (1.0 + TP_PERCENTAGE) if direction == "LONG" else entry_price * (1.0 - TP_PERCENTAGE)
+    sl_price = entry_price * (1.0 - SL_PERCENTAGE) if direction == "LONG" else entry_price * (1.0 + SL_PERCENTAGE)
+
+    trade_data = {
+        "active": True,
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": entry_price,
+        "preset_tp": tp_price,
+        "preset_sl": sl_price,
+        "contract_size": str(contract_size),
+        "pre_trade_balance": pre_trade_balance,
+        "is_virtual": is_virtual,
+        "start_time": time.time()
+    }
+    with open(LIVE_ACTIVE_TRADE_FILE, "w") as f:
+        json.dump(trade_data, f, indent=2)
+
+def clear_active_trade_state():
+    if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
+        try:
+            with open(LIVE_ACTIVE_TRADE_FILE, "w") as f:
+                json.dump({"active": False}, f)
+        except Exception:
+            pass
 
 # ====================================================================================================
 # BITGET UTA v3 EXCHANGER ENGINE
@@ -259,18 +282,30 @@ async def configure_bitget_leverage(session, symbol):
         log.debug(f"Leverage notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, drop_depth_pct=0.0):
-    if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
-        log.error("❌ Missing Bitget API Keys. Order execution skipped.")
-        return None
-
     trade_symbol = symbol
     await configure_bitget_leverage(session, trade_symbol)
 
     req_margin, exact_qty, actual_notional = calculate_min_required_margin_for_price(market_price, DEFAULT_LEVERAGE)
 
+    # VIRTUAL TRACKER FALLBACK:
+    # If required margin exceeds balance capacity, initiate VIRTUAL SHADOW TRACKING to see if setup wins!
     if req_margin > (available_balance * 0.85):
-        log.error(f"❌ Order rejected by pre-execution check: {symbol} requires ${req_margin:.2f} margin ($5.01+ Notional), which exceeds balance limit (${available_balance*0.85:.2f}).")
-        return None
+        log.warning(f"⚠️ BALANCE LIMIT: {symbol} requires ${req_margin:.2f} margin (min $5.01 notional), which exceeds current balance (${available_balance:.2f}).")
+        log.info(f"🔮 STARTING VIRTUAL SHADOW TRACKING ON {symbol} (Entry: ${format_price(market_price)} | TP: +2.5% | SL: -1.5%)...")
+        save_active_trade_state(symbol, direction, market_price, exact_qty, available_balance, is_virtual=True)
+        return {
+            "order_id": "VIRTUAL_SHADOW_ORDER",
+            "symbol": trade_symbol,
+            "notional_value": actual_notional,
+            "contract_size": str(exact_qty),
+            "preset_tp": format_price(market_price * (1.0 + TP_PERCENTAGE)),
+            "preset_sl": format_price(market_price * (1.0 - SL_PERCENTAGE)),
+            "real_fill_price": market_price,
+            "pre_trade_balance": available_balance,
+            "slippage_pct": 0.0,
+            "is_virtual": True,
+            "filled": True
+        }
 
     if market_price < 0.0001:
         size_str = f"{int(exact_qty)}"
@@ -285,12 +320,12 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     if direction == "LONG":
         side = "buy"
-        preset_tp = format_price(market_price * (1.0 + TP_PERCENTAGE))  # Native TP (+2.50%)
-        preset_sl = format_price(market_price * (1.0 - SL_PERCENTAGE))  # Native SL (-1.50%)
+        preset_tp = format_price(market_price * (1.0 + TP_PERCENTAGE))
+        preset_sl = format_price(market_price * (1.0 - SL_PERCENTAGE))
     else:
         side = "sell"
-        preset_tp = format_price(market_price * (1.0 - TP_PERCENTAGE))  # Native TP (+2.50%)
-        preset_sl = format_price(market_price * (1.0 + SL_PERCENTAGE))  # Native SL (-1.50%)
+        preset_tp = format_price(market_price * (1.0 - TP_PERCENTAGE))
+        preset_sl = format_price(market_price * (1.0 + SL_PERCENTAGE))
 
     path = "/api/v3/trade/place-order"
     order_payload = {
@@ -309,7 +344,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     headers = get_bitget_headers("POST", path, body_json)
 
     mode_label = "🎮 BITGET DEMO (UTA v3)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (UTA v3)"
-    log.info(f"🎯 SUBMITTING AFFORDABLE ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${req_margin:.2f} | Balance Buffer: ${available_balance - req_margin:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
+    log.info(f"🎯 SUBMITTING ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${req_margin:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -329,7 +364,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                     real_fill = market_price
 
                 slippage = abs(real_fill - market_price) / market_price * 100.0
-                log.info(f"🎯 BITGET FILL PRICE VERIFIED: ${format_price(real_fill)} | Measured Slippage: {slippage:.3f}%")
+                save_active_trade_state(trade_symbol, direction, real_fill, size_str, available_balance, is_virtual=False)
 
                 return {
                     "order_id": order_id,
@@ -341,11 +376,26 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                     "real_fill_price": real_fill,
                     "pre_trade_balance": available_balance,
                     "slippage_pct": round(slippage, 3),
+                    "is_virtual": False,
                     "filled": True
                 }
             else:
                 log.error(f"❌ BITGET UTA v3 ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
-                return None
+                log.info(f"🔮 STARTING VIRTUAL SHADOW TRACKING ON {symbol} (Entry: ${format_price(market_price)} | TP: +2.5% | SL: -1.5%)...")
+                save_active_trade_state(symbol, direction, market_price, size_str, available_balance, is_virtual=True)
+                return {
+                    "order_id": "VIRTUAL_SHADOW_ORDER",
+                    "symbol": trade_symbol,
+                    "notional_value": actual_notional,
+                    "contract_size": size_str,
+                    "preset_tp": preset_tp,
+                    "preset_sl": preset_sl,
+                    "real_fill_price": market_price,
+                    "pre_trade_balance": available_balance,
+                    "slippage_pct": 0.0,
+                    "is_virtual": True,
+                    "filled": True
+                }
     except Exception as e:
         log.error(f"❌ Error submitting Bitget order: {e}")
         return None
@@ -443,16 +493,10 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# OVERSTRETCHED REVERSAL ENGINE WITH AFFORDABILITY CHECK
+# OVERSTRETCHED REVERSAL ENGINE
 # ====================================================================================================
 
-async def process_overstretched_reversal_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won, available_balance=1.17):
-    """
-    Evaluates ALL 600+ Bitget Pairs for Overstretched Reversals AND Margin Affordability:
-    1. Rejects coins whose minimum step notional exceeds account margin capacity (e.g. EVAA $3.65 requiring $1.46 margin).
-    2. Rejects still-falling coins (current_price <= prev_price).
-    3. Ranks remaining affordable candidates by Overstretched Reversal Score (Drop Depth x Active Bounce).
-    """
+async def process_overstretched_reversal_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
     batch_evaluated = []
 
     tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
@@ -484,11 +528,6 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
         if current_price <= prev_price:
             continue
 
-        # REJECT UNAFFORDABLE COINS: Check if min required margin > available_balance * 0.85
-        req_margin, _, _ = calculate_min_required_margin_for_price(current_price, DEFAULT_LEVERAGE)
-        if req_margin > (available_balance * 0.85):
-            continue
-
         drop_depth_pct = ((peak_60m - low_60m) / peak_60m) * 100.0
         bounce_pct = ((current_price - low_60m) / low_60m) * 100.0
 
@@ -504,7 +543,6 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
                 "bounce_pct": bounce_pct,
                 "score": overstretched_reversal_score,
                 "current_price": current_price,
-                "req_margin": req_margin,
                 "low_60m": low_60m,
                 "peak_60m": peak_60m
             })
@@ -560,23 +598,39 @@ async def run_scanner_iteration():
             symbol = active_trade.get("symbol")
             direction = active_trade.get("direction", "LONG")
             entry_price = float(active_trade.get("entry_price", 0.0))
+            preset_tp = float(active_trade.get("preset_tp", entry_price * 1.025))
+            preset_sl = float(active_trade.get("preset_sl", entry_price * 0.985))
             contract_size = active_trade.get("contract_size", "1")
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
+            is_virtual = active_trade.get("is_virtual", False)
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ ACTIVE TRADE PENDING ({symbol}): Entry @ ${entry_p_str}. Managed natively by Bitget Engine (TP: +2.5% | SL: -1.5%). Pre-Trade Equity: ${pre_trade_balance:.4f}")
+            trade_type_label = "🔮 VIRTUAL SHADOW TRADE" if is_virtual else "⚡ LIVE BITGET TRADE"
+            log.info(f"⏳ {trade_type_label} MONITORING ({symbol}): Entry @ ${entry_p_str} | Target TP: ${format_price(preset_tp)} (+2.5%) | Stop SL: ${format_price(preset_sl)} (-1.5%)")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
 
-                log.info(f"📍 LIVE TRADE PING: {symbol} | Current: ${curr_p_str} | Live PnL: {live_pnl_pct:+.2f}%")
+                log.info(f"📍 LIVE PRICE PING: {symbol} | Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}%")
+
+                # VIRTUAL SHADOW TRADE EVALUATION
+                if is_virtual:
+                    is_win_hit = current_price >= preset_tp if direction == "LONG" else current_price <= preset_tp
+                    is_loss_hit = current_price <= preset_sl if direction == "LONG" else current_price >= preset_sl
+
+                    if is_win_hit:
+                        log.info(f"🏆 VIRTUAL SHADOW TRADE WIN! {symbol} hit Target TP ${format_price(preset_tp)} (+2.50%)! Setup successfully validated!")
+                        clear_active_trade_state()
+                    elif is_loss_hit:
+                        log.info(f"❌ VIRTUAL SHADOW TRADE LOSS! {symbol} hit Stop SL ${format_price(preset_sl)} (-1.50%). Setup invalidated.")
+                        clear_active_trade_state()
 
                 payload = {
                     "symbol": symbol,
                     "direction": direction,
-                    "is_paper": False,
+                    "is_paper": is_virtual,
                     "is_demo": BITGET_DEMO_MODE,
                     "entry_price": entry_price,
                     "current_price": current_price,
@@ -595,7 +649,7 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info("🔍 Fetching ALL 600+ Bitget USDT-Futures pairs for Affordability & Overstretched Reversal Analysis...")
+            log.info("🔍 Fetching ALL 600+ Bitget USDT-Futures pairs for Overstretched Reversal Analysis...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -610,12 +664,12 @@ async def run_scanner_iteration():
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_coins = len(valid_coins)
 
-            log.info(f"🛰️ Evaluating {total_coins} pairs for Margin Affordability (Margin <= ${current_equity*0.85:.2f}) & Overstretched Rebound...")
+            log.info(f"🛰️ Evaluating {total_coins} pairs for Overstretched Rebound (Drop >= 0.80%, Active Bounce >= +0.20%)...")
 
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-            batch_tasks = [process_overstretched_reversal_batch(i + 1, batch, session, semaphore, last_symbol, last_won, available_balance=current_equity) for i, batch in enumerate(coin_batches)]
+            batch_tasks = [process_overstretched_reversal_batch(i + 1, batch, session, semaphore, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
             batch_results = await asyncio.gather(*batch_tasks)
 
             all_batch_candidates = []
@@ -623,12 +677,12 @@ async def run_scanner_iteration():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 OVERSTRETCHED REVERSAL LEADERBOARD (COLLECTED: {len(all_batch_candidates)} AFFORDABLE SETUPS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'DROP DEPTH':<14} | {'ACTIVE BOUNCE':<16} | {'REQUIRED MARGIN'}")
-            log.info("-" * 95)
+            log.info(f"📊 OVERSTRETCHED REVERSAL LEADERBOARD (COLLECTED: {len(all_batch_candidates)} QUALIFIED SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'DROP DEPTH':<14} | {'ACTIVE BOUNCE':<16} | {'SCORE'}")
+            log.info("-" * 90)
 
             for cand in all_batch_candidates:
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | -{cand['drop_depth_pct']:.2f}%         | +{cand['bounce_pct']:.2f}%          | ${cand['req_margin']:.2f} Margin")
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | -{cand['drop_depth_pct']:.2f}%         | +{cand['bounce_pct']:.2f}%          | {cand['score']:.2f}")
 
             log.info("====================================================================================================")
 
@@ -636,7 +690,7 @@ async def run_scanner_iteration():
                 all_batch_candidates.sort(key=lambda x: x["score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 AFFORDABLE OVERSTRETCHED MATCH: {best_signal['symbol']} (Drop Depth: -{best_signal['drop_depth_pct']:.2f}% | Active Bounce: +{best_signal['bounce_pct']:.2f}% | Req Margin: ${best_signal['req_margin']:.2f})")
+                log.info(f"🔥 #1 OVERSTRETCHED MATCH: {best_signal['symbol']} (Drop Depth: -{best_signal['drop_depth_pct']:.2f}% | Active Bounce: +{best_signal['bounce_pct']:.2f}% | Score: {best_signal['score']:.2f})")
 
                 live_order_result = await place_bitget_live_order(
                     session=session,
@@ -653,7 +707,7 @@ async def run_scanner_iteration():
                     payload = {
                         "symbol": live_order_result.get("symbol", best_signal["symbol"]),
                         "direction": live_order_result.get("direction", best_signal["direction"]),
-                        "is_paper": False,
+                        "is_paper": live_order_result.get("is_virtual", False),
                         "is_demo": BITGET_DEMO_MODE,
                         "avg_fluctuation": round(best_signal["score"] * 10, 2),
                         "current_price": final_entry_fill,
@@ -669,7 +723,7 @@ async def run_scanner_iteration():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
             else:
-                log.info("ℹ️ No altcoins currently matched overstretched reversal criteria within account margin capacity.")
+                log.info("ℹ️ No altcoins currently matched overstretched reversal criteria.")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
 
         if CLOUDFLARE_URL:
@@ -681,7 +735,7 @@ async def run_scanner_iteration():
                 except Exception:
                     res_data = {}
 
-                if active_trade and res_data:
+                if active_trade and res_data and not active_trade.get("is_virtual", False):
                     worker_status = res_data.get("status", "")
 
                     if worker_status == "CLOSED":
