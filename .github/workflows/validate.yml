@@ -20,15 +20,5 @@ jobs:
         run: pip install -r requirements.txt
       - name: Compile scanner
         run: python -m py_compile scanner.py
-      - name: Verify demo-only strategy safeguards
-        run: |
-          python - <<'PY'
-          import scanner
-          assert scanner.BITGET_DEMO_MODE is True
-          assert scanner.MIN_24H_VOLUME == 500000
-          assert scanner.MIN_REQUIRED_COLOR_COUNT == 42
-          assert scanner.TARGET_COLOR_COUNT == 30
-          assert scanner.MAX_TRADE_DURATION_MIN == 54.0
-          assert scanner.DEFAULT_LEVERAGE == 5
-          print("Safety configuration checks passed.")
-          PY
+      - name: Run strategy and safety unit tests
+        run: python -m unittest discover -s tests -v
