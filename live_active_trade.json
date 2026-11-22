@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "IDOLUSDT",
-  "direction": "LONG",
-  "mode": "REAL_LIVE_RED_CARD",
-  "entry_price": 0.015134,
-  "stop_loss": 0.014944825,
-  "pre_trade_balance": 1.17216598,
-  "contract_size": "331.1",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795372238722
+  "active": false
 }
