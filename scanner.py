@@ -396,7 +396,7 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id, key_set=None)
 
 async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
     if not key_set:
-        return
+        return False
 
     path = "/api/v3/account/set-leverage"
     payload = {
@@ -410,16 +410,22 @@ async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
     try:
         async with session.post(BITGET_V3_SET_LEVERAGE_URL, data=body_json, headers=headers, timeout=5) as r:
             res = await r.json()
-            log.info(f"⚡ Bitget UTA v3 {leverage}x Leverage Configured ({symbol} via Key #{key_set['id']}): {res.get('msg', 'OK')}")
+            ok = r.status == 200 and res.get("code") == "00000"
+            log.info(f"⚡ Bitget leverage setup for {symbol}: {res.get('msg', 'OK')}")
+            return ok
     except Exception as e:
-        log.debug(f"Leverage notice: {e}")
+        log.error(f"Leverage setup failed for {symbol}: {e}")
+        return False
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, dynamic_tp=0.0, dynamic_sl=0.0, sl_pct_val=1.5, dominant_color="GREEN", dominant_count=0):
     key_set = get_next_bitget_key()
     trade_symbol = symbol
 
     req_margin, exact_qty, actual_notional, adaptive_leverage = calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score)
-    await configure_bitget_leverage(session, trade_symbol, leverage=adaptive_leverage, key_set=key_set)
+    leverage_ok = await configure_bitget_leverage(session, trade_symbol, leverage=adaptive_leverage, key_set=key_set)
+    if not leverage_ok:
+        log_ai_decision(symbol, "LEVERAGE_SETUP_FAILED", "Bitget did not confirm requested leverage", "Skipped; no order submitted")
+        return None
 
     margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
 
