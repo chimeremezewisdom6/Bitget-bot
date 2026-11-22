@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "VELVETUSDT",
+  "direction": "LONG",
+  "mode": "REAL_LIVE_RED_CARD",
+  "entry_price": 0.06973,
+  "stop_loss": 0.068858375,
+  "pre_trade_balance": 1.17216598,
+  "contract_size": "71.9",
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795364433264
 }
