@@ -423,22 +423,10 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
 
-    # Virtual Shadow Tracker if required margin exceeds balance
+    # Fail closed: never simulate a fill or open a shadow trade.
     if req_margin > (available_balance * 0.85):
-        log_ai_decision(symbol, "MARGIN_SHADOW_FALLBACK", f"Required margin ${req_margin:.2f} > Balance limit", "Opened Virtual Shadow Trade Tracker")
-        save_active_trade_state(symbol, direction, market_price, exact_qty, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=True)
-        return {
-            "order_id": "VIRTUAL_SHADOW_ORDER",
-            "symbol": trade_symbol,
-            "notional_value": actual_notional,
-            "contract_size": str(exact_qty),
-            "preset_tp": format_price(dynamic_tp),
-            "preset_sl": format_price(dynamic_sl),
-            "real_fill_price": market_price,
-            "pre_trade_balance": available_balance,
-            "is_virtual": True,
-            "filled": True
-        }
+        log_ai_decision(symbol, "INSUFFICIENT_MARGIN", f"Required margin ${req_margin:.2f} exceeds safe available balance", "Skipped; no order submitted")
+        return None
 
     if market_price < 0.0001:
         size_str = f"{int(exact_qty)}"
@@ -455,20 +443,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     preset_sl = format_price(dynamic_sl)
 
     if not key_set:
-        log_ai_decision(symbol, "NO_API_KEY_FALLBACK", "No active Pollination Key set provided", "Executing Virtual AI Trade")
-        save_active_trade_state(symbol, direction, market_price, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=True)
-        return {
-            "order_id": "VIRTUAL_SHADOW_ORDER",
-            "symbol": trade_symbol,
-            "notional_value": actual_notional,
-            "contract_size": size_str,
-            "preset_tp": preset_tp,
-            "preset_sl": preset_sl,
-            "real_fill_price": market_price,
-            "pre_trade_balance": available_balance,
-            "is_virtual": True,
-            "filled": True
-        }
+        log_ai_decision(symbol, "NO_API_KEY", "No Bitget API credentials configured", "Skipped; no order submitted")
+        return None
 
     path = "/api/v3/trade/place-order"
     order_payload = {
