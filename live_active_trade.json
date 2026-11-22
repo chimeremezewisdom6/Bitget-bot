@@ -1,14 +1,3 @@
 {
-  "active": true,
-  "symbol": "SKYAIUSDT",
-  "direction": "LONG",
-  "mode": "BITGET_DEMO_RED_CARD",
-  "entry_price": 0.04045,
-  "stop_loss": 0.039944375000000004,
-  "pre_trade_balance": 1.4904615,
-  "contract_size": "165",
-  "leverage": 5,
-  "position_mode": "one_way",
-  "reduce_only": true,
-  "opened_at": 1795340133990
+  "active": false
 }
