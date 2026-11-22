@@ -471,14 +471,19 @@ async def fetch_bitget_order_fill_price(session, symbol, order_id, key_set=None)
     except (TypeError, ValueError):
         return None
 
+def safe_leverage_attempts(leverage):
+    """Return descending leverage attempts without exceeding the requested cap."""
+    requested = max(1, int(leverage))
+    return [requested] + [candidate for candidate in (3, 2, 1) if candidate < requested]
+
+
 async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
     if not key_set:
         return 0
 
     path = "/api/v3/account/set-leverage"
-    # Some contracts have a lower maximum. Step down safely rather than failing
-    # the entire scan or ever increasing leverage above the requested value.
-    attempts = list(dict.fromkeys([int(leverage), 3, 2, 1]))
+    # Step down only; never try a value above the contract's requested maximum.
+    attempts = safe_leverage_attempts(leverage)
     for selected in attempts:
         payload = {
             "category": ORDER_CATEGORY,
