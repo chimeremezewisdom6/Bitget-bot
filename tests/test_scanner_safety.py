@@ -53,6 +53,23 @@ class ScannerSafetyTests(unittest.TestCase):
         self.assertEqual(leverage, 3)
         self.assertAlmostEqual(margin, notional / leverage)
 
+    def test_position_fill_recovery_requires_matching_symbol_and_side(self):
+        positions = [
+            {"symbol": "OTHERUSDT", "posSide": "long", "total": "2", "avgPrice": "10"},
+            {"symbol": "TESTUSDT", "posSide": "short", "total": "3", "avgPrice": "20"},
+            {"symbol": "TESTUSDT", "posSide": "long", "total": "1.5", "avgPrice": "12.5"},
+        ]
+        self.assertEqual(
+            scanner.extract_confirmed_position_fill(positions, "TESTUSDT", "LONG"),
+            (12.5, 1.5)
+        )
+        self.assertIsNone(
+            scanner.extract_confirmed_position_fill(positions, "TESTUSDT", "SHORT")
+        )
+        self.assertIsNone(
+            scanner.extract_confirmed_position_fill(None, "TESTUSDT", "LONG")
+        )
+
     def test_leverage_fallback_only_steps_down(self):
         self.assertEqual(scanner.safe_leverage_attempts(1), [1])
         self.assertEqual(scanner.safe_leverage_attempts(2), [2, 1])
