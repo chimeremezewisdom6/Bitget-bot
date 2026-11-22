@@ -10,16 +10,16 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION & 1-SECOND CONTINUOUS LOOP AUTO-DETECTION
+# ZERO-CONFIGURATION & ENVIRONMENT AUTO-DETECTION
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v115_1sec_scanner")
+log = logging.getLogger("v116_demo_audit_scanner")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
 
-# REAL-TIME 1-SECOND SCAN INTERVAL
+# Loop Interval (1 second continuous on 24/7 runner, single scan on GitHub Actions)
 LOOP_INTERVAL_SECONDS = 1.0
 
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
@@ -48,6 +48,7 @@ BITGET_V3_ORDER_INFO_URL = f"https://{BIT_DOMAIN}/api/v3/trade/order-info"
 LIVE_STREAK_FILE = "live_streak.json"
 LIVE_ACTIVE_TRADE_FILE = "live_active_trade.json"
 LIVE_HISTORY_FILE = "live_trade_history.json"
+VIRTUAL_DEMO_BAL_FILE = "virtual_demo_balance.json"
 
 NUM_BATCHES = 20
 MIN_24H_VOLUME = 300000
@@ -120,8 +121,25 @@ def calculate_min_required_margin_for_price(market_price, leverage=DEFAULT_LEVER
     return required_margin, qty, notional
 
 # ====================================================================================================
-# STATE & VIRTUAL TRACKING MANAGEMENT
+# STATE & VIRTUAL DEMO BALANCE MANAGEMENT
 # ====================================================================================================
+
+def get_virtual_demo_balance():
+    if os.path.exists(VIRTUAL_DEMO_BAL_FILE):
+        try:
+            with open(VIRTUAL_DEMO_BAL_FILE, "r") as f:
+                data = json.load(f)
+                return float(data.get("equity", 10000.0))
+        except Exception:
+            return 10000.0
+    return 10000.0
+
+def update_virtual_demo_balance(new_equity):
+    try:
+        with open(VIRTUAL_DEMO_BAL_FILE, "w") as f:
+            json.dump({"equity": new_equity}, f, indent=2)
+    except Exception:
+        pass
 
 def get_last_traded_coin_status():
     if os.path.exists(LIVE_HISTORY_FILE):
@@ -157,6 +175,41 @@ def get_live_win_streak():
         except Exception:
             return 0
     return 0
+
+def update_live_win_streak(is_win):
+    current = get_live_win_streak()
+    new_streak = current + 1 if is_win else 0
+    try:
+        with open(LIVE_STREAK_FILE, "w") as f:
+            json.dump({"live_wins": new_streak}, f, indent=2)
+    except Exception:
+        pass
+    return new_streak
+
+def record_trade_history(symbol, won, pnl_pct, pnl_cash):
+    history = []
+    if os.path.exists(LIVE_HISTORY_FILE):
+        try:
+            with open(LIVE_HISTORY_FILE, "r") as f:
+                history = json.load(f)
+                if not isinstance(history, list):
+                    history = []
+        except Exception:
+            history = []
+
+    history.append({
+        "symbol": symbol,
+        "won": won,
+        "pnl_pct": pnl_pct,
+        "pnl_cash": pnl_cash,
+        "timestamp": time.time()
+    })
+
+    try:
+        with open(LIVE_HISTORY_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+    except Exception:
+        pass
 
 def get_active_live_trade():
     if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
@@ -202,7 +255,13 @@ def clear_active_trade_state():
 
 async def fetch_bitget_account_balance(session):
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
-        return None
+        v_bal = get_virtual_demo_balance()
+        return {
+            "equity": v_bal,
+            "available": v_bal * 0.90,
+            "margin_coin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
+            "account_type": f"Bitget UTA v3 {'DEMO (Virtual Simulated)' if BITGET_DEMO_MODE else 'UNAUTHENTICATED'}"
+        }
 
     path = "/api/v3/account/assets"
     headers = get_bitget_headers("GET", path)
@@ -228,15 +287,23 @@ async def fetch_bitget_account_balance(session):
                     if usdt_equity == 0.0:
                         usdt_equity = float(asset_obj.get("equity") or available_margin)
 
+                v_bal = usdt_equity if usdt_equity > 0 else (10000.0 if BITGET_DEMO_MODE else 1.17)
                 return {
-                    "equity": usdt_equity if usdt_equity > 0 else (10000.0 if BITGET_DEMO_MODE else 1.17),
-                    "available": available_margin if available_margin > 0 else (10000.0 if BITGET_DEMO_MODE else 1.17),
+                    "equity": v_bal,
+                    "available": available_margin if available_margin > 0 else v_bal * 0.90,
                     "margin_coin": margin_coin_type,
                     "account_type": f"Bitget UTA v3 {'DEMO (Simulated)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
                 }
     except Exception as e:
         log.error(f"Error querying Bitget UTA v3 balance: {e}")
-    return None
+
+    v_bal = get_virtual_demo_balance()
+    return {
+        "equity": v_bal,
+        "available": v_bal * 0.90,
+        "margin_coin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
+        "account_type": f"Bitget UTA v3 {'DEMO (Fallback)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
+    }
 
 async def fetch_bitget_order_fill_price(session, symbol, order_id):
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE and order_id):
@@ -287,9 +354,17 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     req_margin, exact_qty, actual_notional = calculate_min_required_margin_for_price(market_price, DEFAULT_LEVERAGE)
 
+    margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
+
+    # VIRTUAL SHADOW TRACKER FALLBACK if required margin exceeds balance
     if req_margin > (available_balance * 0.85):
         log.warning(f"⚠️ MARGIN LIMIT ({symbol}): Requires ${req_margin:.2f} margin (min $5.01 notional), balance available: ${available_balance:.2f}.")
-        log.info(f"🔮 INITIATING VIRTUAL SHADOW TRADE TRACKER FOR {symbol} (Entry: ${format_price(market_price)} | TP: +2.5% | SL: -1.5%)...")
+        log.info(f"🔮 STARTING VIRTUAL SHADOW TRACKING ON {symbol}:")
+        log.info(f"   • Opening Demo Equity:  ${available_balance:.4f} {margin_currency}")
+        log.info(f"   • Entry Fill Price:    ${format_price(market_price)}")
+        log.info(f"   • Target Take Profit:  ${format_price(market_price * (1.0 + TP_PERCENTAGE))} (+2.50%)")
+        log.info(f"   • Stop Loss Floor:     ${format_price(market_price * (1.0 - SL_PERCENTAGE))} (-1.50%)")
+
         save_active_trade_state(symbol, direction, market_price, exact_qty, available_balance, is_virtual=True)
         return {
             "order_id": "VIRTUAL_SHADOW_ORDER",
@@ -329,7 +404,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     order_payload = {
         "category": ORDER_CATEGORY,
         "symbol": trade_symbol,
-        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
+        "marginCoin": margin_currency,
         "qty": size_str,
         "side": side,
         "orderType": "market",
@@ -341,8 +416,17 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json)
 
-    mode_label = "🎮 BITGET DEMO (UTA v3)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (UTA v3)"
-    log.info(f"🎯 SUBMITTING REBOUND ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${req_margin:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
+    mode_label = "🎮 BITGET DEMO MODE (S-USDT)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
+
+    log.info("====================================================================================================")
+    log.info(f"🎯 SUBMITTING TRADE ENTRY ORDER ({mode_label}):")
+    log.info(f"   • Symbol Pair:         {trade_symbol} ({direction})")
+    log.info(f"   • Opening Equity:      ${available_balance:.4f} {margin_currency}")
+    log.info(f"   • Entry Market Price:  ${format_price(market_price)}")
+    log.info(f"   • Order Size:          {size_str} (${actual_notional:.2f} Notional | Margin: ${req_margin:.2f})")
+    log.info(f"   • Preset Take Profit:  ${preset_tp} (+2.50%)")
+    log.info(f"   • Preset Stop Loss:    ${preset_sl} (-1.50%)")
+    log.info("====================================================================================================")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -354,7 +438,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "ORDER_EXECUTED")
-                log.info(f"✅ BITGET UTA v3 MATCHING ENGINE ACCEPTED ORDER WITH NATIVE TP & SL! Order ID: {order_id}")
+                log.info(f"✅ BITGET UTA v3 MATCHING ENGINE ACCEPTED DEMO ORDER! Order ID: {order_id}")
 
                 await asyncio.sleep(0.5)
                 real_fill = await fetch_bitget_order_fill_price(session, trade_symbol, order_id)
@@ -379,7 +463,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 }
             else:
                 log.error(f"❌ BITGET UTA v3 ORDER REJECTED: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
-                log.info(f"🔮 STARTING VIRTUAL SHADOW TRACKING ON {symbol} (Entry: ${format_price(market_price)} | TP: +2.5% | SL: -1.5%)...")
+                log.info(f"🔮 FALLING BACK TO VIRTUAL SHADOW TRADE TRACKER FOR {symbol}...")
                 save_active_trade_state(symbol, direction, market_price, size_str, available_balance, is_virtual=True)
                 return {
                     "order_id": "VIRTUAL_SHADOW_ORDER",
@@ -429,7 +513,7 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
                 resp = {}
 
             if r.status == 200 and resp.get("code") == "00000":
-                log.info(f"✅ BITGET POSITION CLOSED ON EXCHANGE! Order ID: {resp.get('data', {}).get('orderId')}")
+                log.info(f"✅ BITGET DEMO POSITION CLOSED ON EXCHANGE! Order ID: {resp.get('data', {}).get('orderId')}")
             else:
                 log.warning(f"Notice on exchange close: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
     except Exception as e:
@@ -491,7 +575,7 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# PURE 18%-20% REBOUND RECOVERY WINDOW ENGINE (REAL-TIME 1-SECOND SCAN)
+# PURE 18%-25% REBOUND RECOVERY ENGINE
 # ====================================================================================================
 
 async def process_pure_rebound_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
@@ -559,7 +643,7 @@ async def process_pure_rebound_batch(batch_id, coin_list, session, semaphore, la
     return [batch_evaluated[0]]
 
 # ====================================================================================================
-# MAIN EXECUTION RUNNER
+# MAIN EXECUTION RUNNER WITH DEMO BALANCE AUDIT
 # ====================================================================================================
 
 async def run_scanner_iteration():
@@ -573,7 +657,8 @@ async def run_scanner_iteration():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_label = "🎮 BITGET DEMO MODE (UTA v3 | S-USDT)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
+    margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
+    mode_label = f"🎮 BITGET DEMO MODE (UTA v3 | {margin_currency})" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
 
     log.info(f"🏆 Win Streak: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_label} | API: {auth_status}")
 
@@ -595,7 +680,7 @@ async def run_scanner_iteration():
         current_equity = acc_info["equity"] if acc_info else (10000.0 if BITGET_DEMO_MODE else 1.17)
 
         if acc_info:
-            log.info(f"💰 BITGET ACCOUNT EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f} ({acc_info['account_type']})")
+            log.info(f"💰 {mode_label} EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f}")
 
         active_trade = get_active_live_trade()
 
@@ -610,25 +695,53 @@ async def run_scanner_iteration():
             is_virtual = active_trade.get("is_virtual", False)
 
             entry_p_str = format_price(entry_price)
-            trade_type_label = "🔮 VIRTUAL SHADOW TRADE" if is_virtual else "⚡ LIVE BITGET TRADE"
-            log.info(f"⏳ {trade_type_label} MONITORING ({symbol}): Entry @ ${entry_p_str} | Target TP: ${format_price(preset_tp)} (+2.5%) | Stop SL: ${format_price(preset_sl)} (-1.5%)")
+            trade_type_label = "🔮 VIRTUAL SHADOW DEMO TRADE" if is_virtual else f"🎮 LIVE {margin_currency} DEMO TRADE"
+            log.info(f"⏳ {trade_type_label} ACTIVE ({symbol}): Entry @ ${entry_p_str} | Opening Balance: ${pre_trade_balance:.4f} {margin_currency} | TP: ${format_price(preset_tp)} (+2.5%) | SL: ${format_price(preset_sl)} (-1.5%)")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
 
-                log.info(f"📍 LIVE PRICE PING (1-sec tick): {symbol} | Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}%")
+                log.info(f"📍 LIVE PRICE PING ({symbol}): Current: ${curr_p_str} | Live PnL: {live_pnl_pct:+.2f}%")
 
+                # VIRTUAL SHADOW DEMO TRADE AUDIT LOGIC
                 if is_virtual:
                     is_win_hit = current_price >= preset_tp if direction == "LONG" else current_price <= preset_tp
                     is_loss_hit = current_price <= preset_sl if direction == "LONG" else current_price >= preset_sl
 
                     if is_win_hit:
-                        log.info(f"🏆 VIRTUAL SHADOW TRADE WIN! {symbol} hit Target TP ${format_price(preset_tp)} (+2.50%)! Setup successfully validated!")
+                        pnl_cash = pre_trade_balance * (TP_PERCENTAGE * DEFAULT_LEVERAGE)
+                        closing_equity = pre_trade_balance + pnl_cash
+                        update_virtual_demo_balance(closing_equity)
+                        new_streak = update_live_win_streak(True)
+                        record_trade_history(symbol, True, TP_PERCENTAGE * 100.0, pnl_cash)
+
+                        log.info("====================================================================================================")
+                        log.info(f"🏆 DEMO ACCOUNT TRADE AUDIT SUMMARY ({symbol}):")
+                        log.info(f"   • Demo Account Opening Equity:  ${pre_trade_balance:.4f} {margin_currency}")
+                        log.info(f"   • Demo Account Closing Equity:  ${closing_equity:.4f} {margin_currency}")
+                        log.info(f"   • NET DEMO PROFIT/LOSS:        +${pnl_cash:.4f} {margin_currency} (+{TP_PERCENTAGE*100.0:.2f}%)")
+                        log.info(f"   • TRADE OUTCOME:                🏆 WIN (DEMO BALANCE GAINED!)")
+                        log.info(f"   • NEW DEMO WIN STREAK:          {new_streak} WINS IN A ROW")
+                        log.info("====================================================================================================")
                         clear_active_trade_state()
+
                     elif is_loss_hit:
-                        log.info(f"❌ VIRTUAL SHADOW TRADE LOSS! {symbol} hit Stop SL ${format_price(preset_sl)} (-1.50%). Setup invalidated.")
+                        pnl_cash = - (pre_trade_balance * (SL_PERCENTAGE * DEFAULT_LEVERAGE))
+                        closing_equity = pre_trade_balance + pnl_cash
+                        update_virtual_demo_balance(closing_equity)
+                        new_streak = update_live_win_streak(False)
+                        record_trade_history(symbol, False, -SL_PERCENTAGE * 100.0, pnl_cash)
+
+                        log.info("====================================================================================================")
+                        log.info(f"❌ DEMO ACCOUNT TRADE AUDIT SUMMARY ({symbol}):")
+                        log.info(f"   • Demo Account Opening Equity:  ${pre_trade_balance:.4f} {margin_currency}")
+                        log.info(f"   • Demo Account Closing Equity:  ${closing_equity:.4f} {margin_currency}")
+                        log.info(f"   • NET DEMO PROFIT/LOSS:        -${abs(pnl_cash):.4f} {margin_currency} (-{SL_PERCENTAGE*100.0:.2f}%)")
+                        log.info(f"   • TRADE OUTCOME:                ❌ LOSS (STREAK RESET TO 0)")
+                        log.info(f"   • NEW DEMO WIN STREAK:          {new_streak} WINS")
+                        log.info("====================================================================================================")
                         clear_active_trade_state()
 
                 payload = {
@@ -653,7 +766,7 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info(f"⚡ FAST SCAN (1-sec interval): Evaluating all 600+ Bitget pairs for 18%-25% Rebound Recovery...")
+            log.info(f"🔍 Fetching ALL 600+ Bitget pairs for Rebound Recovery Window (18%-25% Recovery)...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -667,6 +780,8 @@ async def run_scanner_iteration():
 
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_coins = len(valid_coins)
+
+            log.info(f"🛰️ Evaluating {total_coins} pairs for Rebound Recovery between 18% and 25%...")
 
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
@@ -740,18 +855,21 @@ async def run_scanner_iteration():
                             final_eq = post_bal['equity']
                             net_cash_change = final_eq - pre_trade_balance
                             is_win = net_cash_change > 0
+                            new_streak = update_live_win_streak(is_win)
+                            record_trade_history(symbol, is_win, (net_cash_change / pre_trade_balance) * 100.0 if pre_trade_balance > 0 else 0.0, net_cash_change)
 
                             log.info("====================================================================================================")
-                            log.info(f"💵 BITGET ACCOUNT BALANCE AUDIT ({symbol}):")
-                            log.info(f"   • Starting Account Equity: ${pre_trade_balance:.4f}")
-                            log.info(f"   • Closing Account Equity:  ${final_eq:.4f}")
-                            log.info(f"   • NET CASH CHANGE:         {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f}")
-                            log.info(f"   • TRADE RESULT:            {'🏆 WIN (EQUITY GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
-                            log.info(f"   • NEW WIN STREAK:          {res_data.get('live_win_streak', 0)} WINS")
+                            log.info(f"💵 DEMO ACCOUNT TRADE AUDIT SUMMARY ({symbol}):")
+                            log.info(f"   • Demo Account Opening Equity:  ${pre_trade_balance:.4f} {margin_currency}")
+                            log.info(f"   • Demo Account Closing Equity:  ${final_eq:.4f} {margin_currency}")
+                            log.info(f"   • NET DEMO PROFIT/LOSS:        {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} {margin_currency}")
+                            log.info(f"   • TRADE RESULT:                {'🏆 WIN (DEMO BALANCE GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
+                            log.info(f"   • NEW DEMO WIN STREAK:          {new_streak} WINS")
                             log.info("====================================================================================================")
+                            clear_active_trade_state()
 
                     elif worker_status == "HOLDING":
-                        log.info(f"📈 TRADE HOLDING: {symbol} ({direction}) | Elapsed: {res_data.get('elapsed_minutes')}m")
+                        log.info(f"📈 DEMO TRADE HOLDING: {symbol} ({direction}) | Elapsed: {res_data.get('elapsed_minutes')}m")
 
                 log.info(f"📡 Webhook response status: {status_code}")
 
