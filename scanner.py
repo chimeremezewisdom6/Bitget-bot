@@ -14,7 +14,7 @@ import base64
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v128_truth_engine_scanner")
+log = logging.getLogger("v129_truth_engine_scanner")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -619,6 +619,7 @@ async def fetch_bitget_tickers(session):
     return []
 
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
+    """Fetches exactly 60 1-minute candles for full 60-candle window analysis."""
     async with semaphore:
         key_set = get_next_bitget_key()
         params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
@@ -792,9 +793,7 @@ async def run_scanner_iteration():
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
 
-                # ----------------------------------------------------------------------------------
                 # STEP 1: RISK-FIRST CHECK: EVALUATE STOP LOSS BEFORE ANYTHING ELSE!
-                # ----------------------------------------------------------------------------------
                 is_sl_breached = current_price <= ai_floor_sl if direction == "LONG" else current_price >= ai_floor_sl
 
                 if is_sl_breached or live_pnl_pct <= -5.0:
@@ -822,15 +821,12 @@ async def run_scanner_iteration():
                     clear_active_trade_state()
                     return
 
-                # ----------------------------------------------------------------------------------
-                # STEP 2: COUNT CANDLES FORMED SINCE ENTRY (IGNORE PRE-ENTRY CANDLES)
-                # ----------------------------------------------------------------------------------
+                # STEP 2: COUNT CANDLES FORMED SINCE ENTRY
                 candles_since_entry = 0
                 if candle_data:
                     candles_chrono = list(reversed(candle_data[:60]))
                     for c in candles_chrono:
                         c_timestamp_sec = float(c[0]) / 1000.0 if float(c[0]) > 1e11 else float(c[0])
-                        # Only count candles opened AFTER entry start_time
                         if c_timestamp_sec >= (start_time - 60.0):
                             o_p = float(c[1])
                             c_p = float(c[4])
@@ -840,9 +836,7 @@ async def run_scanner_iteration():
 
                 log.info(f"📍 LIVE MONITOR ({symbol}): Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}% | Candles Since Entry: {candles_since_entry}/30 {dominant_color} | Elapsed: {elapsed_minutes:.1f}m")
 
-                # ----------------------------------------------------------------------------------
-                # STEP 3: COLOR TARGET EXIT (Must have 30+ candles SINCE ENTRY & Positive PnL!)
-                # ----------------------------------------------------------------------------------
+                # STEP 3: COLOR TARGET EXIT
                 if candles_since_entry >= TARGET_COLOR_COUNT and live_pnl_pct > 0.0 and elapsed_minutes < MAX_TRADE_DURATION_MIN:
                     pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
                     closing_equity = pre_trade_balance + pnl_cash
@@ -869,9 +863,7 @@ async def run_scanner_iteration():
                     clear_active_trade_state()
                     return
 
-                # ----------------------------------------------------------------------------------
                 # STEP 4: TIME LIMIT EXPIRED (54-Minute Cutoff)
-                # ----------------------------------------------------------------------------------
                 if elapsed_minutes >= MAX_TRADE_DURATION_MIN and candles_since_entry < TARGET_COLOR_COUNT:
                     pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
