@@ -42,6 +42,11 @@ def load_bitget_api_keys():
     return keys
 
 BITGET_KEYS = load_bitget_api_keys()
+if len(BITGET_KEYS) > 1:
+    log.warning(
+        "Multiple Bitget API key sets are configured. This scanner will use only "
+        "the first key to avoid mixing account balances, positions and orders."
+    )
 def get_next_bitget_key():
     """
     Return one stable account identity for the entire scanner process.
@@ -389,7 +394,7 @@ async def fetch_bitget_account_balance(session):
                 usdt_equity = float(data.get("usdtEquity") or data.get("accountEquity") or 0.0)
                 assets_list = data.get("assets", [])
 
-                margin_coin_type = "S-USDT" if BITGET_DEMO_MODE else "USDT"
+                margin_coin_type = "USDT"
                 asset_obj = next((a for a in assets_list if a.get("coin") in ("USDT", "S-USDT")), None)
 
                 available_margin = float(asset_obj.get("available") or 0.0) if asset_obj else 0.0
@@ -552,6 +557,8 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
         "orderType": "market",
         "timeInForce": "ioc",
         "stopLoss": str(preset_sl),
+        "slTriggerBy": "mark",
+        "slOrderType": "market",
         "reduceOnly": "no"
     }
 
@@ -598,7 +605,30 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 filled_size_str = f"{filled_qty:.{quantity_precision}f}"
                 actual_notional = filled_qty * real_fill
                 pre_trade_equity = float(account_equity) if account_equity is not None else float(available_balance)
-                save_active_trade_state(trade_symbol, direction, real_fill, filled_size_str, pre_trade_equity, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=False)
+                try:
+                    save_active_trade_state(
+                        trade_symbol, direction, real_fill, filled_size_str,
+                        pre_trade_equity, dynamic_tp, dynamic_sl,
+                        adaptive_leverage, dominant_color, dominant_count,
+                        is_virtual=False
+                    )
+                except Exception as state_error:
+                    log.critical(
+                        f"Demo order {order_id} filled for {trade_symbol}, but local "
+                        f"trade state could not be saved: {state_error}. Attempting "
+                        "an immediate reduce-only emergency close."
+                    )
+                    emergency_closed = await close_bitget_live_position(
+                        session, trade_symbol, direction,
+                        contract_size=filled_size_str
+                    )
+                    if not emergency_closed:
+                        log.critical(
+                            f"URGENT: Could not confirm emergency close for {trade_symbol}. "
+                            "Check and close the Bitget Demo position manually."
+                        )
+                    return None
+
                 log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} matching {dominant_color} direction ({dominant_count} candles > 42)", "Active 54m / 30-Candle Color Supervision Engaged")
 
                 return {
@@ -859,8 +889,11 @@ async def run_scanner_iteration():
     recent_loss_count = get_consecutive_losses()
     last_symbol, last_won = get_last_traded_coin_status()
 
-    num_active_keys = len(BITGET_KEYS)
-    auth_status = f"🔐 AUTHENTICATED ({num_active_keys} Bitget Pollination Key Sets Active)" if num_active_keys > 0 else "🔓 PUBLIC API (Unauthenticated)"
+    configured_key_count = len(BITGET_KEYS)
+    auth_status = (
+        f"🔐 AUTHENTICATED (1 stable account key selected; {configured_key_count} configured)"
+        if configured_key_count > 0 else "🔓 PUBLIC API (Unauthenticated)"
+    )
     margin_currency = "USDT"
     mode_label = f"🎮 BITGET DEMO MODE (UTA v3 | {margin_currency})" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT)"
 
@@ -1153,7 +1186,7 @@ async def run_scanner_iteration():
 
 async def main():
     if CONTINUOUS_247_LOOP:
-        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND Auto-Purger Loop ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info("🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND scanner loop with one stable account key...")
         while True:
             try:
                 await run_scanner_iteration()
@@ -1161,7 +1194,7 @@ async def main():
                 log.error(f"Error during scan iteration: {e}")
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
     else:
-        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan Auto-Purger Execution ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info("⚡ AUTOMATIC ENVIRONMENT DETECTED: Running single scanner pass with one stable account key...")
         await run_scanner_iteration()
 
 if __name__ == "__main__":
