@@ -10,11 +10,11 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION & DOMINANT CANDLE COLOR ENGINE
+# ZERO-CONFIGURATION & 42+ CANDLE COLOR THRESHOLD ENGINE
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v126_dominant_color_scanner")
+log = logging.getLogger("v127_42plus_color_scanner")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -78,9 +78,10 @@ NUM_BATCHES = 20
 MIN_24H_VOLUME = 300000
 DEFAULT_LEVERAGE = 5
 
-# Strategy Constraints
-TARGET_COLOR_COUNT = 30        # Target 30+ candles of dominant color
-MAX_TRADE_DURATION_MIN = 54.0   # Must achieve target in less than 54 minutes
+# Strategy Constraints & Strict 42+ Color Entry Gate
+MIN_REQUIRED_COLOR_COUNT = 42    # MUST have >42 candles of the SAME color in 60m window
+TARGET_COLOR_COUNT = 30          # Target 30+ candles of dominant color during trade
+MAX_TRADE_DURATION_MIN = 54.0     # Must achieve target in less than 54 minutes
 
 # ====================================================================================================
 # UTILITY & AUTONOMOUS DECISION LOGGING FUNCTIONS
@@ -107,7 +108,7 @@ def log_ai_decision(symbol, decision_type, reason, action_taken):
         "reason": reason,
         "action": action_taken
     }
-    log.info(f"🧠 [DOMINANT COLOR ENGINE] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
+    log.info(f"🧠 [42+ CANDLE COLOR ENGINE] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
 
     logs = []
     if os.path.exists(AI_DECISION_LOG_FILE):
@@ -492,7 +493,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     log.info("====================================================================================================")
     log.info(f"🚨 TRADE IS HAPPENING NOW! ({mode_label})")
     log.info(f"   • Symbol Pair Opened:   {trade_symbol} ({direction})")
-    log.info(f"   • Dominant 60m Color:   {dominant_count} {dominant_color} Candles out of 60")
+    log.info(f"   • 60m Candle Color:     {dominant_count} {dominant_color} Candles out of 60 (PASSED >42 THRESHOLD!)")
     log.info(f"   • Exit Target Rule:     Reach 30+ {dominant_color} Candles in < 54 Minutes")
     log.info(f"   • Dynamic Stop Loss:    ${preset_sl} (-{sl_pct_val:.2f}% Risk Floor)")
     log.info(f"   • Account Opening Equity: ${available_balance:.4f} {margin_currency}")
@@ -520,7 +521,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                     real_fill = market_price
 
                 save_active_trade_state(trade_symbol, direction, real_fill, size_str, available_balance, dynamic_tp, dynamic_sl, adaptive_leverage, dominant_color, dominant_count, is_virtual=False)
-                log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} matching {dominant_color} direction (SL: -{sl_pct_val:.2f}%)", "Active 54m / 30-Candle Color Supervision Engaged")
+                log_ai_decision(trade_symbol, "ORDER_ENTERED", f"Filled at ${format_price(real_fill)} matching {dominant_color} direction ({dominant_count} candles > 42)", "Active 54m / 30-Candle Color Supervision Engaged")
 
                 return {
                     "order_id": order_id,
@@ -632,6 +633,7 @@ async def fetch_bitget_tickers(session):
     return []
 
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
+    """Fetches exactly 60 1-minute candles for full 60-candle window analysis."""
     async with semaphore:
         key_set = get_next_bitget_key()
         params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
@@ -653,14 +655,14 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# 60-CANDLE DOMINANT COLOR SCANNER & DYNAMIC 0.5%-2.5% STOP LOSS ENGINE
+# STRICT 42+ CANDLE COLOR ENTRY GATE & DYNAMIC 0.5%-2.5% STOP LOSS ENGINE
 # ====================================================================================================
 
 async def process_dominant_candle_color_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
     """
     Evaluates 60 1-minute candles for all Bitget pairs:
     1. Counts Green candles (LONG) vs Red candles (SHORT)
-    2. Identifies the crypto with the highest single candle color count in the last 60 candles
+    2. ENFORCES STRICT FILTER: Must have OVER 42+ candles of the SAME color out of 60!
     3. Dynamically calculates Stop Loss between 0.5% and 2.5% based on volatility/structure
     """
     batch_evaluated = []
@@ -693,7 +695,6 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
                 red_count += 1
 
         current_price = float(candles_chrono[-1][4])
-        prev_price = float(candles_chrono[-2][4])
         low_60m = min(float(c[3]) for c in candles_chrono)
         high_60m = max(float(c[2]) for c in candles_chrono)
 
@@ -710,10 +711,13 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
             dominant_color = "RED"
             dominant_count = red_count
 
+        # STRICT ENTRY GATE: REJECT TRADE IF DOMINANT COLOR COUNT IS NOT OVER 42!
+        if dominant_count < MIN_REQUIRED_COLOR_COUNT:
+            continue
+
         volatility_pct = ((high_60m - low_60m) / low_60m) * 100.0
 
         # DYNAMIC STOP LOSS CALCULATION (0.5% to 2.5% Range)
-        # Based on coin volatility: Low Volatility = 0.5% .. 1.0%, High Volatility = up to 2.5%
         raw_sl_pct = max(0.5, min(2.5, volatility_pct * 0.40))
 
         if direction == "LONG":
@@ -723,7 +727,7 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
             dynamic_sl = current_price * (1.0 + (raw_sl_pct / 100.0))
             dynamic_tp = current_price * (1.0 - (raw_sl_pct * 2.0 / 100.0))
 
-        confidence_score = min(99.0, 70.0 + (dominant_count * 0.45))
+        confidence_score = min(99.0, 75.0 + (dominant_count * 0.45))
 
         batch_evaluated.append({
             "batch_id": batch_id,
@@ -806,7 +810,6 @@ async def run_scanner_iteration():
             trade_type_label = "🔮 VIRTUAL SHADOW TRADE" if is_virtual else f"🎮 LIVE {margin_currency} DEMO TRADE"
             log.info(f"⏳ {trade_type_label} SUPERVISION ({symbol}): Entry @ ${entry_p_str} | Elapsed: {elapsed_minutes:.1f}m / 54.0m Max | Target: 30+ {dominant_color} Candles | SL Floor: ${format_price(ai_floor_sl)}")
 
-            # Fetch recent candles to evaluate active color count
             candle_data = await fetch_60m_candle_data_for_coin(session, symbol, asyncio.Semaphore(5))
             current_price = await fetch_single_price(session, symbol)
 
@@ -814,7 +817,6 @@ async def run_scanner_iteration():
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
 
-                # Count active candles of position color since entry
                 candles_chrono = list(reversed(candle_data[:60]))
                 active_same_color_count = 0
                 for c in candles_chrono:
@@ -825,10 +827,6 @@ async def run_scanner_iteration():
                         active_same_color_count += 1
 
                 log.info(f"📍 LIVE MONITOR ({symbol}): Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}% | Active {dominant_color} Candle Count: {active_same_color_count}/30 | Elapsed: {elapsed_minutes:.1f}m")
-
-                # ==================================================================================
-                # TIME / CANDLE COLOR EXIT EVALUATOR RULES
-                # ==================================================================================
 
                 # RULE 1: TARGET ACHIEVED (30+ Same-Color Candles in < 54 Minutes)
                 if active_same_color_count >= TARGET_COLOR_COUNT and elapsed_minutes < MAX_TRADE_DURATION_MIN:
@@ -929,7 +927,7 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info(f"🕯️ DOMINANT COLOR ENGINE: Scanning all 600+ Bitget pairs for highest candle color count in last 60 candles...")
+            log.info(f"🕯️ 42+ CANDLE COLOR ENGINE: Scanning all 600+ Bitget pairs for OVER 42+ candles of SAME color in last 60m...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -958,7 +956,7 @@ async def run_scanner_iteration():
                 all_batch_candidates.sort(key=lambda x: x["dominant_count"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 DOMINANT COLOR MATCH: {best_signal['symbol']} ({best_signal['dominant_count']}/60 {best_signal['dominant_color']} Candles | Direction: {best_signal['direction']} | Dynamic SL: -{best_signal['sl_pct_val']:.2f}%)")
+                log.info(f"🔥 #1 APPROVED 42+ CANDLE COLOR MATCH: {best_signal['symbol']} ({best_signal['dominant_count']}/60 {best_signal['dominant_color']} Candles | Direction: {best_signal['direction']} | Dynamic SL: -{best_signal['sl_pct_val']:.2f}%)")
 
                 live_order_result = await place_bitget_live_order(
                     session=session,
@@ -997,7 +995,7 @@ async def run_scanner_iteration():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
             else:
-                log.info("ℹ️ No altcoins currently matched dominant candle color criteria.")
+                log.info("ℹ️ No altcoins currently matched the >42+ candle color threshold in the last 60 minutes.")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
 
         if CLOUDFLARE_URL:
@@ -1044,7 +1042,7 @@ async def run_scanner_iteration():
 
 async def main():
     if CONTINUOUS_247_LOOP:
-        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND Dominant Color Loop ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND 42+ Candle Color Loop ({len(BITGET_KEYS)} Pollination Keys)...")
         while True:
             try:
                 await run_scanner_iteration()
@@ -1052,7 +1050,7 @@ async def main():
                 log.error(f"Error during scan iteration: {e}")
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
     else:
-        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan Dominant Color Execution ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan 42+ Candle Color Execution ({len(BITGET_KEYS)} Pollination Keys)...")
         await run_scanner_iteration()
 
 if __name__ == "__main__":
