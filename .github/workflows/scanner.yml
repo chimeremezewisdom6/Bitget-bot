@@ -1,58 +1,13 @@
 name: Bitget Demo Scanner
 
+# Trading remains paused until the automated validation workflow passes and
+# a supervised Demo-only test is completed.
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
-
-# Prevent overlapping scans from creating duplicate orders.
-concurrency:
-  group: bitget-demo-scanner
-  cancel-in-progress: false
-
-permissions:
-  contents: write
 
 jobs:
   scan:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run demo-only scanner
-        env:
-          BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
-          BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY }}
-          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE }}
-          BITGET_DEMO_MODE: "true"
-          CONTINUOUS_247_LOOP: "false"
-        run: python scanner.py
-
-      - name: Persist scanner state for the next scheduled run
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for file in live_active_trade.json live_streak.json live_trade_history.json ai_trader_decisions.json; do
-            if [ -f "$file" ]; then git add "$file"; fi
-          done
-          if ! git diff --cached --quiet; then
-            git commit -m "Persist Bitget demo scanner state"
-            git push
-          else
-            echo "No scanner state changes to save."
-          fi
+      - run: echo "Scanner is paused pending validation. Do not enable automated trading yet."
