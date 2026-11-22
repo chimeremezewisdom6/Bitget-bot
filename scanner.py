@@ -146,10 +146,13 @@ def get_bitget_headers(method="GET", request_path="", body="", key_set=None):
             "ACCESS-PASSPHRASE": key_set["passphrase"],
             "locale": "en-US"
         })
+        if BITGET_DEMO_MODE:
+            headers["paptrading"] = "1"
     return headers
 
 def calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score):
-    leverage = 10 if (confidence_score >= 95.0 and volatility_pct < 3.5) else 5
+    # Keep leverage conservative; do not request 10x automatically.
+    leverage = 5
 
     raw_qty = 5.01 / market_price
 
@@ -282,11 +285,14 @@ def get_active_live_trade():
                 data = json.load(f)
                 if data.get("active"):
                     start_time = float(data.get("start_time", 0))
-                    # Auto-purge trades created over 60 minutes ago or with static git timestamps
-                    if start_time == 0 or (time.time() - start_time) > 3600.0:
-                        log.warning(f"🧹 AUTO-PURGING STALE TRADE STATE FOR {data.get('symbol')} (Checked into Git / Age > 60m)...")
-                        clear_active_trade_state()
-                        return None
+                    if start_time <= 0:
+                        opened_at_ms = float(data.get("opened_at", 0) or 0)
+                        start_time = opened_at_ms / 1000.0 if opened_at_ms > 1e11 else opened_at_ms
+                        if start_time > 0:
+                            data["start_time"] = start_time
+                    if start_time <= 0:
+                        log.error("Active trade state has no valid start time; refusing to discard it automatically.")
+                        return data
                     return data
         except Exception:
             clear_active_trade_state()
@@ -321,13 +327,8 @@ def save_active_trade_state(symbol, direction, entry_price, contract_size, pre_t
 async def fetch_bitget_account_balance(session):
     key_set = get_next_bitget_key()
     if not key_set:
-        v_bal = get_virtual_demo_balance()
-        return {
-            "equity": v_bal,
-            "available": v_bal * 0.90,
-            "margin_coin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
-            "account_type": f"Bitget UTA v3 {'DEMO (Simulated)' if BITGET_DEMO_MODE else 'UNAUTHENTICATED'}"
-        }
+        log.error("No Bitget API credentials configured; refusing to use a simulated balance.")
+        return None
 
     path = "/api/v3/account/assets"
     headers = get_bitget_headers("GET", path, key_set=key_set)
@@ -363,13 +364,8 @@ async def fetch_bitget_account_balance(session):
     except Exception as e:
         log.error(f"Error querying Bitget balance via Key #{key_set['id']}: {e}")
 
-    v_bal = get_virtual_demo_balance()
-    return {
-        "equity": v_bal,
-        "available": v_bal * 0.90,
-        "margin_coin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
-        "account_type": f"Bitget UTA v3 {'DEMO (Fallback)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
-    }
+    log.error("Bitget account balance could not be verified; refusing to use fallback equity.")
+    return None
 
 async def fetch_bitget_order_fill_price(session, symbol, order_id, key_set=None):
     if not (key_set and order_id):
@@ -430,7 +426,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     margin_currency = "S-USDT" if BITGET_DEMO_MODE else "USDT"
 
     # Fail closed: never simulate a fill or open a shadow trade.
-    if req_margin > (available_balance * 0.85):
+    if available_balance <= 0 or req_margin > (available_balance * 0.80):
         log_ai_decision(symbol, "INSUFFICIENT_MARGIN", f"Required margin ${req_margin:.2f} exceeds safe available balance", "Skipped; no order submitted")
         return None
 
@@ -556,12 +552,14 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
                 resp = {}
 
             if r.status == 200 and resp.get("code") == "00000":
-                log.info(f"✅ BITGET POSITION CLOSED ON EXCHANGE! Order ID: {resp.get('data', {}).get('orderId')}")
-                log_ai_decision(symbol, "POSITION_CLOSED", f"Market exit order executed for size {order_payload['qty']}", "Cleared Active Trade State")
-            else:
-                log.warning(f"Notice on exchange close: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+                log.info(f"✅ Bitget accepted reduce-only close order for {symbol}.")
+                log_ai_decision(symbol, "CLOSE_ORDER_ACCEPTED", f"Reduce-only close submitted for size {order_payload['qty']}", "Will clear local state after exchange response")
+                return True
+            log.error(f"Bitget rejected close order: Code: {resp.get('code')} | Msg: {resp.get('msg')}")
+            return False
     except Exception as e:
         log.error(f"Error executing Bitget position close: {e}")
+        return False
 
 # ====================================================================================================
 # MARKET DATA FETCHERS & 60-CANDLE COLOR SCANNER
@@ -813,7 +811,7 @@ async def run_scanner_iteration():
                     candles_chrono = list(reversed(candle_data[:60]))
                     for c in candles_chrono:
                         c_timestamp_sec = float(c[0]) / 1000.0 if float(c[0]) > 1e11 else float(c[0])
-                        if c_timestamp_sec >= (start_time - 60.0):
+                        if c_timestamp_sec >= math.ceil(start_time / 60.0) * 60.0:
                             o_p = float(c[1])
                             c_p = float(c[4])
                             c_color = "GREEN" if c_p >= o_p else "RED"
@@ -823,7 +821,7 @@ async def run_scanner_iteration():
                 log.info(f"📍 LIVE MONITOR ({symbol}): Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}% | Candles Since Entry: {candles_since_entry}/30 {dominant_color} | Elapsed: {elapsed_minutes:.1f}m")
 
                 # STEP 3: COLOR TARGET EXIT
-                if candles_since_entry >= TARGET_COLOR_COUNT and live_pnl_pct > 0.0 and elapsed_minutes < MAX_TRADE_DURATION_MIN:
+                if candles_since_entry >= TARGET_COLOR_COUNT and elapsed_minutes < MAX_TRADE_DURATION_MIN:
                     pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
                     closing_equity = pre_trade_balance + pnl_cash
 
@@ -850,7 +848,7 @@ async def run_scanner_iteration():
                     return
 
                 # STEP 4: TIME LIMIT EXPIRED (54-Minute Cutoff)
-                if elapsed_minutes >= MAX_TRADE_DURATION_MIN and candles_since_entry < TARGET_COLOR_COUNT:
+                if elapsed_minutes >= MAX_TRADE_DURATION_MIN:
                     pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
                     is_win = pnl_cash >= 0
