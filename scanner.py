@@ -208,7 +208,8 @@ def calculate_ai_position_parameters(market_price, available_balance, volatility
     return required_margin, qty, notional, leverage
 
 def format_instrument_price(price, rules, direction):
-    precision = int(rules.get("pricePrecision") or 8)
+    raw_precision = rules.get("pricePrecision")
+    precision = int(raw_precision) if raw_precision not in (None, "") else 8
     step = float(rules.get("priceMultiplier") or (10 ** -precision))
     if step <= 0:
         return format_price(price)
@@ -408,6 +409,22 @@ async def fetch_bitget_account_balance(session):
     log.error("Bitget account balance could not be verified; refusing to use fallback equity.")
     return None
 
+async def fetch_account_hold_mode(session):
+    key_set = get_next_bitget_key()
+    if not key_set:
+        return None
+    path = "/api/v3/account/settings"
+    headers = get_bitget_headers("GET", path, key_set=key_set)
+    try:
+        async with session.get(f"https://{BIT_DOMAIN}{path}", headers=headers, timeout=8) as response:
+            payload = await response.json()
+            if response.status == 200 and payload.get("code") == "00000":
+                return (payload.get("data") or {}).get("holdMode")
+            log.error(f"Could not verify Bitget position mode: {payload.get('msg')}")
+    except Exception as exc:
+        log.error(f"Position-mode check failed: {exc}")
+    return None
+
 async def fetch_bitget_order_info(session, order_id, key_set=None):
     if not (key_set and order_id):
         return None
@@ -557,8 +574,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                     "symbol": trade_symbol,
                     "notional_value": actual_notional,
                     "contract_size": size_str,
-                    "preset_tp": preset_tp,
-                    "preset_sl": preset_sl,
+                    "stop_loss": preset_sl,
                     "real_fill_price": real_fill,
                     "pre_trade_balance": available_balance,
                     "is_virtual": False,
@@ -698,9 +714,6 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
 
-        if symbol == last_symbol and last_won:
-            continue
-
         candles_chrono = list(reversed(candle_data[:60]))
 
         green_count = 0
@@ -796,6 +809,10 @@ async def run_scanner_iteration():
         acc_info = await fetch_bitget_account_balance(session)
         if not acc_info:
             log.error("Account equity and available margin are unverified. Skipping this run.")
+            return
+        hold_mode = await fetch_account_hold_mode(session)
+        if hold_mode != "one_way_mode":
+            log.error(f"Bitget position mode is {hold_mode!r}; this bot only supports confirmed one-way mode. No trade action taken.")
             return
         current_equity = float(acc_info["equity"])
         available_margin = float(acc_info["available"])
