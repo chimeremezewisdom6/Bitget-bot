@@ -70,7 +70,7 @@ class ScannerSafetyTests(unittest.TestCase):
 
     def test_candle_selection_uses_latest_completed_candles_in_order(self):
         minute_ms = 60_000
-        now_ms = 100 * minute_ms + 30_000
+        now_ms = 99 * minute_ms + 30_000
         candles = [
             [str(i * minute_ms), "1", "2", "0.5", str(i), "1", "1"]
             for i in range(100)
