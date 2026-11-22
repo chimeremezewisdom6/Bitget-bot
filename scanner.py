@@ -742,10 +742,15 @@ async def run_scanner_iteration():
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
-        current_equity = acc_info["equity"] if acc_info else (10000.0 if BITGET_DEMO_MODE else 1.17)
-
-        if acc_info:
-            log.info(f"💰 {mode_label} EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f}")
+        if not acc_info:
+            log.error("Account equity and available margin are unverified. Skipping this run.")
+            return
+        current_equity = float(acc_info["equity"])
+        available_margin = float(acc_info["available"])
+        if current_equity <= 0 or available_margin <= 0:
+            log.error("Bitget reports zero/invalid equity or available margin. Skipping this run.")
+            return
+        log.info(f"💰 {mode_label} EQUITY: ${current_equity:.4f} {acc_info['margin_coin']} | Available Margin: ${available_margin:.4f}")
 
         # Check and auto-purge stale git active trade state
         active_trade = get_active_live_trade()
@@ -784,8 +789,9 @@ async def run_scanner_iteration():
                     pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
 
-                    if not is_virtual:
-                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
+                    if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
+                        log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
+                        return
 
                     update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(False)
@@ -825,8 +831,9 @@ async def run_scanner_iteration():
                     pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
                     closing_equity = pre_trade_balance + pnl_cash
 
-                    if not is_virtual:
-                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
+                    if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
+                        log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
+                        return
 
                     update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(True)
@@ -853,8 +860,9 @@ async def run_scanner_iteration():
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
                     is_win = pnl_cash >= 0
 
-                    if not is_virtual:
-                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
+                    if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
+                        log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
+                        return
 
                     update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(is_win)
@@ -932,7 +940,7 @@ async def run_scanner_iteration():
                     symbol=best_signal["symbol"],
                     direction=best_signal["direction"],
                     market_price=best_signal["current_price"],
-                    available_balance=current_equity,
+                    available_balance=available_margin,
                     confidence_score=best_signal["confidence_score"],
                     volatility_pct=best_signal["volatility_pct"],
                     dynamic_tp=best_signal["dynamic_tp"],
@@ -967,47 +975,8 @@ async def run_scanner_iteration():
                 log.info("ℹ️ No altcoins currently matched the >42+ candle color threshold in the last 60 minutes.")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
 
-        if CLOUDFLARE_URL:
-            headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
-            async with session.post(CLOUDFLARE_URL, json=payload, headers=headers, timeout=15) as resp:
-                status_code = resp.status
-                try:
-                    res_data = await resp.json()
-                except Exception:
-                    res_data = {}
-
-                if active_trade and res_data and not active_trade.get("is_virtual", False):
-                    worker_status = res_data.get("status", "")
-
-                    if worker_status == "CLOSED":
-                        c_size = active_trade.get("contract_size") or res_data.get("contract_size", "1")
-                        await close_bitget_live_position(session, symbol, direction, contract_size=c_size)
-
-                        await asyncio.sleep(4.5)
-                        post_bal = await fetch_bitget_account_balance(session)
-                        if post_bal:
-                            final_eq = post_bal['equity']
-                            net_cash_change = final_eq - pre_trade_balance
-                            is_win = net_cash_change > 0
-                            new_streak = update_live_win_streak(is_win)
-                            record_trade_history(symbol, is_win, (net_cash_change / pre_trade_balance) * 100.0 if pre_trade_balance > 0 else 0.0, net_cash_change)
-
-                            log_ai_decision(symbol, "EXCHANGE_CLOSE_AUDIT", f"Closing Equity ${final_eq:.4f}", f"Result: {'WIN' if is_win else 'LOSS'}")
-
-                            log.info("====================================================================================================")
-                            log.info(f"🏁 TRADE CLOSED & AUDITED! ({symbol})")
-                            log.info(f"   • Trade Opening Account Balance: ${pre_trade_balance:.4f} {margin_currency}")
-                            log.info(f"   • Trade Closing Account Balance: ${final_eq:.4f} {margin_currency}")
-                            log.info(f"   • NET PROFIT/LOSS:              {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} {margin_currency}")
-                            log.info(f"   • TRADE RESULT:                  {'🏆 WIN' if is_win else '❌ LOSS'}")
-                            log.info(f"   • NEW WIN STREAK:                {new_streak} WINS")
-                            log.info("====================================================================================================")
-                            clear_active_trade_state()
-
-                    elif worker_status == "HOLDING":
-                        log.info(f"📈 DEMO TRADE HOLDING: {symbol} ({direction}) | Elapsed: {res_data.get('elapsed_minutes')}m")
-
-                log.info(f"📡 Webhook response status: {status_code}")
+        # Active trade state is persisted by the GitHub Actions commit step.
+        # Cloudflare Worker is not used for strategy, monitoring or exits.
 
 async def main():
     if CONTINUOUS_247_LOOP:
