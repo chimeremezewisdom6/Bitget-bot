@@ -389,7 +389,7 @@ async def fetch_bitget_account_balance(session):
             except Exception:
                 resp = {}
 
-            if r.status == 200 and resp.get("code") == "00000" and resp.get("data"):
+            if r.status == 200 and resp.get("code") == "00000" and isinstance(resp.get("data"), dict):
                 data = resp["data"]
                 usdt_equity = float(data.get("usdtEquity") or data.get("accountEquity") or 0.0)
                 assets_list = data.get("assets", [])
@@ -406,6 +406,8 @@ async def fetch_bitget_account_balance(session):
                         "Bitget reports zero USDT equity. Existing positions may still be "
                         "supervised, but new entries will be blocked."
                     )
+                if not asset_obj:
+                    log.warning("Bitget returned account assets but no USDT asset row; available USDT margin is treated as zero.")
 
                 return {
                     "equity": usdt_equity,
@@ -413,6 +415,13 @@ async def fetch_bitget_account_balance(session):
                     "margin_coin": margin_coin_type,
                     "account_type": f"Bitget UTA v3 {'DEMO (Key #' + str(key_set['id']) + ')' if BITGET_DEMO_MODE else 'REAL LIVE'}"
                 }
+
+            # Expose the exchange's diagnostic code/message, never request headers or secrets.
+            log.error(
+                "Bitget balance request rejected or returned an unexpected payload "
+                "(HTTP %s, code=%s, msg=%s). Check Demo API key, permissions, and account mode.",
+                r.status, resp.get("code", "missing"), resp.get("msg", "missing")
+            )
     except Exception as e:
         log.error(f"Error querying Bitget balance via Key #{key_set['id']}: {e}")
 
@@ -1031,7 +1040,7 @@ async def run_scanner_iteration():
 
     configured_key_count = len(BITGET_KEYS)
     auth_status = (
-        f"🔐 AUTHENTICATED (1 stable account key selected; {configured_key_count} configured)"
+        f"🔑 API KEY CONFIGURED (not yet verified; 1 stable key selected; {configured_key_count} configured)"
         if configured_key_count > 0 else "🔓 PUBLIC API (Unauthenticated)"
     )
     margin_currency = "USDT"
