@@ -20,6 +20,20 @@ class ScannerSafetyTests(unittest.TestCase):
             "priceMultiplier": "0.01",
         }
 
+    def test_api_key_selection_is_stable_and_does_not_rotate_accounts(self):
+        keys = [
+            {"key": "demo-account-a", "secret": "a", "passphrase": "a", "id": 1},
+            {"key": "demo-account-b", "secret": "b", "passphrase": "b", "id": 2},
+        ]
+        with patch.object(scanner, "BITGET_KEYS", keys):
+            first = scanner.get_next_bitget_key()
+            second = scanner.get_next_bitget_key()
+            third = scanner.get_next_bitget_key()
+
+        self.assertIs(first, keys[0])
+        self.assertIs(second, first)
+        self.assertIs(third, first)
+
     def test_strategy_is_demo_only_and_thresholds_match(self):
         self.assertIs(scanner.BITGET_DEMO_MODE, True)
         self.assertEqual(scanner.MIN_24H_VOLUME, 500000)
