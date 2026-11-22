@@ -1,4 +1,3 @@
-
 import os
 import time
 import json
@@ -15,7 +14,7 @@ import base64
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v110_overstretched_reversal_scanner")
+log = logging.getLogger("v111_affordability_scanner")
 
 # AUTO-DETECT ENVIRONMENT:
 # - If running in GitHub Actions: Runs 1 scan and exits cleanly.
@@ -94,6 +93,35 @@ def get_bitget_headers(method="GET", request_path="", body=""):
             "locale": "en-US"
         })
     return headers
+
+def calculate_min_required_margin_for_price(market_price, leverage=DEFAULT_LEVERAGE):
+    """
+    Calculates the exact minimum required margin to satisfy Bitget's 5.01 USDT notional minimum.
+    Prevents step-rounding jumps (like $3.65 EVAA requiring 2 contracts = $7.30 Notional = $1.46 Margin).
+    """
+    if market_price <= 0:
+        return 999.0
+
+    # Calculate min contract quantity needed to reach $5.01 USDT notional
+    raw_qty = 5.01 / market_price
+
+    if market_price < 0.0001:
+        qty = math.ceil(raw_qty)
+    elif market_price < 0.01:
+        qty = math.ceil(raw_qty)
+    elif market_price < 1.0:
+        qty = math.ceil(raw_qty * 10) / 10
+    elif market_price < 100.0:
+        qty = math.ceil(raw_qty * 10) / 10
+    else:
+        qty = math.ceil(raw_qty * 100) / 100
+
+    notional = qty * market_price
+    if notional < 5.01:
+        notional = 5.05
+
+    required_margin = notional / leverage
+    return required_margin, qty, notional
 
 # ====================================================================================================
 # STATE & HISTORY MANAGEMENT
@@ -178,8 +206,8 @@ async def fetch_bitget_account_balance(session):
                         usdt_equity = float(asset_obj.get("equity") or available_margin)
 
                 return {
-                    "equity": usdt_equity if usdt_equity > 0 else 1.17,
-                    "available": available_margin if available_margin > 0 else 1.17,
+                    "equity": usdt_equity if usdt_equity > 0 else (10000.0 if BITGET_DEMO_MODE else 1.17),
+                    "available": available_margin if available_margin > 0 else (10000.0 if BITGET_DEMO_MODE else 1.17),
                     "margin_coin": margin_coin_type,
                     "account_type": f"Bitget UTA v3 {'DEMO (Simulated)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
                 }
@@ -231,13 +259,6 @@ async def configure_bitget_leverage(session, symbol):
         log.debug(f"Leverage notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, drop_depth_pct=0.0):
-    """
-    Submits Market Order to Bitget UTA v3 for the most overstretched reversing coin.
-    Sizing is calibrated to fit small balances ($1.17 USDT):
-    - Target Notional = $5.05 USDT (exceeds $5.00 minimum required by Bitget)
-    - Required Initial Margin = $1.01 USDT ($5.05 / 5x leverage)
-    - Unencumbered Fee Buffer = $0.16 USDT (~13.7%), ensuring Code 25203 is bypassed!
-    """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
         log.error("❌ Missing Bitget API Keys. Order execution skipped.")
         return None
@@ -245,43 +266,22 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     trade_symbol = symbol
     await configure_bitget_leverage(session, trade_symbol)
 
-    # Use 83% of balance as margin ($1.01 on $1.17)
-    usable_margin = available_balance * 0.83
-    calculated_notional = usable_margin * DEFAULT_LEVERAGE
+    req_margin, exact_qty, actual_notional = calculate_min_required_margin_for_price(market_price, DEFAULT_LEVERAGE)
 
-    if calculated_notional < 5.05:
-        target_notional = 5.05
-    else:
-        target_notional = calculated_notional
-
-    required_margin = target_notional / DEFAULT_LEVERAGE
-    if required_margin > available_balance:
-        log.error(f"❌ Balance too small to open minimum 5 USDT order. Available: ${available_balance:.2f}, Required: ${required_margin:.2f}")
+    if req_margin > (available_balance * 0.85):
+        log.error(f"❌ Order rejected by pre-execution check: {symbol} requires ${req_margin:.2f} margin ($5.01+ Notional), which exceeds balance limit (${available_balance*0.85:.2f}).")
         return None
 
-    contract_size = target_notional / market_price
-
     if market_price < 0.0001:
-        size_str = f"{int(math.ceil(contract_size))}"
+        size_str = f"{int(exact_qty)}"
     elif market_price < 0.01:
-        size_str = f"{math.ceil(contract_size)}"
+        size_str = f"{int(exact_qty)}"
     elif market_price < 1.0:
-        size_str = f"{math.floor(contract_size * 10) / 10:.1f}"
+        size_str = f"{exact_qty:.1f}"
     elif market_price < 100.0:
-        size_str = f"{math.floor(contract_size * 10) / 10:.1f}"
+        size_str = f"{exact_qty:.1f}"
     else:
-        size_str = f"{math.floor(contract_size * 100) / 100:.2f}"
-
-    actual_notional = float(size_str) * market_price
-    if actual_notional < 5.02:
-        needed_qty = math.ceil(5.05 / market_price)
-        if market_price < 1.0:
-            size_str = f"{needed_qty}"
-        else:
-            size_str = f"{needed_qty:.2f}"
-        actual_notional = float(size_str) * market_price
-
-    actual_margin_used = actual_notional / DEFAULT_LEVERAGE
+        size_str = f"{exact_qty:.2f}"
 
     if direction == "LONG":
         side = "buy"
@@ -309,7 +309,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     headers = get_bitget_headers("POST", path, body_json)
 
     mode_label = "🎮 BITGET DEMO (UTA v3)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (UTA v3)"
-    log.info(f"🎯 SUBMITTING OVERSTRETCHED REVERSAL ORDER ({mode_label}): {trade_symbol} ({direction}) | Drop Depth: -{drop_depth_pct:.2f}% | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${actual_margin_used:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
+    log.info(f"🎯 SUBMITTING AFFORDABLE ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${req_margin:.2f} | Balance Buffer: ${available_balance - req_margin:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -423,7 +423,6 @@ async def fetch_bitget_tickers(session):
     return []
 
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
-    """Fetches 60 1-minute candles to evaluate overstretched depth and reversal confirmation."""
     async with semaphore:
         params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
         path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}&granularity=1m&limit=60"
@@ -444,21 +443,15 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# OVERSTRETCHED REVERSAL ENGINE (SCANNING ALL 600+ PAIRS)
+# OVERSTRETCHED REVERSAL ENGINE WITH AFFORDABILITY CHECK
 # ====================================================================================================
 
-async def process_overstretched_reversal_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
+async def process_overstretched_reversal_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won, available_balance=1.17):
     """
-    Evaluates ALL 600+ Bitget Pairs for Most Overstretched Downside + Active Reversal:
-    1. Overstretched Drop Depth %:
-       - Measures how heavily the coin dropped from its recent peak: (peak_60m - low_60m) / peak_60m * 100
-       - Targets coins that suffered a deep oversold drop relative to rest of market.
-    2. Active Reversal Filter (EXCLUDES STILL-FALLING COINS):
-       - Reversal Condition: current_price > prev_price (must be actively turning UP).
-       - Bounce %: (current_price - low_60m) / low_60m * 100 (must be >= +0.20% off local bottom).
-       - Coins still falling or making new lows are IMMEDIATELY REJECTED.
-    3. Overstretched Reversal Score = Drop_Depth_Pct * Bounce_Pct
-       - Selects the single most overstretched coin that is CONFIRMED actively reversing!
+    Evaluates ALL 600+ Bitget Pairs for Overstretched Reversals AND Margin Affordability:
+    1. Rejects coins whose minimum step notional exceeds account margin capacity (e.g. EVAA $3.65 requiring $1.46 margin).
+    2. Rejects still-falling coins (current_price <= prev_price).
+    3. Ranks remaining affordable candidates by Overstretched Reversal Score (Drop Depth x Active Bounce).
     """
     batch_evaluated = []
 
@@ -477,7 +470,7 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
         if symbol == last_symbol and last_won:
             continue
 
-        candles_60m = list(reversed(candle_data[:60]))  # 60m chronological candles
+        candles_60m = list(reversed(candle_data[:60]))
 
         peak_60m = max(float(c[2]) for c in candles_60m[:-2])
         low_60m = min(float(c[3]) for c in candles_60m[:-2])
@@ -487,17 +480,18 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
         if current_price <= 0 or low_60m <= 0 or peak_60m <= 0:
             continue
 
-        # FILTER OUT FALLING COINS: Must be actively bouncing UP (current > prev)
+        # REJECT FALLING COINS: Must be actively bouncing UP
         if current_price <= prev_price:
             continue
 
-        # Measure Overstretched Drop Depth % from recent peak
-        drop_depth_pct = ((peak_60m - low_60m) / peak_60m) * 100.0
+        # REJECT UNAFFORDABLE COINS: Check if min required margin > available_balance * 0.85
+        req_margin, _, _ = calculate_min_required_margin_for_price(current_price, DEFAULT_LEVERAGE)
+        if req_margin > (available_balance * 0.85):
+            continue
 
-        # Measure Active Rebound % off local bottom
+        drop_depth_pct = ((peak_60m - low_60m) / peak_60m) * 100.0
         bounce_pct = ((current_price - low_60m) / low_60m) * 100.0
 
-        # Coin must be heavily overstretched (dropped >= 0.80%) AND actively bouncing (>= +0.20% off low)
         if drop_depth_pct >= 0.80 and bounce_pct >= 0.20:
             overstretched_reversal_score = drop_depth_pct * bounce_pct
 
@@ -510,6 +504,7 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
                 "bounce_pct": bounce_pct,
                 "score": overstretched_reversal_score,
                 "current_price": current_price,
+                "req_margin": req_margin,
                 "low_60m": low_60m,
                 "peak_60m": peak_60m
             })
@@ -535,9 +530,9 @@ async def run_scanner_iteration():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE (UTA v3 | Overstretched Reversal Engine | Balance $1.17 Ready)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
+    mode_label = "🎮 BITGET DEMO MODE (UTA v3 | S-USDT)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
 
-    log.info(f"🏆 Win Streak: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_status} | API: {auth_status}")
+    log.info(f"🏆 Win Streak: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_label} | API: {auth_status}")
 
     # CIRCUIT BREAKER GUARD
     if recent_loss_count >= 2:
@@ -545,7 +540,7 @@ async def run_scanner_iteration():
         log.warning("⛔ CIRCUIT BREAKER ACTIVATED: ACCOUNT REDUCED ON 2 CONSECUTIVE TRADES!")
         log.warning("🚫 NEW TRADES ARE BLOCKED TO PROTECT ACCOUNT FROM DRAWDOWN.")
         log.warning("====================================================================================================")
-        payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False, "blocked": True}
+        payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False, "blocked": True}
         if CLOUDFLARE_URL:
             headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
             async with aiohttp.ClientSession() as session:
@@ -554,7 +549,7 @@ async def run_scanner_iteration():
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
-        current_equity = acc_info["equity"] if acc_info else 1.17
+        current_equity = acc_info["equity"] if acc_info else (10000.0 if BITGET_DEMO_MODE else 1.17)
 
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f} ({acc_info['account_type']})")
@@ -600,7 +595,7 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info("🔍 Fetching ALL 600+ Bitget USDT-Futures pairs for Overstretched Reversal Analysis...")
+            log.info("🔍 Fetching ALL 600+ Bitget USDT-Futures pairs for Affordability & Overstretched Reversal Analysis...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -615,12 +610,12 @@ async def run_scanner_iteration():
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_coins = len(valid_coins)
 
-            log.info(f"🛰️ Evaluating {total_coins} pairs for Deep Oversold Drop + Active Rebound (Rejecting falling coins)...")
+            log.info(f"🛰️ Evaluating {total_coins} pairs for Margin Affordability (Margin <= ${current_equity*0.85:.2f}) & Overstretched Rebound...")
 
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-            batch_tasks = [process_overstretched_reversal_batch(i + 1, batch, session, semaphore, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
+            batch_tasks = [process_overstretched_reversal_batch(i + 1, batch, session, semaphore, last_symbol, last_won, available_balance=current_equity) for i, batch in enumerate(coin_batches)]
             batch_results = await asyncio.gather(*batch_tasks)
 
             all_batch_candidates = []
@@ -628,12 +623,12 @@ async def run_scanner_iteration():
                 all_batch_candidates.extend(batch_cand)
 
             log.info("====================================================================================================")
-            log.info(f"📊 OVERSTRETCHED REVERSAL LEADERBOARD (COLLECTED: {len(all_batch_candidates)} QUALIFIED SETUPS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'DROP DEPTH':<14} | {'ACTIVE BOUNCE':<16} | {'SCORE'}")
-            log.info("-" * 90)
+            log.info(f"📊 OVERSTRETCHED REVERSAL LEADERBOARD (COLLECTED: {len(all_batch_candidates)} AFFORDABLE SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'DROP DEPTH':<14} | {'ACTIVE BOUNCE':<16} | {'REQUIRED MARGIN'}")
+            log.info("-" * 95)
 
             for cand in all_batch_candidates:
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | -{cand['drop_depth_pct']:.2f}%         | +{cand['bounce_pct']:.2f}%          | {cand['score']:.2f}")
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | -{cand['drop_depth_pct']:.2f}%         | +{cand['bounce_pct']:.2f}%          | ${cand['req_margin']:.2f} Margin")
 
             log.info("====================================================================================================")
 
@@ -641,14 +636,14 @@ async def run_scanner_iteration():
                 all_batch_candidates.sort(key=lambda x: x["score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 MOST OVERSTRETCHED REVERSAL MATCH: {best_signal['symbol']} (Drop Depth: -{best_signal['drop_depth_pct']:.2f}% | Active Bounce: +{best_signal['bounce_pct']:.2f}% | Score: {best_signal['score']:.2f})")
+                log.info(f"🔥 #1 AFFORDABLE OVERSTRETCHED MATCH: {best_signal['symbol']} (Drop Depth: -{best_signal['drop_depth_pct']:.2f}% | Active Bounce: +{best_signal['bounce_pct']:.2f}% | Req Margin: ${best_signal['req_margin']:.2f})")
 
                 live_order_result = await place_bitget_live_order(
                     session=session,
                     symbol=best_signal["symbol"],
                     direction=best_signal["direction"],
                     market_price=best_signal["current_price"],
-                    available_balance=acc_info["available"] if acc_info else 1.17,
+                    available_balance=current_equity,
                     drop_depth_pct=best_signal["drop_depth_pct"]
                 )
 
@@ -672,10 +667,10 @@ async def run_scanner_iteration():
                         "contract_size": live_order_result.get("contract_size", "1")
                     }
                 else:
-                    payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
+                    payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
             else:
-                log.info("ℹ️ No altcoins currently matched overstretched reversal criteria (drop >= 0.80%, active bounce >= +0.20%).")
-                payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
+                log.info("ℹ️ No altcoins currently matched overstretched reversal criteria within account margin capacity.")
+                payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
 
         if CLOUDFLARE_URL:
             headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
