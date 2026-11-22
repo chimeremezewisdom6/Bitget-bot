@@ -1,3 +1,14 @@
 {
-  "active": false
+  "active": true,
+  "symbol": "EVAAUSDT",
+  "direction": "LONG",
+  "mode": "REAL_LIVE_RED_CARD",
+  "entry_price": 2.3154,
+  "stop_loss": 2.2864575,
+  "pre_trade_balance": 1.17216598,
+  "contract_size": "2.2",
+  "leverage": 5,
+  "position_mode": "one_way",
+  "reduce_only": true,
+  "opened_at": 1795371033124
 }
