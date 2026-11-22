@@ -10,23 +10,21 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION & ENVIRONMENT AUTO-DETECTION
+# ZERO-CONFIGURATION & 1-SECOND CONTINUOUS LOOP AUTO-DETECTION
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v112_shadow_tracker_scanner")
+log = logging.getLogger("v115_1sec_scanner")
 
-# AUTO-DETECT ENVIRONMENT:
-# - If running in GitHub Actions: Runs 1 scan and exits cleanly.
-# - If running on Render / VPS / Local Computer: Automatically loops 24/7 every 15 seconds.
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
-LOOP_INTERVAL_SECONDS = 15
+
+# REAL-TIME 1-SECOND SCAN INTERVAL
+LOOP_INTERVAL_SECONDS = 1.0
 
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# Bitget API Credentials
 BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("BITGET_PASSWORD", "")).strip()
@@ -42,7 +40,6 @@ BITGET_TICKERS_URL = f"{BITGET_BASE}/tickers?productType={SCAN_PRODUCT_TYPE}"
 BITGET_CANDLES_URL = f"{BITGET_BASE}/candles"
 BITGET_SINGLE_TICKER_URL = f"{BITGET_BASE}/ticker"
 
-# Bitget UTA v3 Endpoints
 BITGET_V3_UTA_ASSETS_URL = f"https://{BIT_DOMAIN}/api/v3/account/assets"
 BITGET_V3_PLACE_ORDER_URL = f"https://{BIT_DOMAIN}/api/v3/trade/place-order"
 BITGET_V3_SET_LEVERAGE_URL = f"https://{BIT_DOMAIN}/api/v3/account/set-leverage"
@@ -59,6 +56,10 @@ DEFAULT_LEVERAGE = 5
 # Target Ratios
 TP_PERCENTAGE = 0.025   # +2.50% Take Profit
 SL_PERCENTAGE = 0.015   # -1.50% Stop Loss
+
+# Rebound Window Parameters (Pure 18%-25% Recovery Window)
+MIN_REBOUND_RATIO_PCT = 18.0      # Enter as soon as rebound reaches ~18%
+MAX_REBOUND_RATIO_PCT = 25.0      # Reject if rebound exceeds 25%-50% (overchased)
 
 # ====================================================================================================
 # UTILITY FUNCTIONS
@@ -95,7 +96,6 @@ def get_bitget_headers(method="GET", request_path="", body=""):
     return headers
 
 def calculate_min_required_margin_for_price(market_price, leverage=DEFAULT_LEVERAGE):
-    """Calculates min required margin to reach $5.01 USDT Notional."""
     if market_price <= 0:
         return 999.0, 1.0, 5.01
 
@@ -287,11 +287,9 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     req_margin, exact_qty, actual_notional = calculate_min_required_margin_for_price(market_price, DEFAULT_LEVERAGE)
 
-    # VIRTUAL TRACKER FALLBACK:
-    # If required margin exceeds balance capacity, initiate VIRTUAL SHADOW TRACKING to see if setup wins!
     if req_margin > (available_balance * 0.85):
-        log.warning(f"⚠️ BALANCE LIMIT: {symbol} requires ${req_margin:.2f} margin (min $5.01 notional), which exceeds current balance (${available_balance:.2f}).")
-        log.info(f"🔮 STARTING VIRTUAL SHADOW TRACKING ON {symbol} (Entry: ${format_price(market_price)} | TP: +2.5% | SL: -1.5%)...")
+        log.warning(f"⚠️ MARGIN LIMIT ({symbol}): Requires ${req_margin:.2f} margin (min $5.01 notional), balance available: ${available_balance:.2f}.")
+        log.info(f"🔮 INITIATING VIRTUAL SHADOW TRADE TRACKER FOR {symbol} (Entry: ${format_price(market_price)} | TP: +2.5% | SL: -1.5%)...")
         save_active_trade_state(symbol, direction, market_price, exact_qty, available_balance, is_virtual=True)
         return {
             "order_id": "VIRTUAL_SHADOW_ORDER",
@@ -344,7 +342,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     headers = get_bitget_headers("POST", path, body_json)
 
     mode_label = "🎮 BITGET DEMO (UTA v3)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (UTA v3)"
-    log.info(f"🎯 SUBMITTING ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${req_margin:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
+    log.info(f"🎯 SUBMITTING REBOUND ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Required Margin: ${req_margin:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -493,10 +491,10 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# OVERSTRETCHED REVERSAL ENGINE
+# PURE 18%-20% REBOUND RECOVERY WINDOW ENGINE (REAL-TIME 1-SECOND SCAN)
 # ====================================================================================================
 
-async def process_overstretched_reversal_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
+async def process_pure_rebound_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
     batch_evaluated = []
 
     tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
@@ -510,7 +508,6 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
 
-        # NO-REPEAT-WIN GUARD
         if symbol == last_symbol and last_won:
             continue
 
@@ -521,18 +518,26 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
         current_price = float(candles_60m[-1][4])
         prev_price = float(candles_60m[-3][4])
 
-        if current_price <= 0 or low_60m <= 0 or peak_60m <= 0:
+        if current_price <= 0 or low_60m <= 0 or peak_60m <= low_60m:
             continue
 
-        # REJECT FALLING COINS: Must be actively bouncing UP
         if current_price <= prev_price:
             continue
 
         drop_depth_pct = ((peak_60m - low_60m) / peak_60m) * 100.0
-        bounce_pct = ((current_price - low_60m) / low_60m) * 100.0
 
-        if drop_depth_pct >= 0.80 and bounce_pct >= 0.20:
-            overstretched_reversal_score = drop_depth_pct * bounce_pct
+        if drop_depth_pct < 0.40:
+            continue
+
+        total_drop_range = peak_60m - low_60m
+        rebound_gain = current_price - low_60m
+
+        rebound_recovery_pct = (rebound_gain / total_drop_range) * 100.0
+
+        # Sweet spot: 18% - 25% rebound recovery
+        if MIN_REBOUND_RATIO_PCT <= rebound_recovery_pct <= MAX_REBOUND_RATIO_PCT:
+            closeness_to_18pct = 1.0 / (abs(rebound_recovery_pct - 19.0) + 0.1)
+            score = drop_depth_pct * closeness_to_18pct * 100.0
 
             batch_evaluated.append({
                 "batch_id": batch_id,
@@ -540,8 +545,8 @@ async def process_overstretched_reversal_batch(batch_id, coin_list, session, sem
                 "vol_24h": vol_24h,
                 "direction": "LONG",
                 "drop_depth_pct": drop_depth_pct,
-                "bounce_pct": bounce_pct,
-                "score": overstretched_reversal_score,
+                "rebound_recovery_pct": rebound_recovery_pct,
+                "score": score,
                 "current_price": current_price,
                 "low_60m": low_60m,
                 "peak_60m": peak_60m
@@ -613,9 +618,8 @@ async def run_scanner_iteration():
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
 
-                log.info(f"📍 LIVE PRICE PING: {symbol} | Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}%")
+                log.info(f"📍 LIVE PRICE PING (1-sec tick): {symbol} | Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}%")
 
-                # VIRTUAL SHADOW TRADE EVALUATION
                 if is_virtual:
                     is_win_hit = current_price >= preset_tp if direction == "LONG" else current_price <= preset_tp
                     is_loss_hit = current_price <= preset_sl if direction == "LONG" else current_price >= preset_sl
@@ -649,7 +653,7 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info("🔍 Fetching ALL 600+ Bitget USDT-Futures pairs for Overstretched Reversal Analysis...")
+            log.info(f"⚡ FAST SCAN (1-sec interval): Evaluating all 600+ Bitget pairs for 18%-25% Rebound Recovery...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -664,33 +668,21 @@ async def run_scanner_iteration():
             valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
             total_coins = len(valid_coins)
 
-            log.info(f"🛰️ Evaluating {total_coins} pairs for Overstretched Rebound (Drop >= 0.80%, Active Bounce >= +0.20%)...")
-
             chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
             coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-            batch_tasks = [process_overstretched_reversal_batch(i + 1, batch, session, semaphore, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
+            batch_tasks = [process_pure_rebound_batch(i + 1, batch, session, semaphore, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
             batch_results = await asyncio.gather(*batch_tasks)
 
             all_batch_candidates = []
             for batch_cand in batch_results:
                 all_batch_candidates.extend(batch_cand)
 
-            log.info("====================================================================================================")
-            log.info(f"📊 OVERSTRETCHED REVERSAL LEADERBOARD (COLLECTED: {len(all_batch_candidates)} QUALIFIED SETUPS):")
-            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'DROP DEPTH':<14} | {'ACTIVE BOUNCE':<16} | {'SCORE'}")
-            log.info("-" * 90)
-
-            for cand in all_batch_candidates:
-                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | -{cand['drop_depth_pct']:.2f}%         | +{cand['bounce_pct']:.2f}%          | {cand['score']:.2f}")
-
-            log.info("====================================================================================================")
-
             if all_batch_candidates:
                 all_batch_candidates.sort(key=lambda x: x["score"], reverse=True)
                 best_signal = all_batch_candidates[0]
 
-                log.info(f"🔥 #1 OVERSTRETCHED MATCH: {best_signal['symbol']} (Drop Depth: -{best_signal['drop_depth_pct']:.2f}% | Active Bounce: +{best_signal['bounce_pct']:.2f}% | Score: {best_signal['score']:.2f})")
+                log.info(f"🔥 #1 REBOUND MATCH: {best_signal['symbol']} (Drop Depth: -{best_signal['drop_depth_pct']:.2f}% | Rebound Recovery: +{best_signal['rebound_recovery_pct']:.2f}% | Score: {best_signal['score']:.2f})")
 
                 live_order_result = await place_bitget_live_order(
                     session=session,
@@ -723,7 +715,7 @@ async def run_scanner_iteration():
                 else:
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
             else:
-                log.info("ℹ️ No altcoins currently matched overstretched reversal criteria.")
+                log.info("ℹ️ No altcoins currently matched rebound recovery window (18%-25% recovery).")
                 payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_demo": BITGET_DEMO_MODE, "is_ping": False}
 
         if CLOUDFLARE_URL:
@@ -765,7 +757,7 @@ async def run_scanner_iteration():
 
 async def main():
     if CONTINUOUS_247_LOOP:
-        log.info("🔄 AUTOMATIC ENVIRONMENT DETECTED: Running in 24/7 Continuous Loop Mode (Scanning every 15s)...")
+        log.info("🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND Continuous Real-Time Loop Mode...")
         while True:
             try:
                 await run_scanner_iteration()
