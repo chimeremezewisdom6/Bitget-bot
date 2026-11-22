@@ -524,6 +524,65 @@ def extract_confirmed_position_fill(positions, symbol, direction):
     return None
 
 
+async def recover_and_save_confirmed_position(
+    session, symbol, direction, key_set, contract_rules,
+    pre_trade_equity, dynamic_tp, dynamic_sl, leverage,
+    dominant_color, dominant_count
+):
+    """Recover bot state from an exchange-confirmed position after an ambiguous order result."""
+    positions = await fetch_current_positions(session, symbol=symbol, key_set=key_set)
+    if positions is None:
+        log.critical(
+            f"Cannot reconcile {symbol} after an ambiguous order result: "
+            "the Bitget position endpoint is unavailable."
+        )
+        return None
+
+    recovered = extract_confirmed_position_fill(positions, symbol, direction)
+    if not recovered:
+        return None
+
+    fill_price, filled_qty = recovered
+    quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
+    filled_size_str = f"{filled_qty:.{quantity_precision}f}"
+    log.warning(
+        f"Recovered exchange-confirmed {symbol} {direction} position "
+        f"at {fill_price} with quantity {filled_size_str}."
+    )
+    try:
+        save_active_trade_state(
+            symbol, direction, fill_price, filled_size_str,
+            pre_trade_equity, dynamic_tp, dynamic_sl, leverage,
+            dominant_color, dominant_count, is_virtual=False
+        )
+    except Exception as state_error:
+        log.critical(
+            f"Could not save recovered position state for {symbol}: {state_error}. "
+            "Attempting an immediate reduce-only emergency close."
+        )
+        if not await close_bitget_live_position(
+            session, symbol, direction, contract_size=filled_size_str
+        ):
+            log.critical(
+                f"URGENT: Could not confirm emergency close for {symbol}. "
+                "Check and close the Bitget Demo position manually."
+            )
+        return None
+
+    return {
+        "order_id": None,
+        "symbol": symbol,
+        "notional_value": filled_qty * fill_price,
+        "contract_size": filled_size_str,
+        "stop_loss": format_instrument_price(dynamic_sl, contract_rules, direction),
+        "real_fill_price": fill_price,
+        "pre_trade_balance": pre_trade_equity,
+        "is_virtual": False,
+        "filled": True,
+        "recovered": True,
+    }
+
+
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, dynamic_tp=0.0, dynamic_sl=0.0, sl_pct_val=1.5, dominant_color="GREEN", dominant_count=0, account_equity=None):
     key_set = get_next_bitget_key()
     trade_symbol = symbol
@@ -626,37 +685,23 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                     # Order-info can lag the position endpoint. Reconcile before
                     # declaring the order unfilled, otherwise a real position
                     # could be left open without local supervision state.
-                    positions = await fetch_current_positions(
-                        session, symbol=trade_symbol, key_set=key_set
+                    recovered_state = await recover_and_save_confirmed_position(
+                        session, trade_symbol, direction, key_set, contract_rules,
+                        pre_trade_equity, dynamic_tp, dynamic_sl, adaptive_leverage,
+                        dominant_color, dominant_count
                     )
-                    recovered_fill = extract_confirmed_position_fill(
-                        positions, trade_symbol, direction
+                    if recovered_state:
+                        return recovered_state
+                    log_ai_decision(
+                        trade_symbol, "FILL_NOT_CONFIRMED",
+                        f"Order {order_id} has no confirmed executed quantity",
+                        "No matching open position could be reconciled"
                     )
-                    if recovered_fill:
-                        real_fill, filled_qty = recovered_fill
-                        log.warning(
-                            f"Order-info did not confirm {order_id}, but Bitget's "
-                            f"position endpoint confirms {trade_symbol} {direction} "
-                            f"qty={filled_qty} at avgPrice={real_fill}. Recovering state."
-                        )
-                    else:
-                        if positions is None:
-                            log.critical(
-                                f"Order {order_id} was accepted but fill status and "
-                                f"position reconciliation both failed for {trade_symbol}. "
-                                "Check the Bitget Demo account immediately."
-                            )
-                        else:
-                            log.error(
-                                f"Order {order_id} was accepted but no matching open "
-                                f"position was confirmed for {trade_symbol}."
-                            )
-                        log_ai_decision(
-                            trade_symbol, "FILL_NOT_CONFIRMED",
-                            f"Order {order_id} has no confirmed executed quantity",
-                            "No local trade marked as filled"
-                        )
-                        return None
+                    log.error(
+                        f"Order {order_id} was accepted but no matching open "
+                        f"position was confirmed for {trade_symbol}."
+                    )
+                    return None
 
                 quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
                 filled_size_str = f"{filled_qty:.{quantity_precision}f}"
@@ -706,6 +751,20 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 return None
     except Exception as e:
         log.error(f"❌ Error submitting Bitget order: {e}")
+        # A timeout or dropped connection can occur after Bitget accepted the
+        # market order. Reconcile exchange positions before leaving it unmanaged.
+        recovered_state = await recover_and_save_confirmed_position(
+            session, trade_symbol, direction, key_set, contract_rules,
+            float(account_equity) if account_equity is not None else float(available_balance),
+            dynamic_tp, dynamic_sl, adaptive_leverage,
+            dominant_color, dominant_count
+        )
+        if recovered_state:
+            return recovered_state
+        log.critical(
+            f"Order submission outcome for {trade_symbol} is uncertain and no "
+            "matching position could be recovered. Inspect the Bitget Demo account."
+        )
         return None
 
 async def fetch_current_positions(session, symbol=None, key_set=None):
