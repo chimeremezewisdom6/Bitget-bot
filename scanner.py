@@ -642,7 +642,8 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
         return True
 
     expected_side = "long" if direction == "LONG" else "short"
-    if position.get("posSide") and position.get("posSide") != expected_side:
+    actual_side = position.get("posSide")
+    if actual_side in ("long", "short") and actual_side != expected_side:
         log.error(f"Position side mismatch for {symbol}; refusing to close the wrong side.")
         return False
 
@@ -879,12 +880,15 @@ async def run_scanner_iteration():
             matching_position = next(
                 (p for p in nonzero_positions
                  if p.get("symbol") == active_trade.get("symbol")
-                 and (not p.get("posSide") or p.get("posSide") == ("long" if active_trade.get("direction") == "LONG" else "short"))),
+                 and (p.get("posSide") not in ("long", "short") or p.get("posSide") == ("long" if active_trade.get("direction") == "LONG" else "short"))),
                 None
             )
             if not matching_position:
                 log.error(f"Local state says {active_trade.get('symbol')} is active, but Bitget does not show the matching position. Clearing stale state and skipping this scan.")
                 clear_active_trade_state()
+                return
+            if active_trade.get("is_virtual", False):
+                log.error("A legacy virtual trade record conflicts with a real exchange position. Refusing automated management; manual reconciliation is required.")
                 return
             if len(nonzero_positions) != 1:
                 log.error("More than one Bitget futures position is open. Bot will not manage an ambiguous account.")
@@ -904,13 +908,11 @@ async def run_scanner_iteration():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
             dominant_color = active_trade.get("dominant_color", "GREEN")
             start_time = float(active_trade.get("start_time", time.time()))
-            is_virtual = active_trade.get("is_virtual", False)
-
             current_time = time.time()
             elapsed_minutes = (current_time - start_time) / 60.0
 
             entry_p_str = format_price(entry_price)
-            trade_type_label = "🔮 VIRTUAL SHADOW TRADE" if is_virtual else f"🎮 LIVE {margin_currency} DEMO TRADE"
+            trade_type_label = f"🎮 LIVE {margin_currency} DEMO TRADE"
             log.info(f"⏳ {trade_type_label} SUPERVISION ({symbol}): Entry @ ${entry_p_str} | Elapsed: {elapsed_minutes:.1f}m / 54.0m Max | Target: 30+ {dominant_color} Candles | SL Floor: ${format_price(ai_floor_sl)}")
 
             candle_data = await fetch_60m_candle_data_for_coin(session, symbol, asyncio.Semaphore(5))
@@ -928,7 +930,7 @@ async def run_scanner_iteration():
                     pnl_cash = position_notional * (live_pnl_pct / 100.0)
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
 
-                    if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
+                    if not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
                     closing_equity, pnl_cash, pnl_verified = await get_realized_trade_result(session, pre_trade_balance, pnl_cash)
@@ -973,7 +975,7 @@ async def run_scanner_iteration():
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
                     is_win = pnl_cash > 0
 
-                    if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
+                    if not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
 
@@ -1005,7 +1007,7 @@ async def run_scanner_iteration():
                     closing_equity = max(0.0, pre_trade_balance + pnl_cash)
                     is_win = pnl_cash > 0
 
-                    if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
+                    if not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
                     closing_equity, pnl_cash, pnl_verified = await get_realized_trade_result(session, pre_trade_balance, pnl_cash)
