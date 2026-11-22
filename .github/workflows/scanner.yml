@@ -1,19 +1,19 @@
-name: Crypto Order Book & Candle Scanner
+name: Bitget Rebound Scanner
 
 on:
   schedule:
-    - cron: '* * * * *'
-  workflow_dispatch:
+    - cron: '*/5 * * * *'  # Runs automatically every 5 minutes
+  workflow_dispatch:         # Allows manual 1-click execution anytime
 
 jobs:
-  scan:
+  run-scanner:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository Code
-        uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
@@ -22,16 +22,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install aiohttp
 
-      - name: Run Bitget Authenticated Scanner
+      - name: Run Bitget Scanner
         env:
+          BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
+          BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY }}
+          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE }}
+          BITGET_DEMO_MODE: ${{ vars.BITGET_DEMO_MODE }}
           CLOUDFLARE_URL: ${{ secrets.CLOUDFLARE_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-          # Check Secrets or Variables for API Keys
-          BITGET_API_KEY: ${{ secrets.BITGET_API_KEY || vars.BITGET_API_KEY }}
-          BITGET_SECRET_KEY: ${{ secrets.BITGET_SECRET_KEY || vars.BITGET_SECRET_KEY }}
-          # Support both BITGET_PASSPHRASE and BITGET_PASSWORD naming conventions!
-          BITGET_PASSPHRASE: ${{ secrets.BITGET_PASSPHRASE || vars.BITGET_PASSPHRASE || secrets.BITGET_PASSWORD || vars.BITGET_PASSWORD }}
-          BITGET_PASSWORD: ${{ secrets.BITGET_PASSWORD || vars.BITGET_PASSWORD || secrets.BITGET_PASSPHRASE || vars.BITGET_PASSPHRASE }}
-          # Enable Live Real-Money Trading Mode (requires >= 8/8 streak)
-          ALLOW_LIVE_TRADING: "true"
         run: python scanner.py
