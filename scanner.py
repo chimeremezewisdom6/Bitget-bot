@@ -10,14 +10,14 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION AUTO-DETECTION ENGINE
+# ZERO-CONFIGURATION & ENVIRONMENT AUTO-DETECTION
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("zero_config_scanner")
+log = logging.getLogger("v107_small_balance_scanner")
 
 # AUTO-DETECT ENVIRONMENT:
-# - If running in GitHub Actions: Runs 1 scan and finishes automatically.
+# - If running in GitHub Actions: Runs 1 scan and exits cleanly.
 # - If running on Render / VPS / Local Computer: Automatically loops 24/7 every 15 seconds.
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -26,7 +26,7 @@ LOOP_INTERVAL_SECONDS = 15
 CLOUDFLARE_URL = os.environ.get("CLOUDFLARE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
-# Bitget API Credentials (Auto-Fallback to Safe Public Scan if credentials missing)
+# Bitget API Credentials
 BITGET_API_KEY = os.environ.get("BITGET_API_KEY", "").strip()
 BITGET_SECRET_KEY = os.environ.get("BITGET_SECRET_KEY", "").strip()
 BITGET_PASSPHRASE = (os.environ.get("BITGET_PASSPHRASE", "") or os.environ.get("BITGET_PASSWORD", "")).strip()
@@ -55,17 +55,14 @@ LIVE_HISTORY_FILE = "live_trade_history.json"
 NUM_BATCHES = 20
 MIN_24H_VOLUME = 300000
 DEFAULT_LEVERAGE = 5
-BALANCE_USAGE_PCT = 0.90
+BALANCE_USAGE_PCT = 0.95    # Use 95% of available balance
 
-# Top-20 Market Anchors Basket
-ANCHOR_COINS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "SUIUSDT", "NEARUSDT",
-    "LTCUSDT", "PEPEUSDT", "LINKUSDT", "APTUSDT", "SHIBUSDT"
-]
+# Target Ratios
+TP_PERCENTAGE = 0.025   # +2.50% Preset Take Profit
+SL_PERCENTAGE = 0.015   # -1.50% Preset Stop Loss
 
 # ====================================================================================================
-# UTILITY & MATHEMATICAL FUNCTIONS
+# UTILITY FUNCTIONS
 # ====================================================================================================
 
 def format_price(price):
@@ -97,38 +94,6 @@ def get_bitget_headers(method="GET", request_path="", body=""):
             "locale": "en-US"
         })
     return headers
-
-def calculate_returns(prices):
-    returns = []
-    for i in range(1, len(prices)):
-        p_prev = prices[i - 1]
-        p_curr = prices[i]
-        if p_prev > 0:
-            returns.append(((p_curr - p_prev) / p_prev) * 100.0)
-    return returns
-
-def calculate_pearson_and_beta(anchor_returns, alt_returns):
-    n = min(len(anchor_returns), len(alt_returns))
-    if n < 10:
-        return 0.0, 0.0
-
-    x = anchor_returns[:n]
-    y = alt_returns[:n]
-
-    mean_x = sum(x) / n
-    mean_y = sum(y) / n
-
-    cov_xy = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n)) / (n - 1)
-    var_x = sum((x[i] - mean_x) ** 2 for i in range(n)) / (n - 1)
-    var_y = sum((y[i] - mean_y) ** 2 for i in range(n)) / (n - 1)
-
-    std_x = math.sqrt(var_x) if var_x > 0 else 1e-6
-    std_y = math.sqrt(var_y) if var_y > 0 else 1e-6
-
-    correlation = cov_xy / (std_x * std_y) if (std_x * std_y) > 0 else 0.0
-    beta = cov_xy / var_x if var_x > 0 else 0.0
-
-    return round(correlation, 3), round(beta, 2)
 
 # ====================================================================================================
 # STATE & HISTORY MANAGEMENT
@@ -181,7 +146,7 @@ def get_active_live_trade():
     return None
 
 # ====================================================================================================
-# BITGET UTA v3 API EXCHANGER ENGINE
+# BITGET UTA v3 EXCHANGER ENGINE
 # ====================================================================================================
 
 async def fetch_bitget_account_balance(session):
@@ -213,8 +178,8 @@ async def fetch_bitget_account_balance(session):
                         usdt_equity = float(asset_obj.get("equity") or available_margin)
 
                 return {
-                    "equity": usdt_equity if usdt_equity > 0 else 10000.0,
-                    "available": available_margin if available_margin > 0 else 10000.0,
+                    "equity": usdt_equity if usdt_equity > 0 else 1.20,
+                    "available": available_margin if available_margin > 0 else 1.20,
                     "margin_coin": margin_coin_type,
                     "account_type": f"Bitget UTA v3 {'DEMO (Simulated)' if BITGET_DEMO_MODE else 'REAL LIVE'}"
                 }
@@ -266,43 +231,68 @@ async def configure_bitget_leverage(session, symbol):
         log.debug(f"Leverage notice: {e}")
 
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance):
+    """
+    Submits Market Order to Bitget UTA v3.
+    Dynamically sizes orders for small balances ($1.20 USDT) to ensure:
+    - Required Margin = ~$1.05 USDT (well below $1.20 available balance)
+    - Notional Order Value = ~$5.25 USDT (safely above Bitget's 5.00 USDT minimum)
+    """
     if not (BITGET_API_KEY and BITGET_SECRET_KEY and BITGET_PASSPHRASE):
-        log.error("❌ Missing Bitget API Keys. Order not submitted.")
+        log.error("❌ Missing Bitget API Keys. Order execution skipped.")
         return None
 
     trade_symbol = symbol
     await configure_bitget_leverage(session, trade_symbol)
 
-    used_margin = available_balance * BALANCE_USAGE_PCT
-    notional_value = used_margin * DEFAULT_LEVERAGE
+    # DYNAMIC SMALL-BALANCE CALCULATION:
+    # Target Notional Value = 5.25 USDT (Passes Bitget $5 minimum requirement)
+    target_notional = 5.25
+    max_possible_notional = available_balance * BALANCE_USAGE_PCT * DEFAULT_LEVERAGE
 
-    if notional_value < 5.0:
-        notional_value = 5.50
+    if max_possible_notional >= target_notional:
+        notional_value = max_possible_notional
+    else:
+        # Balance is small (e.g. $1.20). Use $5.25 notional (Requires $1.05 margin at 5x)
+        notional_value = target_notional
+
+    required_margin = notional_value / DEFAULT_LEVERAGE
+    if required_margin > available_balance:
+        log.error(f"❌ Balance too small to open 5 USDT minimum order. Available: ${available_balance:.2f}, Required Margin: ${required_margin:.2f}")
+        return None
 
     contract_size = notional_value / market_price
 
-    if market_price < 0.001:
-        size_str = f"{int(contract_size)}"
-    elif market_price > 1000:
-        size_str = f"{contract_size:.3f}"
-    elif market_price > 10:
-        size_str = f"{contract_size:.2f}"
-    elif market_price > 1:
+    # Precision sizing based on coin price scale
+    if market_price < 0.0001:
+        size_str = f"{int(math.ceil(contract_size))}"
+    elif market_price < 0.01:
+        size_str = f"{math.ceil(contract_size)}"
+    elif market_price < 1.0:
+        size_str = f"{contract_size:.1f}"
+    elif market_price < 100.0:
         size_str = f"{contract_size:.1f}"
     else:
-        size_str = f"{int(contract_size)}"
+        size_str = f"{contract_size:.2f}"
 
-    if float(size_str) <= 0:
-        size_str = "1"
+    # GUARANTEE order value >= 5.15 USDT after rounding
+    actual_notional = float(size_str) * market_price
+    if actual_notional < 5.15:
+        # Increase quantity by 1 step
+        needed_qty = math.ceil(5.25 / market_price)
+        if market_price < 1.0:
+            size_str = f"{needed_qty}"
+        else:
+            size_str = f"{needed_qty:.2f}"
+        actual_notional = float(size_str) * market_price
 
     if direction == "LONG":
         side = "buy"
-        preset_tp = format_price(market_price * 1.025)  # Hard +2.50% TP (+12.5% equity at 5x)
-        preset_sl = format_price(market_price * 0.9875) # Hard -1.25% SL (-6.25% equity at 5x)
+        preset_tp = format_price(market_price * (1.0 + TP_PERCENTAGE))  # Native TP (+2.50%)
+        preset_sl = format_price(market_price * (1.0 - SL_PERCENTAGE))  # Native SL (-1.50%)
     else:
         side = "sell"
-        preset_tp = format_price(market_price * 0.975)  # Hard +2.50% TP (+12.5% equity at 5x)
-        preset_sl = format_price(market_price * 1.0125) # Hard -1.25% SL (-6.25% equity at 5x)
+        preset_tp = format_price(market_price * (1.0 - TP_PERCENTAGE))  # Native TP (+2.50%)
+        preset_sl = format_price(market_price * (1.0 + SL_PERCENTAGE))  # Native SL (-1.50%)
 
     path = "/api/v3/trade/place-order"
     order_payload = {
@@ -321,7 +311,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     headers = get_bitget_headers("POST", path, body_json)
 
     mode_label = "🎮 BITGET DEMO (UTA v3)" if BITGET_DEMO_MODE else "🚨 BITGET REAL MONEY (UTA v3)"
-    log.info(f"🎯 SUBMITTING HIGH-BETA REBOUND ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} | TP: {preset_tp} (+2.5%) | SL: {preset_sl} (-1.25%)")
+    log.info(f"🎯 SUBMITTING ORDER ({mode_label}): {trade_symbol} ({direction}) | Size: {size_str} (${actual_notional:.2f} Notional | Margin: ${actual_notional/DEFAULT_LEVERAGE:.2f}) | Preset TP: {preset_tp} (+2.5%) | Preset SL: {preset_sl} (-1.5%)")
 
     try:
         async with session.post(BITGET_V3_PLACE_ORDER_URL, data=body_json, headers=headers, timeout=10) as r:
@@ -333,7 +323,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "ORDER_EXECUTED")
-                log.info(f"✅ BITGET UTA v3 MATCHING ENGINE ACCEPTED ORDER! Order ID: {order_id}")
+                log.info(f"✅ BITGET UTA v3 MATCHING ENGINE ACCEPTED ORDER WITH NATIVE TP & SL! Order ID: {order_id}")
 
                 await asyncio.sleep(0.5)
                 real_fill = await fetch_bitget_order_fill_price(session, trade_symbol, order_id)
@@ -346,7 +336,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 return {
                     "order_id": order_id,
                     "symbol": trade_symbol,
-                    "notional_value": notional_value,
+                    "notional_value": actual_notional,
                     "contract_size": size_str,
                     "preset_tp": preset_tp,
                     "preset_sl": preset_sl,
@@ -434,10 +424,10 @@ async def fetch_bitget_tickers(session):
         log.error(f"Ticker fetch error from Bitget: {e}")
     return []
 
-async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
+async def fetch_4h_candle_data_for_coin(session, symbol, semaphore):
     async with semaphore:
-        params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
-        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}&granularity=1m&limit=60"
+        params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "240"}
+        path = f"/api/v2/mix/market/candles?symbol={symbol}&productType={SCAN_PRODUCT_TYPE}&granularity=1m&limit=240"
         for attempt in range(3):
             headers = get_bitget_headers("GET", path)
             try:
@@ -446,7 +436,7 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
                         data = await r.json()
                         if data.get("code") == "00000":
                             candles = data.get("data", [])
-                            if candles and len(candles) >= 60:
+                            if candles and len(candles) >= 120:
                                 return candles
                     elif r.status in (429, 403):
                         await asyncio.sleep(0.15 * (attempt + 1))
@@ -455,112 +445,72 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# ANCHOR REVERSAL & HIGH-BETA ELASTICITY ENGINE
+# 4-HOUR ASYMMETRIC RISK/REWARD ENGINE
 # ====================================================================================================
 
-async def check_best_anchor_coin_reversal(session, semaphore):
-    anchor_evals = []
-    for sym in ANCHOR_COINS:
-        candles_raw = await fetch_60m_candle_data_for_coin(session, sym, semaphore)
-        if not candles_raw or len(candles_raw) < 40:
-            continue
-
-        candles = list(reversed(candles_raw[:60]))
-
-        c_high_60m = max(float(c[2]) for c in candles[:-3])
-        c_low_60m = min(float(c[3]) for c in candles[:-3])
-        p_current = float(candles[-1][4])
-
-        if c_high_60m <= 0 or c_low_60m <= 0:
-            continue
-
-        drop_pct = ((c_high_60m - c_low_60m) / c_high_60m) * 100.0
-        bounce_pct = ((p_current - c_low_60m) / c_low_60m) * 100.0
-
-        reversal_strength_score = bounce_pct * drop_pct
-
-        if drop_pct >= 0.40 and bounce_pct >= 0.15:
-            anchor_evals.append({
-                "symbol": sym,
-                "drop_pct": drop_pct,
-                "bounce_pct": bounce_pct,
-                "reversal_score": reversal_strength_score,
-                "prices": [float(c[4]) for c in candles]
-            })
-
-    if not anchor_evals:
-        return None
-
-    anchor_evals.sort(key=lambda x: x["reversal_score"], reverse=True)
-    return anchor_evals[0]
-
-async def process_coin_batch(batch_id, coin_list, session, semaphore, anchor_signal, last_symbol, last_won):
+async def process_4h_asymmetric_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
     batch_evaluated = []
 
-    tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
+    tasks = [fetch_4h_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
     candles_results = await asyncio.gather(*tasks)
 
-    anchor_prices = anchor_signal["prices"]
-    anchor_returns = calculate_returns(anchor_prices)
-
     for idx, candle_data in enumerate(candles_results):
-        if not candle_data or len(candle_data) < 30:
+        if not candle_data or len(candle_data) < 120:
             continue
 
         coin = coin_list[idx]
         symbol = coin["symbol"]
         vol_24h = coin["vol_24h"]
 
-        if symbol in ANCHOR_COINS:
-            continue
-
         # NO-REPEAT-WIN GUARD
         if symbol == last_symbol and last_won:
             continue
 
-        candles_30m = list(reversed(candle_data[:30]))
+        candles_4h = list(reversed(candle_data[:240]))
 
-        alt_prices = [float(c[4]) for c in list(reversed(candle_data[:60]))]
-        alt_returns = calculate_returns(alt_prices)
+        high_4h = max(float(c[2]) for c in candles_4h[:-1])
+        low_4h = min(float(c[3]) for c in candles_4h[:-1])
+        current_price = float(candles_4h[-1][4])
+        prev_price = float(candles_4h[-3][4])
 
-        corr, beta = calculate_pearson_and_beta(anchor_returns, alt_returns)
-
-        alt_low_30m = min(float(c[3]) for c in candles_30m[:-3])
-        alt_current = float(candles_30m[-1][4])
-
-        if alt_low_30m <= 0:
+        if current_price <= 0 or low_4h <= 0 or high_4h <= 0:
             continue
 
-        alt_bounce_pct = ((alt_current - alt_low_30m) / alt_low_30m) * 100.0
-
-        if alt_bounce_pct < 0.25:
+        # Rebound Confirmation: Must be moving UP off the 4h low
+        if current_price <= prev_price:
             continue
 
-        if beta < 2.0:
-            continue
+        downside_risk_pct = max(0.10, ((current_price - low_4h) / current_price) * 100.0)
+        upside_reward_pct = max(0.20, ((high_4h - current_price) / current_price) * 100.0)
+        total_4h_range_pct = ((high_4h - low_4h) / current_price) * 100.0
 
-        elastic_score = alt_bounce_pct * beta * (corr if corr > 0 else 0.1)
+        asymmetry_ratio = upside_reward_pct / downside_risk_pct
 
-        batch_evaluated.append({
-            "batch_id": batch_id,
-            "symbol": symbol,
-            "vol_24h": vol_24h,
-            "direction": "LONG",
-            "alt_bounce_pct": alt_bounce_pct,
-            "correlation": corr,
-            "beta": beta,
-            "elastic_score": elastic_score,
-            "current_price": alt_current
-        })
+        if downside_risk_pct <= 1.8 and upside_reward_pct >= 1.5 and asymmetry_ratio >= 2.0:
+            asymmetric_score = asymmetry_ratio * total_4h_range_pct
+
+            batch_evaluated.append({
+                "batch_id": batch_id,
+                "symbol": symbol,
+                "vol_24h": vol_24h,
+                "direction": "LONG",
+                "low_4h": low_4h,
+                "high_4h": high_4h,
+                "downside_risk_pct": downside_risk_pct,
+                "upside_reward_pct": upside_reward_pct,
+                "asymmetry_ratio": asymmetry_ratio,
+                "asymmetric_score": asymmetric_score,
+                "current_price": current_price
+            })
 
     if not batch_evaluated:
         return []
 
-    batch_evaluated.sort(key=lambda x: x["elastic_score"], reverse=True)
+    batch_evaluated.sort(key=lambda x: x["asymmetric_score"], reverse=True)
     return [batch_evaluated[0]]
 
 # ====================================================================================================
-# MAIN SCANNER RUNNER
+# MAIN EXECUTION RUNNER
 # ====================================================================================================
 
 async def run_scanner_iteration():
@@ -574,7 +524,7 @@ async def run_scanner_iteration():
     auth_active = has_key and has_secret and has_pass
 
     auth_status = "🔐 AUTHENTICATED (Bitget API Key active)" if auth_active else "🔓 PUBLIC API (Unauthenticated)"
-    mode_status = f"🎮 BITGET DEMO MODE (UTA v3 | Top-20 Anchor Beta & Correlation Engine)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
+    mode_status = f"🎮 BITGET DEMO MODE (UTA v3 | Small Balance $1.20 Optimized | Preset TP +2.5% & SL -1.5%)" if BITGET_DEMO_MODE else "🚨 REAL MONEY LIVE BITGET TRADING (USDT UTA v3)"
 
     log.info(f"🏆 Win Streak: {live_streak} Wins | Loss Streak: {recent_loss_count} | Mode: {mode_status} | API: {auth_status}")
 
@@ -593,7 +543,7 @@ async def run_scanner_iteration():
 
     async with aiohttp.ClientSession() as session:
         acc_info = await fetch_bitget_account_balance(session)
-        current_equity = acc_info["equity"] if acc_info else 10000.0
+        current_equity = acc_info["equity"] if acc_info else 1.20
 
         if acc_info:
             log.info(f"💰 BITGET ACCOUNT EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f} ({acc_info['account_type']})")
@@ -608,14 +558,14 @@ async def run_scanner_iteration():
             pre_trade_balance = float(active_trade.get("pre_trade_balance", current_equity))
 
             entry_p_str = format_price(entry_price)
-            log.info(f"⏳ HIGH-BETA REBOUND TRADE ACTIVE: {symbol} ({direction} @ ${entry_p_str}). Pre-Trade Equity: ${pre_trade_balance:.4f}. Monitoring price...")
+            log.info(f"⏳ ACTIVE TRADE PENDING ({symbol}): Entry @ ${entry_p_str}. Managed natively by Bitget Engine (TP: +2.5% | SL: -1.5%). Pre-Trade Equity: ${pre_trade_balance:.4f}")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
-                pnl_str = f"{live_pnl_pct:+.2f}%"
-                log.info(f"📍 LIVE TRADE PING: {symbol} | Entry Price: ${entry_p_str} | Current Price: ${curr_p_str} | Price Move: {pnl_str}")
+
+                log.info(f"📍 LIVE TRADE PING: {symbol} | Current: ${curr_p_str} | Live PnL: {live_pnl_pct:+.2f}%")
 
                 payload = {
                     "symbol": symbol,
@@ -639,88 +589,81 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info("🔍 Evaluating Top-20 Sector Anchor Coins (BTC, ETH, SOL, DOGE, TRX, LTC, PEPE, AVAX, SUI, NEAR, LINK) for Structural Reversals...")
-            anchor_signal = await check_best_anchor_coin_reversal(session, semaphore)
+            log.info("🔍 Fetching ALL Bitget USDT-Futures pairs for 4-Hour Asymmetric Analysis...")
+            tickers = await fetch_bitget_tickers(session)
+            if not tickers:
+                log.warning("❌ Could not fetch Bitget tickers.")
+                return
 
-            if not anchor_signal:
-                log.info("ℹ️ Anchor market leaders are sideways or declining. Waiting for structural bottom reversal pivot.")
-                payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
-            else:
-                log.info(f"🔥 TOP SECTOR ANCHOR REVERSAL DETECTED: {anchor_signal['symbol']} (Dropped -{anchor_signal['drop_pct']:.2f}% | Rebounding +{anchor_signal['bounce_pct']:.2f}% off low | Reversal Score: {anchor_signal['reversal_score']:.3f})")
-                log.info(f"🛰️ Scanning ALL Altcoins for Pearson Correlation & Beta Elasticity relative to {anchor_signal['symbol']}...")
+            valid_coins = []
+            for t in tickers:
+                vol_24h = float(t.get("quoteVolume", 0.0) or (float(t.get("baseVolume", 0.0)) * float(t.get("lastPr", 0.0))))
+                if vol_24h >= MIN_24H_VOLUME:
+                    valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h})
 
-                tickers = await fetch_bitget_tickers(session)
-                if not tickers:
-                    log.warning("❌ Could not fetch Bitget tickers.")
-                    return
+            valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
+            total_coins = len(valid_coins)
 
-                valid_coins = []
-                for t in tickers:
-                    vol_24h = float(t.get("quoteVolume", 0.0) or (float(t.get("baseVolume", 0.0)) * float(t.get("lastPr", 0.0))))
-                    if vol_24h >= MIN_24H_VOLUME:
-                        valid_coins.append({"symbol": t["symbol"], "vol_24h": vol_24h})
+            log.info(f"🛰️ Evaluating 4-Hour Range across {total_coins} active pairs for Preset TP (+2.5%) & SL (-1.5%)...")
 
-                valid_coins.sort(key=lambda x: x["vol_24h"], reverse=True)
-                total_coins = len(valid_coins)
+            chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
+            coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
 
-                chunk_size = (total_coins + NUM_BATCHES - 1) // NUM_BATCHES
-                coin_batches = [valid_coins[i * chunk_size:(i + 1) * chunk_size] for i in range(NUM_BATCHES) if valid_coins[i * chunk_size:(i + 1) * chunk_size]]
+            batch_tasks = [process_4h_asymmetric_batch(i + 1, batch, session, semaphore, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
+            batch_results = await asyncio.gather(*batch_tasks)
 
-                batch_tasks = [process_coin_batch(i + 1, batch, session, semaphore, anchor_signal, last_symbol, last_won) for i, batch in enumerate(coin_batches)]
-                batch_results = await asyncio.gather(*batch_tasks)
+            all_batch_candidates = []
+            for batch_cand in batch_results:
+                all_batch_candidates.extend(batch_cand)
 
-                all_batch_candidates = []
-                for batch_cand in batch_results:
-                    all_batch_candidates.extend(batch_cand)
+            log.info("====================================================================================================")
+            log.info(f"📊 4-HOUR ASYMMETRIC LEADERBOARD (COLLECTED: {len(all_batch_candidates)} QUALIFIED SETUPS):")
+            log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'4H LOW':<12} | {'4H HIGH':<12} | {'RISK %':<10} | {'REWARD %':<10} | {'RATIO'}")
+            log.info("-" * 105)
 
-                log.info("====================================================================================================")
-                log.info(f"📊 HIGH-BETA ALTCOIN ELASTICITY CANDIDATES (COLLECTED: {len(all_batch_candidates)} QUALIFIED SETUPS):")
-                log.info(f"{'BATCH':<8} | {'COIN PAIR':<14} | {'DIRECTION':<10} | {'CORRELATION':<14} | {'BETA MULTIPLIER':<18} | {'SCORE':<14}")
-                log.info("-" * 95)
+            for cand in all_batch_candidates:
+                log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | ${format_price(cand['low_4h']):<11} | ${format_price(cand['high_4h']):<11} | -{cand['downside_risk_pct']:.2f}%     | +{cand['upside_reward_pct']:.2f}%     | {cand['asymmetry_ratio']:.2f}x Risk-Reward")
 
-                for cand in all_batch_candidates:
-                    log.info(f"Batch {cand['batch_id']:02d} | {cand['symbol']:<14} | {cand['direction']:<10} | r = {cand['correlation']:+.3f}      | {cand['beta']:.2f}x vs {anchor_signal['symbol']:<8} | {cand['elastic_score']:.4f}")
+            log.info("====================================================================================================")
 
-                log.info("====================================================================================================")
+            if all_batch_candidates:
+                all_batch_candidates.sort(key=lambda x: x["asymmetric_score"], reverse=True)
+                best_signal = all_batch_candidates[0]
 
-                if all_batch_candidates:
-                    all_batch_candidates.sort(key=lambda x: x["elastic_score"], reverse=True)
-                    best_signal = all_batch_candidates[0]
+                log.info(f"🔥 #1 4-HOUR ASYMMETRIC MATCH: {best_signal['symbol']} (4H Low: ${format_price(best_signal['low_4h'])} | 4H High: ${format_price(best_signal['high_4h'])} | Risk: -{best_signal['downside_risk_pct']:.2f}% | Reward: +{best_signal['upside_reward_pct']:.2f}% | Asymmetry Ratio: {best_signal['asymmetry_ratio']:.2f}x)")
 
-                    log.info(f"🔥 #1 HIGH-BETA ELASTIC MATCH: {best_signal['symbol']} (Bounce: +{best_signal['alt_bounce_pct']:.2f}% | Correlation r: {best_signal['correlation']:+.3f} | Beta: {best_signal['beta']:.2f}x vs {anchor_signal['symbol']})")
+                live_order_result = await place_bitget_live_order(
+                    session=session,
+                    symbol=best_signal["symbol"],
+                    direction=best_signal["direction"],
+                    market_price=best_signal["current_price"],
+                    available_balance=acc_info["available"] if acc_info else 1.20
+                )
 
-                    live_order_result = await place_bitget_live_order(
-                        session=session,
-                        symbol=best_signal["symbol"],
-                        direction=best_signal["direction"],
-                        market_price=best_signal["current_price"],
-                        available_balance=acc_info["available"] if acc_info else 10000.0
-                    )
+                if live_order_result and live_order_result.get("filled", False):
+                    final_entry_fill = live_order_result.get("real_fill_price", best_signal["current_price"])
 
-                    if live_order_result and live_order_result.get("filled", False):
-                        final_entry_fill = live_order_result.get("real_fill_price", best_signal["current_price"])
-
-                        payload = {
-                            "symbol": live_order_result.get("symbol", best_signal["symbol"]),
-                            "direction": live_order_result.get("direction", best_signal["direction"]),
-                            "is_paper": False,
-                            "is_demo": BITGET_DEMO_MODE,
-                            "avg_fluctuation": round(best_signal["elastic_score"] * 10, 2),
-                            "current_price": final_entry_fill,
-                            "account_equity": current_equity,
-                            "pre_trade_balance": current_equity,
-                            "leverage": DEFAULT_LEVERAGE,
-                            "position_mode": "one_way",
-                            "reduce_only": True,
-                            "is_ping": False,
-                            "live_order": live_order_result,
-                            "contract_size": live_order_result.get("contract_size", "1")
-                        }
-                    else:
-                        payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
+                    payload = {
+                        "symbol": live_order_result.get("symbol", best_signal["symbol"]),
+                        "direction": live_order_result.get("direction", best_signal["direction"]),
+                        "is_paper": False,
+                        "is_demo": BITGET_DEMO_MODE,
+                        "avg_fluctuation": round(best_signal["asymmetric_score"] * 10, 2),
+                        "current_price": final_entry_fill,
+                        "account_equity": current_equity,
+                        "pre_trade_balance": current_equity,
+                        "leverage": DEFAULT_LEVERAGE,
+                        "position_mode": "one_way",
+                        "reduce_only": True,
+                        "is_ping": False,
+                        "live_order": live_order_result,
+                        "contract_size": live_order_result.get("contract_size", "1")
+                    }
                 else:
-                    log.info(f"ℹ️ No altcoins matched high-beta elasticity criteria during this sector anchor pivot.")
                     payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
+            else:
+                log.info("ℹ️ No altcoins currently matched 4-hour asymmetric risk/reward criteria (downside risk <= 1.8%, upside reward >= 1.5%).")
+                payload = {"symbol": "NONE", "direction": "NONE", "is_paper": False, "is_ping": False}
 
         if CLOUDFLARE_URL:
             headers = {"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"}
