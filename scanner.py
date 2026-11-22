@@ -10,11 +10,11 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION & AUTONOMOUS AI TRADER ENGINE
+# ZERO-CONFIGURATION & AUTONOMOUS AI TRADER ENGINE WITH CLEAR NOTIFICATIONS
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v120_autonomous_ai_trader")
+log = logging.getLogger("v121_trade_notifier_scanner")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -103,7 +103,7 @@ def log_ai_decision(symbol, decision_type, reason, action_taken):
         "reason": reason,
         "action": action_taken
     }
-    log.info(f"🧠 [AUTONOMOUS AI DECISION] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
+    log.info(f"🧠 [AI TRADER DECISION] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
 
     logs = []
     if os.path.exists(AI_DECISION_LOG_FILE):
@@ -143,12 +143,6 @@ def get_bitget_headers(method="GET", request_path="", body="", key_set=None):
     return headers
 
 def calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score):
-    """
-    AI Discretionary Position & Leverage Sizer:
-    - High Confidence & Low Volatility -> Leverage up to 10x
-    - Medium Confidence or High Volatility -> Leverage 5x for risk protection
-    - Calculates exact quantity to satisfy Bitget $5.01 notional requirement cleanly
-    """
     leverage = 10 if (confidence_score >= 95.0 and volatility_pct < 3.5) else 5
 
     raw_qty = 5.01 / market_price
@@ -491,18 +485,18 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     body_json = json.dumps(order_payload)
     headers = get_bitget_headers("POST", path, body_json, key_set=key_set)
 
-    mode_label = f"🎮 BITGET DEMO MODE (Key #{key_set['id']} | {margin_currency})" if BITGET_DEMO_MODE else f"🚨 REAL MONEY BITGET TRADING (Key #{key_set['id']})"
+    mode_label = f"🎮 BITGET DEMO MODE ({margin_currency})" if BITGET_DEMO_MODE else f"🚨 REAL MONEY BITGET TRADING (USDT)"
 
     log.info("====================================================================================================")
-    log.info(f"🧠 SUBMITTING FULLY AUTONOMOUS AI TRADER ORDER ({mode_label}):")
-    log.info(f"   • Symbol Pair:         {trade_symbol} ({direction})")
-    log.info(f"   • AI Confidence Score: {confidence_score:.1f}%")
-    log.info(f"   • AI Adaptive Leverage:{adaptive_leverage}x")
-    log.info(f"   • Opening Equity:      ${available_balance:.4f} {margin_currency}")
-    log.info(f"   • Entry Market Price:  ${format_price(market_price)}")
-    log.info(f"   • Order Size:          {size_str} (${actual_notional:.2f} Notional | Margin: ${req_margin:.2f})")
-    log.info(f"   • AI Dynamic Target TP:${preset_tp} (+{ai_tp_target*100:.2f}%)")
-    log.info(f"   • AI Risk Floor SL:    ${preset_sl} (-{ai_sl_floor*100:.2f}%)")
+    log.info(f"🚨 TRADE IS HAPPENING NOW! ({mode_label})")
+    log.info(f"   • Symbol Pair Opened:   {trade_symbol} ({direction})")
+    log.info(f"   • Account Opening Equity: ${available_balance:.4f} {margin_currency}")
+    log.info(f"   • Margin Used for Trade:  ${req_margin:.4f} {margin_currency} ({adaptive_leverage}x Leverage)")
+    log.info(f"   • Remaining Free Margin:  ${available_balance - req_margin:.4f} {margin_currency}")
+    log.info(f"   • Entry Fill Price:       ${format_price(market_price)}")
+    log.info(f"   • Order Position Size:    {size_str} (${actual_notional:.2f} Notional Value)")
+    log.info(f"   • Initial AI Target TP:   ${preset_tp} (+{ai_tp_target*100:.2f}%)")
+    log.info(f"   • Initial AI Risk SL:     ${preset_sl} (-{ai_sl_floor*100:.2f}%)")
     log.info("====================================================================================================")
 
     try:
@@ -515,7 +509,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
             if r.status == 200 and resp.get("code") == "00000":
                 order_id = resp.get("data", {}).get("orderId", "ORDER_EXECUTED")
-                log.info(f"✅ BITGET MATCHING ENGINE ACCEPTED AI ORDER (Key #{key_set['id']})! Order ID: {order_id}")
+                log.info(f"✅ BITGET MATCHING ENGINE ACCEPTED ORDER (Key #{key_set['id']})! Order ID: {order_id}")
 
                 await asyncio.sleep(0.5)
                 real_fill = await fetch_bitget_order_fill_price(session, trade_symbol, order_id, key_set=key_set)
@@ -692,14 +686,10 @@ async def process_autonomous_ai_market_batch(batch_id, coin_list, session, semap
         volatility_pct = ((recent_high - recent_low) / recent_low) * 100.0
         rebound_impulse_pct = ((current_price - recent_low) / recent_low) * 100.0
 
-        # AI Pattern Evaluator: Look for explosive upward velocity off bottom
         if rebound_impulse_pct >= 0.80 and volatility_pct >= 1.2:
-            # Measure velocity over last 3 candles
             velocity_3m = ((current_price - close_prices[-4]) / close_prices[-4]) * 100.0 if len(close_prices) >= 4 else 0.5
-
             confidence_score = min(99.0, 80.0 + (rebound_impulse_pct * 4.0) + (velocity_3m * 5.0))
 
-            # Dynamic TP/SL Determination based on Volatility & Velocity
             ai_tp_target = max(0.025, min(0.080, rebound_impulse_pct * 0.015))
             ai_sl_floor = max(0.010, min(0.025, volatility_pct * 0.005))
 
@@ -777,14 +767,13 @@ async def run_scanner_iteration():
 
             entry_p_str = format_price(entry_price)
             trade_type_label = "🔮 VIRTUAL SHADOW TRADE" if is_virtual else f"🎮 LIVE {margin_currency} DEMO TRADE"
-            log.info(f"⏳ {trade_type_label} SUPERVISION ({symbol}): Entry @ ${entry_p_str} | Peak: ${format_price(peak_price)} | AI TP: ${format_price(ai_target_tp)} | AI SL: ${format_price(ai_floor_sl)}")
+            log.info(f"⏳ {trade_type_label} SUPERVISION ({symbol}): Entry @ ${entry_p_str} | Opening Equity: ${pre_trade_balance:.4f} {margin_currency} | Peak: ${format_price(peak_price)} | AI TP: ${format_price(ai_target_tp)} | AI SL: ${format_price(ai_floor_sl)}")
 
             current_price = await fetch_single_price(session, symbol)
             if current_price and current_price > 0:
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
 
-                # Update peak & lowest prices
                 if current_price > peak_price:
                     peak_price = current_price
                     update_active_trade_dynamics(symbol, new_peak=peak_price)
@@ -792,20 +781,14 @@ async def run_scanner_iteration():
                     lowest_price = current_price
                     update_active_trade_dynamics(symbol, new_lowest=lowest_price)
 
-                # ==================================================================================
-                # HUMAN-LIKE AUTONOMOUS DECISION RULES (IMPatience / IMPULSE / TRAILING / FAILSAFE)
-                # ==================================================================================
-
-                # RULE A: RIDING STRONG WINNERS (Dynamic TP Expansion)
-                # If coin surges near current TP target with strong momentum, push TP target higher!
+                # RULE A: RIDING STRONG WINNERS
                 if current_price >= (ai_target_tp * 0.995) and live_pnl_pct >= 2.0:
-                    new_expanded_tp = ai_target_tp * 1.02  # Expand TP target by another +2%
+                    new_expanded_tp = ai_target_tp * 1.02
                     update_active_trade_dynamics(symbol, new_tp=new_expanded_tp)
                     log_ai_decision(symbol, "DYNAMIC_TP_EXPANSION", f"Surging momentum (PnL: +{live_pnl_pct:.2f}%). Raising TP target", f"Expanded Target to ${format_price(new_expanded_tp)}")
                     ai_target_tp = new_expanded_tp
 
-                # RULE B: EXHAUSTION EXIT / IMPATIENCE / TRAILING PROFIT LOCK
-                # If price reached a nice peak (>= +1.2% PnL) and drops 0.75% from peak -> Close immediately to lock profit!
+                # RULE B: EXHAUSTION EXIT / TRAILING PROFIT LOCK
                 pullback_from_peak_pct = ((peak_price - current_price) / peak_price) * 100.0 if peak_price > 0 else 0.0
                 if live_pnl_pct >= 1.20 and pullback_from_peak_pct >= 0.75:
                     log_ai_decision(symbol, "EXHAUSTION_PROFIT_LOCK", f"Price pulled back {pullback_from_peak_pct:.2f}% from peak ${format_price(peak_price)}", "Closing Trade Early to Lock Profit")
@@ -819,11 +802,20 @@ async def run_scanner_iteration():
                     update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(True)
                     record_trade_history(symbol, True, live_pnl_pct * leverage, pnl_cash)
+
+                    log.info("====================================================================================================")
+                    log.info(f"🏁 TRADE CLOSED & AUDITED! ({symbol})")
+                    log.info(f"   • Trade Opening Account Balance: ${pre_trade_balance:.4f} {margin_currency}")
+                    log.info(f"   • Trade Closing Account Balance: ${closing_equity:.4f} {margin_currency}")
+                    log.info(f"   • NET PROFIT GAINED:            +${pnl_cash:.4f} {margin_currency} (+{live_pnl_pct*leverage:.2f}%)")
+                    log.info(f"   • TRADE RESULT:                  🏆 WIN (TRAILING PROFIT LOCKED IN)")
+                    log.info(f"   • NEW WIN STREAK:                {new_streak} WINS IN A ROW")
+                    log.info("====================================================================================================")
+
                     clear_active_trade_state()
                     return
 
                 # RULE C: IMPATIENT EARLY CUT (Cutting Weak / Dying Trades)
-                # If trade has been open, shows negative PnL (-0.8%), and continues breaking down -> Cut early before hitting full SL!
                 if live_pnl_pct <= -0.80 and current_price < lowest_price * 1.002:
                     log_ai_decision(symbol, "EARLY_CUT_DYING_TRADE", f"Coin momentum dying (PnL: {live_pnl_pct:.2f}%). Cutting loss early", "Impatience Exit: Closed before full SL")
 
@@ -836,10 +828,20 @@ async def run_scanner_iteration():
                     update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(False)
                     record_trade_history(symbol, False, live_pnl_pct * leverage, pnl_cash)
+
+                    log.info("====================================================================================================")
+                    log.info(f"🏁 TRADE CLOSED & AUDITED! ({symbol})")
+                    log.info(f"   • Trade Opening Account Balance: ${pre_trade_balance:.4f} {margin_currency}")
+                    log.info(f"   • Trade Closing Account Balance: ${closing_equity:.4f} {margin_currency}")
+                    log.info(f"   • NET LOSS SUFFERED:            -${abs(pnl_cash):.4f} {margin_currency} ({live_pnl_pct*leverage:.2f}%)")
+                    log.info(f"   • TRADE RESULT:                  ❌ LOSS (CUT EARLY TO PROTECT CAPITAL)")
+                    log.info(f"   • NEW WIN STREAK:                {new_streak} WINS")
+                    log.info("====================================================================================================")
+
                     clear_active_trade_state()
                     return
 
-                # RULE D: FAILSAFE BOUNDARY CHECK (Stuck Order Protection)
+                # RULE D: FAILSAFE BOUNDARY CHECK
                 is_win_hit = current_price >= ai_target_tp if direction == "LONG" else current_price <= ai_target_tp
                 is_loss_hit = current_price <= ai_floor_sl if direction == "LONG" else current_price >= ai_floor_sl
 
@@ -857,6 +859,15 @@ async def run_scanner_iteration():
                     record_trade_history(symbol, is_win, pnl_pct_gain * 100.0 * leverage, pnl_cash)
 
                     log_ai_decision(symbol, "FAILSAFE_BOUNDARY_EXIT", f"Price ${curr_p_str} crossed TP/SL threshold", f"Result: {'WIN' if is_win else 'LOSS'}")
+
+                    log.info("====================================================================================================")
+                    log.info(f"🏁 TRADE CLOSED & AUDITED! ({symbol})")
+                    log.info(f"   • Trade Opening Account Balance: ${pre_trade_balance:.4f} {margin_currency}")
+                    log.info(f"   • Trade Closing Account Balance: ${closing_equity:.4f} {margin_currency}")
+                    log.info(f"   • NET PROFIT/LOSS:              {'+' if pnl_cash>=0 else ''}${pnl_cash:.4f} {margin_currency}")
+                    log.info(f"   • TRADE RESULT:                  {'🏆 WIN' if is_win else '❌ LOSS'}")
+                    log.info(f"   • NEW WIN STREAK:                {new_streak} WINS")
+                    log.info("====================================================================================================")
                     clear_active_trade_state()
                     return
 
@@ -980,12 +991,12 @@ async def run_scanner_iteration():
                             log_ai_decision(symbol, "EXCHANGE_CLOSE_AUDIT", f"Closing Equity ${final_eq:.4f}", f"Result: {'WIN' if is_win else 'LOSS'}")
 
                             log.info("====================================================================================================")
-                            log.info(f"💵 DEMO ACCOUNT TRADE AUDIT SUMMARY ({symbol}):")
-                            log.info(f"   • Demo Account Opening Equity:  ${pre_trade_balance:.4f} {margin_currency}")
-                            log.info(f"   • Demo Account Closing Equity:  ${final_eq:.4f} {margin_currency}")
-                            log.info(f"   • NET DEMO PROFIT/LOSS:        {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} {margin_currency}")
-                            log.info(f"   • TRADE RESULT:                {'🏆 WIN (DEMO BALANCE GAINED!)' if is_win else '❌ LOSS (STREAK RESET TO 0)'}")
-                            log.info(f"   • NEW DEMO WIN STREAK:          {new_streak} WINS")
+                            log.info(f"🏁 TRADE CLOSED & AUDITED! ({symbol})")
+                            log.info(f"   • Trade Opening Account Balance: ${pre_trade_balance:.4f} {margin_currency}")
+                            log.info(f"   • Trade Closing Account Balance: ${final_eq:.4f} {margin_currency}")
+                            log.info(f"   • NET PROFIT/LOSS:              {'+' if net_cash_change>=0 else ''}${net_cash_change:.4f} {margin_currency}")
+                            log.info(f"   • TRADE RESULT:                  {'🏆 WIN' if is_win else '❌ LOSS'}")
+                            log.info(f"   • NEW WIN STREAK:                {new_streak} WINS")
                             log.info("====================================================================================================")
                             clear_active_trade_state()
 
