@@ -63,8 +63,9 @@ class ScannerSafetyTests(unittest.TestCase):
             scanner.extract_confirmed_position_fill(positions, "TESTUSDT", "LONG"),
             (12.5, 1.5)
         )
-        self.assertIsNone(
-            scanner.extract_confirmed_position_fill(positions, "TESTUSDT", "SHORT")
+        self.assertEqual(
+            scanner.extract_confirmed_position_fill(positions, "TESTUSDT", "SHORT"),
+            (20.0, 3.0)
         )
         self.assertIsNone(
             scanner.extract_confirmed_position_fill(None, "TESTUSDT", "LONG")
