@@ -409,6 +409,16 @@ async def fetch_bitget_account_balance(session):
     log.error("Bitget account balance could not be verified; refusing to use fallback equity.")
     return None
 
+async def get_realized_trade_result(session, pre_trade_balance, estimated_pnl_cash):
+    # Prefer the exchange's post-close equity delta (includes fees/funding).
+    await asyncio.sleep(1.0)
+    post_balance = await fetch_bitget_account_balance(session)
+    if post_balance and float(post_balance.get("equity") or 0) > 0:
+        closing_equity = float(post_balance["equity"])
+        return closing_equity, closing_equity - pre_trade_balance, True
+    closing_equity = max(0.0, pre_trade_balance + estimated_pnl_cash)
+    return closing_equity, estimated_pnl_cash, False
+
 async def fetch_account_hold_mode(session):
     key_set = get_next_bitget_key()
     if not key_set:
@@ -930,8 +940,11 @@ async def run_scanner_iteration():
                     if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
-                    new_streak = update_live_win_streak(False)
-                    record_trade_history(symbol, False, live_pnl_pct * leverage, pnl_cash)
+                    closing_equity, pnl_cash, pnl_verified = await get_realized_trade_result(session, pre_trade_balance, pnl_cash)
+                    is_win = pnl_cash > 0
+                    new_streak = update_live_win_streak(is_win)
+                    result_pct = (pnl_cash / pre_trade_balance * 100.0) if pre_trade_balance > 0 else 0.0
+                    record_trade_history(symbol, is_win, result_pct, pnl_cash)
 
                     log_ai_decision(symbol, "STOP_LOSS_EXECUTED", f"Price ${curr_p_str} breached Stop Loss ${format_price(ai_floor_sl)} (PnL: {live_pnl_pct:.2f}%)", "Stop Loss Executed Immediately")
 
@@ -973,8 +986,11 @@ async def run_scanner_iteration():
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
 
+                    closing_equity, pnl_cash, pnl_verified = await get_realized_trade_result(session, pre_trade_balance, pnl_cash)
+                    is_win = pnl_cash > 0
                     new_streak = update_live_win_streak(is_win)
-                    record_trade_history(symbol, is_win, live_pnl_pct, pnl_cash)
+                    result_pct = (pnl_cash / pre_trade_balance * 100.0) if pre_trade_balance > 0 else 0.0
+                    record_trade_history(symbol, is_win, result_pct, pnl_cash)
 
                     log_ai_decision(symbol, "COLOR_TARGET_ACHIEVED", f"Formed {candles_since_entry} {dominant_color} candles in {elapsed_minutes:.1f}m; estimated gross PnL {live_pnl_pct:+.2f}%", "Target achieved; closing regardless of profit or loss")
 
@@ -1001,8 +1017,11 @@ async def run_scanner_iteration():
                     if not is_virtual and not await close_bitget_live_position(session, symbol, direction, contract_size=contract_size):
                         log.error("Exchange did not accept the reduce-only close. Keeping active trade state for retry.")
                         return
+                    closing_equity, pnl_cash, pnl_verified = await get_realized_trade_result(session, pre_trade_balance, pnl_cash)
+                    is_win = pnl_cash > 0
                     new_streak = update_live_win_streak(is_win)
-                    record_trade_history(symbol, is_win, live_pnl_pct * leverage, pnl_cash)
+                    result_pct = (pnl_cash / pre_trade_balance * 100.0) if pre_trade_balance > 0 else 0.0
+                    record_trade_history(symbol, is_win, result_pct, pnl_cash)
 
                     log_ai_decision(symbol, "TIME_LIMIT_EXPIRED_54M", f"Hit 54m limit ({elapsed_minutes:.1f}m) with {candles_since_entry}/30 candles", f"Time Expired: Closed. Result: {'WIN' if is_win else 'LOSS'}")
 
