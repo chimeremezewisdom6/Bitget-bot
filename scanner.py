@@ -348,15 +348,13 @@ async def fetch_bitget_account_balance(session):
                 margin_coin_type = "S-USDT" if BITGET_DEMO_MODE else "USDT"
                 asset_obj = next((a for a in assets_list if a.get("coin") in ("USDT", "S-USDT")), None)
 
-                available_margin = 0.0
-                if asset_obj:
-                    available_margin = float(asset_obj.get("available") or asset_obj.get("equity") or 0.0)
-                    if usdt_equity == 0.0:
-                        usdt_equity = float(asset_obj.get("equity") or available_margin)
+                available_margin = float(asset_obj.get("available") or 0.0) if asset_obj else 0.0
+                if usdt_equity <= 0:
+                    log.error("Bitget returned no positive USDT equity; refusing to trade.")
+                    return None
 
-                v_bal = usdt_equity if usdt_equity > 0 else (10000.0 if BITGET_DEMO_MODE else 1.17)
                 return {
-                    "equity": v_bal,
+                    "equity": usdt_equity,
                     "available": available_margin,
                     "margin_coin": margin_coin_type,
                     "account_type": f"Bitget UTA v3 {'DEMO (Key #' + str(key_set['id']) + ')' if BITGET_DEMO_MODE else 'REAL LIVE'}"
@@ -367,28 +365,34 @@ async def fetch_bitget_account_balance(session):
     log.error("Bitget account balance could not be verified; refusing to use fallback equity.")
     return None
 
-async def fetch_bitget_order_fill_price(session, symbol, order_id, key_set=None):
+async def fetch_bitget_order_info(session, order_id, key_set=None):
     if not (key_set and order_id):
         return None
-
-    path = f"/api/v3/trade/order-info?category={ORDER_CATEGORY}&symbol={symbol}&orderId={order_id}"
+    path = f"/api/v3/trade/order-info?orderId={order_id}"
     full_url = f"https://{BIT_DOMAIN}{path}"
     headers = get_bitget_headers("GET", path, key_set=key_set)
-
-    for _ in range(3):
+    for _ in range(5):
         try:
             async with session.get(full_url, headers=headers, timeout=5) as r:
                 if r.status == 200:
                     resp = await r.json()
                     if resp.get("code") == "00000" and resp.get("data"):
-                        d = resp["data"]
-                        fill_price = float(d.get("priceAvg") or d.get("fillPrice") or d.get("price") or 0.0)
-                        if fill_price > 0:
-                            return fill_price
-        except Exception:
-            pass
-        await asyncio.sleep(0.3)
+                        data = resp["data"]
+                        if data.get("orderStatus") == "filled":
+                            return data
+        except Exception as e:
+            log.debug(f"Order-info check failed: {e}")
+        await asyncio.sleep(0.4)
     return None
+
+async def fetch_bitget_order_fill_price(session, symbol, order_id, key_set=None):
+    data = await fetch_bitget_order_info(session, order_id, key_set=key_set)
+    if not data:
+        return None
+    try:
+        return float(data.get("avgPrice") or 0.0) or None
+    except (TypeError, ValueError):
+        return None
 
 async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
     if not key_set:
@@ -458,12 +462,10 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     order_payload = {
         "category": ORDER_CATEGORY,
         "symbol": trade_symbol,
-        "marginCoin": margin_currency,
         "qty": size_str,
         "side": "buy" if direction == "LONG" else "sell",
         "orderType": "market",
-        "presetTakeProfitPrice": str(preset_tp),
-        "presetStopLossPrice": str(preset_sl),
+        "stopLoss": str(preset_sl),
         "reduceOnly": "no"
     }
 
@@ -537,7 +539,6 @@ async def close_bitget_live_position(session, symbol, direction, contract_size="
     order_payload = {
         "category": ORDER_CATEGORY,
         "symbol": symbol,
-        "marginCoin": "S-USDT" if BITGET_DEMO_MODE else "USDT",
         "side": close_side,
         "orderType": "market",
         "qty": str(contract_size) if contract_size and contract_size != "0" else "1",
