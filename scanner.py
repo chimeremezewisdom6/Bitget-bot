@@ -150,29 +150,72 @@ def get_bitget_headers(method="GET", request_path="", body="", key_set=None):
             headers["paptrading"] = "1"
     return headers
 
-def calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score):
-    # Keep leverage conservative; do not request 10x automatically.
-    leverage = 5
+async def fetch_contract_rules(session, symbol):
+    query = f"category={ORDER_CATEGORY}&symbol={symbol}"
+    path = f"/api/v3/market/instruments?{query}"
+    headers = get_bitget_headers("GET", path)
+    try:
+        async with session.get(
+            f"https://{BIT_DOMAIN}/api/v3/market/instruments",
+            params={"category": ORDER_CATEGORY, "symbol": symbol},
+            headers=headers,
+            timeout=8
+        ) as response:
+            payload = await response.json()
+            if response.status != 200 or payload.get("code") != "00000":
+                log.error(f"Could not load Bitget contract rules for {symbol}: {payload.get('msg')}")
+                return None
+            rows = payload.get("data") or []
+            rule = next((row for row in rows if row.get("symbol") == symbol), None)
+            if not rule or rule.get("status") != "online":
+                log.warning(f"{symbol} is missing, offline or restricted on Bitget.")
+                return None
+            return rule
+    except Exception as exc:
+        log.error(f"Contract-rule request failed for {symbol}: {exc}")
+        return None
 
-    raw_qty = 5.01 / market_price
+def calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score, rules):
+    if market_price <= 0 or not rules:
+        return None
 
-    if market_price < 0.0001:
-        qty = math.ceil(raw_qty)
-    elif market_price < 0.01:
-        qty = math.ceil(raw_qty)
-    elif market_price < 1.0:
-        qty = math.ceil(raw_qty * 10) / 10
-    elif market_price < 100.0:
-        qty = math.ceil(raw_qty * 10) / 10
-    else:
-        qty = math.ceil(raw_qty * 100) / 100
+    # Conservative cap, further limited by the contract's published maximum.
+    try:
+        max_leverage = float(rules.get("maxLeverage") or 5)
+        leverage = max(1, min(5, int(max_leverage)))
+        quantity_precision = int(rules.get("quantityPrecision") or 0)
+        quantity_step = float(rules.get("quantityMultiplier") or (10 ** -quantity_precision))
+        min_quantity = float(rules.get("minOrderQty") or 0)
+        min_notional = max(5.01, float(rules.get("minOrderAmount") or 0))
+        max_quantity = float(rules.get("maxOrderQty") or 0)
+    except (TypeError, ValueError):
+        return None
 
+    if quantity_step <= 0:
+        return None
+
+    raw_qty = min_notional / market_price
+    qty = math.ceil((raw_qty / quantity_step) - 1e-10) * quantity_step
+    if qty < min_quantity:
+        qty = math.ceil((min_quantity / quantity_step) - 1e-10) * quantity_step
+    qty = round(qty, quantity_precision)
     notional = qty * market_price
-    if notional < 5.01:
-        notional = 5.05
+
+    if qty <= 0 or notional < min_notional or (max_quantity > 0 and qty > max_quantity):
+        return None
 
     required_margin = notional / leverage
     return required_margin, qty, notional, leverage
+
+def format_instrument_price(price, rules, direction):
+    precision = int(rules.get("pricePrecision") or 8)
+    step = float(rules.get("priceMultiplier") or (10 ** -precision))
+    if step <= 0:
+        return format_price(price)
+    units = price / step
+    # Keep the stop just outside the trigger threshold to avoid rounding it inward.
+    rounded_units = math.floor(units + 1e-12) if direction == "LONG" else math.ceil(units - 1e-12)
+    return f"{rounded_units * step:.{precision}f}"
 
 # ====================================================================================================
 # STATE & VIRTUAL DEMO BALANCE MANAGEMENT (WITH STALE GIT STATE AUTO-PURGING)
@@ -425,7 +468,16 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     key_set = get_next_bitget_key()
     trade_symbol = symbol
 
-    req_margin, exact_qty, actual_notional, adaptive_leverage = calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score)
+    contract_rules = await fetch_contract_rules(session, trade_symbol)
+    if not contract_rules:
+        log_ai_decision(symbol, "CONTRACT_RULES_UNAVAILABLE", "Bitget contract specifications could not be verified", "Skipped; no order submitted")
+        return None
+
+    position_params = calculate_ai_position_parameters(market_price, available_balance, volatility_pct, confidence_score, contract_rules)
+    if not position_params:
+        log_ai_decision(symbol, "INVALID_CONTRACT_SIZE", "Could not calculate a valid quantity from Bitget contract rules", "Skipped; no order submitted")
+        return None
+    req_margin, exact_qty, actual_notional, adaptive_leverage = position_params
     configured_leverage = await configure_bitget_leverage(session, trade_symbol, leverage=adaptive_leverage, key_set=key_set)
     if not configured_leverage:
         log_ai_decision(symbol, "LEVERAGE_SETUP_FAILED", "Bitget rejected all safe leverage settings", "Skipped; no order submitted")
@@ -436,23 +488,14 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     margin_currency = "USDT"
 
     # Fail closed: never simulate a fill or open a shadow trade.
-    if available_balance <= 0 or req_margin > (available_balance * 0.80):
+    if available_balance <= 0 or req_margin > (available_balance * 0.85):
         log_ai_decision(symbol, "INSUFFICIENT_MARGIN", f"Required margin ${req_margin:.2f} exceeds safe available balance", "Skipped; no order submitted")
         return None
 
-    if market_price < 0.0001:
-        size_str = f"{int(exact_qty)}"
-    elif market_price < 0.01:
-        size_str = f"{int(exact_qty)}"
-    elif market_price < 1.0:
-        size_str = f"{exact_qty:.1f}"
-    elif market_price < 100.0:
-        size_str = f"{exact_qty:.1f}"
-    else:
-        size_str = f"{exact_qty:.2f}"
+    quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
+    size_str = f"{exact_qty:.{quantity_precision}f}"
 
-    preset_tp = format_price(dynamic_tp)
-    preset_sl = format_price(dynamic_sl)
+    preset_sl = format_instrument_price(dynamic_sl, contract_rules, direction)
 
     if not key_set:
         log_ai_decision(symbol, "NO_API_KEY", "No Bitget API credentials configured", "Skipped; no order submitted")
