@@ -34,7 +34,7 @@ For the manual Demo smoke test, configure these repository Actions secrets using
 - `BITGET_SECRET_KEY`
 - `BITGET_PASSPHRASE`
 
-The smoke-test workflow sets `BOT_DRY_RUN=true` and `CONTINUOUS_247_LOOP=false`. It checks the account and market data without placing orders.
+The smoke-test workflow sets `BOT_DRY_RUN=true` and `CONTINUOUS_247_LOOP=false`. It checks the account and market data without placing orders. Configure one API key set for the intended Demo account. If extra key sets are present, the scanner deliberately uses only the first so balance, positions, entries and exits cannot accidentally target different accounts.
 
 ## Local validation
 
