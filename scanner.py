@@ -910,9 +910,11 @@ async def run_scanner_iteration():
             return
         current_equity = float(acc_info["equity"])
         available_margin = float(acc_info["available"])
-        if current_equity <= 0 or available_margin <= 0:
-            log.error("Bitget reports zero/invalid equity or available margin. Skipping this run.")
+        if current_equity < 0 or available_margin < 0:
+            log.error("Bitget returned invalid negative equity or available margin. Skipping this run.")
             return
+        if available_margin <= 0:
+            log.warning("No free margin is available. Existing positions will still be supervised; new entries are blocked.")
         log.info(f"💰 {mode_label} EQUITY: ${current_equity:.4f} {acc_info['margin_coin']} | Available Margin: ${available_margin:.4f}")
 
         # Exchange positions are authoritative; never open a second trade if state is missing.
@@ -1101,6 +1103,11 @@ async def run_scanner_iteration():
                 log.error(f"Could not fetch price for active trade {symbol}.")
                 return
         else:
+            # No position is open, so free margin and positive equity are required before scanning for entries.
+            if current_equity <= 0 or available_margin <= 0:
+                log.warning("No positive equity or free margin is available. Skipping new-entry scan.")
+                return
+
             # Circuit breaker blocks new entries only; existing positions must still be supervised.
             if recent_loss_count >= 2:
                 log.warning("Circuit breaker: two consecutive losses. New entries paused; no position is open.")
