@@ -55,6 +55,7 @@ def get_next_bitget_key():
 # FORCE DEMO MODE DEFAULT TO TRUE TO PROTECT REAL ACCOUNT EQUITY
 # HARD LOCK: this repository is demo-only. Environment variables cannot enable live trading.
 BITGET_DEMO_MODE = True
+DRY_RUN = os.environ.get("BOT_DRY_RUN", "false").strip().lower() == "true"
 
 SCAN_PRODUCT_TYPE = "USDT-FUTURES"
 ORDER_CATEGORY = "USDT-FUTURES"
@@ -525,6 +526,10 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
 
     preset_sl = format_instrument_price(dynamic_sl, contract_rules, direction)
 
+    if DRY_RUN:
+        log.info(f"DRY RUN: {symbol} {direction}; qty={size_str}; notional approximately ${actual_notional:.4f}; leverage at most {adaptive_leverage}x; stop={preset_sl}. No leverage change or order will be sent.")
+        return None
+
     if not key_set:
         log_ai_decision(symbol, "NO_API_KEY", "No Bitget API credentials configured", "Skipped; no order submitted")
         return None
@@ -895,6 +900,10 @@ async def run_scanner_iteration():
                 return
         elif nonzero_positions:
             log.error("Bitget has an open futures position but no matching bot state. Refusing to open another trade; manual reconciliation is required.")
+            return
+
+        if DRY_RUN and (active_trade or nonzero_positions):
+            log.error("Dry-run smoke test requires a flat Bitget Demo account and no active trade state.")
             return
 
         if active_trade:
