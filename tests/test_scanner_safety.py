@@ -68,6 +68,36 @@ class ScannerSafetyTests(unittest.TestCase):
             )
         )
 
+    def test_candle_selection_uses_latest_completed_candles_in_order(self):
+        minute_ms = 60_000
+        now_ms = 100 * minute_ms + 30_000
+        candles = [
+            [str(i * minute_ms), "1", "2", "0.5", str(i), "1", "1"]
+            for i in range(100)
+        ]
+        selected = scanner.select_latest_completed_candles(
+            candles, now_ms=now_ms, count=60
+        )
+
+        self.assertEqual(len(selected), 60)
+        timestamps = [int(candle[0]) for candle in selected]
+        self.assertEqual(timestamps, sorted(timestamps))
+        self.assertEqual(timestamps[0], 39 * minute_ms)
+        self.assertEqual(timestamps[-1], 98 * minute_ms)
+
+    def test_incomplete_candle_is_excluded(self):
+        minute_ms = 60_000
+        now_ms = 100 * minute_ms + 30_000
+        candles = [
+            [str(i * minute_ms), "1", "2", "0.5", "1.5", "1", "1"]
+            for i in range(60)
+        ]
+        selected = scanner.select_latest_completed_candles(
+            candles, now_ms=now_ms, count=60
+        )
+        self.assertEqual(len(selected), 60)
+        self.assertTrue(all(int(c[0]) + minute_ms <= now_ms for c in selected))
+
     def test_stop_price_rounds_outward_to_exchange_tick(self):
         self.assertEqual(
             scanner.format_instrument_price(1.234, self.rules, "LONG"), "1.23"
