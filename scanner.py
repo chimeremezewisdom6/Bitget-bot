@@ -503,6 +503,27 @@ async def configure_bitget_leverage(session, symbol, leverage=5, key_set=None):
             log.error(f"Leverage setup failed for {symbol} at {selected}x: {e}")
     return 0
 
+def extract_confirmed_position_fill(positions, symbol, direction):
+    """Recover a filled entry from the exchange position endpoint when order info lags."""
+    if positions is None:
+        return None
+    expected_side = "long" if direction == "LONG" else "short"
+    for position in positions:
+        if position.get("symbol") != symbol:
+            continue
+        actual_side = position.get("posSide")
+        if actual_side in ("long", "short") and actual_side != expected_side:
+            continue
+        try:
+            quantity = float(position.get("total") or 0)
+            average_price = float(position.get("avgPrice") or 0)
+        except (TypeError, ValueError):
+            continue
+        if quantity > 0 and average_price > 0:
+            return average_price, quantity
+    return None
+
+
 async def place_bitget_live_order(session, symbol, direction, market_price, available_balance, confidence_score=90.0, volatility_pct=2.0, dynamic_tp=0.0, dynamic_sl=0.0, sl_pct_val=1.5, dominant_color="GREEN", dominant_count=0, account_equity=None):
     key_set = get_next_bitget_key()
     trade_symbol = symbol
@@ -602,9 +623,40 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
                 real_fill = float(order_info.get("avgPrice") or 0) if order_info else 0.0
                 filled_qty = float(order_info.get("cumExecQty") or 0) if order_info else 0.0
                 if real_fill <= 0 or filled_qty <= 0:
-                    log.error(f"Order {order_id} was accepted but no executed quantity was confirmed. Refusing to invent a fill or mark a trade active.")
-                    log_ai_decision(trade_symbol, "FILL_NOT_CONFIRMED", f"Order {order_id} has no confirmed executed quantity", "No local trade marked as filled")
-                    return None
+                    # Order-info can lag the position endpoint. Reconcile before
+                    # declaring the order unfilled, otherwise a real position
+                    # could be left open without local supervision state.
+                    positions = await fetch_current_positions(
+                        session, symbol=trade_symbol, key_set=key_set
+                    )
+                    recovered_fill = extract_confirmed_position_fill(
+                        positions, trade_symbol, direction
+                    )
+                    if recovered_fill:
+                        real_fill, filled_qty = recovered_fill
+                        log.warning(
+                            f"Order-info did not confirm {order_id}, but Bitget's "
+                            f"position endpoint confirms {trade_symbol} {direction} "
+                            f"qty={filled_qty} at avgPrice={real_fill}. Recovering state."
+                        )
+                    else:
+                        if positions is None:
+                            log.critical(
+                                f"Order {order_id} was accepted but fill status and "
+                                f"position reconciliation both failed for {trade_symbol}. "
+                                "Check the Bitget Demo account immediately."
+                            )
+                        else:
+                            log.error(
+                                f"Order {order_id} was accepted but no matching open "
+                                f"position was confirmed for {trade_symbol}."
+                            )
+                        log_ai_decision(
+                            trade_symbol, "FILL_NOT_CONFIRMED",
+                            f"Order {order_id} has no confirmed executed quantity",
+                            "No local trade marked as filled"
+                        )
+                        return None
 
                 quantity_precision = int(contract_rules.get("quantityPrecision") or 0)
                 filled_size_str = f"{filled_qty:.{quantity_precision}f}"
