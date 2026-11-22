@@ -10,11 +10,11 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION & TRUTH-IN-REPORTING ENGINE
+# ZERO-CONFIGURATION & STALE GIT STATE AUTO-PURGER ENGINE
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v129_truth_engine_scanner")
+log = logging.getLogger("v130_auto_purger_scanner")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -52,7 +52,7 @@ def get_next_bitget_key():
     KEY_ROTATION_INDEX += 1
     return key_set
 
-# FORCE DEMO MODE DEFAULT TO TRUE TO PROTECT REAL ACC EQUITY
+# FORCE DEMO MODE DEFAULT TO TRUE TO PROTECT REAL ACCOUNT EQUITY
 BITGET_DEMO_ENV = os.environ.get("BITGET_DEMO_MODE", "true").lower()
 BITGET_DEMO_MODE = BITGET_DEMO_ENV != "false"
 
@@ -172,7 +172,7 @@ def calculate_ai_position_parameters(market_price, available_balance, volatility
     return required_margin, qty, notional, leverage
 
 # ====================================================================================================
-# STATE & VIRTUAL DEMO BALANCE MANAGEMENT
+# STATE & VIRTUAL DEMO BALANCE MANAGEMENT (WITH STALE GIT STATE AUTO-PURGING)
 # ====================================================================================================
 
 def get_virtual_demo_balance():
@@ -262,14 +262,34 @@ def record_trade_history(symbol, won, pnl_pct, pnl_cash):
     except Exception:
         pass
 
+def clear_active_trade_state():
+    if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
+        try:
+            with open(LIVE_ACTIVE_TRADE_FILE, "w") as f:
+                json.dump({"active": False}, f)
+        except Exception:
+            pass
+
 def get_active_live_trade():
+    """
+    AUTO-PURGE STALE GIT STATE:
+    If live_active_trade.json was checked into git or contains an old start_time (>60 mins ago),
+    automatically purge it on startup to prevent repeated execution loops!
+    """
     if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
         try:
             with open(LIVE_ACTIVE_TRADE_FILE, "r") as f:
                 data = json.load(f)
                 if data.get("active"):
+                    start_time = float(data.get("start_time", 0))
+                    # Auto-purge trades created over 60 minutes ago or with static git timestamps
+                    if start_time == 0 or (time.time() - start_time) > 3600.0:
+                        log.warning(f"🧹 AUTO-PURGING STALE TRADE STATE FOR {data.get('symbol')} (Checked into Git / Age > 60m)...")
+                        clear_active_trade_state()
+                        return None
                     return data
         except Exception:
+            clear_active_trade_state()
             return None
     return None
 
@@ -293,14 +313,6 @@ def save_active_trade_state(symbol, direction, entry_price, contract_size, pre_t
     }
     with open(LIVE_ACTIVE_TRADE_FILE, "w") as f:
         json.dump(trade_data, f, indent=2)
-
-def clear_active_trade_state():
-    if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
-        try:
-            with open(LIVE_ACTIVE_TRADE_FILE, "w") as f:
-                json.dump({"active": False}, f)
-        except Exception:
-            pass
 
 # ====================================================================================================
 # BITGET UTA v3 EXCHANGER ENGINE WITH MULTI-KEY ROTATION
@@ -764,6 +776,7 @@ async def run_scanner_iteration():
         if acc_info:
             log.info(f"💰 {mode_label} EQUITY: ${acc_info['equity']:.4f} {acc_info['margin_coin']} | Available Margin: ${acc_info['available']:.4f}")
 
+        # Check and auto-purge stale git active trade state
         active_trade = get_active_live_trade()
 
         if active_trade:
@@ -1027,7 +1040,7 @@ async def run_scanner_iteration():
 
 async def main():
     if CONTINUOUS_247_LOOP:
-        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND Truth-Engine Loop ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND Auto-Purger Loop ({len(BITGET_KEYS)} Pollination Keys)...")
         while True:
             try:
                 await run_scanner_iteration()
@@ -1035,7 +1048,7 @@ async def main():
                 log.error(f"Error during scan iteration: {e}")
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
     else:
-        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan Truth-Engine Execution ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan Auto-Purger Execution ({len(BITGET_KEYS)} Pollination Keys)...")
         await run_scanner_iteration()
 
 if __name__ == "__main__":
