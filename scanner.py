@@ -10,11 +10,11 @@ import hashlib
 import base64
 
 # ====================================================================================================
-# ZERO-CONFIGURATION & 42+ CANDLE COLOR THRESHOLD ENGINE
+# ZERO-CONFIGURATION & TRUTH-IN-REPORTING ENGINE
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v127_42plus_color_scanner")
+log = logging.getLogger("v128_truth_engine_scanner")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -52,7 +52,9 @@ def get_next_bitget_key():
     KEY_ROTATION_INDEX += 1
     return key_set
 
-BITGET_DEMO_MODE = os.environ.get("BITGET_DEMO_MODE", "true").lower() == "true"
+# FORCE DEMO MODE DEFAULT TO TRUE TO PROTECT REAL ACC EQUITY
+BITGET_DEMO_ENV = os.environ.get("BITGET_DEMO_MODE", "true").lower()
+BITGET_DEMO_MODE = BITGET_DEMO_ENV != "false"
 
 SCAN_PRODUCT_TYPE = "USDT-FUTURES"
 ORDER_CATEGORY = "USDT-FUTURES"
@@ -78,9 +80,8 @@ NUM_BATCHES = 20
 MIN_24H_VOLUME = 300000
 DEFAULT_LEVERAGE = 5
 
-# Strategy Constraints & Strict 42+ Color Entry Gate
-MIN_REQUIRED_COLOR_COUNT = 42    # MUST have >42 candles of the SAME color in 60m window
-TARGET_COLOR_COUNT = 30          # Target 30+ candles of dominant color during trade
+MIN_REQUIRED_COLOR_COUNT = 42    # Must have over 42 candles of SAME color out of 60 to enter
+TARGET_COLOR_COUNT = 30          # Must form 30 candles of position color SINCE ENTRY
 MAX_TRADE_DURATION_MIN = 54.0     # Must achieve target in less than 54 minutes
 
 # ====================================================================================================
@@ -108,7 +109,7 @@ def log_ai_decision(symbol, decision_type, reason, action_taken):
         "reason": reason,
         "action": action_taken
     }
-    log.info(f"🧠 [42+ CANDLE COLOR ENGINE] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
+    log.info(f"🧠 [TRUTH-ENGINE] {decision_type} on {symbol} | Reason: {reason} | Action: {action_taken}")
 
     logs = []
     if os.path.exists(AI_DECISION_LOG_FILE):
@@ -292,21 +293,6 @@ def save_active_trade_state(symbol, direction, entry_price, contract_size, pre_t
     }
     with open(LIVE_ACTIVE_TRADE_FILE, "w") as f:
         json.dump(trade_data, f, indent=2)
-
-def update_active_trade_dynamics(symbol, new_peak=None, new_lowest=None):
-    if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
-        try:
-            with open(LIVE_ACTIVE_TRADE_FILE, "r") as f:
-                data = json.load(f)
-            if data.get("active") and data.get("symbol") == symbol:
-                if new_peak:
-                    data["peak_price"] = max(float(data.get("peak_price", new_peak)), new_peak)
-                if new_lowest:
-                    data["lowest_price"] = min(float(data.get("lowest_price", new_lowest)), new_lowest)
-                with open(LIVE_ACTIVE_TRADE_FILE, "w") as f:
-                    json.dump(data, f, indent=2)
-        except Exception:
-            pass
 
 def clear_active_trade_state():
     if os.path.exists(LIVE_ACTIVE_TRADE_FILE):
@@ -494,7 +480,7 @@ async def place_bitget_live_order(session, symbol, direction, market_price, avai
     log.info(f"🚨 TRADE IS HAPPENING NOW! ({mode_label})")
     log.info(f"   • Symbol Pair Opened:   {trade_symbol} ({direction})")
     log.info(f"   • 60m Candle Color:     {dominant_count} {dominant_color} Candles out of 60 (PASSED >42 THRESHOLD!)")
-    log.info(f"   • Exit Target Rule:     Reach 30+ {dominant_color} Candles in < 54 Minutes")
+    log.info(f"   • Exit Target Rule:     Form 30+ {dominant_color} Candles SINCE ENTRY in < 54 Minutes")
     log.info(f"   • Dynamic Stop Loss:    ${preset_sl} (-{sl_pct_val:.2f}% Risk Floor)")
     log.info(f"   • Account Opening Equity: ${available_balance:.4f} {margin_currency}")
     log.info(f"   • Margin Used for Trade:  ${req_margin:.4f} {margin_currency} ({adaptive_leverage}x Leverage)")
@@ -633,7 +619,6 @@ async def fetch_bitget_tickers(session):
     return []
 
 async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
-    """Fetches exactly 60 1-minute candles for full 60-candle window analysis."""
     async with semaphore:
         key_set = get_next_bitget_key()
         params = {"symbol": symbol, "productType": SCAN_PRODUCT_TYPE, "granularity": "1m", "limit": "60"}
@@ -655,16 +640,10 @@ async def fetch_60m_candle_data_for_coin(session, symbol, semaphore):
         return []
 
 # ====================================================================================================
-# STRICT 42+ CANDLE COLOR ENTRY GATE & DYNAMIC 0.5%-2.5% STOP LOSS ENGINE
+# STRICT 42+ CANDLE COLOR ENTRY GATE & DYNAMIC STOP LOSS ENGINE
 # ====================================================================================================
 
 async def process_dominant_candle_color_batch(batch_id, coin_list, session, semaphore, last_symbol, last_won):
-    """
-    Evaluates 60 1-minute candles for all Bitget pairs:
-    1. Counts Green candles (LONG) vs Red candles (SHORT)
-    2. ENFORCES STRICT FILTER: Must have OVER 42+ candles of the SAME color out of 60!
-    3. Dynamically calculates Stop Loss between 0.5% and 2.5% based on volatility/structure
-    """
     batch_evaluated = []
 
     tasks = [fetch_60m_candle_data_for_coin(session, c["symbol"], semaphore) for c in coin_list]
@@ -701,7 +680,6 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
         if current_price <= 0 or low_60m <= 0:
             continue
 
-        # Determine dominant color and direction
         if green_count >= red_count:
             direction = "LONG"
             dominant_color = "GREEN"
@@ -711,18 +689,16 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
             dominant_color = "RED"
             dominant_count = red_count
 
-        # STRICT ENTRY GATE: REJECT TRADE IF DOMINANT COLOR COUNT IS NOT OVER 42!
+        # STRICT ENTRY GATE: MUST HAVE OVER 42+ CANDLES OF SAME COLOR OUT OF 60!
         if dominant_count < MIN_REQUIRED_COLOR_COUNT:
             continue
 
         volatility_pct = ((high_60m - low_60m) / low_60m) * 100.0
-
-        # DYNAMIC STOP LOSS CALCULATION (0.5% to 2.5% Range)
         raw_sl_pct = max(0.5, min(2.5, volatility_pct * 0.40))
 
         if direction == "LONG":
             dynamic_sl = current_price * (1.0 - (raw_sl_pct / 100.0))
-            dynamic_tp = current_price * (1.0 + (raw_sl_pct * 2.0 / 100.0))  # Projected 2x R:R TP
+            dynamic_tp = current_price * (1.0 + (raw_sl_pct * 2.0 / 100.0))
         else:
             dynamic_sl = current_price * (1.0 + (raw_sl_pct / 100.0))
             dynamic_tp = current_price * (1.0 - (raw_sl_pct * 2.0 / 100.0))
@@ -747,12 +723,11 @@ async def process_dominant_candle_color_batch(batch_id, coin_list, session, sema
     if not batch_evaluated:
         return []
 
-    # Sort by highest dominant candle color count
     batch_evaluated.sort(key=lambda x: x["dominant_count"], reverse=True)
     return [batch_evaluated[0]]
 
 # ====================================================================================================
-# MAIN SUPERVISION LOOP: 54m / 30-CANDLE COLOR EXIT EVALUATOR
+# MAIN SUPERVISION LOOP: RISK-FIRST STOP LOSS & TRUTH-IN-REPORTING EVALUATOR
 # ====================================================================================================
 
 async def run_scanner_iteration():
@@ -813,94 +788,112 @@ async def run_scanner_iteration():
             candle_data = await fetch_60m_candle_data_for_coin(session, symbol, asyncio.Semaphore(5))
             current_price = await fetch_single_price(session, symbol)
 
-            if current_price and current_price > 0 and candle_data:
+            if current_price and current_price > 0:
                 curr_p_str = format_price(current_price)
                 live_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if direction == "LONG" else ((entry_price - current_price) / entry_price) * 100.0
 
-                candles_chrono = list(reversed(candle_data[:60]))
-                active_same_color_count = 0
-                for c in candles_chrono:
-                    o_p = float(c[1])
-                    c_p = float(c[4])
-                    c_color = "GREEN" if c_p >= o_p else "RED"
-                    if c_color == dominant_color:
-                        active_same_color_count += 1
+                # ----------------------------------------------------------------------------------
+                # STEP 1: RISK-FIRST CHECK: EVALUATE STOP LOSS BEFORE ANYTHING ELSE!
+                # ----------------------------------------------------------------------------------
+                is_sl_breached = current_price <= ai_floor_sl if direction == "LONG" else current_price >= ai_floor_sl
 
-                log.info(f"📍 LIVE MONITOR ({symbol}): Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}% | Active {dominant_color} Candle Count: {active_same_color_count}/30 | Elapsed: {elapsed_minutes:.1f}m")
-
-                # RULE 1: TARGET ACHIEVED (30+ Same-Color Candles in < 54 Minutes)
-                if active_same_color_count >= TARGET_COLOR_COUNT and elapsed_minutes < MAX_TRADE_DURATION_MIN:
-                    log_ai_decision(symbol, "COLOR_TARGET_ACHIEVED", f"Achieved {active_same_color_count} {dominant_color} candles in {elapsed_minutes:.1f}m (< 54m limit)", "Target Achieved: Closing Trade for Profit")
-
+                if is_sl_breached or live_pnl_pct <= -5.0:
                     pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
-                    closing_equity = pre_trade_balance + pnl_cash
-
-                    if not is_virtual:
-                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
-
-                    update_virtual_demo_balance(closing_equity)
-                    new_streak = update_live_win_streak(True if pnl_cash >= 0 else False)
-                    record_trade_history(symbol, True if pnl_cash >= 0 else False, live_pnl_pct * leverage, pnl_cash)
-
-                    log.info("====================================================================================================")
-                    log.info(f"🏆 COLOR TARGET ACHIEVED & TRADE CLOSED! ({symbol})")
-                    log.info(f"   • Dominant Color Goal:          Achieved {active_same_color_count} {dominant_color} Candles")
-                    log.info(f"   • Time Elapsed:                 {elapsed_minutes:.1f} Minutes (Target: < 54.0m)")
-                    log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
-                    log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
-                    log.info(f"   • NET PROFIT/LOSS:              {'+' if pnl_cash>=0 else ''}${pnl_cash:.4f} {margin_currency}")
-                    log.info(f"   • NEW WIN STREAK:                {new_streak} WINS")
-                    log.info("====================================================================================================")
-                    clear_active_trade_state()
-                    return
-
-                # RULE 2: TIME EXPIRED (Failed to achieve 30+ same-color candles within 54 minutes)
-                if elapsed_minutes >= MAX_TRADE_DURATION_MIN and active_same_color_count < TARGET_COLOR_COUNT:
-                    log_ai_decision(symbol, "TIME_LIMIT_EXPIRED_54M", f"Reached 54m time limit ({elapsed_minutes:.1f}m) with only {active_same_color_count}/30 {dominant_color} candles", "Time Expired: Closing Trade Immediately")
-
-                    pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
-                    closing_equity = pre_trade_balance + pnl_cash
-
-                    if not is_virtual:
-                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
-
-                    update_virtual_demo_balance(closing_equity)
-                    is_win = pnl_cash >= 0
-                    new_streak = update_live_win_streak(is_win)
-                    record_trade_history(symbol, is_win, live_pnl_pct * leverage, pnl_cash)
-
-                    log.info("====================================================================================================")
-                    log.info(f"⌛ 54-MINUTE TIME LIMIT EXPIRED & TRADE CLOSED! ({symbol})")
-                    log.info(f"   • Dominant Color Count:         {active_same_color_count}/30 {dominant_color} Candles (Failed 30 Goal)")
-                    log.info(f"   • Time Elapsed:                 {elapsed_minutes:.1f} Minutes (Hit 54m Cutoff)")
-                    log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
-                    log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
-                    log.info(f"   • NET PROFIT/LOSS:              {'+' if pnl_cash>=0 else ''}${pnl_cash:.4f} {margin_currency}")
-                    log.info("====================================================================================================")
-                    clear_active_trade_state()
-                    return
-
-                # RULE 3: DYNAMIC STOP LOSS GUARD (0.5% - 2.5% Protection Floor)
-                is_sl_hit = current_price <= ai_floor_sl if direction == "LONG" else current_price >= ai_floor_sl
-                if is_sl_hit:
-                    pnl_pct_gain = (ai_floor_sl - entry_price)/entry_price
-                    pnl_cash = pre_trade_balance * (pnl_pct_gain * leverage)
-                    closing_equity = pre_trade_balance + pnl_cash
+                    closing_equity = max(0.0, pre_trade_balance + pnl_cash)
 
                     if not is_virtual:
                         await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
 
                     update_virtual_demo_balance(closing_equity)
                     new_streak = update_live_win_streak(False)
-                    record_trade_history(symbol, False, pnl_pct_gain * 100.0 * leverage, pnl_cash)
+                    record_trade_history(symbol, False, live_pnl_pct * leverage, pnl_cash)
 
-                    log_ai_decision(symbol, "DYNAMIC_SL_EXIT", f"Price ${curr_p_str} hit Stop Loss level ${format_price(ai_floor_sl)}", "Stop Loss Triggered")
+                    log_ai_decision(symbol, "STOP_LOSS_EXECUTED", f"Price ${curr_p_str} breached Stop Loss ${format_price(ai_floor_sl)} (PnL: {live_pnl_pct:.2f}%)", "Stop Loss Executed Immediately")
 
                     log.info("====================================================================================================")
-                    log.info(f"❌ DYNAMIC STOP LOSS TRIGGERED & TRADE CLOSED! ({symbol})")
+                    log.info(f"❌ STOP LOSS TRIGGERED & POSITION CLOSED! ({symbol})")
+                    log.info(f"   • Entry Price:                  ${entry_p_str}")
+                    log.info(f"   • Exit Price:                   ${curr_p_str} (PnL: {live_pnl_pct:.2f}%)")
                     log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
                     log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
                     log.info(f"   • NET LOSS SUFFERED:            -${abs(pnl_cash):.4f} {margin_currency}")
+                    log.info(f"   • TRADE RESULT:                  ❌ LOSS (STREAK RESET TO 0)")
+                    log.info("====================================================================================================")
+                    clear_active_trade_state()
+                    return
+
+                # ----------------------------------------------------------------------------------
+                # STEP 2: COUNT CANDLES FORMED SINCE ENTRY (IGNORE PRE-ENTRY CANDLES)
+                # ----------------------------------------------------------------------------------
+                candles_since_entry = 0
+                if candle_data:
+                    candles_chrono = list(reversed(candle_data[:60]))
+                    for c in candles_chrono:
+                        c_timestamp_sec = float(c[0]) / 1000.0 if float(c[0]) > 1e11 else float(c[0])
+                        # Only count candles opened AFTER entry start_time
+                        if c_timestamp_sec >= (start_time - 60.0):
+                            o_p = float(c[1])
+                            c_p = float(c[4])
+                            c_color = "GREEN" if c_p >= o_p else "RED"
+                            if c_color == dominant_color:
+                                candles_since_entry += 1
+
+                log.info(f"📍 LIVE MONITOR ({symbol}): Current: ${curr_p_str} | PnL: {live_pnl_pct:+.2f}% | Candles Since Entry: {candles_since_entry}/30 {dominant_color} | Elapsed: {elapsed_minutes:.1f}m")
+
+                # ----------------------------------------------------------------------------------
+                # STEP 3: COLOR TARGET EXIT (Must have 30+ candles SINCE ENTRY & Positive PnL!)
+                # ----------------------------------------------------------------------------------
+                if candles_since_entry >= TARGET_COLOR_COUNT and live_pnl_pct > 0.0 and elapsed_minutes < MAX_TRADE_DURATION_MIN:
+                    pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
+                    closing_equity = pre_trade_balance + pnl_cash
+
+                    if not is_virtual:
+                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
+
+                    update_virtual_demo_balance(closing_equity)
+                    new_streak = update_live_win_streak(True)
+                    record_trade_history(symbol, True, live_pnl_pct * leverage, pnl_cash)
+
+                    log_ai_decision(symbol, "COLOR_TARGET_ACHIEVED", f"Formed {candles_since_entry} {dominant_color} candles since entry in {elapsed_minutes:.1f}m (PnL: +{live_pnl_pct:.2f}%)", "Target Achieved: Closing for Profit")
+
+                    log.info("====================================================================================================")
+                    log.info(f"🏆 COLOR TARGET ACHIEVED & TRADE CLOSED! ({symbol})")
+                    log.info(f"   • Dominant Color Goal:          Formed {candles_since_entry} {dominant_color} Candles Since Entry")
+                    log.info(f"   • Time Elapsed:                 {elapsed_minutes:.1f} Minutes (Target: < 54.0m)")
+                    log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
+                    log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
+                    log.info(f"   • NET PROFIT GAINED:            +${pnl_cash:.4f} {margin_currency} (+{live_pnl_pct*leverage:.2f}%)")
+                    log.info(f"   • TRADE RESULT:                  🏆 WIN")
+                    log.info(f"   • NEW WIN STREAK:                {new_streak} WINS IN A ROW")
+                    log.info("====================================================================================================")
+                    clear_active_trade_state()
+                    return
+
+                # ----------------------------------------------------------------------------------
+                # STEP 4: TIME LIMIT EXPIRED (54-Minute Cutoff)
+                # ----------------------------------------------------------------------------------
+                if elapsed_minutes >= MAX_TRADE_DURATION_MIN and candles_since_entry < TARGET_COLOR_COUNT:
+                    pnl_cash = pre_trade_balance * (live_pnl_pct / 100.0 * leverage)
+                    closing_equity = max(0.0, pre_trade_balance + pnl_cash)
+                    is_win = pnl_cash >= 0
+
+                    if not is_virtual:
+                        await close_bitget_live_position(session, symbol, direction, contract_size=contract_size)
+
+                    update_virtual_demo_balance(closing_equity)
+                    new_streak = update_live_win_streak(is_win)
+                    record_trade_history(symbol, is_win, live_pnl_pct * leverage, pnl_cash)
+
+                    log_ai_decision(symbol, "TIME_LIMIT_EXPIRED_54M", f"Hit 54m limit ({elapsed_minutes:.1f}m) with {candles_since_entry}/30 candles", f"Time Expired: Closed. Result: {'WIN' if is_win else 'LOSS'}")
+
+                    log.info("====================================================================================================")
+                    log.info(f"⌛ 54-MINUTE TIME LIMIT EXPIRED & TRADE CLOSED! ({symbol})")
+                    log.info(f"   • Candles Since Entry:          {candles_since_entry}/30 {dominant_color} Candles")
+                    log.info(f"   • Time Elapsed:                 {elapsed_minutes:.1f} Minutes (Hit 54m Cutoff)")
+                    log.info(f"   • Trade Opening Balance:        ${pre_trade_balance:.4f} {margin_currency}")
+                    log.info(f"   • Trade Closing Balance:        ${closing_equity:.4f} {margin_currency}")
+                    log.info(f"   • NET PROFIT/LOSS:              {'+' if pnl_cash>=0 else ''}${pnl_cash:.4f} {margin_currency}")
+                    log.info(f"   • TRADE RESULT:                  {'🏆 WIN' if is_win else '❌ LOSS'}")
                     log.info("====================================================================================================")
                     clear_active_trade_state()
                     return
@@ -927,7 +920,7 @@ async def run_scanner_iteration():
         else:
             semaphore = asyncio.get_event_loop().is_running() and asyncio.Semaphore(15) or asyncio.Semaphore(15)
 
-            log.info(f"🕯️ 42+ CANDLE COLOR ENGINE: Scanning all 600+ Bitget pairs for OVER 42+ candles of SAME color in last 60m...")
+            log.info(f"🕯️ TRUTH-ENGINE SCANNER: Evaluating all 600+ Bitget pairs for OVER 42+ candles of SAME color in last 60m...")
             tickers = await fetch_bitget_tickers(session)
             if not tickers:
                 log.warning("❌ Could not fetch Bitget tickers.")
@@ -1042,7 +1035,7 @@ async def run_scanner_iteration():
 
 async def main():
     if CONTINUOUS_247_LOOP:
-        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND 42+ Candle Color Loop ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"🔄 AUTOMATIC ENVIRONMENT DETECTED: Running 1-SECOND Truth-Engine Loop ({len(BITGET_KEYS)} Pollination Keys)...")
         while True:
             try:
                 await run_scanner_iteration()
@@ -1050,7 +1043,7 @@ async def main():
                 log.error(f"Error during scan iteration: {e}")
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
     else:
-        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan 42+ Candle Color Execution ({len(BITGET_KEYS)} Pollination Keys)...")
+        log.info(f"⚡ AUTOMATIC ENVIRONMENT DETECTED: Running Single-Scan Truth-Engine Execution ({len(BITGET_KEYS)} Pollination Keys)...")
         await run_scanner_iteration()
 
 if __name__ == "__main__":
