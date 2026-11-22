@@ -14,7 +14,7 @@ import base64
 # ====================================================================================================
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("v119_autonomous_ai_trader")
+log = logging.getLogger("v120_autonomous_ai_trader")
 
 IS_GITHUB = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 CONTINUOUS_247_LOOP = os.environ.get("CONTINUOUS_247_LOOP", str(not IS_GITHUB)).lower() == "true"
@@ -76,6 +76,7 @@ AI_DECISION_LOG_FILE = "ai_trader_decisions.json"
 
 NUM_BATCHES = 20
 MIN_24H_VOLUME = 300000
+DEFAULT_LEVERAGE = 5
 
 # ====================================================================================================
 # UTILITY & AUTONOMOUS DECISION LOGGING FUNCTIONS
