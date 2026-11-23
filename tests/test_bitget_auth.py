@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from daily_research import auth_headers, make_signature
+from daily_research import auth_headers, credentials, make_signature
 
 
 class BitgetAuthenticationTests(unittest.TestCase):
@@ -12,6 +12,31 @@ class BitgetAuthenticationTests(unittest.TestCase):
         changed = make_signature("secret", "1700000000000", "GET", "/api/v3/account/all-fee-rate", "category=SPOT")
         self.assertEqual(first, same)
         self.assertNotEqual(first, changed)
+
+    def test_credentials_accept_common_passphrase_and_password_aliases(self):
+        cases = [
+            {"BITGET_API_PASSPHRASE": "canonical"},
+            {"BITGET_PASSPHRASE": "short-name"},
+            {"BITGET_API_PASSWORD": "api-password"},
+            {"BITGET_PASSWORD": "password"},
+        ]
+        for env in cases:
+            with self.subTest(env=list(env)):
+                full_env = {
+                    "BITGET_API_KEY": "test-key",
+                    "BITGET_API_SECRET": "test-secret",
+                    **env,
+                }
+                with patch.dict(os.environ, full_env, clear=True):
+                    self.assertEqual(credentials(), ("test-key", "test-secret", next(iter(env.values()))))
+
+    def test_credentials_accept_common_secret_aliases(self):
+        with patch.dict(os.environ, {
+            "BITGET_KEY": "alias-key",
+            "BITGET_SECRET": "alias-secret",
+            "BITGET_PASSPHRASE": "alias-passphrase",
+        }, clear=True):
+            self.assertEqual(credentials(), ("alias-key", "alias-secret", "alias-passphrase"))
 
     def test_auth_headers_require_all_three_credentials(self):
         with patch.dict(os.environ, {}, clear=True):
