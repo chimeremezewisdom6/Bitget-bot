@@ -188,6 +188,7 @@ def main():
   S.write_text(json.dumps(st,indent=2));Q.write_text("[]");print("Started 24-hour session until "+st["ends_at_utc"])
  elif a.action=="collect":asyncio.run(collect())
  elif a.action=="stop":
+  R.mkdir(parents=True,exist_ok=True)
   st=read(S,{"active":False});st["active"]=False;st["stopped_at_utc"]=iso();S.write_text(json.dumps(st,indent=2));print("Research collection stopped; existing records were preserved.")
  else:print(json.dumps(read(S,{"active":False}),indent=2))
 if __name__=="__main__":main()
