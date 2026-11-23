@@ -103,7 +103,7 @@ def render_markdown(report):
     return "\n".join(lines) + "\n"
 
 
-async def build(per_group=3):
+async def build(per_group=50):
     timeout = aiohttp.ClientTimeout(total=35, connect=10)
     headers = {"User-Agent": "Bitget-ReadOnly-Research/2.0"}
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
@@ -202,7 +202,7 @@ async def build(per_group=3):
             "Bitget futures instrument/ticker endpoints do not expose circulating market cap.",
             "Turnover bands must not be relabelled as market-cap bands.",
             "Reported turnover is not executable depth; use repeated order-book snapshots and fills.",
-            "At most three contracts are selected per activity band; empty bands remain empty.",
+            "At most 50 contracts are selected per activity band (up to 200 total); empty bands remain empty.",
         ],
     }
     OUT_DIR.mkdir(parents=True, exist_ok=True)
