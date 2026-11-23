@@ -46,7 +46,8 @@ async def posts(s):
    root=ET.fromstring(raw); entries=root.findall(".//item")+root.findall(".//{http://www.w3.org/2005/Atom}entry")
    for e in entries[:25]:
     def val(k):
-     z=e.find(k) or e.find("{http://www.w3.org/2005/Atom}"+k)
+     z=e.find(k)
+     if z is None:z=e.find("{http://www.w3.org/2005/Atom}"+k)
      return (z.get("href") if k=="link" and z is not None and z.get("href") else (z.text or "").strip() if z is not None else "")
     title=val("title");link=val("link");key=hashlib.sha256((link or title).encode()).hexdigest()
     if not title or key in known:continue
@@ -79,7 +80,8 @@ async def collect():
   try:
    inst,ticks=await asyncio.gather(get(s,"/api/v3/market/instruments",{"category":"USDT-FUTURES"}),get(s,"/api/v3/market/tickers",{"category":"USDT-FUTURES"}))
    meta={x["symbol"]:x for x in inst["data"] if x.get("status")=="online" and x.get("type")=="perpetual"}
-   ranked=sorted([(n(t.get("turnover24h")),t,meta[t["symbol"]]) for t in ticks["data"] if t.get("symbol") in meta and n(t.get("turnover24h"))>=500000],reverse=True)[:15]
+   current.update({t.get("symbol"):n(t.get("lastPrice")) for t in ticks.get("data",[]) if t.get("symbol") and n(t.get("lastPrice"))>0})
+   ranked=sorted([(n(t.get("turnover24h")),t,meta[t["symbol"]]) for t in ticks["data"] if t.get("symbol") in meta and n(t.get("turnover24h"))>=500000],key=lambda z:z[0],reverse=True)[:15]
    for turnover,t,m in ranked:
     sym=t["symbol"];bid=n(t.get("bid1Price"));ask=n(t.get("ask1Price"));mid=(bid+ask)/2 if bid and ask else n(t.get("lastPrice"));current[sym]=n(t.get("lastPrice")) or mid
     spread=(ask-bid)/mid*10000 if mid and ask>=bid else 0
@@ -106,7 +108,8 @@ async def collect():
    if px and now().timestamp()>=x["due"]:
     gross=(px/x["entry"]-1)*10000 if x["direction"]=="LONG" else (x["entry"]/px-1)*10000
     add(E,{"type":"forward_reference_outcome","at":iso(),**x,"exit_reference":px,"gross_bps":gross,"estimated_net_bps":gross-x["cost"],"caveat":"Reference-price result, not executable fill; excludes funding and changing impact."})
-   else:keep.append(x)
+   elif now().timestamp() < x["due"]+600:keep.append(x)
+   else:add(E,{"type":"evaluation_unavailable","at":iso(),**x,"note":"No current ticker reference within 10 minutes after due time; not scored."})
   Q.write_text(json.dumps(keep,indent=2))
   newposts=await posts(s)
  if errors:add(R/"collection_errors.jsonl",{"at":iso(),"error":";".join(errors)[:800]})
