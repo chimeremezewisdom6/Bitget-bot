@@ -601,7 +601,7 @@ Questions to investigate in later analysis:
 
 - A two-snapshot book walk is still a hypothetical estimate. It cannot guarantee execution, queue priority, hidden liquidity, network latency, or unchanged depth between snapshots.
 - The automated outcome currently deducts the instrument taker-fee metadata when present. It does not yet include funding settlement costs, liquidation effects, or a separately calibrated adverse stop-market model.
-- The daily universe is the top 15 online USDT perpetual contracts above the $500,000 24-hour turnover threshold. This is not the requested approved 12-coin watchlist across four market-cap groups.
+- The daily universe includes the top 15 online USDT perpetual contracts above the $500,000 24-hour turnover threshold plus any selected contracts from the current provisional four-band watchlist. The four-band watchlist still requires manual identity review before it is considered approved.
 - The Bitget futures API does not supply market cap. Asset identity and cap must be joined from an independent timestamped source; ambiguous symbols must remain unverified.
 - The public RSS feeds provide commentary, not verified trader identities, actual positions, or audited trade histories.
 - GitHub cron is best-effort, not guaranteed five-minute continuous monitoring. The actual cycle timestamps and missing intervals must be reviewed.
@@ -618,3 +618,38 @@ The validation workflow is triggered by pushes to `main`. Do not claim the expan
 - Fetches public RSS commentary every third cycle (approximately 15 minutes), rather than every five-minute market cycle.
 - RSI overbought/oversold extremes are explicitly classified as watch-only conditions. They do not initiate shadow entries without a separate reversal-confirmation rule.
 - The latest successful validation recorded before these final small safeguards was run #85 (commit 72e48110). A newer validation is triggered by subsequent commits and must be checked before calling the final repository state fully validated.
+
+
+## 19. Four-band market-cap watchlist builder (2026-11-23)
+
+### New workflow and files
+
+- Added `cap_watchlist.py` and manual GitHub Actions workflow `.github/workflows/market-cap-watchlist.yml`.
+- The builder obtains online Bitget `USDT-FUTURES` instruments and tickers, screens for at least $500,000 24-hour futures turnover, attempts exact CoinGecko symbol matching, joins CoinGecko USD market-cap snapshots, and collects a 0.5% order-book depth snapshot for selected contracts.
+- It selects up to three candidates per group by futures turnover and spread. It does not force three picks when fewer qualify.
+- It writes `reports/market_cap_watchlist/current_watchlist.json` and `current_watchlist.md`, uploads a 30-day workflow artifact, and commits the current files so the daily collector can use them.
+- The daily 24-hour recorder now samples the top 15 turnover contracts plus selected contracts from the current cap watchlist. Market-cap value, band, source update timestamp and identity status are recorded with market observations.
+
+### Configurable default groups
+
+`config/market_cap_bands.json` defines provisional boundaries:
+- Lower cap: below $10 million.
+- Smaller cap: $10 million to below $100 million.
+- Mid cap: $100 million to below $1 billion.
+- Mega cap: $1 billion and above.
+
+These are operational defaults, not a claim that the user previously approved exact thresholds. Change the configuration if the intended category definitions differ.
+
+### Asset identity safeguards
+
+- A unique exact CoinGecko ticker-symbol match is still marked `unique_exact_symbol_needs_review`; ticker equality alone does not prove that two assets are the same project.
+- Multiple exact symbol matches are classified as ambiguous and are not assigned a market-cap band.
+- Manual overrides live in `config/asset_identity_overrides.json`. Set `verified: true` only after independently checking the exact project identity and CoinGecko ID.
+- The report retains source timestamps and visible spread/depth. A one-time liquidity snapshot does not prove persistent liquidity or safe execution.
+
+### Validation and execution status
+
+- GitHub Actions validation run #101, commit `c6b48426`, completed successfully. It compiled the research modules and ran 29 unit tests successfully, including cap-band boundaries, ambiguous-symbol handling, watchlist shortfall handling, shadow execution math, report aggregation, and the no-order/account-route boundary test.
+- The market-cap watchlist workflow has been added but has not yet been manually dispatched. No current four-band watchlist artifact has been produced by this new workflow.
+- The 24-hour research session has not been started. User should first run **Build Four-Band Futures Watchlist (Read Only)**, inspect/verify asset identities and the provisional bands, then start **24-Hour Futures Research (Read Only)**.
+- No Demo or Live trading was enabled; the automated scanner remains paused.
