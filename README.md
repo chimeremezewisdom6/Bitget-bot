@@ -80,3 +80,17 @@ Or open **Actions → Shadow Market Snapshot (Read Only) → Run workflow**. The
 The collector estimates visible-book market buy/sell fills at $100, $500 and $1,000, plus spread and depth inside 0.1%, 0.5% and 1%. These are hypothetical estimates, not fills. Bitget futures endpoints do not supply circulating market cap; market caps must be joined separately and timestamped before any coin is assigned to a cap band.
 
 No Pollinations key is needed for numeric market collection. Pollinations may later be used for separate text analysis of public trader research, but never as the source of market prices, volume, order-book depth or P&L. Keep any future Pollinations credential in a budget-limited Actions Secret, never in source code or repository Variables.
+
+
+## 24-hour read-only research experiment
+
+A separate research recorder is available at `daily_research.py`. Open **Actions → 24-Hour Futures Research (Read Only) → Run workflow**, choose `start`, and run it once. Scheduled GitHub Actions invocations then attempt a collection cycle every five minutes for 24 hours. The collector records Bitget USDT perpetual market observations, visible order-book depth, public RSS trader/community commentary, rule-generated shadow signals, and 5/15/30-minute reference-price outcomes.
+
+Research files are committed under `reports/daily_research/`:
+- `market_observations.jsonl`
+- `public_trader_posts.jsonl`
+- `shadow_experiments.jsonl`
+- `collection_errors.jsonl`
+- `daily_research_summary.md` (generated when the session expires)
+
+This is not guaranteed uninterrupted monitoring: GitHub scheduled runs can be delayed or skipped. Public posts are unverified claims, signals are hypotheses, and forward outcomes are reference-price calculations rather than fills. Market cap remains unverified until a separate timestamped source is joined. One day cannot prove profitability. No Bitget private key is used and no order, leverage, or position action is possible through this collector. See Section 17 of the project knowledge base.
