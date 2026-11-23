@@ -107,7 +107,7 @@ jobs:
           except (OSError, json.JSONDecodeError):
               state = {}
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write('cycles=' + str(int(state.get('cycles', 0))) + '\\n')
+              output.write('cycles=' + str(int(state.get('cycles', 0))) + '\n')
           PY
       - name: Collect one manual research cycle
         id: manual_collect
