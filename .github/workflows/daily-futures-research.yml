@@ -1,0 +1,54 @@
+name: 24-Hour Futures Research (Read Only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Start a new 24-hour session or inspect status
+        required: true
+        type: choice
+        options: [start, status]
+        default: start
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bitget-24h-research
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r requirements.txt
+      - name: Start or inspect
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ inputs.action }}" = "start" ]; then
+            python daily_research.py start
+          else
+            python daily_research.py status
+          fi
+      - name: Collect one scheduled cycle
+        if: github.event_name == 'schedule'
+        run: python daily_research.py collect
+      - name: Commit research records
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'start')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/daily_research
+          if ! git diff --cached --quiet; then
+            git commit -m "Record 24-hour read-only futures research"
+            git push
+          fi
