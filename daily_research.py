@@ -3,7 +3,7 @@ import argparse,asyncio,json,math,time,hashlib
 from datetime import datetime,timezone
 from pathlib import Path
 import aiohttp,xml.etree.ElementTree as ET
-R=Path("reports/daily_research"); S=R/"session.json"; O=R/"market_observations.jsonl"; P=R/"public_trader_posts.jsonl"; E=R/"shadow_experiments.jsonl"; Q=R/"pending.json"; SUMMARY=R/"daily_research_summary.md"
+R=Path("reports/daily_research"); S=R/"session.json"; O=R/"market_observations.jsonl"; C=R/"candles_1m.jsonl"; P=R/"public_trader_posts.jsonl"; E=R/"shadow_experiments.jsonl"; Q=R/"pending.json"; SUMMARY=R/"daily_research_summary.md"
 FEEDS=["https://www.reddit.com/r/BitcoinMarkets/new/.rss","https://www.reddit.com/r/Daytrading/new/.rss","https://www.reddit.com/r/CryptoCurrency/new/.rss","https://www.coindesk.com/arc/outboundfeeds/rss/","https://cointelegraph.com/rss"]
 H={"User-Agent":"Bitget-ReadOnly-Research/1.0"}
 def now(): return datetime.now(timezone.utc)
@@ -73,7 +73,7 @@ async def collect():
  if not st.get("active"):print("No active session");return
  if now().timestamp()>=st["end_epoch"]:
   st["active"]=False;st["ended_at_utc"]=iso();S.write_text(json.dumps(st,indent=2))
-  SUMMARY.write_text("# 24-Hour Bitget Futures Research\n\n"+json.dumps(st,indent=2)+"\n\n## Evidence cautions\nPosts are unverified public claims. Signals are hypotheses. Forward outcomes are reference prices, not fills. Market cap is not provided by Bitget and remains unverified. Five-minute scheduled runs may be delayed or skipped. This exploratory day cannot prove profitability.\n\nFiles: market_observations.jsonl, public_trader_posts.jsonl, shadow_experiments.jsonl, collection_errors.jsonl.\n")
+  SUMMARY.write_text("# 24-Hour Bitget Futures Research\n\n"+json.dumps(st,indent=2)+"\n\n## Evidence cautions\nPosts are unverified public claims. Signals are hypotheses. Forward outcomes are reference prices, not fills. Market cap is not provided by Bitget and remains unverified. Five-minute scheduled runs may be delayed or skipped. This exploratory day cannot prove profitability.\n\nFiles: market_observations.jsonl, candles_1m.jsonl, public_trader_posts.jsonl, shadow_experiments.jsonl, collection_errors.jsonl.\n")
   print("Session ended");return
  R.mkdir(parents=True,exist_ok=True);errors=[];current={};signals=0
  async with aiohttp.ClientSession(headers=H) as s:
@@ -87,6 +87,13 @@ async def collect():
     spread=(ask-bid)/mid*10000 if mid and ask>=bid else 0
     ob=await get(s,"/api/v3/market/orderbook",{"category":"USDT-FUTURES","symbol":sym,"limit":"1000"})
     candles=await get(s,"/api/v3/market/candles",{"category":"USDT-FUTURES","symbol":sym,"interval":"1m","limit":"100"})
+    candle_seen=st.setdefault("candle_ids",[])
+    for cr in candles.get("data",[]):
+     cid=f"{sym}:{cr[0]}"
+     if cid not in candle_seen:
+      add(C,{"symbol":sym,"candle_timestamp_ms":cr[0],"open":n(cr[1]),"high":n(cr[2]),"low":n(cr[3]),"close":n(cr[4]),"base_volume":n(cr[5]),"quote_turnover":n(cr[6]),"collected_at_utc":iso()})
+      candle_seen.append(cid)
+    candle_seen[:]=candle_seen[-12000:]
     book=ob.get("data",{});asks=book.get("a",[]);bids=book.get("b",[])
     def depth(levels):
      return round(sum(n(p)*n(q) for p,q in levels if mid and abs(n(p)/mid-1)<=.005),3)
