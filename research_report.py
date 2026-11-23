@@ -263,6 +263,7 @@ def build_report(root=ROOT):
         "- market_observations.jsonl — timestamped ticker/order-book summaries.",
         "- candles_1m.jsonl — de-duplicated one-minute candles.",
         "- trend_first_hour_backtest.jsonl — rolling 24-hour breakout trend starts and first-hour candle-colour counts.",
+        "- trend_early_window_backtest.jsonl — separate 5/10/15/20/30/60-minute candle-window measurements and continuation outcomes.",
         "- public_trader_posts.jsonl — public RSS commentary and verification caveats.",
         "- shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.",
         "- collection_errors.jsonl — API/feed failures.", ""
