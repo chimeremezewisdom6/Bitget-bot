@@ -1,6 +1,6 @@
 """Build a transparent performance and evidence summary from research JSONL records."""
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path("reports/daily_research")
