@@ -23,6 +23,7 @@ O = R / "market_observations.jsonl"
 C = R / "candles_1m.jsonl"
 P = R / "public_trader_posts.jsonl"
 E = R / "shadow_experiments.jsonl"
+F = R / "candle_streak_checks.jsonl"
 Q = R / "pending.json"
 SUMMARY = R / "daily_research_summary.md"
 WATCH = ROOT / "reports/market_cap_watchlist/current_watchlist.json"
@@ -205,6 +206,36 @@ def strategy(candles):
         signals.append(("overbought_watch", "SHORT", f"RSI14 {relative_strength:.1f}; context only, not entry confirmation"))
     return signals
 
+
+def evaluate_candle_streak(symbol, candles):
+    """Record up to five separate checks of the latest 60 fully closed 1m candles."""
+    rows = []
+    cutoff_ms = int(time.time() * 1000) - 60_000
+    for row in candles or []:
+        try:
+            if int(row[0]) + 60_000 <= cutoff_ms:
+                rows.append(row)
+        except (TypeError, ValueError, IndexError):
+            continue
+    rows.sort(key=lambda row: int(row[0]))
+    rows = rows[-60:]
+    if len(rows) < 60:
+        return None
+    green = sum(number(row[4]) > number(row[1]) for row in rows)
+    red = sum(number(row[4]) < number(row[1]) for row in rows)
+    doji = 60 - green - red
+    dominant = "GREEN" if green >= red else "RED"
+    dominant_count = max(green, red)
+    return {
+        "type": "same_colour_60m_candle_test",
+        "at": iso(), "symbol": symbol, "candles_checked": 60,
+        "green_candles": green, "red_candles": red, "doji_candles": doji,
+        "dominant_colour": dominant, "dominant_count": dominant_count,
+        "threshold": 40, "qualifies": dominant_count >= 40,
+        "first_candle_timestamp_ms": rows[0][0],
+        "last_candle_timestamp_ms": rows[-1][0],
+        "meaning": "Research condition only; not a trade instruction."
+    }
 
 def watchlist_activity_map():
     watchlist = read(WATCH, {})
@@ -483,6 +514,26 @@ async def collect():
             results = await asyncio.gather(*(bounded(symbol) for symbol in selected_symbols))
             symbol_errors = sum(1 for result in results if result.get("error"))
             signal_count = sum(record_signals_and_entries(result, state) for result in results)
+
+            # Mandatory experiment: test each symbol up to five separate times.
+            # Persist per-symbol counts so scheduled runs do not reset them.
+            check_counts = state.setdefault("candle_streak_checks_by_symbol", {})
+            checks_this_cycle = 0
+            qualified_this_cycle = 0
+            for result in results:
+                if result.get("error") or check_counts.get(result["symbol"], 0) >= 5:
+                    continue
+                check = evaluate_candle_streak(result["symbol"], result.get("candles", []))
+                if check is None:
+                    continue
+                add(F, check)
+                check_counts[result["symbol"]] = check_counts.get(result["symbol"], 0) + 1
+                checks_this_cycle += 1
+                qualified_this_cycle += int(check["qualifies"])
+            state["candle_streak_checks_total"] = state.get("candle_streak_checks_total", 0) + checks_this_cycle
+            state["candle_streak_qualifications_total"] = state.get("candle_streak_qualifications_total", 0) + qualified_this_cycle
+            state["candle_streak_checks_this_cycle"] = checks_this_cycle
+            state["candle_streak_qualifications_this_cycle"] = qualified_this_cycle
             await evaluate_due_exits(session)
             if state.get("cycles", 0) % 3 == 0 and now().timestamp() < state["end_epoch"]:
                 new_posts, post_errors = await collect_public_posts(session)
@@ -503,6 +554,9 @@ async def collect():
         "cycle": state["cycles"], "symbols": state["symbols_last_cycle"],
         "signals": signal_count, "new_posts": new_posts, "errors": len(errors) + symbol_errors + post_errors,
         "bitget_auth_status": auth_status,
+        "candle_streak_checks_this_cycle": state.get("candle_streak_checks_this_cycle", 0),
+        "candle_streak_qualifications_this_cycle": state.get("candle_streak_qualifications_this_cycle", 0),
+        "candle_streak_checks_total": state.get("candle_streak_checks_total", 0),
         "ends": state.get("ends_at_utc"),
     }))
 
