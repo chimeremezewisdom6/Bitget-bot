@@ -1,0 +1,12 @@
+{
+  "currency": "usd",
+  "minimum_turnover_usdt": 500000,
+  "contracts_per_group": 3,
+  "bands": [
+    {"name": "lower_cap", "label": "Lower cap", "min_usd": 0, "max_usd": 10000000},
+    {"name": "small_cap", "label": "Smaller cap", "min_usd": 10000000, "max_usd": 100000000},
+    {"name": "mid_cap", "label": "Mid cap", "min_usd": 100000000, "max_usd": 1000000000},
+    {"name": "mega_cap", "label": "Mega cap", "min_usd": 1000000000, "max_usd": null}
+  ],
+  "note": "Provisional operational boundaries. Review and change these ranges if the user's intended definitions differ."
+}
