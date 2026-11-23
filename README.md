@@ -84,6 +84,8 @@ No Pollinations key is needed for numeric market collection. Pollinations may la
 
 ## 24-hour read-only research experiment
 
+Follow [docs/RESEARCH_RUNBOOK.md](docs/RESEARCH_RUNBOOK.md) for the exact start, status, output and interpretation steps.
+
 A separate research recorder is available at `daily_research.py`. Open **Actions → 24-Hour Futures Research (Read Only) → Run workflow**, choose `start`, and run it once. Scheduled GitHub Actions invocations then attempt a collection cycle every five minutes for 24 hours. The collector records Bitget USDT perpetual market observations, one-minute candles, public RSS trader/community commentary and rule-generated signal hypotheses. For each signal it attempts hypothetical $100/$500/$1,000 market entries by walking the visible order book, then at 5/15/30 minutes attempts a fresh exit-book walk for the exact hypothetical base quantity. It deducts the instrument taker-fee metadata when available and records partial/unavailable fills instead of inventing a completed trade. Funding is recorded as context but is not included in these short-horizon P&L estimates.
 
 Research files are committed under `reports/daily_research/`:
