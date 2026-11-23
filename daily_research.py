@@ -123,7 +123,7 @@ async def collect():
         q.append({"id":sid+f":{amount}:{mins}","signal_id":sid,"symbol":sym,"strategy":strat,"direction":direction,"notional_usdt":amount,"entry_base":entry_fill["filled_base"],"entry_quote":entry_fill["filled_quote_usdt"],"entry_vwap":entry_fill["vwap"],"entry_fee_usdt":entry_fill["filled_quote_usdt"]*fee_bps/10000,"fee_bps":fee_bps,"entry_mid":mid,"entry_spread_bps":spread,"funding_rate_at_entry":n(t.get("fundingRate")),"due":now().timestamp()+mins*60,"horizon_min":mins})
      Q.write_text(json.dumps(q,indent=2))
   except Exception as ex:errors.append(str(ex))
-  # Evaluate due signals using latest ticker reference price (not fill).
+  # Evaluate due shadow positions using a fresh public exit-book snapshot.
   q=read(Q,[]);keep=[]
   for x in q:
    if now().timestamp() < x["due"]:
