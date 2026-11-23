@@ -5,7 +5,7 @@ from pathlib import Path
 from research_report import build_report
 
 class ResearchReportTests(unittest.TestCase):
-    def test_counts_only_forward_reference_outcomes(self):
+    def test_counts_only_two_book_shadow_outcomes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "session.json").write_text(json.dumps({"cycles": 4, "started_at_utc": "start"}))
@@ -18,7 +18,7 @@ class ResearchReportTests(unittest.TestCase):
             report = build_report(root)
             self.assertIn("Distinct symbols observed: 2", report)
             self.assertIn("Candidate signals: 1", report)
-            self.assertIn("Forward reference outcomes: 2", report)
+            self.assertIn("Two-snapshot order-book shadow outcomes: 2", report)
             self.assertIn("Mean estimated net result: 2.50 bps", report)
             self.assertIn("not executable fills", report)
 
