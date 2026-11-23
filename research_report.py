@@ -254,13 +254,6 @@ def build_report(root=ROOT):
         "- shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.",
         "- collection_errors.jsonl — Bitget API and processing failures.", ""
     ]
-    return "\n".join(lines)
-
-
-if __name__ == "__main__":
-    ROOT.mkdir(parents=True, exist_ok=True)
-    output = ROOT / "daily_research_summary.md"
-    output.write_text(build_report(), encoding="utf-8")
     status = {
         "schema_version": 1,
         "updated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -303,7 +296,15 @@ if __name__ == "__main__":
         },
         "report_file": "daily_research_summary.md",
     }
-    status_path = root / "research_status.json"
-    status_path.write_text(json.dumps(status, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8")
+    (root / "research_status.json").write_text(
+        json.dumps(status, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8"
+    )
+    return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    ROOT.mkdir(parents=True, exist_ok=True)
+    output = ROOT / "daily_research_summary.md"
+    output.write_text(build_report(), encoding="utf-8")
     print(f"Wrote {output}")
     print(f"Wrote {status_path}")
