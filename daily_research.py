@@ -20,10 +20,18 @@ def add(p,x):
  p.parent.mkdir(parents=True,exist_ok=True)
  with p.open("a",encoding="utf8") as f:f.write(json.dumps(x,ensure_ascii=False)+"\n")
 async def get(s,path,params=None,url=False):
- async with s.get(path if url else "https://api.bitget.com"+path,params=params,timeout=18) as r:
-  r.raise_for_status(); x=await r.json()
-  if x.get("code") not in (None,"00000"):raise RuntimeError(str(x))
-  return x
+ last=None
+ for attempt in range(3):
+  try:
+   async with s.get(path if url else "https://api.bitget.com"+path,params=params,timeout=18) as r:
+    if r.status in (429,500,502,503,504):raise RuntimeError(f"temporary HTTP {r.status}")
+    r.raise_for_status();x=await r.json()
+    if x.get("code") not in (None,"00000"):raise RuntimeError(str(x))
+    return x
+  except (aiohttp.ClientError,asyncio.TimeoutError,RuntimeError) as ex:
+   last=ex
+   if attempt<2:await asyncio.sleep(.5*(2**attempt))
+ raise RuntimeError(f"GET {path} failed after retries: {last}")
 def ema(a,k):
  if len(a)<k:return None
  v=sum(a[:k])/k; alpha=2/(k+1)
@@ -108,6 +116,9 @@ async def collect():
      if sid in seen:continue
      seen.append(sid);seen[:]=seen[-3000:];signals+=1
      add(E,{"type":"signal","id":sid,"at":iso(),"symbol":sym,"strategy":strat,"direction":direction,"reason":reason,"reference_entry":mid,"fee_rate_source":"Bitget instrument metadata","taker_fee_bps":fee_bps if fee_bps>=0 else None,"funding_rate_at_entry":n(t.get("fundingRate")),"status":"unverified hypothesis"})
+     if strat in ("oversold_watch","overbought_watch"):
+      add(E,{"type":"watch_only_condition","id":sid,"at":iso(),"symbol":sym,"strategy":strat,"direction_hint":direction,"reason":reason,"note":"RSI extreme is context only; no hypothetical entry is opened without a separate reversal confirmation rule."})
+      continue
      q=read(Q,[])
      entry_side="buy" if direction=="LONG" else "sell"
      entry_levels=asks if entry_side=="buy" else bids
@@ -124,13 +135,15 @@ async def collect():
      Q.write_text(json.dumps(q,indent=2))
   except Exception as ex:errors.append(str(ex))
   # Evaluate due shadow positions using a fresh public exit-book snapshot.
-  q=read(Q,[]);keep=[]
+  q=read(Q,[]);keep=[];exit_books={}
   for x in q:
    if now().timestamp() < x["due"]:
     keep.append(x);continue
    try:
-    exit_ob=await get(s,"/api/v3/market/orderbook",{"category":"USDT-FUTURES","symbol":x["symbol"],"limit":"1000"})
-    exit_book=exit_ob.get("data",{});exit_asks=exit_book.get("a",[]);exit_bids=exit_book.get("b",[])
+    if x["symbol"] not in exit_books:
+     exit_ob=await get(s,"/api/v3/market/orderbook",{"category":"USDT-FUTURES","symbol":x["symbol"],"limit":"1000"})
+     exit_books[x["symbol"]]=exit_ob.get("data",{})
+    exit_book=exit_books[x["symbol"]];exit_asks=exit_book.get("a",[]);exit_bids=exit_book.get("b",[])
     exit_side="sell" if x["direction"]=="LONG" else "buy"
     exit_levels=exit_bids if exit_side=="sell" else exit_asks
     exit_fill=walk_book(exit_levels,exit_side,base_target=x["entry_base"])
@@ -149,7 +162,7 @@ async def collect():
     if now().timestamp() < x["due"]+600:keep.append(x)
     else:add(E,{"type":"evaluation_unavailable","at":iso(),**x,"note":"Exit order-book retrieval failed: "+str(ex)[:250]})
   Q.write_text(json.dumps(keep,indent=2))
-  newposts=await posts(s) if now().timestamp()<st["end_epoch"] else 0
+  newposts=await posts(s) if now().timestamp()<st["end_epoch"] and st.get("cycles",0)%3==0 else 0
  if errors:add(R/"collection_errors.jsonl",{"at":iso(),"error":";".join(errors)[:800]})
  st["cycles"]=st.get("cycles",0)+1;st["last_at"]=iso();st["signals"]=st.get("signals",0)+signals;st["posts"]=st.get("posts",0)+newposts;st["errors"]=st.get("errors",0)+len(errors);st["symbols_last_cycle"]=len(current)
  S.write_text(json.dumps(st,indent=2))
