@@ -3,6 +3,7 @@ import argparse,asyncio,json,math,time,hashlib
 from datetime import datetime,timezone
 from pathlib import Path
 import aiohttp,xml.etree.ElementTree as ET
+from shadow_execution import walk_book
 R=Path("reports/daily_research"); S=R/"session.json"; O=R/"market_observations.jsonl"; C=R/"candles_1m.jsonl"; P=R/"public_trader_posts.jsonl"; E=R/"shadow_experiments.jsonl"; Q=R/"pending.json"; SUMMARY=R/"daily_research_summary.md"
 FEEDS=["https://www.reddit.com/r/BitcoinMarkets/new/.rss","https://www.reddit.com/r/Daytrading/new/.rss","https://www.reddit.com/r/CryptoCurrency/new/.rss","https://www.coindesk.com/arc/outboundfeeds/rss/","https://cointelegraph.com/rss"]
 H={"User-Agent":"Bitget-ReadOnly-Research/1.0"}
@@ -98,25 +99,54 @@ async def collect():
     def depth(levels):
      return round(sum(n(p)*n(q) for p,q in levels if mid and abs(n(p)/mid-1)<=.005),3)
     add(O,{"at":iso(),"symbol":sym,"base_coin":m.get("baseCoin"),"turnover24h_usdt":turnover,"last":n(t.get("lastPrice")),"mark":n(t.get("markPrice")),"index":n(t.get("indexPrice")),"funding":n(t.get("fundingRate")),"open_interest":n(t.get("openInterest")),"spread_bps":spread,"depth_0_5pct_bid_usdt":depth(bids),"depth_0_5pct_ask_usdt":depth(asks),"orderbook_ts":book.get("ts"),"candle_rows":len(candles.get("data",[])),"market_cap":"UNVERIFIED"})
-    for strat,direction,reason in strategy(candles.get("data",[]),mid,spread,n(m.get("takerFeeRate"))):
+    fee_raw=m.get("takerFeeRate")
+    fee_bps=n(fee_raw,-1)*10000 if fee_raw is not None else -1
+    for strat,direction,reason in strategy(candles.get("data",[]),mid,spread,n(fee_raw)):
      sid=f"{sym}:{strat}:{candles['data'][-1][0]}"
      seen=st.setdefault("signal_ids",[])
      if sid in seen:continue
      seen.append(sid);seen[:]=seen[-3000:];signals+=1
-     add(E,{"type":"signal","id":sid,"at":iso(),"symbol":sym,"strategy":strat,"direction":direction,"reason":reason,"reference_entry":mid,"estimated_round_trip_cost_bps":spread+2*n(m.get("takerFeeRate"))*10000,"status":"unverified hypothesis"})
+     add(E,{"type":"signal","id":sid,"at":iso(),"symbol":sym,"strategy":strat,"direction":direction,"reason":reason,"reference_entry":mid,"fee_rate_source":"Bitget instrument metadata","taker_fee_bps":fee_bps if fee_bps>=0 else None,"funding_rate_at_entry":n(t.get("fundingRate")),"status":"unverified hypothesis"})
      q=read(Q,[])
-     for mins in (5,15,30):q.append({"id":sid,"symbol":sym,"strategy":strat,"direction":direction,"entry":mid,"cost":spread+2*n(m.get("takerFeeRate"))*10000,"due":now().timestamp()+mins*60,"horizon_min":mins})
+     entry_side="buy" if direction=="LONG" else "sell"
+     entry_levels=asks if entry_side=="buy" else bids
+     if fee_bps < 0:
+      add(E,{"type":"shadow_entry_not_simulated","id":sid,"at":iso(),"symbol":sym,"reason":"Taker fee rate missing from instrument metadata; refusing to assume zero fees."})
+     else:
+      for amount in (100,500,1000):
+       entry_fill=walk_book(entry_levels,entry_side,quote_target=amount)
+       if not entry_fill["complete"]:
+        add(E,{"type":"shadow_entry_partial_or_unfilled","id":sid,"at":iso(),"symbol":sym,"direction":direction,"notional_usdt":amount,"entry_fill":entry_fill,"reason":"Visible entry book could not fill the full hypothetical notional."})
+        continue
+       for mins in (5,15,30):
+        q.append({"id":sid+f":{amount}:{mins}","signal_id":sid,"symbol":sym,"strategy":strat,"direction":direction,"notional_usdt":amount,"entry_base":entry_fill["filled_base"],"entry_quote":entry_fill["filled_quote_usdt"],"entry_vwap":entry_fill["vwap"],"entry_fee_usdt":entry_fill["filled_quote_usdt"]*fee_bps/10000,"fee_bps":fee_bps,"entry_mid":mid,"entry_spread_bps":spread,"funding_rate_at_entry":n(t.get("fundingRate")),"due":now().timestamp()+mins*60,"horizon_min":mins})
      Q.write_text(json.dumps(q,indent=2))
   except Exception as ex:errors.append(str(ex))
   # Evaluate due signals using latest ticker reference price (not fill).
   q=read(Q,[]);keep=[]
   for x in q:
-   px=current.get(x["symbol"])
-   if px and now().timestamp()>=x["due"]:
-    gross=(px/x["entry"]-1)*10000 if x["direction"]=="LONG" else (x["entry"]/px-1)*10000
-    add(E,{"type":"forward_reference_outcome","at":iso(),**x,"exit_reference":px,"gross_bps":gross,"estimated_net_bps":gross-x["cost"],"caveat":"Reference-price result, not executable fill; excludes funding and changing impact."})
-   elif now().timestamp() < x["due"]+600:keep.append(x)
-   else:add(E,{"type":"evaluation_unavailable","at":iso(),**x,"note":"No current ticker reference within 10 minutes after due time; not scored."})
+   if now().timestamp() < x["due"]:
+    keep.append(x);continue
+   try:
+    exit_ob=await get(s,"/api/v3/market/orderbook",{"category":"USDT-FUTURES","symbol":x["symbol"],"limit":"1000"})
+    exit_book=exit_ob.get("data",{});exit_asks=exit_book.get("a",[]);exit_bids=exit_book.get("b",[])
+    exit_side="sell" if x["direction"]=="LONG" else "buy"
+    exit_levels=exit_bids if exit_side=="sell" else exit_asks
+    exit_fill=walk_book(exit_levels,exit_side,base_target=x["entry_base"])
+    if exit_fill["complete"]:
+     exit_fee=exit_fill["filled_quote_usdt"]*x["fee_bps"]/10000
+     gross=(exit_fill["filled_quote_usdt"]-x["entry_quote"]) if x["direction"]=="LONG" else (x["entry_quote"]-exit_fill["filled_quote_usdt"])
+     net=gross-x["entry_fee_usdt"]-exit_fee
+     exit_mid=(n(exit_book.get("b",[[0,0]])[0][0])+n(exit_book.get("a",[[0,0]])[0][0]))/2 if exit_book.get("b") and exit_book.get("a") else 0
+     exit_slippage=((1-exit_fill["vwap"]/exit_mid)*10000 if exit_side=="sell" else (exit_fill["vwap"]/exit_mid-1)*10000) if exit_mid else None
+     add(E,{"type":"orderbook_shadow_outcome","at":iso(),**x,"exit_fill":exit_fill,"exit_book_timestamp":exit_book.get("ts"),"exit_fee_usdt":exit_fee,"gross_pnl_usdt":gross,"net_after_trading_fees_usdt":net,"entry_slippage_bps":((x["entry_vwap"]/x["entry_mid"]-1)*10000 if x["direction"]=="LONG" else (1-x["entry_vwap"]/x["entry_mid"])*10000),"exit_slippage_bps":exit_slippage,"funding_included":False,"funding_rate_at_entry_context_only":x.get("funding_rate_at_entry"),"caveat":"Two-snapshot visible-book shadow estimate; no guaranteed fills, no queue/latency/hidden depth, and funding excluded."})
+    elif now().timestamp() < x["due"]+600:
+     keep.append(x)
+    else:
+     add(E,{"type":"evaluation_unavailable","at":iso(),**x,"exit_fill":exit_fill,"note":"Visible exit book could not close the full hypothetical quantity within 10 minutes; not scored as a complete trade."})
+   except Exception as ex:
+    if now().timestamp() < x["due"]+600:keep.append(x)
+    else:add(E,{"type":"evaluation_unavailable","at":iso(),**x,"note":"Exit order-book retrieval failed: "+str(ex)[:250]})
   Q.write_text(json.dumps(keep,indent=2))
   newposts=await posts(s)
  if errors:add(R/"collection_errors.jsonl",{"at":iso(),"error":";".join(errors)[:800]})
