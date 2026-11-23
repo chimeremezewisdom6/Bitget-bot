@@ -33,6 +33,14 @@ def build_report(root=ROOT):
     errors = read_jsonl(root / "collection_errors.jsonl")
     candle_streak_checks = read_jsonl(root / "candle_streak_checks.jsonl")
     candle_streak_qualified = [x for x in candle_streak_checks if x.get("qualifies") is True]
+    trend_backtests = read_jsonl(root / "trend_first_hour_backtest.jsonl")
+    trend_events = [
+        {**event, "symbol": row.get("symbol")}
+        for row in trend_backtests for event in row.get("events", [])
+    ]
+    trend_long = [x for x in trend_events if x.get("direction") == "LONG"]
+    trend_short = [x for x in trend_events if x.get("direction") == "SHORT"]
+    trend_matching = [x.get("direction_matching_pct", 0) for x in trend_events]
 
     signals = [x for x in experiments if x.get("type") == "signal"]
     watch_conditions = [x for x in experiments if x.get("type") == "watch_condition"]
@@ -106,6 +114,26 @@ def build_report(root=ROOT):
         f"- 60-minute same-colour candle checks: {len(candle_streak_checks)}",
         f"- Checks meeting 40+ same-colour candles: {len(candle_streak_qualified)}",
         "",
+        "## Previous 24-hour trend-start candle-colour backtest",
+        "",
+        f"- Symbols with completed historical backtests: {len(trend_backtests)}",
+        f"- Breakout-based trend starts found: {len(trend_events)} (LONG: {len(trend_long)}; SHORT: {len(trend_short)})",
+        f"- Average direction-matching candle share in first hour: {sum(trend_matching) / len(trend_matching):.1f}%" if trend_matching else "- Average direction-matching candle share in first hour: unavailable",
+        "",
+        "A trend start is defined as a fully closed 1m candle closing above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT). The first hour is the breakout candle plus the next 59 fully closed 1m candles. Green, red and doji candles are counted separately. This is a consistent breakout proxy, not a universal definition of every trend.",
+        "",
+        "| Symbol | Direction | Trend start (UTC) | Green | Red | Doji | Matching candles | Matching % | First-hour follow-through % |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+        *[
+            f"| {x.get('symbol')} | {x.get('direction')} | "
+            f"{__import__('datetime').datetime.fromtimestamp(x.get('trend_start_timestamp_ms', 0) / 1000, __import__('datetime').timezone.utc).strftime('%Y-%m-%d %H:%M')} | "
+            f"{x.get('green_candles')} | {x.get('red_candles')} | {x.get('doji_candles')} | "
+            f"{x.get('direction_matching_candles')} / 60 | {x.get('direction_matching_pct')}% | "
+            f"{x.get('first_hour_follow_through_pct')}%"
+            for x in sorted(trend_events, key=lambda item: item.get("direction_matching_pct", 0), reverse=True)[:100]
+        ],
+        *([] if trend_events else ["| No complete breakout trends found | — | — | — | — | — | — | — | — |"]),
+        "",
         "## Mandatory 60-minute same-colour candle experiment", "",
         "Each eligible symbol is checked up to five separate times. Every check uses the latest 60 fully closed one-minute candles; green and red candles are counted separately, doji candles count toward neither colour, and a result qualifies when either colour reaches at least 40. This is a research filter, not a trade instruction.",
         "",
@@ -178,6 +206,7 @@ def build_report(root=ROOT):
         "## Research files", "",
         "- market_observations.jsonl — timestamped ticker/order-book summaries.",
         "- candles_1m.jsonl — de-duplicated one-minute candles.",
+        "- trend_first_hour_backtest.jsonl — rolling 24-hour breakout trend starts and first-hour candle-colour counts.",
         "- public_trader_posts.jsonl — public RSS commentary and verification caveats.",
         "- shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.",
         "- collection_errors.jsonl — API/feed failures.", ""
