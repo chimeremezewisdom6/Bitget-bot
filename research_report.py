@@ -30,7 +30,14 @@ def build_report(root=ROOT):
 
     observations = read_jsonl(root / "market_observations.jsonl")
     experiments = read_jsonl(root / "shadow_experiments.jsonl")
-    errors = read_jsonl(root / "collection_errors.jsonl")
+    all_errors = read_jsonl(root / "collection_errors.jsonl")
+    # Keep legacy Reddit/RSS failures in the raw archive, but exclude them from
+    # current health because the Bitget-only collector no longer requests feeds.
+    external_hosts = ("reddit.com", "coindesk.com", "cointelegraph.com", "rss")
+    errors = [
+        item for item in all_errors
+        if not any(host in json.dumps(item, ensure_ascii=False).lower() for host in external_hosts)
+    ]
     candle_streak_checks = read_jsonl(root / "candle_streak_checks.jsonl")
     candle_streak_qualified = [x for x in candle_streak_checks if x.get("qualifies") is True]
     trend_backtests = read_jsonl(root / "trend_first_hour_backtest.jsonl")
