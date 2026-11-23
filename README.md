@@ -82,6 +82,12 @@ The collector estimates visible-book market buy/sell fills at $100, $500 and $1,
 No Pollinations key is needed for numeric market collection. Pollinations may later be used for separate text analysis of public trader research, but never as the source of market prices, volume, order-book depth or P&L. Keep any future Pollinations credential in a budget-limited Actions Secret, never in source code or repository Variables.
 
 
+## Four-band market-cap watchlist
+
+Before starting the 24-hour recorder, run **Actions → Build Four-Band Futures Watchlist (Read Only) → Run workflow**. It screens online Bitget USDT perpetuals with at least $500,000 24-hour futures turnover, attempts exact CoinGecko symbol matching, fetches timestamped market caps, and checks visible depth for up to three candidates in each group. It commits `reports/market_cap_watchlist/current_watchlist.json` and a Markdown report. The daily collector then adds those selected contracts to its normal top-15 turnover sample.
+
+Default editable ranges are in `config/market_cap_bands.json`: lower cap below $10m; smaller cap $10m–$100m; mid cap $100m–$1bn; mega cap $1bn and above. These are provisional definitions and should be confirmed before treating group labels as final. Exact ticker matches are provisional until manually checked; ambiguous symbols remain unclassified. Add a manually verified CoinGecko ID to `config/asset_identity_overrides.json` only after confirming the asset identity.
+
 ## 24-hour read-only research experiment
 
 Follow [docs/RESEARCH_RUNBOOK.md](docs/RESEARCH_RUNBOOK.md) for the exact start, status, output and interpretation steps.
