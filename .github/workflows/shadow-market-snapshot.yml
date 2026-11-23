@@ -1,0 +1,41 @@
+name: Shadow Market Snapshot (Read Only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_turnover:
+        description: Minimum 24h USDT futures turnover
+        required: false
+        default: "500000"
+      top_depth:
+        description: Number of highest-turnover contracts to inspect for order-book depth
+        required: false
+        default: "50"
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install existing HTTP dependency
+        run: python -m pip install -r requirements.txt
+      - name: Collect public Bitget USDT perpetual data only
+        run: >-
+          python shadow_research.py
+          --min-turnover "${{ inputs.min_turnover }}"
+          --top-depth "${{ inputs.top_depth }}"
+          --output-dir reports/shadow
+      - name: Upload timestamped snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitget-usdt-perp-shadow-snapshot-${{ github.run_id }}
+          path: reports/shadow/
+          if-no-files-found: error
+          retention-days: 30
