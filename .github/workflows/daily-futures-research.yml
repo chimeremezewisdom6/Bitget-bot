@@ -42,6 +42,9 @@ jobs:
       - name: Collect one scheduled cycle
         if: github.event_name == 'schedule'
         run: python daily_research.py collect
+      - name: Build transparent research summary
+        if: github.event_name == 'schedule'
+        run: python research_report.py
       - name: Commit research records
         if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'start')
         run: |
