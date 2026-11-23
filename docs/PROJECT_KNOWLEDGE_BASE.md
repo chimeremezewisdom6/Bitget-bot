@@ -509,3 +509,66 @@ Sources for cap checks:
 - Do not force 12 picks. Keep the four bands distinct, preserve gaps, and prioritize execution quality rather than raw turnover.
 - Next research step: repeat public order-book snapshots at intervals for candidates; compare depth stability, spread, book walk for $100/$500/$1,000, and fees/funding. For ACE, verify the exploit/trading-pause situation before retaining it. Continue searching for alternatives that genuinely pass cap band, Bitget USDT perpetual status, $500,000 turnover and minimum depth/spread criteria.
 - No shadow trade has been opened or closed from this snapshot. It is a market-liquidity baseline only. No Demo or Live order was placed.
+
+
+## 17. 24-hour read-only futures research recorder (2026-11-23)
+
+### Purpose and operating model
+
+The user wants a full-day experiment file, not just a one-time market snapshot. Added `daily_research.py` and `.github/workflows/daily-futures-research.yml` to record a 24-hour Bitget USDT perpetual futures research session.
+
+- Start manually from GitHub Actions with action `start`. This creates a UTC start/end time and activates the session for 24 hours.
+- A GitHub Actions schedule invokes the collector every five minutes. Each invocation runs as a short job, reads the session state, and records a cycle only while the 24-hour session is active. This avoids relying on a single GitHub-hosted job running continuously; hosted jobs have a six-hour maximum.
+- Each scheduled run commits new research records to the repository using the workflow's `GITHUB_TOKEN` and `contents: write` permission. No Bitget key is used.
+- Scheduled invocations may be delayed or skipped by GitHub; timestamps and collection errors must be inspected. Do not describe this as guaranteed uninterrupted monitoring.
+- The scheduled workflow remains installed after the 24-hour session and performs no-op checks when inactive. Consider disabling the schedule after a completed experiment or changing the workflow to stop scheduling automatically in a later engineering pass.
+
+### Market observations collected
+
+- Public Bitget USDT-FUTURES instruments and tickers; only online perpetual contracts.
+- Candidates with at least $500,000 24h quote turnover; top 15 by turnover sampled per cycle.
+- For each selected contract: last/mark/index price, 24h turnover, funding rate, open interest, best bid/ask, spread, order-book timestamp, visible bid/ask depth within 0.5%, and recent 1-minute candle availability.
+- No market-cap value is fabricated. Market cap remains UNVERIFIED until joined from a timestamped, identity-matched external source.
+- Public RSS feeds are polled for Reddit BitcoinMarkets, Daytrading, CryptoCurrency, CoinDesk and Cointelegraph posts/articles. These are public commentary and are not proof of a trader's identity, positions, fills or profitability. X/Twitter coverage is not implemented.
+
+### Shadow experiments
+
+The collector records rule-generated hypotheses from completed 1-minute candles:
+- EMA 9/21 trend continuation with price and quote-turnover confirmation.
+- 20-bar breakout / breakdown with quote-turnover confirmation.
+- RSI14 extreme-level watch signals (explicitly not treated as reversal confirmation).
+
+For each new signal, the script records hypothetical reference-price entry and schedules 5-, 15-, and 30-minute forward reference-price evaluations. Net estimate subtracts a spread + two taker-fee estimate. These are not executable fills and omit funding, changing spread, dynamic impact, queue position, hidden liquidity and stop execution. They must not be presented as verified strategy profitability.
+
+### Output files
+
+- `reports/daily_research/market_observations.jsonl`: repeated market observations.
+- `reports/daily_research/public_trader_posts.jsonl`: deduplicated public RSS items with explicit unverified classification.
+- `reports/daily_research/shadow_experiments.jsonl`: signal hypotheses and forward reference-price evaluations.
+- `reports/daily_research/collection_errors.jsonl`: source and API failures.
+- `reports/daily_research/session.json`: session timing and counters.
+- `reports/daily_research/daily_research_summary.md`: generated end-of-session summary.
+
+### Evidence policy and research questions
+
+Keep measured exchange data, public trader claims, rule-generated hypotheses, and model interpretations separate. Record both favorable and adverse observations, including no-signal periods, missing data, false breakouts, failed reversals, trend continuation, liquidity deterioration and estimated trading costs. A one-day run is exploratory and cannot prove a strategy is profitable or establish a robust risk/reward edge. Require larger out-of-sample and forward-shadow samples before strategy promotion.
+
+Questions to investigate in later analysis:
+- Why apparent highs keep extending or apparent lows keep breaking (trend persistence, new information, positioning/liquidations, liquidity imbalance); these are candidate explanations, not conclusions from this collector alone.
+- Which reversals receive confirmation and which are only countertrend bounces.
+- Whether turnover aligns with executable depth and tolerable spread.
+- Whether strategy results remain positive after realistic fees, slippage and funding.
+- Which market regimes and coin groups produce the largest adverse excursions and losses.
+
+### Safety
+
+- Observation-only: public endpoints, no private API keys, account endpoints, orders, leverage changes, position changes or closes.
+- The existing scanner and trading workflows remain untouched and must stay paused.
+- The Pollinations key is not used; it is not a market-data source. Do not expose or paste the secret.
+
+### Initial implementation status
+
+- Added `daily_research.py`.
+- Added manual start/status plus every-five-minute scheduled workflow `.github/workflows/daily-futures-research.yml`.
+- Hardened Atom/RSS element parsing and added handling for missing delayed forward-evaluation prices.
+- **Not yet run or validated end-to-end.** The user must start the 24-hour session once from the new workflow. The first run's logs and resulting files must be inspected before treating the collector as proven.
