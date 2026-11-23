@@ -38,7 +38,7 @@ This document is the short operating map for a future assistant session. The use
 - A positive simulated net result is not proof of a profitable strategy. Repeated sizes/horizons and signals can be correlated; account for fees, spread, slippage, latency, funding and sample size.
 - Bitget account credentials are used only for signed read-only permission/fee metadata requests. Never print or expose secret values.
 - Do not switch to Demo or Live order placement without the user's explicit new instruction and separate safety review.
-- Do not claim five-minute monitoring is reliable until the latest `heartbeat.json` and GitHub Actions history show repeated successful `schedule` events. A successful `push` bootstrap proves the workflow and collector can run, but does not prove the cron trigger is firing.
+- Do not claim five-minute monitoring is reliable until the latest `heartbeat.json` and GitHub Actions history show repeated successful main `schedule` runs and watchdog recovery runs where needed. A successful `push` bootstrap proves the workflow and collector can run, but does not prove the cron trigger is firing. The watchdog is a recovery path, not a guarantee against GitHub-wide scheduler outages.
 - The assistant cannot watch continuously between chats or send a message on its own. When the user returns, fetch the latest repository state and continue from the files above; do not ask for ZIP uploads unless repository access is unavailable.
 
 ## User experience
