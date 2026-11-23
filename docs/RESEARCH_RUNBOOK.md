@@ -19,8 +19,8 @@ Do not dispatch start again while the session is active. The program rejects a s
 - Attempts one collection cycle every five minutes while the session is active.
 - Samples the highest-turnover online Bitget USDT perpetual contracts above the $500,000 24-hour quote-turnover floor (up to 15 symbols per cycle).
 - Saves one-minute candles, tickers, funding/open interest context, spread and visible order-book depth.
-- Collects deduplicated public RSS posts from selected crypto/trading sources. These posts are unverified commentary, not verified trader fills.
-- Records rule-based signal hypotheses, not recommendations.
+- Collects deduplicated public RSS posts from selected crypto/trading sources approximately every 15 minutes to limit feed load. These posts are unverified commentary, not verified trader fills.
+- Records rule-based signal hypotheses, not recommendations. RSI extreme conditions are watch-only and do not open hypothetical positions without a separate reversal-confirmation rule.
 - For each signal, attempts $100, $500 and $1,000 hypothetical market entries by walking the current visible order book. If the visible entry book is insufficient or the taker fee is missing, it does not invent a completed entry.
 - Attempts fresh exit-book walks after 5, 15 and 30 minutes for the exact hypothetical base quantity. It deducts the instrument taker fee at entry and exit. Funding is recorded as context but is not included in this automatic P&L.
 - After 24 hours it stops creating new signals, then allows up to 30 minutes to settle pending 30-minute exit observations.
