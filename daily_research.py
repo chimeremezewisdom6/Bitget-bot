@@ -4,7 +4,7 @@ from datetime import datetime,timezone
 from pathlib import Path
 import aiohttp,xml.etree.ElementTree as ET
 from shadow_execution import walk_book
-R=Path("reports/daily_research"); S=R/"session.json"; O=R/"market_observations.jsonl"; C=R/"candles_1m.jsonl"; P=R/"public_trader_posts.jsonl"; E=R/"shadow_experiments.jsonl"; Q=R/"pending.json"; SUMMARY=R/"daily_research_summary.md"
+R=Path("reports/daily_research"); S=R/"session.json"; O=R/"market_observations.jsonl"; C=R/"candles_1m.jsonl"; P=R/"public_trader_posts.jsonl"; E=R/"shadow_experiments.jsonl"; Q=R/"pending.json"; SUMMARY=R/"daily_research_summary.md"; WATCH=Path("reports/market_cap_watchlist/current_watchlist.json")
 FEEDS=["https://www.reddit.com/r/BitcoinMarkets/new/.rss","https://www.reddit.com/r/Daytrading/new/.rss","https://www.reddit.com/r/CryptoCurrency/new/.rss","https://www.coindesk.com/arc/outboundfeeds/rss/","https://cointelegraph.com/rss"]
 H={"User-Agent":"Bitget-ReadOnly-Research/1.0"}
 def now(): return datetime.now(timezone.utc)
@@ -90,7 +90,16 @@ async def collect():
    inst,ticks=await asyncio.gather(get(s,"/api/v3/market/instruments",{"category":"USDT-FUTURES"}),get(s,"/api/v3/market/tickers",{"category":"USDT-FUTURES"}))
    meta={x["symbol"]:x for x in inst["data"] if x.get("status")=="online" and x.get("type")=="perpetual"}
    current.update({t.get("symbol"):n(t.get("lastPrice")) for t in ticks.get("data",[]) if t.get("symbol") and n(t.get("lastPrice"))>0})
-   ranked=sorted([(n(t.get("turnover24h")),t,meta[t["symbol"]]) for t in ticks["data"] if t.get("symbol") in meta and n(t.get("turnover24h"))>=500000],key=lambda z:z[0],reverse=True)[:15]
+   ranked_all=sorted([(n(t.get("turnover24h")),t,meta[t["symbol"]]) for t in ticks["data"] if t.get("symbol") in meta and n(t.get("turnover24h"))>=500000],key=lambda z:z[0],reverse=True)
+   watch_report=read(WATCH,{})
+   watch_symbols=set(watch_report.get("watchlist_symbols",[]))
+   watch_meta={x.get("symbol"):x for x in watch_report.get("candidates",[]) if x.get("symbol") in watch_symbols}
+   ranked=ranked_all[:15]
+   already={row[1]["symbol"] for row in ranked}
+   by_symbol={row[1]["symbol"]:row for row in ranked_all}
+   for watch_symbol in sorted(watch_symbols):
+    if watch_symbol in by_symbol and watch_symbol not in already:
+     ranked.append(by_symbol[watch_symbol]);already.add(watch_symbol)
    for turnover,t,m in ranked:
     sym=t["symbol"];bid=n(t.get("bid1Price"));ask=n(t.get("ask1Price"));mid=(bid+ask)/2 if bid and ask else n(t.get("lastPrice"));current[sym]=n(t.get("lastPrice")) or mid
     spread=(ask-bid)/mid*10000 if mid and ask>=bid else 0
@@ -106,7 +115,7 @@ async def collect():
     book=ob.get("data",{});asks=book.get("a",[]);bids=book.get("b",[])
     def depth(levels):
      return round(sum(n(p)*n(q) for p,q in levels if mid and abs(n(p)/mid-1)<=.005),3)
-    add(O,{"at":iso(),"symbol":sym,"base_coin":m.get("baseCoin"),"turnover24h_usdt":turnover,"last":n(t.get("lastPrice")),"mark":n(t.get("markPrice")),"index":n(t.get("indexPrice")),"funding":n(t.get("fundingRate")),"open_interest":n(t.get("openInterest")),"spread_bps":spread,"depth_0_5pct_bid_usdt":depth(bids),"depth_0_5pct_ask_usdt":depth(asks),"orderbook_ts":book.get("ts"),"candle_rows":len(candles.get("data",[])),"market_cap":"UNVERIFIED"})
+    add(O,{"at":iso(),"symbol":sym,"base_coin":m.get("baseCoin"),"turnover24h_usdt":turnover,"last":n(t.get("lastPrice")),"mark":n(t.get("markPrice")),"index":n(t.get("indexPrice")),"funding":n(t.get("fundingRate")),"open_interest":n(t.get("openInterest")),"spread_bps":spread,"depth_0_5pct_bid_usdt":depth(bids),"depth_0_5pct_ask_usdt":depth(asks),"orderbook_ts":book.get("ts"),"candle_rows":len(candles.get("data",[])),"market_cap_usd":watch_meta.get(sym,{}).get("market_cap_usd"),"market_cap_band":watch_meta.get(sym,{}).get("market_cap_band","UNVERIFIED"),"market_cap_source":"CoinGecko" if watch_meta.get(sym,{}).get("market_cap_usd") is not None else None,"market_cap_updated_at":watch_meta.get(sym,{}).get("market_cap_updated_at"),"identity_status":watch_meta.get(sym,{}).get("identity_status","not_in_watchlist")})
     fee_raw=m.get("takerFeeRate")
     fee_bps=n(fee_raw,-1)*10000 if fee_raw is not None else -1
     new_signals=strategy(candles.get("data",[]),mid,spread,n(fee_raw)) if now().timestamp()<st["end_epoch"] else []
