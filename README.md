@@ -11,7 +11,7 @@ Bitget's USDT-futures instruments and ticker endpoints provide contract metadata
 - $10m–$100m
 - $100m+
 
-The watchlist selects up to three contracts per activity band. These are activity groups, not a substitute for the earlier market-cap grouping. Do not infer a coin's market cap from its ticker or trading volume.
+The watchlist selects up to 50 contracts per activity band (up to 200 total). Each five-minute research cycle scans up to 200 online USDT perpetual contracts ranked by Bitget-reported 24-hour futures turnover. These are activity groups, not a substitute for the earlier market-cap grouping. Do not infer a coin's market cap from its ticker or trading volume.
 
 ## Configure the Bitget API key safely
 
