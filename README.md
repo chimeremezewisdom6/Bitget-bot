@@ -84,9 +84,10 @@ No Pollinations key is needed for numeric market collection. Pollinations may la
 
 ## 24-hour read-only research experiment
 
-A separate research recorder is available at `daily_research.py`. Open **Actions → 24-Hour Futures Research (Read Only) → Run workflow**, choose `start`, and run it once. Scheduled GitHub Actions invocations then attempt a collection cycle every five minutes for 24 hours. The collector records Bitget USDT perpetual market observations, visible order-book depth, public RSS trader/community commentary, rule-generated shadow signals, and 5/15/30-minute reference-price outcomes.
+A separate research recorder is available at `daily_research.py`. Open **Actions → 24-Hour Futures Research (Read Only) → Run workflow**, choose `start`, and run it once. Scheduled GitHub Actions invocations then attempt a collection cycle every five minutes for 24 hours. The collector records Bitget USDT perpetual market observations, one-minute candles, public RSS trader/community commentary and rule-generated signal hypotheses. For each signal it attempts hypothetical $100/$500/$1,000 market entries by walking the visible order book, then at 5/15/30 minutes attempts a fresh exit-book walk for the exact hypothetical base quantity. It deducts the instrument taker-fee metadata when available and records partial/unavailable fills instead of inventing a completed trade. Funding is recorded as context but is not included in these short-horizon P&L estimates.
 
 Research files are committed under `reports/daily_research/`:
+- `candles_1m.jsonl` (de-duplicated completed candle observations)
 - `market_observations.jsonl`
 - `public_trader_posts.jsonl`
 - `shadow_experiments.jsonl`
@@ -94,3 +95,16 @@ Research files are committed under `reports/daily_research/`:
 - `daily_research_summary.md` (generated when the session expires)
 
 This is not guaranteed uninterrupted monitoring: GitHub scheduled runs can be delayed or skipped. Public posts are unverified claims, signals are hypotheses, and forward outcomes are reference-price calculations rather than fills. Market cap remains unverified until a separate timestamped source is joined. One day cannot prove profitability. No Bitget private key is used and no order, leverage, or position action is possible through this collector. See Section 17 of the project knowledge base.
+
+
+### Shadow execution math and validation
+
+- `shadow_execution.py` is a pure calculation module. It does not make HTTP requests and cannot place orders. It walks asks for hypothetical buys and bids for hypothetical sells, supports quote-notional entry and base-quantity exit, reports partial fills, and computes two-sided fees plus an explicitly supplied funding assumption.
+- The daily recorder uses visible entry and later exit books for its shadow outcomes. Funding is deliberately excluded from the automatic short-horizon result unless a future implementation can verify that a settlement event occurred during the holding period. The funding rate at entry is retained as context.
+- `research_report.py` creates `daily_research_summary.md` and reports two-snapshot book-walk outcomes separately from any legacy ticker-reference outcomes.
+- The test suite now includes order-book execution, partial-fill handling, fee/funding arithmetic and report aggregation. GitHub Actions validation compiles the shadow modules and runs all tests.
+- These are estimates, not exchange fills. Hidden liquidity, queue position, network latency, book changes between observations and actual funding settlement can change results.
+
+### Watchlist readiness limitation
+
+The existing daily collector samples the highest-turnover eligible Bitget USDT perpetual contracts. It does **not** yet constitute an approved 12-coin watchlist across the user's four requested market-cap groups. Market-cap data must be identity-matched to each contract, timestamped, and checked against a separately agreed band definition. Do not infer a coin's cap group from its ticker, and do not force three picks into a band when fewer than three genuinely qualify. The historical cap candidates in the knowledge base remain research leads, not a current approved watchlist.
