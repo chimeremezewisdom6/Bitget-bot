@@ -36,7 +36,7 @@ FEEDS = [
     "https://cointelegraph.com/rss",
 ]
 HEADERS = {"User-Agent": "Bitget-ReadOnly-Research/2.0"}
-MAX_SYMBOLS = 24
+MAX_SYMBOLS = 27
 SYMBOL_CONCURRENCY = 6
 
 
@@ -303,7 +303,7 @@ def record_signals_and_entries(result, state):
     signals_found = strategy(result["candles"]) if now().timestamp() < state["end_epoch"] else []
     signal_count = 0
     for strategy_name, direction, reason in signals_found:
-        candle_id = result["candles"][-1][0] if result["candles"] else "no-candle"
+        candle_id = max((row[0] for row in result["candles"]), key=lambda value: int(value)) if result["candles"] else "no-candle"
         signal_id = f"{symbol}:{strategy_name}:{candle_id}"
         seen = state.setdefault("signal_ids", [])
         if signal_id in seen:
