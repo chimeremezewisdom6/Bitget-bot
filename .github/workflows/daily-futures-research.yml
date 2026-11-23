@@ -115,7 +115,7 @@ jobs:
               "last_collection_utc": session.get("last_at"),
               "expected_interval_minutes": 5,
           }
-          (root / "heartbeat.json").write_text(json.dumps(heartbeat, indent=2) + "\\n", encoding="utf-8")
+          (root / "heartbeat.json").write_text(json.dumps(heartbeat, indent=2) + "\n", encoding="utf-8")
           print(json.dumps(heartbeat, indent=2))
           PY
       - name: Check whether the session has finished
