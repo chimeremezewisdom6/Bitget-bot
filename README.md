@@ -29,15 +29,17 @@ The workflow uses the credentials only for signed GET requests to:
 
 If credentials are absent or the fee endpoint is not permitted, public Bitget market research continues and the session records the authentication/fee lookup status. Missing fees are never silently treated as zero. Public market endpoints do not require API credentials; Bitget requires signed credentials for private account-specific information.
 
-## Start the 24-hour experiment
+## Hands-off research app
 
-1. Open [Actions → 24-Hour Futures Research (Read Only)](https://github.com/chimeremezewisdom6/Bitget-bot/actions/workflows/daily-futures-research.yml).
-2. Choose **Run workflow**, select branch `main`, and choose action **start**.
-3. The workflow builds the Bitget-only turnover watchlist and starts the observation session.
-4. GitHub Actions attempts a collection cycle every five minutes for 24 hours, with a 30-minute settlement window for pending hypothetical exits.
-5. Use action **status** to inspect progress. Use **stop** to end early and preserve the data.
+The research worker starts itself when the workflow is first deployed and whenever no active 24-hour session remains. You do not need to ping it or manually start a session. GitHub Actions attempts a new Bitget-only collection cycle every five minutes, keeps the session and evidence in the repository, and writes a machine-readable status snapshot after each report build.
 
-Only start one session at a time. A second start is rejected while the current session or its settlement grace period is active.
+When you return, open the latest report and status snapshot below, or simply ask ChatGPT to inspect this repository:
+- `reports/daily_research/daily_research_summary.md`
+- `reports/daily_research/research_status.json` — latest machine-readable app status — readable research findings.
+- `reports/daily_research/research_status.json` — latest machine-readable health, progress and result summary.
+- `reports/daily_research/session.json` — session state and last collection timestamp.
+
+The optional Actions controls remain available for **status** and **stop**. Do not start another session while one is active. The five-minute schedule is best-effort, not a guarantee of exact timing.
 
 ## What gets recorded
 
