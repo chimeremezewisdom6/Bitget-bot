@@ -2,17 +2,17 @@
 
 - Session started UTC: 2026-11-23T11:29:36.710531+00:00
 - Session ended UTC: not recorded
-- Collector cycles: 8
+- Collector cycles: 9
 - Distinct symbols observed: 206
 - Current Bitget turnover-watchlist contracts: 11
-- Market observation rows: 1600
-- Candidate signals eligible for entry evaluation: 348
-- Watch-only RSI conditions (no entry): 526
-- Two-snapshot order-book shadow outcomes: 2064
+- Market observation rows: 1800
+- Candidate signals eligible for entry evaluation: 381
+- Watch-only RSI conditions (no entry): 592
+- Two-snapshot order-book shadow outcomes: 2376
 - Legacy ticker-reference outcomes: 0
 - Outcomes unavailable: 0
 - Collection error records: 0
-- 60-minute same-colour candle checks: 1015
+- 60-minute same-colour candle checks: 1017
 - Checks meeting 40+ same-colour candles: 0
 
 ## Previous 24-hour trend-start candle-colour backtest
@@ -25,19 +25,19 @@ A trend start is defined as a fully closed 1m candle closing above the previous 
 
 ## Early-trend candle windows (separate experiment)
 
-- Symbols with early-window backtests: 203
-- Complete trend events with early-window measurements: 3108
+- Symbols with early-window backtests: 204
+- Complete trend events with early-window measurements: 3124
 
 For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candles. The continuation column is the direction-adjusted price change from that window's closing price to the end of the first hour. Positive means price continued in the trend direction; negative means it reversed. The 60-minute row has no candles remaining after its close, so its continuation-to-hour-end is not scored and is excluded from that metric. These are descriptive historical samples, not proof that early candle colour predicts future returns.
 
 | First minutes | Events with window data | Avg direction-matching candles % | Positive continuation (scored events) | Avg continuation after window % |
 |---:|---:|---:|---:|---:|
-| 5 | 3108 | 44.7% | 1559/3108 (50.2%) | 0.0364% |
-| 10 | 3108 | 37.6% | 1575/3108 (50.7%) | 0.0653% |
-| 15 | 3108 | 35.2% | 1581/3108 (50.9%) | 0.0750% |
-| 20 | 3108 | 34.3% | 1549/3108 (49.8%) | 0.0523% |
-| 30 | 3108 | 33.2% | 1538/3108 (49.5%) | 0.0515% |
-| 60 | 3108 | 32.2% | — | — |
+| 5 | 3124 | 44.7% | 1568/3124 (50.2%) | 0.0343% |
+| 10 | 3124 | 37.5% | 1582/3124 (50.6%) | 0.0631% |
+| 15 | 3124 | 35.2% | 1589/3124 (50.9%) | 0.0725% |
+| 20 | 3124 | 34.3% | 1557/3124 (49.8%) | 0.0496% |
+| 30 | 3124 | 33.2% | 1545/3124 (49.5%) | 0.0490% |
+| 60 | 3124 | 32.2% | — | — |
 
 | Symbol | Direction | Trend start (UTC) | Green | Red | Doji | Matching candles | Matching % | First-hour follow-through % |
 |---|---|---|---:|---:|---:|---:|---:|---:|
@@ -169,7 +169,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | ATOMUSDT | 5 | RED | 24 | No |
 | AVAXUSDT | 5 | RED | 28 | No |
 | AXISUSDT | 5 | GREEN | 21 | No |
-| BABYUSDT | 1 | GREEN | 15 | No |
+| BABYUSDT | 2 | GREEN | 12 | No |
 | BANKUSDT | 5 | GREEN | 11 | No |
 | BARDUSDT | 5 | GREEN | 11 | No |
 | BATUSDT | 5 | RED | 13 | No |
@@ -331,7 +331,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | TRXUSDT | 5 | GREEN | 18 | No |
 | TUTUSDT | 5 | GREEN | 5 | No |
 | UAIUSDT | 5 | GREEN | 21 | No |
-| UBUSDT | 3 | GREEN | 15 | No |
+| UBUSDT | 4 | RED | 8 | No |
 | UNITASUSDT | 5 | GREEN | 17 | No |
 | UNIUSDT | 5 | RED | 31 | No |
 | USDBRLUSDT | 5 | GREEN | 17 | No |
@@ -359,22 +359,22 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 
 | Group | Watchlist candidates | Observation rows |
 |---|---:|---:|
-| Under $1m 24h futures turnover | 3 | 24 |
-| $1m–$10m 24h futures turnover | 3 | 24 |
-| $10m–$100m 24h futures turnover | 3 | 24 |
-| $100m+ 24h futures turnover | 2 | 16 |
+| Under $1m 24h futures turnover | 3 | 27 |
+| $1m–$10m 24h futures turnover | 3 | 27 |
+| $10m–$100m 24h futures turnover | 3 | 27 |
+| $100m+ 24h futures turnover | 2 | 18 |
 
 ## Profit-versus-loss summary (hypothetical book-walk outcomes)
 
-- Positive outcomes: 798; negative outcomes: 1266; flat: 0
-- Win rate among scored outcomes: 38.7%
-- Gross positive outcomes: 3279.383275 USDT
-- Gross negative outcomes: 5107.899920 USDT
-- Total estimated net after trading fees: -1828.516646 USDT
-- Profit factor (gross gains / gross losses): 0.642
-- Average winning outcome: 4.109503 USDT
-- Average losing outcome: -4.034676 USDT
-- Mean estimated net result: -15.19 bps
+- Positive outcomes: 913; negative outcomes: 1463; flat: 0
+- Win rate among scored outcomes: 38.4%
+- Gross positive outcomes: 3334.275252 USDT
+- Gross negative outcomes: 5398.613906 USDT
+- Total estimated net after trading fees: -2064.338653 USDT
+- Profit factor (gross gains / gross losses): 0.618
+- Average winning outcome: 3.651999 USDT
+- Average losing outcome: -3.690098 USDT
+- Mean estimated net result: -14.85 bps
 
 These estimates walk the visible entry book and a later visible exit book, deducting the authenticated account-specific Bitget taker fee when available, otherwise instrument metadata; missing fees are not assumed to be zero. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. The same signal is evaluated at multiple sizes and horizons, so these rows are correlated and must not be treated as independent trades. A completed simulation is not proof of profitability.
 
@@ -384,9 +384,9 @@ These estimates walk the visible entry book and a later visible exit book, deduc
 
 | Strategy | Outcomes | Positive | Negative | Mean estimated net (bps) |
 |---|---:|---:|---:|---:|
-| breakdown | 330 | 161 | 169 | -11.47 |
-| breakout | 240 | 18 | 222 | -50.96 |
-| ema_volume | 1494 | 619 | 875 | -10.27 |
+| breakdown | 387 | 180 | 207 | -12.01 |
+| breakout | 246 | 18 | 228 | -51.08 |
+| ema_volume | 1743 | 715 | 1028 | -10.37 |
 
 ## Legacy Trader discussion records
 
