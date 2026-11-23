@@ -35,7 +35,7 @@ Do not dispatch start again while the session is active. The program rejects a s
 
 ## Inspect the session
 
-Use Actions → 24-Hour Futures Research (Read Only) → Run workflow → action **status**. This prints the current session state without resetting it.
+Use Actions → 24-Hour Futures Research (Read Only) → Run workflow → action **status**. This prints the current session state without resetting it. To end early, choose **stop**; this preserves existing records and prevents further scheduled collection.
 
 ## Output files
 
