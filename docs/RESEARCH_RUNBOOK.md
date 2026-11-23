@@ -25,7 +25,7 @@ Do not dispatch start again while the session is active. The program rejects a s
 ## What the recorder does
 
 - Attempts one collection cycle every five minutes while the session is active.
-- Samples the highest-turnover online Bitget USDT perpetual contracts above the $500,000 24-hour quote-turnover floor (up to 15 symbols per cycle).
+- Samples the highest-turnover online Bitget USDT perpetual contracts above the $500,000 24-hour quote-turnover floor (up to 15 symbols per cycle), plus selected contracts from the current provisional cap watchlist.
 - Saves one-minute candles, tickers, funding/open interest context, spread and visible order-book depth.
 - Collects deduplicated public RSS posts from selected crypto/trading sources approximately every 15 minutes to limit feed load. These posts are unverified commentary, not verified trader fills.
 - Records rule-based signal hypotheses, not recommendations. RSI extreme conditions are watch-only and do not open hypothetical positions without a separate reversal-confirmation rule.
@@ -56,7 +56,7 @@ All durable records are committed under reports/daily_research:
 - Funding is not included in the automatic P&L; do not treat net-after-fees as fully net of all perpetual-futures costs.
 - Public trader commentary is not independently verified. Do not assume a post author traded the position.
 - Market cap is not supplied by the Bitget futures endpoints. The watchlist uses a separate CoinGecko snapshot; exact symbol matches still require manual identity review. Do not infer cap bands from symbols or Spot turnover.
-- The top-turnover sample is not the requested verified 12-coin / four-market-cap-group watchlist. Keep this limitation visible until a timestamped identity-matched cap dataset and explicit band definitions are approved.
+- The cap-group watchlist is provisional until each CoinGecko identity is manually reviewed. It may contain fewer than three candidates in a group. Do not treat an automatic unique-ticker match as a confirmed asset identity.
 - GitHub scheduled runs can be delayed or skipped. Inspect timestamps and cycle counts; never describe the recorder as guaranteed continuous monitoring.
 - A positive day or a small number of positive shadow outcomes is not evidence of a durable trading edge. Require larger samples, out-of-sample tests, regime coverage and full costs.
 
