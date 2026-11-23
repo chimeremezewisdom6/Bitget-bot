@@ -28,14 +28,17 @@ def build_report(root=ROOT):
     experiments = read_jsonl(root / "shadow_experiments.jsonl")
     errors = read_jsonl(root / "collection_errors.jsonl")
     signals = [x for x in experiments if x.get("type") == "signal"]
-    outcomes = [x for x in experiments if x.get("type") == "forward_reference_outcome"]
+    outcomes = [x for x in experiments if x.get("type") == "orderbook_shadow_outcome"]
+    reference_outcomes = [x for x in experiments if x.get("type") == "forward_reference_outcome"]
     unavailable = [x for x in experiments if x.get("type") == "evaluation_unavailable"]
-    net = [float(x["estimated_net_bps"]) for x in outcomes if isinstance(x.get("estimated_net_bps"), (int, float))]
+    net = [float(x["net_after_trading_fees_usdt"]) / float(x["notional_usdt"]) * 10000
+           for x in outcomes if isinstance(x.get("net_after_trading_fees_usdt"), (int, float))
+           and isinstance(x.get("notional_usdt"), (int, float)) and x["notional_usdt"] > 0]
     wins, losses, flat = sum(x > 0 for x in net), sum(x < 0 for x in net), sum(x == 0 for x in net)
     by_strategy = defaultdict(list)
     for row in outcomes:
-        if isinstance(row.get("estimated_net_bps"), (int, float)):
-            by_strategy[row.get("strategy", "unknown")].append(float(row["estimated_net_bps"]))
+        if isinstance(row.get("net_after_trading_fees_usdt"), (int, float)) and row.get("notional_usdt", 0) > 0:
+            by_strategy[row.get("strategy", "unknown")].append(float(row["net_after_trading_fees_usdt"]) / float(row["notional_usdt"]) * 10000)
     symbols = sorted({x.get("symbol") for x in observations if x.get("symbol")})
     sources = Counter(x.get("source", "unknown") for x in posts)
     avg = sum(net) / len(net) if net else None
@@ -48,13 +51,15 @@ def build_report(root=ROOT):
         f"- Market observation rows: {len(observations)}",
         f"- Public commentary items: {len(posts)}",
         f"- Candidate signals: {len(signals)}",
-        f"- Forward reference outcomes: {len(net)}",
+        f"- Two-snapshot order-book shadow outcomes: {len(net)}",
+        f"- Legacy ticker-reference outcomes: {len(reference_outcomes)}",
         f"- Outcomes unavailable: {len(unavailable)}",
         f"- Collection error records: {len(errors)}", "",
-        "## Forward reference outcomes (not exchange fills)", "",
+        "## Two-snapshot order-book shadow outcomes (not exchange fills)", "",
         f"- Positive: {wins}; negative: {losses}; flat: {flat}",
         f"- Mean estimated net result: {avg:.2f} bps" if avg is not None else "- Mean estimated net result: unavailable", "",
-        "These outcomes use later ticker reference prices and a simple spread/fee allowance. They are not executable fills and may omit changing book impact, queue position, latency and funding. They are not proof of profitability.", "",
+        "These estimates walk the visible entry book and a later visible exit book, and deduct the instrument taker fee metadata when available. They are not actual fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. A completed simulation is not proof of profitability. Ticker-only reference outcomes, if any, are listed separately and must not be combined with this sample.", "",
+        f"- Ticker-only reference outcomes (separate, not executable): {len(reference_outcomes)}", "",
         "## Strategy breakdown", "",
         "| Strategy | Outcomes | Positive | Negative | Mean estimated net (bps) |",
         "|---|---:|---:|---:|---:|"
