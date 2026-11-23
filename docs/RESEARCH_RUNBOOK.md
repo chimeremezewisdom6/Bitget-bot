@@ -2,64 +2,60 @@
 
 ## Safety boundary
 
-This workflow reads public Bitget USDT perpetual market data only. It does not use Bitget API credentials and must not be connected to Demo or Live order placement. The existing scanner workflow is deliberately paused. Do not enable it as part of research.
+The 24-hour research collector reads public Bitget USDT perpetual market data only. It does not need API credentials and has no account, order, leverage, or position-management functions. The existing Demo-capable `scanner.py` and its automated workflow remain separate and paused. Do not enable trading as part of this experiment.
 
-## Build the four-band watchlist first
+## Start the single observation workflow
 
-1. Open the repository Actions tab.
-2. Select **Build Four-Band Futures Watchlist (Read Only)** and run it on main.
-3. Inspect the artifact and committed report at reports/market_cap_watchlist/current_watchlist.md. Check each CoinGecko asset identity. Resolve ambiguous or mismatched tickers in config/asset_identity_overrides.json only after independent verification.
-4. The default provisional groups are lower cap below $10m, smaller cap $10m–$100m, mid cap $100m–$1bn, and mega cap $1bn or above. Change config/market_cap_bands.json if these boundaries do not match the intended study.
-5. Do not force three coins into a group when fewer qualify.
+1. Open [24-Hour Futures Research (Read Only)](https://github.com/chimeremezewisdom6/Bitget-bot/actions/workflows/daily-futures-research.yml).
+2. Select **Run workflow** on branch `main`.
+3. Choose action **start** and dispatch once.
+4. The workflow checks that no session is already active, builds the four-band CoinGecko/Bitget watchlist, starts the 24-hour session, and commits the initial state.
+5. Confirm the GitHub Actions run completes successfully. The scheduled workflow then attempts one collection cycle every five minutes.
 
-## Start the 24-hour session
+No separate market-cap workflow or shadow snapshot workflow is required. Do not start another session while one is active.
 
-1. Open the repository Actions tab.
-2. Select **24-Hour Futures Research (Read Only)**.
-3. Select **Run workflow** on the main branch.
-4. Choose action **start** and dispatch once.
-5. Confirm the run succeeds and commits the session state under reports/daily_research/session.json.
+## What the collector records
 
-Do not dispatch start again while the session is active. The program rejects a second start rather than resetting the existing data.
+- The highest-turnover eligible online Bitget USDT perpetual contracts above the $500,000 24-hour quote-turnover floor (up to 15 symbols per cycle), plus selected contracts from the current four-band watchlist.
+- One-minute candles, prices, funding/open-interest context, spread and visible order-book depth.
+- Up to three candidates in each configured market-cap band if identity, turnover and liquidity checks allow. It does not force three selections when fewer qualify.
+- Deduplicated public RSS commentary approximately every 15 minutes. These are unverified posts, not verified trader fills or audited track records.
+- Rule-based signal hypotheses. RSI extremes are watch-only and do not create hypothetical positions without a separate reversal-confirmation rule.
+- Hypothetical $100, $500 and $1,000 market entries by walking the visible order book. Insufficient visible depth or missing fee metadata is recorded as partial/unavailable rather than treated as a completed entry.
+- Fresh exit-book walks at 5, 15 and 30 minutes for the exact hypothetical base quantity. It records VWAP, slippage, gross P&L and taker-fee-adjusted P&L. Funding is retained as context but excluded from this automatic short-horizon result.
+- Collection errors and missing data, so the final analysis can account for gaps rather than only successful outcomes.
 
-## What the recorder does
+## Inspect or stop
 
-- Attempts one collection cycle every five minutes while the session is active.
-- Samples the highest-turnover online Bitget USDT perpetual contracts above the $500,000 24-hour quote-turnover floor (up to 15 symbols per cycle), plus selected contracts from the current provisional cap watchlist.
-- Saves one-minute candles, tickers, funding/open interest context, spread and visible order-book depth.
-- Collects deduplicated public RSS posts from selected crypto/trading sources approximately every 15 minutes to limit feed load. These posts are unverified commentary, not verified trader fills.
-- Records rule-based signal hypotheses, not recommendations. RSI extreme conditions are watch-only and do not open hypothetical positions without a separate reversal-confirmation rule.
-- For each signal, attempts $100, $500 and $1,000 hypothetical market entries by walking the current visible order book. If the visible entry book is insufficient or the taker fee is missing, it does not invent a completed entry.
-- Attempts fresh exit-book walks after 5, 15 and 30 minutes for the exact hypothetical base quantity. It deducts the instrument taker fee at entry and exit. Funding is recorded as context but is not included in this automatic P&L.
-- After 24 hours it stops creating new signals, then allows up to 30 minutes to settle pending 30-minute exit observations.
+Open the same workflow and choose action **status** to print the current session state. Choose **stop** to stop collection early, rebuild the report and upload the collected data. Stopping preserves existing records.
 
-## Inspect the session
+The session automatically stops generating new signals after 24 hours and allows a 30-minute grace period for pending 30-minute hypothetical exits. The next scheduled run marks the session complete and uploads the final research package.
 
-Use Actions → 24-Hour Futures Research (Read Only) → Run workflow → action **status**. This prints the current session state without resetting it. To end early, choose **stop**; this preserves existing records and prevents further scheduled collection.
+## Download results
 
-## Output files
+Open the completed GitHub Actions run and download the artifact named `bitget-24-hour-futures-research-...` from **Artifacts**. The same records are committed under `reports/daily_research/`, with the market-cap watchlist under `reports/market_cap_watchlist/`.
 
-All durable records are committed under reports/daily_research:
+Key files:
 
-- session.json — start/end, cycle counts and session state.
-- market_observations.jsonl — ticker and visible depth summaries.
-- candles_1m.jsonl — de-duplicated one-minute candles.
-- public_trader_posts.jsonl — public commentary, source URL and verification caveat.
-- shadow_experiments.jsonl — hypotheses, partial entries, book-walk outcomes and unavailable evaluations.
-- pending.json — open hypothetical observations awaiting their exit horizon.
-- collection_errors.jsonl — API/RSS failures.
-- daily_research_summary.md — automatically rebuilt summary and limitations.
+- `session.json` — start/end timestamps, cycle counts and status.
+- `market_observations.jsonl` — timestamped market and visible-depth observations.
+- `candles_1m.jsonl` — de-duplicated one-minute candles.
+- `public_trader_posts.jsonl` — public commentary, source and verification caveat.
+- `shadow_experiments.jsonl` — signal hypotheses, partial entries, book-walk outcomes and unavailable evaluations.
+- `collection_errors.jsonl` — API and RSS failures.
+- `daily_research_summary.md` — generated summary and limitations.
+- `../market_cap_watchlist/current_watchlist.json` — provisional four-band watchlist.
 
-## How to interpret results
+## Interpretation rules
 
 - A two-snapshot order-book simulation is not a real fill. It cannot know queue position, hidden liquidity, latency, or what the book did between snapshots.
-- Funding is not included in the automatic P&L; do not treat net-after-fees as fully net of all perpetual-futures costs.
-- Public trader commentary is not independently verified. Do not assume a post author traded the position.
-- Market cap is not supplied by the Bitget futures endpoints. The watchlist uses a separate CoinGecko snapshot; exact symbol matches still require manual identity review. Do not infer cap bands from symbols or Spot turnover.
-- The cap-group watchlist is provisional until each CoinGecko identity is manually reviewed. It may contain fewer than three candidates in a group. Do not treat an automatic unique-ticker match as a confirmed asset identity.
-- GitHub scheduled runs can be delayed or skipped. Inspect timestamps and cycle counts; never describe the recorder as guaranteed continuous monitoring.
-- A positive day or a small number of positive shadow outcomes is not evidence of a durable trading edge. Require larger samples, out-of-sample tests, regime coverage and full costs.
+- Funding is not included in automatic P&L. Do not treat net-after-fees as fully net of all perpetual-futures costs.
+- Public trader commentary is unverified. Do not assume a post author actually traded the position.
+- Market cap is not supplied by Bitget futures endpoints. The watchlist joins a separate CoinGecko snapshot; exact ticker matches still require manual identity review. Ambiguous or uncertain assets remain unclassified.
+- The cap groups in `config/market_cap_bands.json` are provisional and may contain fewer than three candidates in a group.
+- GitHub scheduled runs can be delayed or skipped. Use timestamps and cycle counts; never describe this as guaranteed uninterrupted monitoring.
+- A positive day or a small number of positive shadow outcomes is not proof of a durable edge. Require larger samples, out-of-sample tests, multiple market regimes and full costs.
 
-## Before any future change to trading permissions
+## After the experiment
 
-No trading is authorized by this research workflow. Any future Demo or Live test requires a separate explicit user decision and a separate safety review. Research completion does not enable the scanner.
+Upload the downloaded artifact ZIP in this chat. Analyse profitable and losing hypothetical outcomes, strategy and coin-group performance, fees, slippage, adverse movement, unavailable fills, market conditions and trader commentary. Keep verified measurements separate from assumptions and public claims. Only after this review should we decide whether and how to rebuild the trading scanner. No Demo or Live trading is authorised by completing the research run.
