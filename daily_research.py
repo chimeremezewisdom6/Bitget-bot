@@ -84,12 +84,11 @@ async def collect():
   st["active"]=False;st["ended_at_utc"]=iso();S.write_text(json.dumps(st,indent=2))
   SUMMARY.write_text("# 24-Hour Bitget Futures Research\n\n"+json.dumps(st,indent=2)+"\n\n## Evidence cautions\nPosts are unverified public claims. Signals are hypotheses. Forward outcomes are reference prices, not fills. Market cap is not provided by Bitget and remains unverified. Five-minute scheduled runs may be delayed or skipped. This exploratory day cannot prove profitability.\n\nFiles: market_observations.jsonl, candles_1m.jsonl, public_trader_posts.jsonl, shadow_experiments.jsonl, collection_errors.jsonl.\n")
   print("Session ended");return
- R.mkdir(parents=True,exist_ok=True);errors=[];current={};signals=0
+ R.mkdir(parents=True,exist_ok=True);errors=[];observed_symbols=set();signals=0
  async with aiohttp.ClientSession(headers=H) as s:
   try:
    inst,ticks=await asyncio.gather(get(s,"/api/v3/market/instruments",{"category":"USDT-FUTURES"}),get(s,"/api/v3/market/tickers",{"category":"USDT-FUTURES"}))
    meta={x["symbol"]:x for x in inst["data"] if x.get("status")=="online" and x.get("type")=="perpetual"}
-   current.update({t.get("symbol"):n(t.get("lastPrice")) for t in ticks.get("data",[]) if t.get("symbol") and n(t.get("lastPrice"))>0})
    ranked_all=sorted([(n(t.get("turnover24h")),t,meta[t["symbol"]]) for t in ticks["data"] if t.get("symbol") in meta and n(t.get("turnover24h"))>=500000],key=lambda z:z[0],reverse=True)
    watch_report=read(WATCH,{})
    watch_symbols=set(watch_report.get("watchlist_symbols",[]))
@@ -101,7 +100,7 @@ async def collect():
     if watch_symbol in by_symbol and watch_symbol not in already:
      ranked.append(by_symbol[watch_symbol]);already.add(watch_symbol)
    for turnover,t,m in ranked:
-    sym=t["symbol"];bid=n(t.get("bid1Price"));ask=n(t.get("ask1Price"));mid=(bid+ask)/2 if bid and ask else n(t.get("lastPrice"));current[sym]=n(t.get("lastPrice")) or mid
+    sym=t["symbol"];observed_symbols.add(sym);bid=n(t.get("bid1Price"));ask=n(t.get("ask1Price"));mid=(bid+ask)/2 if bid and ask else n(t.get("lastPrice"));current[sym]=n(t.get("lastPrice")) or mid
     spread=(ask-bid)/mid*10000 if mid and ask>=bid else 0
     ob=await get(s,"/api/v3/market/orderbook",{"category":"USDT-FUTURES","symbol":sym,"limit":"1000"})
     candles=await get(s,"/api/v3/market/candles",{"category":"USDT-FUTURES","symbol":sym,"interval":"1m","limit":"100"})
@@ -173,9 +172,9 @@ async def collect():
   Q.write_text(json.dumps(keep,indent=2))
   newposts=await posts(s) if now().timestamp()<st["end_epoch"] and st.get("cycles",0)%3==0 else 0
  if errors:add(R/"collection_errors.jsonl",{"at":iso(),"error":";".join(errors)[:800]})
- st["cycles"]=st.get("cycles",0)+1;st["last_at"]=iso();st["signals"]=st.get("signals",0)+signals;st["posts"]=st.get("posts",0)+newposts;st["errors"]=st.get("errors",0)+len(errors);st["symbols_last_cycle"]=len(current)
+ st["cycles"]=st.get("cycles",0)+1;st["last_at"]=iso();st["signals"]=st.get("signals",0)+signals;st["posts"]=st.get("posts",0)+newposts;st["errors"]=st.get("errors",0)+len(errors);st["symbols_last_cycle"]=len(observed_symbols)
  S.write_text(json.dumps(st,indent=2))
- print(json.dumps({"cycle":st["cycles"],"symbols":len(current),"signals":signals,"new_posts":newposts,"errors":len(errors),"ends":st["ends_at_utc"]}))
+ print(json.dumps({"cycle":st["cycles"],"symbols":len(observed_symbols),"signals":signals,"new_posts":newposts,"errors":len(errors),"ends":st["ends_at_utc"]}))
 def main():
  p=argparse.ArgumentParser();p.add_argument("action",choices=["start","collect","status","stop"]);a=p.parse_args()
  if a.action=="start":
