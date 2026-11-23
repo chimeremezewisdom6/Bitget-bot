@@ -55,7 +55,7 @@ The shadow simulator is mathematical only. It does not send orders to Bitget. It
 
 ## Results and persistence
 
-When the session completes, the workflow uploads an artifact named similar to `bitget-24-hour-futures-research-...`. Open the completed Actions run and download it from **Artifacts**. Durable records are also committed under:
+When the session completes, the workflow uploads one artifact named similar to `bitget-24-hour-futures-research-...`. Download it from the completed Actions run under **Summary → Artifacts**. The ZIP includes the original JSONL evidence, CSV exports for spreadsheet analysis, the Markdown report, a package manifest with record counts, and the watchlist. The main CSVs are `market_observations.csv`, `candles_1m.csv`, and `shadow_experiments.csv`. Durable raw records are also committed under:
 
 - `reports/daily_research/market_observations.jsonl`
 - `reports/daily_research/candles_1m.jsonl`
