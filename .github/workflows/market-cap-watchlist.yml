@@ -1,0 +1,43 @@
+name: Build Four-Band Futures Watchlist (Read Only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bitget-cap-watchlist
+  cancel-in-progress: false
+
+jobs:
+  build-watchlist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install HTTP dependency
+        run: python -m pip install -r requirements.txt
+      - name: Build market-cap and futures liquidity watchlist
+        run: python cap_watchlist.py
+      - name: Upload watchlist report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitget-four-band-watchlist-${{ github.run_id }}
+          path: reports/market_cap_watchlist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Commit current watchlist for the daily collector
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/market_cap_watchlist/current_watchlist.json reports/market_cap_watchlist/current_watchlist.md
+          if ! git diff --cached --quiet; then
+            git commit -m "Refresh provisional four-band futures watchlist"
+            git push
+          fi
