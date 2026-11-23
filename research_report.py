@@ -45,16 +45,18 @@ def build_report(root=ROOT):
             window for event in early_window_events
             for window in event.get("early_window_analysis", [])
             if window.get("minutes") == minutes
-            and isinstance(window.get("direction_adjusted_continuation_to_hour_end_pct"), (int, float))
         ]
         continuation_values = [
-            float(item["direction_adjusted_continuation_to_hour_end_pct"]) for item in samples
+            float(item["direction_adjusted_continuation_to_hour_end_pct"])
+            for item in samples
+            if isinstance(item.get("direction_adjusted_continuation_to_hour_end_pct"), (int, float))
         ]
         matching_values = [
             float(item.get("direction_matching_pct", 0)) for item in samples
         ]
         early_window_summary[minutes] = {
             "samples": len(samples),
+            "scored": len(continuation_values),
             "positive": sum(value > 0 for value in continuation_values),
             "mean_continuation": (
                 sum(continuation_values) / len(continuation_values) if continuation_values else None
@@ -158,17 +160,21 @@ def build_report(root=ROOT):
         "",
         "For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candles. The continuation column is the direction-adjusted price change from that window's closing price to the end of the first hour. Positive means price continued in the trend direction; negative means it reversed. The 60-minute row has no candles remaining after its close, so its continuation-to-hour-end is not scored and is excluded from that metric. These are descriptive historical samples, not proof that early candle colour predicts future returns.",
         "",
-        "| First minutes | Events scored | Avg direction-matching candles % | Positive continuation to minute 60 | Avg continuation after window % |",
+        "| First minutes | Events with window data | Avg direction-matching candles % | Positive continuation (scored events) | Avg continuation after window % |",
         "|---:|---:|---:|---:|---:|",
         *[
-            f"| {minutes} | {early_window_summary[minutes]['samples']} | "
-            f"{early_window_summary[minutes]['mean_matching']:.1f}% | "
-            f"{early_window_summary[minutes]['positive']}/{early_window_summary[minutes]['samples']} "
-            f"({early_window_summary[minutes]['positive'] / early_window_summary[minutes]['samples'] * 100:.1f}%) | "
-            f"{early_window_summary[minutes]['mean_continuation']:.4f}% |"
-            if early_window_summary[minutes]['samples'] and early_window_summary[minutes]['mean_matching'] is not None
-            and early_window_summary[minutes]['mean_continuation'] is not None
-            else f"| {minutes} | {early_window_summary[minutes]['samples']} | — | — | — |"
+            (
+                f"| {minutes} | {early_window_summary[minutes]['samples']} | "
+                f"{early_window_summary[minutes]['mean_matching']:.1f}% | "
+                f"{early_window_summary[minutes]['positive']}/{early_window_summary[minutes]['scored']} "
+                f"({early_window_summary[minutes]['positive'] / early_window_summary[minutes]['scored'] * 100:.1f}%) | "
+                f"{early_window_summary[minutes]['mean_continuation']:.4f}% |"
+                if early_window_summary[minutes]['scored'] and early_window_summary[minutes]['mean_continuation'] is not None
+                else f"| {minutes} | {early_window_summary[minutes]['samples']} | "
+                     f"{early_window_summary[minutes]['mean_matching']:.1f}% | — | — |"
+                if early_window_summary[minutes]['samples'] and early_window_summary[minutes]['mean_matching'] is not None
+                else f"| {minutes} | 0 | — | — | — |"
+            )
             for minutes in (5, 10, 15, 20, 30, 60)
         ],
         "",
