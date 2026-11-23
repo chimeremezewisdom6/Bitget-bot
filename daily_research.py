@@ -177,7 +177,7 @@ async def collect():
  S.write_text(json.dumps(st,indent=2))
  print(json.dumps({"cycle":st["cycles"],"symbols":len(current),"signals":signals,"new_posts":newposts,"errors":len(errors),"ends":st["ends_at_utc"]}))
 def main():
- p=argparse.ArgumentParser();p.add_argument("action",choices=["start","collect","status"]);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument("action",choices=["start","collect","status","stop"]);a=p.parse_args()
  if a.action=="start":
   R.mkdir(parents=True,exist_ok=True)
   existing=read(S,{})
@@ -187,5 +187,7 @@ def main():
   st={"active":True,"started_at_utc":iso(),"end_epoch":end,"ends_at_utc":datetime.fromtimestamp(end,timezone.utc).isoformat(),"settle_epoch":settle,"settle_until_utc":datetime.fromtimestamp(settle,timezone.utc).isoformat(),"cycles":0,"signals":0,"posts":0,"errors":0,"signal_ids":[]}
   S.write_text(json.dumps(st,indent=2));Q.write_text("[]");print("Started 24-hour session until "+st["ends_at_utc"])
  elif a.action=="collect":asyncio.run(collect())
+ elif a.action=="stop":
+  st=read(S,{"active":False});st["active"]=False;st["stopped_at_utc"]=iso();S.write_text(json.dumps(st,indent=2));print("Research collection stopped; existing records were preserved.")
  else:print(json.dumps(read(S,{"active":False}),indent=2))
 if __name__=="__main__":main()
