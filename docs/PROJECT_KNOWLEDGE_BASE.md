@@ -444,3 +444,68 @@ Before approving a coin, collect a same-session official Bitget API snapshot for
 - Confirmed steps: dependency install, compile of `scanner.py`, and full `python -m unittest discover -s tests -v` step all succeeded. This includes the new shadow-research unit tests because they are discovered by the existing test command.
 - This validates syntax and unit tests, not a live API collection. The manual shadow snapshot workflow still needs to be run by a user from GitHub Actions before any real market snapshot is available.
 - Documentation-only commits after that successful run triggered additional validation runs which were queued when checked; no failure was observed in the successful code-validation run.
+
+
+## 16. First successful official Bitget futures snapshot and cap cross-check (2026-11-23)
+
+### Snapshot execution evidence
+
+- User manually dispatched **Shadow Market Snapshot (Read Only)**. GitHub Actions run: https://github.com/chimeremezewisdom6/Bitget-bot/actions/runs/45153758690
+- Run ID: `45153758690`; event: `workflow_dispatch`; conclusion: `success`; started 2026-11-23 10:11:12 UTC and completed 10:11:30 UTC.
+- Artifact: `bitget-usdt-perp-shadow-snapshot-45153758690` (artifact ID `14808350074`), containing JSON and CSV. The artifact was retrieved and inspected directly; no user download was required.
+- Collector timestamp: `2026-11-23T10:11:25.309973+00:00`.
+- Universe: Bitget `USDT-FUTURES`; public market data only; no account endpoints or trading actions.
+- Candidate count: 133 online perpetual crypto contracts passing the configured $500,000 24h turnover filter.
+- Depth was collected for the top 50 contracts by turnover. The workflow produced a timestamped JSON and CSV report.
+- The raw snapshot has no market-cap values: all `market_cap_usd` values are null and `market_cap_band` is `UNVERIFIED`. Market-cap classification below is a separate timestamped external-source join, not a Bitget field.
+
+### Selected futures rows from the snapshot
+
+Values below are from the official Bitget public collector snapshot at 10:11:25 UTC. Turnover is 24h quote turnover in USDT. Spread is in basis points. The 0.5% depth is visible order-book notional on each side within 0.5% of mid-price.
+
+| Contract | 24h turnover | Spread (bps) | 0.5% bid depth | 0.5% ask depth |
+|---|---:|---:|---:|---:|
+| ACEUSDT | $27.23m | 15.35 | $402 | $1,141 |
+| BLESSUSDT | $27.43m | 7.56 | $18,485 | $18,274 |
+| MMTUSDT | $20.98m | 13.09 | $31,794 | $28,088 |
+| ELSAUSDT | $22.41m | 10.41 | $20,875 | $13,908 |
+| DGAIUSDT | $11.52m | 8.95 | $19,932 | $15,563 |
+| WLDUSDT | $8.04m | 4.23 | $545,688 | $830,038 |
+
+**Interpretation:** turnover alone is misleading. ACE had $27.23m reported 24h turnover but only about $402 bid depth and $1,141 ask depth within 0.5%, plus a 15.35 bps spread. Do not treat it as liquid for meaningful market orders without much smaller sizing and repeated snapshots. BLESS, MMT, ELSA and DGAI also show shallow 0.5% depth compared with their turnover. WLD has materially deeper visible book in this snapshot, but still needs repeat sampling and fill simulation. A single snapshot cannot establish persistent liquidity.
+
+Other high-turnover examples in this same snapshot included BTCUSDT ($3.024bn), ETHUSDT ($941.29m), PIEVERSEUSDT ($100.65m), SOLUSDT ($95.38m), XRPUSDT ($66.65m), EVAAUSDT ($64.24m), ZECUSDT ($59.93m), HYPEUSDT ($31.05m), NEARUSDT ($28.85m), and PEPEUSDT ($17.51m). These are turnover ranks only; do not assign cap bands without identity-matched cap data.
+
+### Separate market-cap cross-check (2026-11-23)
+
+The following public market-cap pages were checked separately. Market caps can differ across providers and update times; the cap band is provisional and should be timestamped on each future run.
+
+| Band | Candidate | Market cap evidence | Bitget 24h futures turnover in snapshot | Initial decision |
+|---|---|---:|---:|---|
+| Below $1m | None confirmed | No eligible candidate identified from this pass | — | Leave empty; do not invent a contract |
+| $1m-$10m | ACE (Fusionist) | CoinMarketCap about $7.65m; CoinGecko same-day page about $9.06m | $27.23m | Cap fits, but reject from preferred liquidity shortlist for now: book depth is exceptionally thin and current news reported a bridge exploit/trading-pause concern. Recheck instrument and risk status before any future observation. |
+| $10m-$100m | BLESS | CoinGecko historical page about $29.72m | $27.43m | Candidate only; shallow book relative to turnover |
+| $10m-$100m | MMT (Momentum) | CoinGecko historical page about $44.46m | $20.98m | Candidate only; shallow book and funding/volatility need close review |
+| $10m-$100m | ELSA (HeyElsa) | CoinGecko historical page about $25.69m | $22.41m | Candidate only; shallow book relative to turnover |
+| $100m-$1bn | DGAI (DGrid AI) | CoinGecko historical page about $147.92m | $11.52m | Candidate only; shallow book |
+| $100m-$1bn | WLD (Worldcoin) | CoinGecko historical page about $899.60m | $8.04m | Stronger visible depth in this snapshot; still needs repeat observations |
+| Above $1bn (outside requested bands) | PIEVERSE | CoinGecko historical page about $1.011bn | $100.65m | Exclude from $100m-$1bn band; just above the upper boundary |
+
+Sources for cap checks:
+- ACE / Fusionist, CoinMarketCap: https://coinmarketcap.com/currencies/fusionist/
+- ACE / Fusionist, CoinGecko: https://www.coingecko.com/en/coins/fusionist
+- BLESS historical cap: https://www.coingecko.com/en/coins/bless/historical_data
+- MMT historical cap: https://www.coingecko.com/en/coins/momentum-2/historical_data
+- ELSA historical cap: https://www.coingecko.com/en/coins/elsa/historical_data
+- DGAI historical cap: https://www.coingecko.com/en/coins/dgrid-ai/historical_data
+- WLD historical cap: https://www.coingecko.com/en/coins/worldcoin/historical_data
+- PIEVERSE historical cap: https://www.coingecko.com/en/coins/pieverse/historical_data
+- Bitget public futures collector code and raw endpoints are recorded in Section 15; snapshot artifact came from the successful run linked above.
+
+### Current watchlist status and decision
+
+- The first successful snapshot validates the collector and gives a real, timestamped futures dataset.
+- It does **not** produce three approved coins in every band. Below $1m remains empty. The $1m-$10m band has ACE as a cap match but its visible depth is too thin for preferred execution research at ordinary notionals. The $10m-$100m band has three turnover/cap matches, but all have relatively shallow visible depth. The $100m-$1bn band has DGAI and WLD; WLD has the stronger visible depth of the two.
+- Do not force 12 picks. Keep the four bands distinct, preserve gaps, and prioritize execution quality rather than raw turnover.
+- Next research step: repeat public order-book snapshots at intervals for candidates; compare depth stability, spread, book walk for $100/$500/$1,000, and fees/funding. For ACE, verify the exploit/trading-pause situation before retaining it. Continue searching for alternatives that genuinely pass cap band, Bitget USDT perpetual status, $500,000 turnover and minimum depth/spread criteria.
+- No shadow trade has been opened or closed from this snapshot. It is a market-liquidity baseline only. No Demo or Live order was placed.
