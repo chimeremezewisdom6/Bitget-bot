@@ -610,3 +610,11 @@ Questions to investigate in later analysis:
 ### Validation state after these commits
 
 The validation workflow is triggered by pushes to `main`. Do not claim the expanded tests passed until the latest GitHub Actions validation run has completed successfully. The research session itself has not been started by these code changes; the user must manually dispatch **24-Hour Futures Research (Read Only)** with action `start`.
+
+### Additional collector safeguards (same update)
+
+- Added bounded retries with exponential backoff for transient Bitget HTTP/API failures.
+- Reuses one exit-book snapshot per symbol per collection cycle when several hypothetical sizes/horizons become due, reducing redundant requests.
+- Fetches public RSS commentary every third cycle (approximately 15 minutes), rather than every five-minute market cycle.
+- RSI overbought/oversold extremes are explicitly classified as watch-only conditions. They do not initiate shadow entries without a separate reversal-confirmation rule.
+- The latest successful validation recorded before these final small safeguards was run #85 (commit 72e48110). A newer validation is triggered by subsequent commits and must be checked before calling the final repository state fully validated.
