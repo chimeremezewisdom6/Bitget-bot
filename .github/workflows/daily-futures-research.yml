@@ -85,7 +85,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'status'
         run: python daily_research.py status
       - name: Check credential variables without exposing values
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
+        if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
         run: |
           python - <<'PY'
           import os
