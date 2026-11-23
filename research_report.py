@@ -97,7 +97,7 @@ def build_report(root=ROOT):
         "|---|---:|---:|",
         *[
             f"| {band.get('label', band['name'])} | "
-            f"{len(watchlist.get('groups', {}).get(band['name'], []))} | "
+            f"{len(watchlist.get('selected_groups', watchlist.get('groups', {})).get(band['name'], []))} | "
             f"{cap_observations.get(band['name'], 0)} |"
             for band in watchlist.get("activity_band_definitions", [])
         ],
