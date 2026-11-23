@@ -1,0 +1,13 @@
+{
+  "heartbeat_utc": "2026-11-23T21:37:04.011326+00:00",
+  "event": "push",
+  "action": "automatic_bootstrap",
+  "collection_outcome": "success",
+  "run_id": "45271362845",
+  "run_attempt": "1",
+  "workflow": "24-Hour Bitget-Only Futures Research (Read Only)",
+  "session_active": true,
+  "collector_cycles": 4,
+  "last_collection_utc": "2026-11-23T21:37:03.460444+00:00",
+  "expected_interval_minutes": 5
+}

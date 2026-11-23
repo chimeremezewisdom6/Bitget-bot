@@ -2,27 +2,42 @@
 
 - Session started UTC: 2026-11-23T11:29:36.710531+00:00
 - Session ended UTC: not recorded
-- Collector cycles: 3
-- Distinct symbols observed: 202
+- Collector cycles: 4
+- Distinct symbols observed: 204
 - Current Bitget turnover-watchlist contracts: 11
-- Market observation rows: 600
-- Public commentary items: 50
-- Candidate signals eligible for entry evaluation: 111
-- Watch-only RSI conditions (no entry): 178
-- Two-snapshot order-book shadow outcomes: 339
+- Market observation rows: 800
+- Candidate signals eligible for entry evaluation: 166
+- Watch-only RSI conditions (no entry): 318
+- Two-snapshot order-book shadow outcomes: 999
 - Legacy ticker-reference outcomes: 0
 - Outcomes unavailable: 0
 - Collection error records: 3
-- 60-minute same-colour candle checks: 600
+- 60-minute same-colour candle checks: 800
 - Checks meeting 40+ same-colour candles: 0
 
 ## Previous 24-hour trend-start candle-colour backtest
 
-- Symbols with completed historical backtests: 200
-- Breakout-based trend starts found: 3125 (LONG: 1411; SHORT: 1714)
-- Average direction-matching candle share in first hour: 32.1%
+- Symbols with completed historical backtests: 203
+- Breakout-based trend starts found: 3171 (LONG: 1428; SHORT: 1743)
+- Average direction-matching candle share in first hour: 31.9%
 
 A trend start is defined as a fully closed 1m candle closing above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT). The first hour is the breakout candle plus the next 59 fully closed 1m candles. Green, red and doji candles are counted separately. This is a consistent breakout proxy, not a universal definition of every trend.
+
+## Early-trend candle windows (separate experiment)
+
+- Symbols with early-window backtests: 200
+- Complete trend events with early-window measurements: 3065
+
+For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candles. The continuation column is the direction-adjusted price change from that window's closing price to the end of the first hour. Positive means price continued in the trend direction; negative means it reversed. The 60-minute row has no candles remaining after its close, so its continuation-to-hour-end is not scored and is excluded from that metric. These are descriptive historical samples, not proof that early candle colour predicts future returns.
+
+| First minutes | Events with window data | Avg direction-matching candles % | Positive continuation (scored events) | Avg continuation after window % |
+|---:|---:|---:|---:|---:|
+| 5 | 3065 | 44.9% | 1540/3065 (50.2%) | 0.0336% |
+| 10 | 3065 | 37.8% | 1554/3065 (50.7%) | 0.0624% |
+| 15 | 3065 | 35.4% | 1562/3065 (51.0%) | 0.0728% |
+| 20 | 3065 | 34.5% | 1529/3065 (49.9%) | 0.0499% |
+| 30 | 3065 | 33.5% | 1523/3065 (49.7%) | 0.0509% |
+| 60 | 3065 | 32.4% | — | — |
 
 | Symbol | Direction | Trend start (UTC) | Green | Red | Doji | Matching candles | Matching % | First-hour follow-through % |
 |---|---|---|---:|---:|---:|---:|---:|---:|
@@ -133,229 +148,231 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 
 | Symbol | Checks recorded | Latest colour | Same-colour count | Qualified |
 |---|---:|---|---:|---|
-| 1000BONKUSDT | 3 | GREEN | 13 | No |
-| AAVEUSDT | 3 | RED | 28 | No |
-| ACEUSDT | 3 | RED | 31 | No |
-| ADAUSDT | 3 | GREEN | 25 | No |
-| AEONUSDT | 3 | GREEN | 10 | No |
-| AEROUSDT | 3 | GREEN | 22 | No |
-| AIOUSDT | 3 | RED | 11 | No |
-| AKEUSDT | 3 | GREEN | 32 | No |
-| ALGOUSDT | 3 | RED | 27 | No |
-| ALLOUSDT | 3 | GREEN | 24 | No |
-| AMDLUSDT | 3 | RED | 27 | No |
-| APRUSDT | 3 | GREEN | 32 | No |
-| APTUSDT | 3 | GREEN | 28 | No |
-| ARBUSDT | 3 | GREEN | 32 | No |
-| ARIAUSDT | 3 | RED | 32 | No |
-| ARKMUSDT | 3 | GREEN | 9 | No |
-| ARUSDT | 3 | GREEN | 13 | No |
-| ASTERUSDT | 3 | GREEN | 24 | No |
-| ATOMUSDT | 3 | GREEN | 26 | No |
-| AVAXUSDT | 3 | RED | 29 | No |
-| AXISUSDT | 3 | GREEN | 29 | No |
-| BANKUSDT | 3 | RED | 12 | No |
-| BARDUSDT | 3 | RED | 18 | No |
-| BATUSDT | 3 | GREEN | 13 | No |
-| BCHUSDT | 3 | GREEN | 31 | No |
-| BEAMUSDT | 3 | RED | 9 | No |
-| BEATUSDT | 3 | RED | 27 | No |
-| BERAUSDT | 3 | GREEN | 12 | No |
-| BGBUSDT | 3 | RED | 15 | No |
-| BLESSUSDT | 3 | RED | 35 | No |
-| BLURUSDT | 3 | RED | 9 | No |
-| BNBUSDT | 3 | GREEN | 32 | No |
-| BOMEUSDT | 3 | RED | 17 | No |
-| BREVUSDT | 3 | GREEN | 12 | No |
-| BRUSDT | 3 | GREEN | 9 | No |
-| BTCUSDT | 3 | GREEN | 31 | No |
-| BTWUSDT | 3 | RED | 33 | No |
-| CAPUSDT | 3 | GREEN | 32 | No |
-| CFGUSDT | 3 | GREEN | 15 | No |
-| CHIPUSDT | 3 | RED | 27 | No |
-| CLSUSDT | 3 | RED | 27 | No |
-| COOKIEUSDT | 2 | GREEN | 14 | No |
-| CPUSDT | 3 | RED | 13 | No |
-| CROSSUSDT | 3 | RED | 27 | No |
-| CRVUSDT | 3 | RED | 22 | No |
-| CSTOCKUSDT | 3 | GREEN | 17 | No |
-| CTUSDT | 3 | RED | 25 | No |
-| CYBERUSDT | 3 | RED | 28 | No |
-| CYSUSDT | 3 | GREEN | 32 | No |
-| DASHUSDT | 3 | RED | 18 | No |
-| DEXEUSDT | 3 | RED | 10 | No |
-| DGAIUSDT | 3 | GREEN | 32 | No |
-| DOGEUSDT | 3 | GREEN | 32 | No |
+| 1000BONKUSDT | 4 | RED | 10 | No |
+| AAVEUSDT | 4 | GREEN | 28 | No |
+| ACEUSDT | 4 | GREEN | 25 | No |
+| ADAUSDT | 4 | GREEN | 25 | No |
+| AEONUSDT | 4 | RED | 9 | No |
+| AEROUSDT | 4 | GREEN | 19 | No |
+| AIOUSDT | 4 | GREEN | 9 | No |
+| AKEUSDT | 4 | RED | 34 | No |
+| ALGOUSDT | 4 | RED | 29 | No |
+| ALLOUSDT | 4 | GREEN | 18 | No |
+| AMDLUSDT | 4 | GREEN | 21 | No |
+| APRUSDT | 4 | GREEN | 31 | No |
+| APTUSDT | 4 | GREEN | 25 | No |
+| ARBUSDT | 4 | GREEN | 29 | No |
+| ARIAUSDT | 4 | GREEN | 32 | No |
+| ARKMUSDT | 4 | RED | 4 | No |
+| ARUSDT | 4 | GREEN | 14 | No |
+| ASTERUSDT | 4 | GREEN | 24 | No |
+| ATOMUSDT | 4 | GREEN | 25 | No |
+| AVAXUSDT | 4 | RED | 28 | No |
+| AXISUSDT | 4 | GREEN | 22 | No |
+| BANKUSDT | 4 | RED | 12 | No |
+| BARDUSDT | 4 | RED | 11 | No |
+| BATUSDT | 4 | RED | 14 | No |
+| BCHUSDT | 4 | GREEN | 30 | No |
+| BEAMUSDT | 4 | GREEN | 7 | No |
+| BEATUSDT | 4 | GREEN | 30 | No |
+| BERAUSDT | 4 | GREEN | 9 | No |
+| BGBUSDT | 4 | GREEN | 6 | No |
+| BLESSUSDT | 4 | RED | 33 | No |
+| BLURUSDT | 4 | GREEN | 9 | No |
+| BNBUSDT | 4 | GREEN | 32 | No |
+| BOMEUSDT | 4 | RED | 11 | No |
+| BREVUSDT | 4 | RED | 20 | No |
+| BRUSDT | 4 | GREEN | 12 | No |
+| BTCUSDT | 4 | GREEN | 35 | No |
+| BTWUSDT | 4 | RED | 30 | No |
+| CAPUSDT | 4 | RED | 30 | No |
+| CFGUSDT | 4 | GREEN | 21 | No |
+| CHIPUSDT | 4 | GREEN | 18 | No |
+| CLSUSDT | 4 | RED | 17 | No |
+| COOKIEUSDT | 3 | RED | 12 | No |
+| CPUSDT | 4 | GREEN | 13 | No |
+| CROSSUSDT | 4 | RED | 26 | No |
+| CRVUSDT | 4 | GREEN | 19 | No |
+| CSTOCKUSDT | 4 | GREEN | 12 | No |
+| CTUSDT | 4 | GREEN | 26 | No |
+| CYBERUSDT | 4 | GREEN | 20 | No |
+| CYSUSDT | 4 | RED | 31 | No |
+| DASHUSDT | 4 | RED | 12 | No |
+| DEXEUSDT | 4 | RED | 11 | No |
+| DGAIUSDT | 4 | RED | 34 | No |
+| DOGEUSDT | 4 | RED | 29 | No |
 | DOODUSDT | 3 | GREEN | 7 | No |
-| DOSUSDT | 3 | GREEN | 17 | No |
-| DOTUSDT | 3 | GREEN | 16 | No |
-| EDGEUSDT | 3 | RED | 16 | No |
-| ELICEUSDT | 3 | GREEN | 19 | No |
-| ELSAUSDT | 3 | RED | 34 | No |
-| ENAUSDT | 3 | RED | 31 | No |
-| ENSOUSDT | 3 | RED | 29 | No |
-| ENSUSDT | 3 | GREEN | 16 | No |
-| ERAUSDT | 3 | RED | 17 | No |
-| ETCUSDT | 3 | GREEN | 28 | No |
-| ETHFIUSDT | 3 | RED | 24 | No |
-| ETHUSDT | 3 | GREEN | 31 | No |
+| DOSUSDT | 4 | RED | 17 | No |
+| DOTUSDT | 4 | GREEN | 12 | No |
+| EDGEUSDT | 4 | RED | 9 | No |
+| EIGENUSDT | 1 | RED | 19 | No |
+| ELICEUSDT | 4 | GREEN | 6 | No |
+| ELSAUSDT | 4 | GREEN | 30 | No |
+| ENAUSDT | 4 | RED | 30 | No |
+| ENSOUSDT | 4 | RED | 26 | No |
+| ENSUSDT | 4 | RED | 16 | No |
+| ERAUSDT | 4 | RED | 15 | No |
+| ETCUSDT | 4 | GREEN | 22 | No |
+| ETHFIUSDT | 4 | GREEN | 21 | No |
+| ETHUSDT | 4 | RED | 34 | No |
 | EURUSDUSDT | 1 | GREEN | 4 | No |
-| EVAAUSDT | 3 | GREEN | 32 | No |
-| FARTCOINUSDT | 3 | GREEN | 33 | No |
-| FCXUSDT | 3 | GREEN | 5 | No |
-| FETUSDT | 3 | GREEN | 20 | No |
-| FILUSDT | 3 | GREEN | 30 | No |
-| FLOCKUSDT | 3 | RED | 18 | No |
-| FLOKIUSDT | 3 | RED | 17 | No |
+| EVAAUSDT | 4 | RED | 31 | No |
+| FARTCOINUSDT | 4 | RED | 29 | No |
+| FCXUSDT | 4 | GREEN | 3 | No |
+| FETUSDT | 4 | GREEN | 20 | No |
+| FILUSDT | 4 | RED | 29 | No |
+| FLOCKUSDT | 4 | RED | 21 | No |
+| FLOKIUSDT | 4 | GREEN | 11 | No |
 | FLUIDUSDT | 3 | RED | 12 | No |
-| FOLKSUSDT | 3 | GREEN | 6 | No |
-| GALAUSDT | 3 | GREEN | 19 | No |
-| GPSUSDT | 3 | GREEN | 6 | No |
-| GRAMUSDT | 3 | RED | 15 | No |
-| GRASSUSDT | 3 | GREEN | 24 | No |
-| GRTUSDT | 3 | RED | 5 | No |
-| GRVTUSDT | 3 | GREEN | 19 | No |
-| GWEIUSDT | 3 | RED | 12 | No |
-| HBARUSDT | 3 | GREEN | 30 | No |
-| HUMAUSDT | 3 | RED | 12 | No |
-| HUSDT | 3 | RED | 28 | No |
-| HYPEUSDT | 3 | RED | 31 | No |
-| ICNTUSDT | 3 | GREEN | 30 | No |
-| ICPUSDT | 3 | GREEN | 26 | No |
-| IDOLUSDT | 3 | RED | 30 | No |
-| INITUSDT | 3 | RED | 38 | No |
-| INJUSDT | 3 | GREEN | 30 | No |
-| INXUSDT | 3 | GREEN | 30 | No |
-| IOSTUSDT | 3 | GREEN | 5 | No |
-| IRYSUSDT | 3 | GREEN | 28 | No |
-| JCTUSDT | 3 | GREEN | 25 | No |
-| JTOUSDT | 3 | GREEN | 13 | No |
-| JUPUSDT | 3 | GREEN | 25 | No |
-| KAITOUSDT | 3 | RED | 14 | No |
-| KASUSDT | 3 | GREEN | 20 | No |
-| KAVAUSDT | 3 | RED | 12 | No |
-| KERNELUSDT | 3 | RED | 19 | No |
-| KGENUSDT | 3 | RED | 21 | No |
-| KITEUSDT | 3 | GREEN | 20 | No |
-| KUAISHOUUSDT | 3 | GREEN | 4 | No |
-| LABUSDT | 3 | GREEN | 15 | No |
-| LAUSDT | 2 | RED | 13 | No |
-| LDOUSDT | 3 | GREEN | 16 | No |
-| LINKUSDT | 3 | GREEN | 29 | No |
-| LISTAUSDT | 3 | GREEN | 29 | No |
-| LITUSDT | 3 | GREEN | 29 | No |
-| LSKUSDT | 3 | GREEN | 15 | No |
-| LTCUSDT | 3 | GREEN | 30 | No |
-| LUNCUSDT | 3 | GREEN | 17 | No |
-| MAGMAUSDT | 3 | RED | 23 | No |
-| MARSCOINUSDT | 3 | GREEN | 13 | No |
-| MEGAUSDT | 3 | GREEN | 20 | No |
-| MELANIAUSDT | 3 | GREEN | 8 | No |
-| METUSDT | 3 | GREEN | 21 | No |
-| MMTUSDT | 3 | GREEN | 33 | No |
-| MONUSDT | 3 | GREEN | 19 | No |
-| MORPHOUSDT | 3 | GREEN | 16 | No |
-| MSUSDT | 3 | GREEN | 3 | No |
-| MUBARAKUSDT | 3 | GREEN | 30 | No |
-| MYXUSDT | 3 | GREEN | 13 | No |
-| NAORISUSDT | 3 | RED | 20 | No |
-| NEARUSDT | 3 | GREEN | 30 | No |
-| NEMUSDT | 3 | GREEN | 3 | No |
-| NIGHTUSDT | 3 | GREEN | 23 | No |
-| NILUSDT | 3 | RED | 16 | No |
-| NUUSDT | 3 | GREEN | 10 | No |
-| ONDOUSDT | 3 | GREEN | 29 | No |
-| ONEUSDT | 3 | RED | 33 | No |
-| OPGUSDT | 2 | RED | 6 | No |
-| OPUSDT | 3 | GREEN | 14 | No |
-| ORCAUSDT | 3 | RED | 11 | No |
-| ORDIUSDT | 3 | RED | 19 | No |
-| PENDLEUSDT | 3 | GREEN | 21 | No |
-| PENGUUSDT | 3 | GREEN | 22 | No |
-| PEPEUSDT | 3 | RED | 30 | No |
-| PHAUSDT | 3 | GREEN | 17 | No |
-| PIEVERSEUSDT | 3 | GREEN | 32 | No |
-| PIPPINUSDT | 3 | RED | 19 | No |
-| PIUSDT | 3 | GREEN | 26 | No |
-| PLUMEUSDT | 3 | GREEN | 12 | No |
-| POLUSDT | 3 | GREEN | 24 | No |
-| PONSUSDT | 3 | RED | 30 | No |
-| POWERUSDT | 3 | RED | 20 | No |
-| PROMUSDT | 3 | RED | 33 | No |
-| PUMPUSDT | 3 | GREEN | 30 | No |
-| PYTHUSDT | 3 | RED | 24 | No |
-| QNTUSDT | 3 | GREEN | 30 | No |
-| QUSDT | 3 | RED | 17 | No |
-| RAREUSDT | 3 | RED | 14 | No |
-| RAVEUSDT | 3 | RED | 19 | No |
-| RAYUSDT | 3 | GREEN | 18 | No |
-| RENDERUSDT | 3 | GREEN | 28 | No |
-| REUSDT | 3 | GREEN | 12 | No |
-| RUNEUSDT | 3 | RED | 14 | No |
-| SANDUSDT | 3 | GREEN | 29 | No |
-| SAPIENUSDT | 3 | RED | 8 | No |
-| SEIUSDT | 3 | RED | 26 | No |
-| SENTUSDT | 3 | GREEN | 7 | No |
-| SHIBUSDT | 3 | GREEN | 25 | No |
-| SKYAIUSDT | 3 | RED | 24 | No |
-| SKYUSDT | 3 | RED | 26 | No |
-| SOLUSDT | 3 | GREEN | 33 | No |
-| SOONUSDT | 3 | GREEN | 8 | No |
-| SPKUSDT | 3 | GREEN | 8 | No |
-| SPXUSDT | 2 | GREEN | 7 | No |
-| STRKUSDT | 3 | GREEN | 26 | No |
-| STXUSDT | 3 | RED | 16 | No |
-| SUIUSDT | 3 | GREEN | 32 | No |
-| TAOUSDT | 3 | GREEN | 32 | No |
-| TIAUSDT | 3 | GREEN | 27 | No |
-| TRUMPUSDT | 3 | GREEN | 33 | No |
-| TRXUSDT | 3 | RED | 18 | No |
-| TUTUSDT | 3 | RED | 7 | No |
-| UAIUSDT | 3 | GREEN | 24 | No |
+| FOLKSUSDT | 4 | GREEN | 5 | No |
+| GALAUSDT | 4 | GREEN | 12 | No |
+| GPSUSDT | 4 | GREEN | 6 | No |
+| GRAMUSDT | 4 | GREEN | 26 | No |
+| GRASSUSDT | 4 | GREEN | 18 | No |
+| GRTUSDT | 4 | RED | 7 | No |
+| GRVTUSDT | 4 | RED | 25 | No |
+| GWEIUSDT | 4 | RED | 7 | No |
+| HBARUSDT | 4 | RED | 26 | No |
+| HUMAUSDT | 4 | GREEN | 12 | No |
+| HUSDT | 4 | RED | 21 | No |
+| HYPEUSDT | 4 | GREEN | 34 | No |
+| ICNTUSDT | 4 | GREEN | 26 | No |
+| ICPUSDT | 4 | RED | 25 | No |
+| IDOLUSDT | 4 | RED | 31 | No |
+| INITUSDT | 4 | GREEN | 33 | No |
+| INJUSDT | 4 | RED | 32 | No |
+| INXUSDT | 4 | GREEN | 30 | No |
+| IOSTUSDT | 4 | GREEN | 9 | No |
+| IRYSUSDT | 4 | RED | 20 | No |
+| JCTUSDT | 4 | RED | 22 | No |
+| JTOUSDT | 4 | GREEN | 12 | No |
+| JUPUSDT | 4 | RED | 25 | No |
+| KAITOUSDT | 4 | RED | 16 | No |
+| KASUSDT | 4 | RED | 14 | No |
+| KAVAUSDT | 4 | RED | 16 | No |
+| KERNELUSDT | 4 | RED | 22 | No |
+| KGENUSDT | 4 | RED | 22 | No |
+| KITEUSDT | 4 | GREEN | 10 | No |
+| KUAISHOUUSDT | 4 | RED | 5 | No |
+| LABUSDT | 4 | RED | 17 | No |
+| LAUSDT | 3 | RED | 13 | No |
+| LDOUSDT | 4 | RED | 13 | No |
+| LINKUSDT | 4 | GREEN | 30 | No |
+| LISTAUSDT | 4 | GREEN | 23 | No |
+| LITUSDT | 4 | RED | 27 | No |
+| LSKUSDT | 4 | GREEN | 23 | No |
+| LTCUSDT | 4 | RED | 30 | No |
+| LUNCUSDT | 4 | GREEN | 16 | No |
+| MAGMAUSDT | 4 | GREEN | 23 | No |
+| MARSCOINUSDT | 4 | RED | 15 | No |
+| MEGAUSDT | 4 | RED | 16 | No |
+| MELANIAUSDT | 4 | GREEN | 3 | No |
+| METUSDT | 4 | GREEN | 12 | No |
+| MMTUSDT | 4 | GREEN | 30 | No |
+| MONUSDT | 4 | RED | 18 | No |
+| MORPHOUSDT | 4 | GREEN | 17 | No |
+| MSUSDT | 4 | RED | 9 | No |
+| MUBARAKUSDT | 4 | GREEN | 29 | No |
+| MYXUSDT | 4 | GREEN | 10 | No |
+| NAORISUSDT | 4 | RED | 19 | No |
+| NEARUSDT | 4 | RED | 30 | No |
+| NEMUSDT | 4 | GREEN | 5 | No |
+| NIGHTUSDT | 4 | RED | 20 | No |
+| NILUSDT | 4 | GREEN | 9 | No |
+| NUUSDT | 4 | GREEN | 7 | No |
+| ONDOUSDT | 4 | RED | 27 | No |
+| ONEUSDT | 4 | GREEN | 29 | No |
+| OPGUSDT | 3 | RED | 7 | No |
+| OPUSDT | 4 | RED | 12 | No |
+| ORCAUSDT | 4 | GREEN | 10 | No |
+| ORDIUSDT | 4 | RED | 19 | No |
+| PENDLEUSDT | 4 | RED | 20 | No |
+| PENGUUSDT | 4 | GREEN | 23 | No |
+| PEOPLEUSDT | 1 | RED | 18 | No |
+| PEPEUSDT | 4 | GREEN | 30 | No |
+| PHAUSDT | 4 | GREEN | 18 | No |
+| PIEVERSEUSDT | 4 | GREEN | 30 | No |
+| PIPPINUSDT | 4 | RED | 21 | No |
+| PIUSDT | 4 | GREEN | 23 | No |
+| PLUMEUSDT | 4 | RED | 12 | No |
+| POLUSDT | 4 | GREEN | 17 | No |
+| PONSUSDT | 4 | RED | 30 | No |
+| POWERUSDT | 4 | GREEN | 20 | No |
+| PROMUSDT | 4 | GREEN | 34 | No |
+| PUMPUSDT | 4 | RED | 31 | No |
+| PYTHUSDT | 4 | GREEN | 23 | No |
+| QNTUSDT | 4 | RED | 31 | No |
+| QUSDT | 4 | RED | 20 | No |
+| RAREUSDT | 4 | GREEN | 20 | No |
+| RAVEUSDT | 4 | RED | 14 | No |
+| RAYUSDT | 4 | GREEN | 16 | No |
+| RENDERUSDT | 4 | GREEN | 28 | No |
+| REUSDT | 4 | RED | 15 | No |
+| RUNEUSDT | 4 | RED | 17 | No |
+| SANDUSDT | 4 | GREEN | 27 | No |
+| SAPIENUSDT | 4 | RED | 9 | No |
+| SEIUSDT | 4 | RED | 27 | No |
+| SENTUSDT | 4 | GREEN | 13 | No |
+| SHIBUSDT | 4 | GREEN | 24 | No |
+| SKYAIUSDT | 4 | GREEN | 20 | No |
+| SKYUSDT | 4 | RED | 22 | No |
+| SOLUSDT | 4 | RED | 32 | No |
+| SOONUSDT | 4 | RED | 4 | No |
+| SPKUSDT | 4 | GREEN | 8 | No |
+| SPXUSDT | 3 | GREEN | 7 | No |
+| STRKUSDT | 4 | RED | 30 | No |
+| STXUSDT | 4 | RED | 14 | No |
+| SUIUSDT | 4 | RED | 28 | No |
+| TAOUSDT | 4 | GREEN | 32 | No |
+| TIAUSDT | 4 | RED | 30 | No |
+| TRUMPUSDT | 4 | RED | 29 | No |
+| TRXUSDT | 4 | GREEN | 16 | No |
+| TUTUSDT | 4 | GREEN | 4 | No |
+| UAIUSDT | 4 | GREEN | 23 | No |
 | UBUSDT | 3 | GREEN | 15 | No |
-| UNITASUSDT | 3 | GREEN | 15 | No |
-| UNIUSDT | 3 | GREEN | 32 | No |
-| USDBRLUSDT | 3 | GREEN | 18 | No |
-| USDJPYUSDT | 3 | RED | 6 | No |
-| USELESSUSDT | 3 | GREEN | 26 | No |
-| USUALUSDT | 3 | RED | 10 | No |
-| VELVETUSDT | 3 | GREEN | 27 | No |
-| VIRTUALUSDT | 3 | GREEN | 25 | No |
-| VVVUSDT | 3 | RED | 29 | No |
-| WIFUSDT | 3 | GREEN | 21 | No |
-| WLDUSDT | 3 | GREEN | 29 | No |
-| WLFIUSDT | 3 | RED | 12 | No |
-| XLMUSDT | 3 | GREEN | 31 | No |
-| XMRUSDT | 3 | RED | 33 | No |
-| XPLUSDT | 3 | GREEN | 25 | No |
-| XRPUSDT | 3 | GREEN | 28 | No |
-| XVGUSDT | 3 | RED | 15 | No |
-| ZECUSDT | 3 | RED | 32 | No |
-| ZESTUSDT | 3 | GREEN | 9 | No |
-| ZROUSDT | 3 | RED | 32 | No |
-| 牛来USDT | 3 | GREEN | 10 | No |
-| 龙虾USDT | 3 | GREEN | 16 | No |
+| UNITASUSDT | 4 | GREEN | 17 | No |
+| UNIUSDT | 4 | RED | 30 | No |
+| USDBRLUSDT | 4 | GREEN | 17 | No |
+| USDJPYUSDT | 4 | GREEN | 4 | No |
+| USELESSUSDT | 4 | GREEN | 22 | No |
+| USUALUSDT | 4 | RED | 12 | No |
+| VELVETUSDT | 4 | RED | 24 | No |
+| VIRTUALUSDT | 4 | GREEN | 24 | No |
+| VVVUSDT | 4 | RED | 29 | No |
+| WIFUSDT | 4 | GREEN | 17 | No |
+| WLDUSDT | 4 | GREEN | 25 | No |
+| WLFIUSDT | 4 | RED | 15 | No |
+| XLMUSDT | 4 | GREEN | 30 | No |
+| XMRUSDT | 4 | GREEN | 34 | No |
+| XPLUSDT | 4 | RED | 26 | No |
+| XRPUSDT | 4 | RED | 32 | No |
+| XVGUSDT | 4 | GREEN | 15 | No |
+| ZECUSDT | 4 | GREEN | 31 | No |
+| ZESTUSDT | 4 | RED | 9 | No |
+| ZROUSDT | 4 | RED | 29 | No |
+| 牛来USDT | 4 | GREEN | 9 | No |
+| 龙虾USDT | 4 | GREEN | 14 | No |
 
 ## Bitget futures-turnover activity-group coverage
 
 | Group | Watchlist candidates | Observation rows |
 |---|---:|---:|
-| Under $1m 24h futures turnover | 3 | 9 |
-| $1m–$10m 24h futures turnover | 3 | 9 |
-| $10m–$100m 24h futures turnover | 3 | 9 |
-| $100m+ 24h futures turnover | 2 | 6 |
+| Under $1m 24h futures turnover | 3 | 12 |
+| $1m–$10m 24h futures turnover | 3 | 12 |
+| $10m–$100m 24h futures turnover | 3 | 12 |
+| $100m+ 24h futures turnover | 2 | 8 |
 
 ## Profit-versus-loss summary (hypothetical book-walk outcomes)
 
-- Positive outcomes: 213; negative outcomes: 126; flat: 0
-- Win rate among scored outcomes: 62.8%
-- Gross positive outcomes: 1433.892151 USDT
-- Gross negative outcomes: 444.619109 USDT
-- Total estimated net after trading fees: 989.273042 USDT
-- Profit factor (gross gains / gross losses): 3.225
-- Average winning outcome: 6.731888 USDT
-- Average losing outcome: -3.528723 USDT
-- Mean estimated net result: 56.55 bps
+- Positive outcomes: 468; negative outcomes: 531; flat: 0
+- Win rate among scored outcomes: 46.8%
+- Gross positive outcomes: 2464.213630 USDT
+- Gross negative outcomes: 2059.340224 USDT
+- Total estimated net after trading fees: 404.873406 USDT
+- Profit factor (gross gains / gross losses): 1.197
+- Average winning outcome: 5.265414 USDT
+- Average losing outcome: -3.878230 USDT
+- Mean estimated net result: 9.15 bps
 
 These estimates walk the visible entry book and a later visible exit book, deducting the authenticated account-specific Bitget taker fee when available, otherwise instrument metadata; missing fees are not assumed to be zero. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. The same signal is evaluated at multiple sizes and horizons, so these rows are correlated and must not be treated as independent trades. A completed simulation is not proof of profitability.
 
@@ -365,53 +382,18 @@ These estimates walk the visible entry book and a later visible exit book, deduc
 
 | Strategy | Outcomes | Positive | Negative | Mean estimated net (bps) |
 |---|---:|---:|---:|---:|
-| breakdown | 36 | 27 | 9 | 57.91 |
-| breakout | 12 | 9 | 3 | 443.72 |
-| ema_volume | 291 | 177 | 114 | 40.42 |
+| breakdown | 216 | 99 | 117 | -14.02 |
+| breakout | 18 | 9 | 9 | 291.81 |
+| ema_volume | 765 | 360 | 405 | 9.04 |
 
-## Public trader and community commentary (unverified)
+## Legacy Trader discussion records
 
-- https://www.coindesk.com/arc/outboundfeeds/rss/: 25 items
-- https://cointelegraph.com/rss: 25 items
-
-### Recent collected posts
-
-- ECB seeks industry partners for tokenized deposits, securities experiments — [source](https://cointelegraph.com/news/ecb-tokenized-deposits-securities-experiments-appia?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Sat, 21 Nov 2026 09:48:56 +0000
-- Chainflip confirms $12M hack, offers attacker 10% bounty — [source](https://cointelegraph.com/news/chainflip-12m-crypto-hack-10-percent-bounty?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Sun, 22 Nov 2026 05:28:43 +0000
-- South Korean exchanges halt CYBER transfers amid suspected bridge exploit — [source](https://cointelegraph.com/news/upbit-bithumb-suspend-cyber-transfers-bridge-exploit?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Sun, 22 Nov 2026 07:24:05 +0000
-- Bitcoin briefly drops to $17K on Kraken, exchange upholds trades — [source](https://cointelegraph.com/news/bitcoin-17k-kraken-canadian-dollar-market-trades-stand?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Sun, 22 Nov 2026 09:33:06 +0000
-- The future of onchain FX could start with users, not institutional liquidity — [source](https://cointelegraph.com/opinion/future-onchain-fx-could-start-with-users-not-institutional-liquidity?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Sun, 22 Nov 2026 14:30:00 +0000
-- Will Bitcoin’s big rebound hold? More tampered Ledgers found: Hodler’s Digest — [source](https://cointelegraph.com/magazine/will-bitcoins-big-rebound-hold-more-tampered-ledgers-found-hodlers-digest?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Sun, 22 Nov 2026 22:47:09 +0000
-- Half of wallets on Trump’s dinner list got tokens from non-US exchanges — [source](https://cointelegraph.com/news/half-wallets-trumps-dinner-list-got-tokens-from-non-us-exchanges?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 00:53:49 +0000
-- Billionaire Bill Ackman warns Fed will make a rate ‘mistake’ in December — [source](https://cointelegraph.com/markets/billionaire-bill-ackman-warns-fed-rate-hikes-could-trigger-recession?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 02:47:39 +0000
-- Trump renews call for Nvidia to rehire Jensen Huang as CEO — [source](https://cointelegraph.com/news/trump-renews-call-for-nvidia-to-rehire-jensen-huang-as-ceo?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 03:37:20 +0000
-- Bitcoin ETFs shed $1.8B in third-largest weekly outflow — [source](https://cointelegraph.com/markets/bitcoin-etfs-third-largest-weekly-outflows-1-8-billion?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 08:08:52 +0000
-- ‘MoldyRoost’ ads can steal crypto wallet recovery phrases from iPhones — [source](https://cointelegraph.com/news/moldyroost-malware-drain-iphone-wallets-one-tap?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 09:05:44 +0000
-- BTC price gains 12% from $55K: Three things to know in Bitcoin this week — [source](https://cointelegraph.com/markets/btc-price-stock-futures-rebound-three-things-know-bitcoin-this-week?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 11:20:57 +0000
-- ECB to let banks pledge more tokenized securities as collateral — [source](https://cointelegraph.com/news/ecb-expands-eurosystem-collateral-tokenized-securities?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 11:49:38 +0000
-- Critics of Netflix’s FTX drama point to Obama’s producer credit — [source](https://cointelegraph.com/news/netflix-ftx-scrutiny-obama-production-ties?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 13:15:03 +0000
-- AI agents are using credit cards. Where does that leave crypto? — [source](https://cointelegraph.com/magazine/ai-agents-are-using-credit-cards-where-does-that-leave-crypto?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 13:30:00 +0000
-- Strategy buys 457 Bitcoin, spends $212M on preferred share buybacks — [source](https://cointelegraph.com/news/strategy-buy-457-bitcoin-btc-treasury-losses?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 13:31:01 +0000
-- Trump-linked American Bitcoin secures $150M credit line from FalconX — [source](https://cointelegraph.com/news/trumps-american-bitcoin-rises-150m-credit-falconx?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 13:44:16 +0000
-- OKX, ICE launch 113 tokenized assets despite issuer objections — [source](https://cointelegraph.com/news/okxice-launch-113-tokenized-assets-objections?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 14:00:00 +0000
-- Here’s what happened in crypto today — [source](https://cointelegraph.com/news/what-happened-in-crypto-today?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 14:06:36 +0000
-- Nvidia reinstates Jensen Huang as CEO amid ongoing intelligence probe — [source](https://cointelegraph.com/news/nvidia-reinstates-jensen-huang-ceo-intelligence-probe?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 14:47:00 +0000
-- How market depth shapes the price of a weekend Bitcoin sale — [source](https://cointelegraph.com/news/how-market-depth-shapes-the-price-of-a-weekend-bitcoin-sale?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 15:57:55 +0000
-- Cross River Bank enters Bitcoin-backed lending with $250K loans — [source](https://cointelegraph.com/news/cross-river-bank-bitcoin-backed-lending-250k-loans?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 16:23:37 +0000
-- Bitcoin rebounds 17% from $55K lows as Nvidia rally sparks $500M crypto liquidations — [source](https://cointelegraph.com/markets/bitcoin-rebounds-lows-nvidia-rally-sparks-500m-crypto-liquidations?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 16:51:17 +0000
-- Cuomo says rivals urged companies to opt out of OKXICE tokenized stocks — [source](https://cointelegraph.com/news/cuomo-rivals-urged-companies-reject-okx-ice-tokenized-stocks?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 17:42:18 +0000
-- Base makes quantum security a 2027 priority as regulators warn of risks — [source](https://cointelegraph.com/interview/base-quantum-security-2027-priority-regulators-warn-risks?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound) — Mon, 23 Nov 2026 19:16:46 +0000
-- Bitcoin's quantum security challenge extends to bridges, custodians and millions of coins — [source](https://www.coindesk.com/tech/2026/11/22/bitcoin-s-quantum-security-challenge-extends-to-bridges-custodians-and-millions-of-coins) — Sun, 22 Nov 2026 14:00:00 +0000
-- More on the pending oversight hearings: State of Crypto — [source](https://www.coindesk.com/policy/2026/11/22/more-on-the-pending-oversight-hearings-state-of-crypto) — Sun, 22 Nov 2026 19:30:00 +0000
-- Market rout kills 50 basis points December Fed rate hike bets — [source](https://www.coindesk.com/markets/2026/11/23/market-rout-kills-50-basis-points-december-fed-rate-hike-bets) — Mon, 23 Nov 2026 04:45:47 +0000
-- Bitcoin sold for $17,000 on Kraken's Canadian dollar market, and the trades stand — [source](https://www.coindesk.com/markets/2026/11/23/bitcoin-sold-for-usd17-000-on-kraken-s-canadian-dollar-market-and-the-trades-stand) — Mon, 23 Nov 2026 05:42:22 +0000
-- Cardano holders are turning down a $4 million request for running its flagship event — [source](https://www.coindesk.com/markets/2026/11/23/cardano-holders-are-turning-down-a-usd4-million-request-for-running-its-flagship-event) — Mon, 23 Nov 2026 06:15:45 +0000
+Older trader discussion records, if present in the repository, are historical and unverified. The Bitget-only collector does not fetch, update or use them in research conclusions.
 
 ## Limitations
 
-- The collector samples the highest-turnover eligible Bitget USDT perpetual contracts plus selected contracts from the current provisional four-band watchlist. Bitget-reported contract names are used; market capitalisation is not inferred from ticker symbols.
+- The collector uses Bitget USDT perpetual market endpoints only. It samples the highest-turnover eligible contracts plus selected contracts from the current provisional four-band watchlist; market capitalisation is not inferred from ticker symbols.
 - Bitget futures endpoints do not provide circulating market cap; this report groups coins by Bitget 24h futures turnover instead.
-- Public trader posts are unverified statements, not authenticated fills or audited track records.
 - GitHub scheduled runs may be delayed or skipped; cycles and timestamps show actual collection, not guaranteed continuous monitoring.
 - Funding is not included in the automatic short-horizon net P&L. Fees are estimated from instrument metadata and may differ from the account's actual fee tier.
 - Any ticker-only legacy outcomes are reference-price calculations and are kept separate from two-snapshot order-book shadow outcomes.
@@ -423,6 +405,6 @@ These estimates walk the visible entry book and a later visible exit book, deduc
 - market_observations.jsonl — timestamped ticker/order-book summaries.
 - candles_1m.jsonl — de-duplicated one-minute candles.
 - trend_first_hour_backtest.jsonl — rolling 24-hour breakout trend starts and first-hour candle-colour counts.
-- public_trader_posts.jsonl — public RSS commentary and verification caveats.
+- trend_early_window_backtest.jsonl — separate 5/10/15/20/30/60-minute candle-window measurements and continuation outcomes.
 - shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.
-- collection_errors.jsonl — API/feed failures.
+- collection_errors.jsonl — Bitget API and processing failures.

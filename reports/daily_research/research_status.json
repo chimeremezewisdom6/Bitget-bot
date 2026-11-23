@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "updated_at_utc": "2026-11-23T21:37:03.671867+00:00",
+  "mode": "BITGET_ONLY_READ_ONLY",
+  "data_source": "Bitget USDT-FUTURES",
+  "trading_enabled": false,
+  "session": {
+    "active": true,
+    "started_at_utc": "2026-11-23T11:29:36.710531+00:00",
+    "ends_at_utc": "2026-11-24T11:29:36.710522+00:00",
+    "last_collection_utc": "2026-11-23T21:37:03.460444+00:00",
+    "cycles": 4,
+    "symbols_last_cycle": 200,
+    "bitget_auth_status": "KEY_PERMISSION_readonly"
+  },
+  "coverage": {
+    "distinct_symbols_observed": 204,
+    "market_observation_rows": 800,
+    "one_minute_candle_records": 68520,
+    "long_trend_starts": 1428,
+    "short_trend_starts": 1743,
+    "early_window_trend_events": 3065
+  },
+  "candle_streak_experiment": {
+    "checks": 800,
+    "qualified_40_plus": 0
+  },
+  "shadow_execution": {
+    "scored_orderbook_outcomes": 999,
+    "wins": 468,
+    "losses": 531,
+    "flat": 0,
+    "estimated_net_usdt": 404.87340576,
+    "mean_net_bps": 9.1532
+  },
+  "health": {
+    "collection_error_records": 3,
+    "latest_error": {
+      "at": "2026-11-23T19:27:47.942687+00:00",
+      "feed": "https://www.reddit.com/r/CryptoCurrency/new/.rss",
+      "error": "429, message='Too Many Requests', url='https://www.reddit.com/r/CryptoCurrency/new/.rss'"
+    },
+    "status": "CHECK_ERRORS"
+  },
+  "report_file": "daily_research_summary.md"
+}
