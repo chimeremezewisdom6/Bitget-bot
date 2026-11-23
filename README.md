@@ -1,30 +1,59 @@
 # Bitget Futures Market Research (Read Only)
 
-This repository is now a **research-only market observer**. It has one scheduled collector: `daily_research.py`. The old trade-execution scanner, its workflows and inactive trade-state files have been removed. There are no Demo or Live order functions in the retained research modules.
+This repository is a **Bitget-first, research-only market observer**. It reads Bitget USDT perpetual market data and, when configured, uses a Bitget API key for authenticated account-specific fee metadata. It never submits, amends or cancels orders and never changes leverage, margin mode or positions.
+
+## Important distinction: market cap versus Bitget turnover
+
+Bitget's USDT-futures instruments and ticker endpoints provide contract metadata, prices, 24-hour turnover, funding, open interest and order-book data. They do **not** provide circulating market capitalisation. The project therefore removed CoinGecko from the runtime watchlist and now labels the four groups as **Bitget 24-hour futures-turnover activity bands**, not market-cap bands:
+
+- Under $1m 24h futures turnover
+- $1m–$10m
+- $10m–$100m
+- $100m+
+
+The watchlist selects up to three contracts per activity band. These are activity groups, not a substitute for the earlier market-cap grouping. Do not infer a coin's market cap from its ticker or trading volume.
+
+## Configure the Bitget API key safely
+
+In GitHub, open **Settings → Secrets and variables → Actions → New repository secret** and create:
+
+- `BITGET_API_KEY`
+- `BITGET_API_SECRET`
+- `BITGET_API_PASSPHRASE`
+
+Use a dedicated Bitget API key with **Read-only** permission, no Trade, Transfer or Withdraw permissions, and an IP whitelist where practical. Do not paste keys into source code, issues, workflow logs or chat.
+
+The workflow uses the credentials only for signed GET requests to:
+- `/api/v3/account/info` — read the key's permission type.
+- `/api/v3/account/all-fee-rate?category=USDT-FUTURES` — retrieve your account-specific futures fee schedule.
+
+If credentials are absent or the fee endpoint is not permitted, public Bitget market research continues and the session records the authentication/fee lookup status. Missing fees are never silently treated as zero. Public market endpoints do not require API credentials; Bitget requires signed credentials for private account-specific information.
 
 ## Start the 24-hour experiment
 
 1. Open [Actions → 24-Hour Futures Research (Read Only)](https://github.com/chimeremezewisdom6/Bitget-bot/actions/workflows/daily-futures-research.yml).
 2. Choose **Run workflow**, select branch `main`, and choose action **start**.
-3. The workflow automatically builds the four-band market-cap/liquidity watchlist, then starts the observation session. No separate workflow is needed.
-4. GitHub Actions attempts a collection cycle every five minutes for 24 hours, with up to 30 minutes to evaluate pending 30-minute hypothetical exits.
+3. The workflow builds the Bitget-only turnover watchlist and starts the observation session.
+4. GitHub Actions attempts a collection cycle every five minutes for 24 hours, with a 30-minute settlement window for pending hypothetical exits.
 5. Use action **status** to inspect progress. Use **stop** to end early and preserve the data.
 
-Only start one session at a time. The workflow rejects a second start while the current session or its settlement grace period is active.
+Only start one session at a time. A second start is rejected while the current session or its settlement grace period is active.
 
 ## What gets recorded
 
-- Online Bitget USDT perpetual contracts, turnover and price observations.
-- One-minute candles, funding/open-interest context, bid/ask spread and visible order-book depth.
-- Up to three eligible coins in each provisional market-cap band, when identity and liquidity checks allow.
+- Online Bitget USDT perpetual contracts, instrument metadata and 24-hour futures turnover.
+- Latest/mark/index prices, 24-hour change, funding rate and open interest.
+- One-minute candles, 100-level visible order books, spread and depth within 0.5% of mid.
+- Recent public Bitget fills, buy/sell volume and order-book timestamps.
+- Account-specific taker fees from the signed read-only fee endpoint when available.
 - Public RSS trader/community commentary, deduplicated and labelled unverified.
-- Rule-based signal hypotheses and hypothetical $100/$500/$1,000 order-book entries.
-- Fresh hypothetical exit-book walks at 5, 15 and 30 minutes, with VWAP, partial-fill status, slippage and estimated taker fees.
-- Collection failures and missing/unavailable observations.
+- Rule-based LONG/SHORT research hypotheses and hypothetical $100/$500/$1,000 order-book entries.
+- Fresh hypothetical exit-book walks at 5, 15 and 30 minutes, with VWAP, partial-fill status, slippage and estimated fees.
+- API/feed errors and missing/unavailable observations.
 
-Default provisional cap groups: lower below $10m, smaller $10m–$100m, mid $100m–$1bn, and mega $1bn or above. See `config/market_cap_bands.json`. A unique ticker match is not proof of asset identity. Unverified or ambiguous symbols must not be treated as confirmed assets; do not force three coins into a group if fewer qualify.
+The shadow simulator is mathematical only. It does not send orders to Bitget. Its visible-book results are estimates, not guaranteed fills; funding is recorded as context but is not currently included in short-horizon simulated P&L.
 
-## Download the results
+## Results and persistence
 
 When the session completes, the workflow uploads an artifact named similar to `bitget-24-hour-futures-research-...`. Open the completed Actions run and download it from **Artifacts**. Durable records are also committed under:
 
@@ -37,21 +66,18 @@ When the session completes, the workflow uploads an artifact named similar to `b
 - `reports/daily_research/daily_research_summary.md`
 - `reports/market_cap_watchlist/current_watchlist.json` and `current_watchlist.md`
 
-Upload the ZIP here after the run. The report separates estimated hypothetical outcomes from unverified trader commentary. We can then analyse wins/losses by strategy, coin group, market regime, size and holding period before designing any future trading system.
+## Limitations
 
-## Important limitations
-
-GitHub's five-minute schedule is best-effort; runs may be delayed or skipped. Check actual timestamps and cycle counts. Public posts are not authenticated trader histories or proof of fills. Visible-book simulations are estimates, not guaranteed executions. Funding is recorded as context but is not included in automatic short-horizon net P&L. A 24-hour sample cannot prove a durable profitable edge.
+GitHub's five-minute schedule is best-effort; runs may be delayed or skipped. Check actual timestamps and cycle counts. Public posts are not authenticated trader histories or proof of fills. Visible-book simulations cannot reproduce queue priority, hidden liquidity, latency or market movement after the snapshot. A 24-hour sample cannot prove a durable profitable edge.
 
 ## Project files
 
-- `daily_research.py` — single scheduled, public-data collector.
-- `cap_watchlist.py` — automatically builds the provisional four-band watchlist.
+- `daily_research.py` — read-only Bitget collector and signed account-fee lookup.
+- `cap_watchlist.py` — Bitget-only futures-turnover activity watchlist.
 - `shadow_execution.py` — pure order-book fill, slippage and fee calculations.
-- `research_report.py` — produces profit/loss and evidence summaries.
-- `config/` — market-cap boundaries and optional manual identity overrides.
-- `tests/` — research calculations and read-only safety tests.
-- `archive/legacy_trade_history.json` — retained historical records for later review; not used by the collector.
+- `research_report.py` — profit/loss and evidence summaries.
+- `tests/` — activity-band, authentication and no-order safety tests.
+- `archive/legacy_trade_history.json` — retained historical records, not used by the collector.
 - `docs/PROJECT_KNOWLEDGE_BASE.md` — dated project decisions and lessons.
 - `docs/RESEARCH_RUNBOOK.md` — operating instructions.
 
