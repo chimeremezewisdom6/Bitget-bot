@@ -88,14 +88,14 @@ def main():
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     readme_path = DATA / "DOWNLOAD_README.txt"
     readme_path.write_text(
-        "BITGET 24-HOUR READ-ONLY RESEARCH PACKAGE\\n"
-        "==========================================\\n"
-        "Start with daily_research_summary.md and package_manifest.json.\\n"
-        "CSV files can be opened in Excel or Google Sheets. JSONL files preserve raw records.\\n"
-        "shadow_experiments.csv contains signals and hypothetical outcomes.\\n"
-        "market_observations.csv contains timestamped Bitget market observations.\\n"
-        "candles_1m.csv contains de-duplicated one-minute candles.\\n"
-        "No live or demo orders were submitted. Estimated results are not a promise of profit.\\n",
+        "BITGET 24-HOUR READ-ONLY RESEARCH PACKAGE\n"
+        "==========================================\n"
+        "Start with daily_research_summary.md and package_manifest.json.\n"
+        "CSV files can be opened in Excel or Google Sheets. JSONL files preserve raw records.\n"
+        "shadow_experiments.csv contains signals and hypothetical outcomes.\n"
+        "market_observations.csv contains timestamped Bitget market observations.\n"
+        "candles_1m.csv contains de-duplicated one-minute candles.\n"
+        "No live or demo orders were submitted. Estimated results are not a promise of profit.\n",
         encoding="utf-8",
     )
     included.extend([manifest_path, readme_path])
