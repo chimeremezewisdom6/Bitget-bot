@@ -32,17 +32,18 @@ async function watchdog(env, scheduledTime) {
     return { action: "skip_active_run", active_runs: active.length };
   }
 
-  const latestSuccessful = runs
-    .filter(run => run.conclusion === "success")
+  const latestCompleted = runs
+    .filter(run => run.status === "completed")
     .sort((a, b) => Date.parse(b.updated_at || b.run_started_at || b.created_at) -
                     Date.parse(a.updated_at || a.run_started_at || a.created_at))[0];
 
-  const latestMs = latestSuccessful
-    ? Date.parse(latestSuccessful.updated_at || latestSuccessful.run_started_at || latestSuccessful.created_at)
+  const latestMs = latestCompleted
+    ? Date.parse(latestCompleted.updated_at || latestCompleted.run_started_at || latestCompleted.created_at)
     : 0;
   const ageMs = latestMs ? Date.now() - latestMs : Number.POSITIVE_INFINITY;
+  const latestSucceeded = latestCompleted && latestCompleted.conclusion === "success";
 
-  if (ageMs < MAX_AGE_MS) {
+  if (latestSucceeded && ageMs < MAX_AGE_MS) {
     return {
       action: "healthy",
       latest_success_utc: new Date(latestMs).toISOString(),
