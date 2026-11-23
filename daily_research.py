@@ -720,7 +720,12 @@ async def collect():
             # its own file so legacy first-hour records remain untouched.
             early_completed = set(state.setdefault("trend_early_window_symbols_completed", []))
             early_pending = [symbol for symbol in selected_symbols if symbol not in early_completed]
+            same_cycle_backtests = {
+                item["symbol"]: item for item in backtest_results if item is not None
+            }
             async def bounded_early_backtest(symbol):
+                if symbol in same_cycle_backtests:
+                    return same_cycle_backtests[symbol]
                 async with backtest_semaphore:
                     try:
                         return await fetch_first_hour_trend_backtest(session, symbol)
