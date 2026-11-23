@@ -41,6 +41,11 @@ def build_report(root=ROOT):
         if isinstance(row.get("net_after_trading_fees_usdt"), (int, float)) and row.get("notional_usdt", 0) > 0:
             by_strategy[row.get("strategy", "unknown")].append(float(row["net_after_trading_fees_usdt"]) / float(row["notional_usdt"]) * 10000)
     symbols = sorted({x.get("symbol") for x in observations if x.get("symbol")})
+    cap_observations = Counter(x.get("market_cap_band", "UNVERIFIED") for x in observations)
+    try:
+        watchlist = json.loads((Path("reports/market_cap_watchlist/current_watchlist.json")).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        watchlist = {}
     sources = Counter(x.get("source", "unknown") for x in posts)
     avg = sum(net) / len(net) if net else None
     lines = [
@@ -49,6 +54,7 @@ def build_report(root=ROOT):
         f"- Session ended UTC: {session.get('ended_at_utc', 'not recorded')}",
         f"- Collector cycles: {session.get('cycles', 0)}",
         f"- Distinct symbols observed: {len(symbols)}",
+        f"- Current provisional cap-watchlist contracts: {len(watchlist.get('watchlist_symbols', []))}",
         f"- Market observation rows: {len(observations)}",
         f"- Public commentary items: {len(posts)}",
         f"- Candidate signals eligible for entry evaluation: {len(signals)}",
@@ -57,6 +63,13 @@ def build_report(root=ROOT):
         f"- Legacy ticker-reference outcomes: {len(reference_outcomes)}",
         f"- Outcomes unavailable: {len(unavailable)}",
         f"- Collection error records: {len(errors)}", "",
+        "## Market-cap group coverage",
+        "",
+        "| Group | Watchlist candidates | Observation rows |",
+        "|---|---:|---:|",
+        *[f"| {band.get('label', band['name'])} | {len(watchlist.get('groups', {}).get(band['name'], []))} | {cap_observations.get(band['name'], 0)} |" for band in watchlist.get("cap_band_definitions", [])],
+        *([] if watchlist.get("cap_band_definitions") else ["| No current cap watchlist | 0 | 0 |"]),
+        "",
         "## Two-snapshot order-book shadow outcomes (not exchange fills)", "",
         f"- Positive: {wins}; negative: {losses}; flat: {flat}",
         f"- Mean estimated net result: {avg:.2f} bps" if avg is not None else "- Mean estimated net result: unavailable", "",
@@ -74,7 +87,7 @@ def build_report(root=ROOT):
     lines += [f"- {source}: {count}" for source, count in sources.most_common()] or ["- None collected."]
     lines += [
         "", "## Limitations", "",
-        "- The collector samples highest-turnover eligible Bitget USDT perpetual contracts, not a verified four-band market-cap watchlist.",
+        "- The collector samples the highest-turnover eligible Bitget USDT perpetual contracts plus selected contracts from the current provisional four-band watchlist. CoinGecko symbol matches still require manual identity review.",
         "- Market cap is not supplied by Bitget futures endpoints; require a separately timestamped, identity-matched source.",
         "- Public trader posts are unverified statements, not authenticated fills or audited track records.",
         "- GitHub scheduled runs may be delayed or skipped; cycles and timestamps show actual collection, not guaranteed continuous monitoring.",
