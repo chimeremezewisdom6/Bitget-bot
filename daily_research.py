@@ -36,7 +36,7 @@ FEEDS = [
     "https://cointelegraph.com/rss",
 ]
 HEADERS = {"User-Agent": "Bitget-ReadOnly-Research/2.0"}
-MAX_SYMBOLS = 27
+MAX_SYMBOLS = 200
 SYMBOL_CONCURRENCY = 6
 
 
@@ -467,11 +467,10 @@ async def collect():
                 key=lambda row: number(row.get("turnover24h")),
                 reverse=True,
             )
-            selected_symbols = [row["symbol"] for row in ranked[:15]]
-            for symbol in activity_map:
-                if symbol in tickers and symbol not in selected_symbols:
-                    selected_symbols.append(symbol)
-            selected_symbols = selected_symbols[:MAX_SYMBOLS]
+            # Scan up to 200 online USDT perpetuals, ranked by live 24h
+            # futures turnover. Keep the four-band watchlist as labels/context;
+            # it must not restrict the research universe to its small shortlist.
+            selected_symbols = [row["symbol"] for row in ranked[:MAX_SYMBOLS]]
             semaphore = asyncio.Semaphore(SYMBOL_CONCURRENCY)
 
             async def bounded(symbol):
