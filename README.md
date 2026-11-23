@@ -46,12 +46,15 @@ Only start one session at a time. A second start is rejected while the current s
 - One-minute candles, 100-level visible order books, spread and depth within 0.5% of mid.
 - Recent public Bitget fills, buy/sell volume and order-book timestamps.
 - Account-specific taker fees from the signed read-only fee endpoint when available.
-- Public RSS trader/community commentary, deduplicated and labelled unverified.
 - Rule-based LONG/SHORT research hypotheses and hypothetical $100/$500/$1,000 order-book entries.
 - Fresh hypothetical exit-book walks at 5, 15 and 30 minutes, with VWAP, partial-fill status, slippage and estimated fees.
 - API/feed errors and missing/unavailable observations.
 
 The shadow simulator is mathematical only. It does not send orders to Bitget. Its visible-book results are estimates, not guaranteed fills; funding is recorded as context but is not currently included in short-horizon simulated P&L.
+
+## Bitget-only data policy
+
+The live collector requests market and (optionally) account fee data from Bitget only. It does not contact Reddit, CoinDesk, Cointelegraph, news sites or social-media feeds. Old `public_trader_posts.jsonl` records, if present, are legacy history only and are not read or updated by the collector.
 
 ## Results and persistence
 
@@ -59,7 +62,6 @@ When the session completes, the workflow uploads one artifact named similar to `
 
 - `reports/daily_research/market_observations.jsonl`
 - `reports/daily_research/candles_1m.jsonl`
-- `reports/daily_research/public_trader_posts.jsonl`
 - `reports/daily_research/shadow_experiments.jsonl`
 - `reports/daily_research/collection_errors.jsonl`
 - `reports/daily_research/session.json`

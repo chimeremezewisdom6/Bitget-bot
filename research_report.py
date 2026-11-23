@@ -28,7 +28,6 @@ def build_report(root=ROOT):
         session = {}
 
     observations = read_jsonl(root / "market_observations.jsonl")
-    posts = read_jsonl(root / "public_trader_posts.jsonl")
     experiments = read_jsonl(root / "shadow_experiments.jsonl")
     errors = read_jsonl(root / "collection_errors.jsonl")
     candle_streak_checks = read_jsonl(root / "candle_streak_checks.jsonl")
@@ -117,7 +116,6 @@ def build_report(root=ROOT):
     except (OSError, json.JSONDecodeError):
         watchlist = {}
 
-    sources = Counter(x.get("source", "unknown") for x in posts)
     streak_rows = []
     for symbol in sorted({x.get("symbol") for x in candle_streak_checks if x.get("symbol")}):
         symbol_checks = [x for x in candle_streak_checks if x.get("symbol") == symbol]
@@ -135,7 +133,6 @@ def build_report(root=ROOT):
         f"- Distinct symbols observed: {len(symbols)}",
         f"- Current Bitget turnover-watchlist contracts: {len(watchlist.get('watchlist_symbols', []))}",
         f"- Market observation rows: {len(observations)}",
-        f"- Public commentary items: {len(posts)}",
         f"- Candidate signals eligible for entry evaluation: {len(signals)}",
         f"- Watch-only RSI conditions (no entry): {len(watch_conditions)}",
         f"- Two-snapshot order-book shadow outcomes: {len(scored)}",
@@ -237,23 +234,12 @@ def build_report(root=ROOT):
     if not by_strategy:
         lines.append("| No scored outcomes | 0 | 0 | 0 | — |")
 
-    lines += ["", "## Public trader and community commentary (unverified)", ""]
-    lines += [f"- {source}: {count} items" for source, count in sources.most_common()] or ["- None collected."]
-    recent_posts = sorted(posts, key=lambda x: x.get("collected_at_utc", ""), reverse=True)[:30]
-    if recent_posts:
-        lines += ["", "### Recent collected posts", ""]
-        for post in recent_posts:
-            title = str(post.get("title", "Untitled")).replace("\n", " ").replace("|", "/")[:220]
-            url = post.get("url")
-            link = f"[source]({url})" if isinstance(url, str) and url.startswith("http") else str(post.get("source", "source"))
-            published = post.get("published") or post.get("collected_at_utc") or "date unavailable"
-            lines.append(f"- {title} — {link} — {published}")
-
     lines += [
+        "", "## Legacy Trader discussion records", "",
+        "Older trader discussion records, if present in the repository, are historical and unverified. The Bitget-only collector does not fetch, update or use them in research conclusions.",
         "", "## Limitations", "",
-        "- The collector samples the highest-turnover eligible Bitget USDT perpetual contracts plus selected contracts from the current provisional four-band watchlist. Bitget-reported contract names are used; market capitalisation is not inferred from ticker symbols.",
+        "- The collector uses Bitget USDT perpetual market endpoints only. It samples the highest-turnover eligible contracts plus selected contracts from the current provisional four-band watchlist; market capitalisation is not inferred from ticker symbols.",
         "- Bitget futures endpoints do not provide circulating market cap; this report groups coins by Bitget 24h futures turnover instead.",
-        "- Public trader posts are unverified statements, not authenticated fills or audited track records.",
         "- GitHub scheduled runs may be delayed or skipped; cycles and timestamps show actual collection, not guaranteed continuous monitoring.",
         "- Funding is not included in the automatic short-horizon net P&L. Fees are estimated from instrument metadata and may differ from the account's actual fee tier.",
         "- Any ticker-only legacy outcomes are reference-price calculations and are kept separate from two-snapshot order-book shadow outcomes.",
@@ -264,9 +250,8 @@ def build_report(root=ROOT):
         "- candles_1m.jsonl — de-duplicated one-minute candles.",
         "- trend_first_hour_backtest.jsonl — rolling 24-hour breakout trend starts and first-hour candle-colour counts.",
         "- trend_early_window_backtest.jsonl — separate 5/10/15/20/30/60-minute candle-window measurements and continuation outcomes.",
-        "- public_trader_posts.jsonl — public RSS commentary and verification caveats.",
         "- shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.",
-        "- collection_errors.jsonl — API/feed failures.", ""
+        "- collection_errors.jsonl — Bitget API and processing failures.", ""
     ]
     return "\n".join(lines)
 

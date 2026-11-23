@@ -37,6 +37,10 @@ These are **turnover activity groups, not market-cap groups**. Up to three contr
 
 No separate watchlist workflow or snapshot workflow is required.
 
+## Bitget-only data policy
+
+The runtime collector calls Bitget endpoints only. It does not request Reddit, news websites, RSS feeds or social-media commentary. Any old `public_trader_posts.jsonl` file is legacy evidence and is not used in new collection cycles.
+
 ## What the collector records
 
 - Eligible online Bitget USDT perpetual contracts, contract metadata and 24-hour futures turnover.
@@ -44,7 +48,6 @@ No separate watchlist workflow or snapshot workflow is required.
 - One-minute candles, 100-level order books, spread and visible depth within 0.5% of mid.
 - Recent public Bitget fills and buy/sell base-volume context.
 - Account-specific taker fee when the authenticated read-only endpoint is available.
-- Deduplicated public RSS commentary approximately every 15 minutes. These are unverified posts, not verified trader fills or audited track records.
 - Rule-based signal hypotheses and hypothetical $100, $500 and $1,000 entries by walking the visible order book.
 - Fresh exit-book walks at 5, 15 and 30 minutes for the exact hypothetical base quantity, including VWAP, slippage, gross P&L and fee-adjusted P&L.
 - Collection errors and missing data.
@@ -61,13 +64,12 @@ The session stops creating new signals after 24 hours and allows up to 30 minute
 
 Open the completed GitHub Actions run and download the `bitget-24-hour-futures-research-...` artifact from **Artifacts**. The same records are committed under `reports/daily_research/`; the activity watchlist is under `reports/market_cap_watchlist/`.
 
-Key files include `session.json`, `market_observations.jsonl`, `candles_1m.jsonl`, `public_trader_posts.jsonl`, `shadow_experiments.jsonl`, `collection_errors.jsonl` and `daily_research_summary.md`.
+Key files include `session.json`, `market_observations.jsonl`, `candles_1m.jsonl`, `shadow_experiments.jsonl`, `collection_errors.jsonl` and `daily_research_summary.md`.
 
 ## Interpretation rules
 
 - Two-snapshot order-book simulations cannot know queue position, hidden liquidity, latency or intervening book changes.
 - Funding is not included in automatic P&L.
-- Public trader commentary is unverified; do not assume authors actually traded.
 - Turnover groups are not market-cap groups.
 - GitHub scheduled runs can be delayed or skipped. Use actual timestamps and cycle counts.
 - Repeated sizes and horizons from the same signal are correlated, not independent trades.

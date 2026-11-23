@@ -21,7 +21,6 @@ R = ROOT / "reports/daily_research"
 S = R / "session.json"
 O = R / "market_observations.jsonl"
 C = R / "candles_1m.jsonl"
-P = R / "public_trader_posts.jsonl"
 E = R / "shadow_experiments.jsonl"
 F = R / "candle_streak_checks.jsonl"
 T = R / "trend_early_window_backtest.jsonl"
@@ -30,13 +29,6 @@ SUMMARY = R / "daily_research_summary.md"
 WATCH = ROOT / "reports/market_cap_watchlist/current_watchlist.json"
 BITGET = "https://api.bitget.com"
 CATEGORY = "USDT-FUTURES"
-FEEDS = [
-    "https://www.reddit.com/r/BitcoinMarkets/new/.rss",
-    "https://www.reddit.com/r/Daytrading/new/.rss",
-    "https://www.reddit.com/r/CryptoCurrency/new/.rss",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://cointelegraph.com/rss",
-]
 HEADERS = {"User-Agent": "Bitget-ReadOnly-Research/2.0"}
 MAX_SYMBOLS = 200
 SYMBOL_CONCURRENCY = 6
@@ -641,8 +633,6 @@ async def collect():
         return
 
     R.mkdir(parents=True, exist_ok=True)
-    new_posts = 0
-    post_errors = 0
     symbol_errors = 0
     signal_count = 0
     errors = []
@@ -773,8 +763,6 @@ async def collect():
             state["candle_streak_checks_this_cycle"] = checks_this_cycle
             state["candle_streak_qualifications_this_cycle"] = qualified_this_cycle
             await evaluate_due_exits(session)
-            if state.get("cycles", 0) % 3 == 0 and now().timestamp() < state["end_epoch"]:
-                new_posts, post_errors = await collect_public_posts(session)
         except Exception as exc:
             errors.append(str(exc)[:500])
             add(R / "collection_errors.jsonl", {"at": iso(), "error": str(exc)[:500]})
@@ -782,15 +770,13 @@ async def collect():
     state["cycles"] = state.get("cycles", 0) + 1
     state["last_at"] = iso()
     state["signals"] = state.get("signals", 0) + signal_count
-    state["posts"] = state.get("posts", 0) + new_posts
-    state["errors"] = state.get("errors", 0) + len(errors) + symbol_errors + post_errors
+    state["errors"] = state.get("errors", 0) + len(errors) + symbol_errors
     state["symbol_errors"] = state.get("symbol_errors", 0) + symbol_errors
-    state["feed_errors"] = state.get("feed_errors", 0) + post_errors
     state["symbols_last_cycle"] = len(selected_symbols) if "selected_symbols" in locals() else 0
     S.write_text(json.dumps(state, indent=2), encoding="utf-8")
     print(json.dumps({
         "cycle": state["cycles"], "symbols": state["symbols_last_cycle"],
-        "signals": signal_count, "new_posts": new_posts, "errors": len(errors) + symbol_errors + post_errors,
+
         "bitget_auth_status": auth_status,
         "candle_streak_checks_this_cycle": state.get("candle_streak_checks_this_cycle", 0),
         "candle_streak_qualifications_this_cycle": state.get("candle_streak_qualifications_this_cycle", 0),
@@ -803,56 +789,6 @@ async def collect():
         "trend_early_window_events_this_cycle": state.get("trend_early_window_events_this_cycle", 0),
         "ends": state.get("ends_at_utc"),
     }))
-
-
-async def collect_public_posts(session):
-    known = set()
-    if P.exists():
-        for line in P.read_text(encoding="utf-8").splitlines():
-            try:
-                known.add(json.loads(line)["id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-    count = 0
-    error_count = 0
-    for feed in FEEDS:
-        try:
-            async with session.get(feed, timeout=15) as response:
-                response.raise_for_status()
-                raw = await response.text()
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(raw)
-            entries = root.findall(".//item") + root.findall(".//{http://www.w3.org/2005/Atom}entry")
-            for entry in entries[:25]:
-                def value(key):
-                    element = entry.find(key)
-                    if element is None:
-                        element = entry.find("{http://www.w3.org/2005/Atom}" + key)
-                    if element is None:
-                        return ""
-                    if key == "link" and element.get("href"):
-                        return element.get("href")
-                    return (element.text or "").strip()
-                title, link = value("title"), value("link")
-                identity = hashlib.sha256((link or title).encode()).hexdigest()
-                if not title or identity in known:
-                    continue
-                add(P, {
-                    "id": identity, "source": feed, "title": title[:500],
-                    "url": link, "published": value("pubDate") or value("published"),
-                    "summary": (value("description") or value("summary"))[:2500],
-                    "collected_at_utc": iso(),
-                    "classification": "UNVERIFIED_PUBLIC_CLAIM_OR_COMMENTARY",
-                    "verification": "No proof of identity, actual fills or profitable track record.",
-                })
-                known.add(identity)
-                count += 1
-        except Exception as exc:
-            error_count += 1
-            add(R / "collection_errors.jsonl", {
-                "at": iso(), "feed": feed, "error": str(exc)[:300]
-            })
-    return count, error_count
 
 
 def main():
@@ -871,9 +807,9 @@ def main():
             "ends_at_utc": datetime.fromtimestamp(end, timezone.utc).isoformat(),
             "settle_epoch": settle,
             "settle_until_utc": datetime.fromtimestamp(settle, timezone.utc).isoformat(),
-            "cycles": 0, "signals": 0, "posts": 0, "errors": 0, "signal_ids": [],
+
             "candle_ids": [], "bitget_auth_status": "NOT_CHECKED",
-            "data_source": "Bitget USDT-FUTURES",
+            "data_source": "Bitget USDT-FUTURES only",
             "trading_enabled": False,
         }
         S.write_text(json.dumps(state, indent=2), encoding="utf-8")

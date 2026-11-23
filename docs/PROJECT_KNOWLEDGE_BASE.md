@@ -11,7 +11,7 @@
 
 ## 1. Project objective and operating boundary
 
-The original project was a Bitget USDT-margined futures scanner intended to evaluate short-term market momentum and manage a Demo position. The user has since explicitly asked to stop all Demo and Live trading and instead observe the market, study public trader discussions and experiments, and calculate hypothetical trades with realistic execution costs.
+The original project was a Bitget USDT-margined futures scanner intended to evaluate short-term market momentum and manage a Demo position. The user has since explicitly asked to stop all Demo and Live trading and instead observe Bitget market behaviour and experiments, and calculate hypothetical trades with realistic execution costs. External social/news feeds are not part of the live research pipeline.
 
 The current research objective is to determine whether any strategy has a repeatable positive expectancy after fees, spread, slippage and (for perpetuals) funding. A strategy is not considered profitable merely because a chart entry looks good or a trader reports a win.
 
@@ -19,7 +19,7 @@ The current research objective is to determine whether any strategy has a repeat
 - No Live orders.
 - No Demo orders.
 - No order placement, leverage changes, account transfers, or position closing.
-- Public market-data requests may be used for observation. Private account credentials are not required for public market research.
+- Live market-data requests must use Bitget endpoints only. Private account credentials are not required for public market research; if configured, a dedicated read-only key may retrieve account fee metadata only.
 - Do not store API keys, secrets, passphrases, account identifiers, or other credentials in this repository.
 - The automated scanner workflow must remain paused.
 - A shadow-trade record is a simulation, not an exchange fill. Label it clearly.
@@ -728,3 +728,8 @@ The user explicitly requires the research system to query Bitget directly using 
 - Manually dispatch the 24-hour research workflow after the fix is merged to `main`; code changes do not start a session.
 - Confirm the first collector cycles contain current Bitget timestamps, non-empty symbols, book/fill/candle observations, and an authenticated fee status where the key has the required read permission.
 - Do not claim continuous collection, successful authentication, or profitability until those runtime records are inspected.
+
+
+## Bitget-only pipeline decision (2026-11-23)
+
+The live research collector must use Bitget as its sole runtime data provider. Reddit, RSS, news-site and social-media requests are removed because their 404/rate-limit failures are unrelated to the Bitget market experiment and should not increment collector errors. Existing `public_trader_posts.jsonl` is retained only as legacy historical data; new cycles do not fetch, append or score external commentary. GitHub Actions remains the code host and scheduler, not a market-data provider. The collector remains read-only and no Demo/Live orders are permitted.
