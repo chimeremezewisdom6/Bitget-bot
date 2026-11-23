@@ -17,7 +17,7 @@ class ResearchReportTests(unittest.TestCase):
                 '{"type":"orderbook_shadow_outcome","strategy":"ema","notional_usdt":100,"net_after_trading_fees_usdt":-0.05}\n')
             report = build_report(root)
             self.assertIn("Distinct symbols observed: 2", report)
-            self.assertIn("Candidate signals: 1", report)
+            self.assertIn("Candidate signals eligible for entry evaluation: 1", report)
             self.assertIn("Two-snapshot order-book shadow outcomes: 2", report)
             self.assertIn("Mean estimated net result: 2.50 bps", report)
             self.assertIn("not executable fills", report)
