@@ -7,7 +7,7 @@ on:
         description: Start a new 24-hour session or inspect status
         required: true
         type: choice
-        options: [start, status]
+        options: [start, status, stop]
         default: start
   schedule:
     - cron: "*/5 * * * *"
@@ -36,8 +36,10 @@ jobs:
         run: |
           if [ "${{ inputs.action }}" = "start" ]; then
             python daily_research.py start
-          else
+          elif [ "${{ inputs.action }}" = "status" ]; then
             python daily_research.py status
+          else
+            python daily_research.py stop
           fi
       - name: Collect one scheduled cycle
         if: github.event_name == 'schedule'
@@ -46,7 +48,7 @@ jobs:
         if: github.event_name == 'schedule'
         run: python research_report.py
       - name: Commit research records
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'start')
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'stop'))
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
