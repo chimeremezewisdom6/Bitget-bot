@@ -502,7 +502,7 @@ async def collect():
     S.write_text(json.dumps(state, indent=2), encoding="utf-8")
     print(json.dumps({
         "cycle": state["cycles"], "symbols": state["symbols_last_cycle"],
-        "signals": signal_count, "new_posts": new_posts, "errors": len(errors),
+        "signals": signal_count, "new_posts": new_posts, "errors": len(errors) + symbol_errors + post_errors,
         "bitget_auth_status": auth_status,
         "ends": state.get("ends_at_utc"),
     }))
