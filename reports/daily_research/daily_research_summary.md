@@ -2,18 +2,18 @@
 
 - Session started UTC: 2026-11-23T11:29:36.710531+00:00
 - Session ended UTC: not recorded
-- Collector cycles: 1
-- Distinct symbols observed: 200
+- Collector cycles: 2
+- Distinct symbols observed: 202
 - Current Bitget turnover-watchlist contracts: 11
-- Market observation rows: 200
+- Market observation rows: 400
 - Public commentary items: 50
-- Candidate signals eligible for entry evaluation: 30
-- Watch-only RSI conditions (no entry): 75
-- Two-snapshot order-book shadow outcomes: 0
+- Candidate signals eligible for entry evaluation: 53
+- Watch-only RSI conditions (no entry): 118
+- Two-snapshot order-book shadow outcomes: 270
 - Legacy ticker-reference outcomes: 0
 - Outcomes unavailable: 0
 - Collection error records: 3
-- 60-minute same-colour candle checks: 200
+- 60-minute same-colour candle checks: 400
 - Checks meeting 40+ same-colour candles: 0
 
 ## Mandatory 60-minute same-colour candle experiment
@@ -22,227 +22,229 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 
 | Symbol | Checks recorded | Latest colour | Same-colour count | Qualified |
 |---|---:|---|---:|---|
-| 1000BONKUSDT | 1 | RED | 10 | No |
-| AAVEUSDT | 1 | RED | 32 | No |
-| ACEUSDT | 1 | GREEN | 31 | No |
-| ADAUSDT | 1 | RED | 26 | No |
-| AEONUSDT | 1 | GREEN | 6 | No |
-| AEROUSDT | 1 | RED | 20 | No |
-| AIOUSDT | 1 | RED | 9 | No |
-| AKEUSDT | 1 | GREEN | 35 | No |
-| ALGOUSDT | 1 | RED | 26 | No |
-| ALLOUSDT | 1 | RED | 27 | No |
-| AMDLUSDT | 1 | RED | 21 | No |
-| APRUSDT | 1 | GREEN | 34 | No |
-| APTUSDT | 1 | RED | 29 | No |
-| ARBUSDT | 1 | RED | 36 | No |
-| ARIAUSDT | 1 | RED | 32 | No |
-| ARKMUSDT | 1 | RED | 11 | No |
-| ARUSDT | 1 | RED | 11 | No |
-| ASTERUSDT | 1 | RED | 28 | No |
-| ATOMUSDT | 1 | RED | 25 | No |
-| AVAXUSDT | 1 | RED | 33 | No |
-| AXISUSDT | 1 | RED | 22 | No |
-| BANKUSDT | 1 | RED | 12 | No |
-| BARDUSDT | 1 | RED | 11 | No |
-| BATUSDT | 1 | RED | 15 | No |
-| BCHUSDT | 1 | GREEN | 28 | No |
-| BEAMUSDT | 1 | GREEN | 11 | No |
-| BEATUSDT | 1 | RED | 28 | No |
-| BERAUSDT | 1 | RED | 8 | No |
-| BGBUSDT | 1 | GREEN | 12 | No |
-| BLESSUSDT | 1 | GREEN | 30 | No |
-| BLURUSDT | 1 | GREEN | 5 | No |
-| BNBUSDT | 1 | RED | 37 | No |
-| BOMEUSDT | 1 | RED | 14 | No |
-| BREVUSDT | 1 | RED | 15 | No |
-| BRUSDT | 1 | RED | 10 | No |
-| BTCUSDT | 1 | RED | 32 | No |
-| BTWUSDT | 1 | RED | 30 | No |
-| CAPUSDT | 1 | GREEN | 31 | No |
-| CFGUSDT | 1 | RED | 22 | No |
-| CHIPUSDT | 1 | RED | 16 | No |
-| CLSUSDT | 1 | RED | 20 | No |
+| 1000BONKUSDT | 2 | RED | 13 | No |
+| AAVEUSDT | 2 | RED | 29 | No |
+| ACEUSDT | 2 | RED | 29 | No |
+| ADAUSDT | 2 | RED | 24 | No |
+| AEONUSDT | 2 | RED | 8 | No |
+| AEROUSDT | 2 | RED | 24 | No |
+| AIOUSDT | 2 | RED | 10 | No |
+| AKEUSDT | 2 | GREEN | 31 | No |
+| ALGOUSDT | 2 | GREEN | 25 | No |
+| ALLOUSDT | 2 | RED | 22 | No |
+| AMDLUSDT | 2 | RED | 29 | No |
+| APRUSDT | 2 | GREEN | 31 | No |
+| APTUSDT | 2 | RED | 30 | No |
+| ARBUSDT | 2 | RED | 30 | No |
+| ARIAUSDT | 2 | RED | 30 | No |
+| ARKMUSDT | 2 | GREEN | 10 | No |
+| ARUSDT | 2 | RED | 13 | No |
+| ASTERUSDT | 2 | GREEN | 23 | No |
+| ATOMUSDT | 2 | GREEN | 26 | No |
+| AVAXUSDT | 2 | RED | 30 | No |
+| AXISUSDT | 2 | GREEN | 26 | No |
+| BANKUSDT | 2 | RED | 14 | No |
+| BARDUSDT | 2 | RED | 16 | No |
+| BATUSDT | 2 | RED | 18 | No |
+| BCHUSDT | 2 | GREEN | 30 | No |
+| BEAMUSDT | 2 | GREEN | 8 | No |
+| BEATUSDT | 2 | RED | 33 | No |
+| BERAUSDT | 2 | GREEN | 11 | No |
+| BGBUSDT | 2 | RED | 18 | No |
+| BLESSUSDT | 2 | RED | 33 | No |
+| BLURUSDT | 2 | RED | 9 | No |
+| BNBUSDT | 2 | GREEN | 29 | No |
+| BOMEUSDT | 2 | GREEN | 15 | No |
+| BREVUSDT | 2 | GREEN | 13 | No |
+| BRUSDT | 2 | GREEN | 9 | No |
+| BTCUSDT | 2 | RED | 33 | No |
+| BTWUSDT | 2 | RED | 33 | No |
+| CAPUSDT | 2 | GREEN | 33 | No |
+| CFGUSDT | 2 | RED | 16 | No |
+| CHIPUSDT | 2 | RED | 28 | No |
+| CLSUSDT | 2 | RED | 29 | No |
 | COOKIEUSDT | 1 | RED | 11 | No |
-| CPUSDT | 1 | RED | 6 | No |
-| CROSSUSDT | 1 | RED | 19 | No |
-| CRVUSDT | 1 | RED | 25 | No |
-| CSTOCKUSDT | 1 | RED | 17 | No |
-| CTUSDT | 1 | RED | 23 | No |
-| CYBERUSDT | 1 | RED | 23 | No |
-| CYSUSDT | 1 | GREEN | 29 | No |
-| DASHUSDT | 1 | RED | 18 | No |
-| DEXEUSDT | 1 | GREEN | 10 | No |
-| DGAIUSDT | 1 | RED | 29 | No |
-| DOGEUSDT | 1 | RED | 31 | No |
-| DOODUSDT | 1 | RED | 12 | No |
-| DOSUSDT | 1 | GREEN | 20 | No |
-| DOTUSDT | 1 | RED | 18 | No |
-| EDGEUSDT | 1 | RED | 15 | No |
-| ELICEUSDT | 1 | GREEN | 10 | No |
-| ELSAUSDT | 1 | GREEN | 33 | No |
-| ENAUSDT | 1 | RED | 34 | No |
-| ENSOUSDT | 1 | RED | 29 | No |
-| ENSUSDT | 1 | RED | 18 | No |
-| ERAUSDT | 1 | RED | 18 | No |
-| ETCUSDT | 1 | RED | 26 | No |
-| ETHFIUSDT | 1 | RED | 30 | No |
-| ETHUSDT | 1 | GREEN | 31 | No |
+| CPUSDT | 2 | RED | 12 | No |
+| CROSSUSDT | 2 | RED | 23 | No |
+| CRVUSDT | 2 | RED | 27 | No |
+| CSTOCKUSDT | 2 | RED | 18 | No |
+| CTUSDT | 2 | RED | 26 | No |
+| CYBERUSDT | 2 | RED | 30 | No |
+| CYSUSDT | 2 | GREEN | 30 | No |
+| DASHUSDT | 2 | RED | 16 | No |
+| DEXEUSDT | 2 | RED | 10 | No |
+| DGAIUSDT | 2 | GREEN | 32 | No |
+| DOGEUSDT | 2 | GREEN | 31 | No |
+| DOODUSDT | 2 | GREEN | 8 | No |
+| DOSUSDT | 2 | RED | 19 | No |
+| DOTUSDT | 2 | RED | 18 | No |
+| EDGEUSDT | 2 | RED | 19 | No |
+| ELICEUSDT | 2 | GREEN | 16 | No |
+| ELSAUSDT | 2 | RED | 33 | No |
+| ENAUSDT | 2 | RED | 32 | No |
+| ENSOUSDT | 2 | RED | 31 | No |
+| ENSUSDT | 2 | GREEN | 17 | No |
+| ERAUSDT | 2 | RED | 20 | No |
+| ETCUSDT | 2 | RED | 27 | No |
+| ETHFIUSDT | 2 | RED | 28 | No |
+| ETHUSDT | 2 | GREEN | 31 | No |
 | EURUSDUSDT | 1 | GREEN | 4 | No |
-| EVAAUSDT | 1 | GREEN | 30 | No |
-| FARTCOINUSDT | 1 | RED | 36 | No |
-| FCXUSDT | 1 | RED | 4 | No |
-| FETUSDT | 1 | RED | 19 | No |
-| FILUSDT | 1 | RED | 33 | No |
-| FLOCKUSDT | 1 | GREEN | 28 | No |
-| FLOKIUSDT | 1 | RED | 14 | No |
-| FLUIDUSDT | 1 | RED | 15 | No |
-| FOLKSUSDT | 1 | GREEN | 4 | No |
-| GALAUSDT | 1 | RED | 11 | No |
-| GPSUSDT | 1 | RED | 7 | No |
-| GRAMUSDT | 1 | RED | 20 | No |
-| GRASSUSDT | 1 | RED | 27 | No |
-| GRTUSDT | 1 | RED | 14 | No |
-| GRVTUSDT | 1 | RED | 22 | No |
-| GWEIUSDT | 1 | RED | 10 | No |
-| HBARUSDT | 1 | RED | 35 | No |
-| HUMAUSDT | 1 | GREEN | 7 | No |
-| HUSDT | 1 | GREEN | 24 | No |
-| HYPEUSDT | 1 | RED | 31 | No |
-| ICNTUSDT | 1 | GREEN | 25 | No |
-| ICPUSDT | 1 | RED | 28 | No |
-| IDOLUSDT | 1 | GREEN | 29 | No |
-| INITUSDT | 1 | RED | 25 | No |
-| INJUSDT | 1 | RED | 34 | No |
-| INXUSDT | 1 | RED | 31 | No |
-| IOSTUSDT | 1 | RED | 8 | No |
-| IRYSUSDT | 1 | GREEN | 24 | No |
-| JCTUSDT | 1 | RED | 27 | No |
-| JTOUSDT | 1 | RED | 15 | No |
-| JUPUSDT | 1 | RED | 31 | No |
-| KAITOUSDT | 1 | RED | 17 | No |
-| KASUSDT | 1 | RED | 23 | No |
-| KAVAUSDT | 1 | GREEN | 14 | No |
-| KERNELUSDT | 1 | GREEN | 13 | No |
-| KGENUSDT | 1 | GREEN | 18 | No |
-| KITEUSDT | 1 | RED | 22 | No |
-| KUAISHOUUSDT | 1 | RED | 3 | No |
-| LABUSDT | 1 | GREEN | 15 | No |
-| LDOUSDT | 1 | RED | 17 | No |
-| LINKUSDT | 1 | RED | 32 | No |
-| LISTAUSDT | 1 | RED | 22 | No |
-| LITUSDT | 1 | RED | 30 | No |
-| LSKUSDT | 1 | GREEN | 20 | No |
-| LTCUSDT | 1 | RED | 32 | No |
-| LUNCUSDT | 1 | GREEN | 14 | No |
-| MAGMAUSDT | 1 | GREEN | 23 | No |
-| MARSCOINUSDT | 1 | RED | 13 | No |
-| MEGAUSDT | 1 | RED | 17 | No |
-| MELANIAUSDT | 1 | RED | 12 | No |
-| METUSDT | 1 | RED | 20 | No |
-| MMTUSDT | 1 | GREEN | 31 | No |
-| MONUSDT | 1 | RED | 19 | No |
-| MORPHOUSDT | 1 | RED | 19 | No |
-| MSUSDT | 1 | RED | 6 | No |
-| MUBARAKUSDT | 1 | GREEN | 29 | No |
-| MYXUSDT | 1 | RED | 12 | No |
-| NAORISUSDT | 1 | GREEN | 19 | No |
-| NEARUSDT | 1 | RED | 36 | No |
-| NEMUSDT | 1 | RED | 9 | No |
-| NIGHTUSDT | 1 | RED | 17 | No |
-| NILUSDT | 1 | RED | 9 | No |
-| NUUSDT | 1 | RED | 9 | No |
-| ONDOUSDT | 1 | RED | 34 | No |
-| ONEUSDT | 1 | GREEN | 31 | No |
-| OPGUSDT | 1 | RED | 9 | No |
-| OPUSDT | 1 | RED | 22 | No |
-| ORCAUSDT | 1 | RED | 11 | No |
-| ORDIUSDT | 1 | RED | 23 | No |
-| PENDLEUSDT | 1 | RED | 24 | No |
-| PENGUUSDT | 1 | RED | 25 | No |
-| PEPEUSDT | 1 | RED | 37 | No |
-| PHAUSDT | 1 | RED | 17 | No |
-| PIEVERSEUSDT | 1 | GREEN | 34 | No |
-| PIPPINUSDT | 1 | RED | 25 | No |
-| PIUSDT | 1 | GREEN | 22 | No |
-| PLUMEUSDT | 1 | RED | 11 | No |
-| POLUSDT | 1 | RED | 32 | No |
-| PONSUSDT | 1 | RED | 31 | No |
-| POWERUSDT | 1 | RED | 12 | No |
-| PROMUSDT | 1 | RED | 31 | No |
-| PUMPUSDT | 1 | RED | 28 | No |
-| PYTHUSDT | 1 | RED | 28 | No |
-| QNTUSDT | 1 | RED | 34 | No |
-| QUSDT | 1 | GREEN | 21 | No |
-| RAREUSDT | 1 | RED | 16 | No |
-| RAVEUSDT | 1 | RED | 20 | No |
-| RAYUSDT | 1 | RED | 15 | No |
-| RENDERUSDT | 1 | RED | 33 | No |
-| REUSDT | 1 | RED | 8 | No |
-| RUNEUSDT | 1 | RED | 14 | No |
-| SANDUSDT | 1 | RED | 37 | No |
-| SAPIENUSDT | 1 | RED | 8 | No |
-| SEIUSDT | 1 | RED | 31 | No |
-| SENTUSDT | 1 | RED | 12 | No |
-| SHIBUSDT | 1 | RED | 28 | No |
-| SKYAIUSDT | 1 | GREEN | 22 | No |
-| SKYUSDT | 1 | RED | 31 | No |
-| SOLUSDT | 1 | RED | 35 | No |
-| SOONUSDT | 1 | RED | 14 | No |
-| SPKUSDT | 1 | RED | 9 | No |
-| STRKUSDT | 1 | RED | 26 | No |
-| STXUSDT | 1 | RED | 13 | No |
-| SUIUSDT | 1 | RED | 32 | No |
-| TAOUSDT | 1 | RED | 32 | No |
-| TIAUSDT | 1 | RED | 28 | No |
-| TRUMPUSDT | 1 | RED | 33 | No |
-| TRXUSDT | 1 | RED | 16 | No |
-| TUTUSDT | 1 | RED | 9 | No |
-| UAIUSDT | 1 | RED | 27 | No |
-| UBUSDT | 1 | RED | 11 | No |
-| UNITASUSDT | 1 | GREEN | 21 | No |
-| UNIUSDT | 1 | RED | 30 | No |
-| USDBRLUSDT | 1 | GREEN | 25 | No |
-| USDJPYUSDT | 1 | RED | 4 | No |
-| USELESSUSDT | 1 | RED | 25 | No |
-| USUALUSDT | 1 | RED | 7 | No |
-| VELVETUSDT | 1 | RED | 29 | No |
-| VIRTUALUSDT | 1 | RED | 34 | No |
-| VVVUSDT | 1 | GREEN | 23 | No |
-| WIFUSDT | 1 | RED | 16 | No |
-| WLDUSDT | 1 | RED | 29 | No |
-| WLFIUSDT | 1 | RED | 20 | No |
-| XLMUSDT | 1 | RED | 34 | No |
-| XMRUSDT | 1 | GREEN | 24 | No |
-| XPLUSDT | 1 | RED | 27 | No |
-| XRPUSDT | 1 | GREEN | 31 | No |
-| XVGUSDT | 1 | RED | 11 | No |
-| ZECUSDT | 1 | RED | 30 | No |
-| ZESTUSDT | 1 | RED | 5 | No |
-| ZROUSDT | 1 | RED | 32 | No |
-| 牛来USDT | 1 | RED | 11 | No |
-| 龙虾USDT | 1 | RED | 9 | No |
+| EVAAUSDT | 2 | GREEN | 31 | No |
+| FARTCOINUSDT | 2 | GREEN | 28 | No |
+| FCXUSDT | 2 | GREEN | 4 | No |
+| FETUSDT | 2 | RED | 23 | No |
+| FILUSDT | 2 | RED | 28 | No |
+| FLOCKUSDT | 2 | RED | 21 | No |
+| FLOKIUSDT | 2 | RED | 16 | No |
+| FLUIDUSDT | 2 | RED | 14 | No |
+| FOLKSUSDT | 2 | GREEN | 7 | No |
+| GALAUSDT | 2 | GREEN | 18 | No |
+| GPSUSDT | 2 | GREEN | 6 | No |
+| GRAMUSDT | 2 | GREEN | 14 | No |
+| GRASSUSDT | 2 | GREEN | 20 | No |
+| GRTUSDT | 2 | RED | 6 | No |
+| GRVTUSDT | 2 | GREEN | 17 | No |
+| GWEIUSDT | 2 | RED | 15 | No |
+| HBARUSDT | 2 | RED | 32 | No |
+| HUMAUSDT | 2 | RED | 12 | No |
+| HUSDT | 2 | RED | 29 | No |
+| HYPEUSDT | 2 | RED | 34 | No |
+| ICNTUSDT | 2 | GREEN | 35 | No |
+| ICPUSDT | 2 | GREEN | 23 | No |
+| IDOLUSDT | 2 | RED | 30 | No |
+| INITUSDT | 2 | RED | 31 | No |
+| INJUSDT | 2 | RED | 31 | No |
+| INXUSDT | 2 | GREEN | 30 | No |
+| IOSTUSDT | 2 | RED | 8 | No |
+| IRYSUSDT | 2 | GREEN | 27 | No |
+| JCTUSDT | 2 | RED | 24 | No |
+| JTOUSDT | 2 | RED | 16 | No |
+| JUPUSDT | 2 | RED | 26 | No |
+| KAITOUSDT | 2 | RED | 17 | No |
+| KASUSDT | 2 | GREEN | 21 | No |
+| KAVAUSDT | 2 | GREEN | 12 | No |
+| KERNELUSDT | 2 | RED | 20 | No |
+| KGENUSDT | 2 | RED | 20 | No |
+| KITEUSDT | 2 | GREEN | 18 | No |
+| KUAISHOUUSDT | 2 | RED | 5 | No |
+| LABUSDT | 2 | GREEN | 14 | No |
+| LAUSDT | 1 | RED | 14 | No |
+| LDOUSDT | 2 | RED | 19 | No |
+| LINKUSDT | 2 | RED | 30 | No |
+| LISTAUSDT | 2 | GREEN | 29 | No |
+| LITUSDT | 2 | GREEN | 27 | No |
+| LSKUSDT | 2 | GREEN | 15 | No |
+| LTCUSDT | 2 | RED | 28 | No |
+| LUNCUSDT | 2 | RED | 16 | No |
+| MAGMAUSDT | 2 | RED | 26 | No |
+| MARSCOINUSDT | 2 | RED | 16 | No |
+| MEGAUSDT | 2 | GREEN | 20 | No |
+| MELANIAUSDT | 2 | RED | 8 | No |
+| METUSDT | 2 | RED | 20 | No |
+| MMTUSDT | 2 | GREEN | 30 | No |
+| MONUSDT | 2 | GREEN | 18 | No |
+| MORPHOUSDT | 2 | RED | 15 | No |
+| MSUSDT | 2 | RED | 3 | No |
+| MUBARAKUSDT | 2 | GREEN | 30 | No |
+| MYXUSDT | 2 | RED | 16 | No |
+| NAORISUSDT | 2 | RED | 20 | No |
+| NEARUSDT | 2 | RED | 34 | No |
+| NEMUSDT | 2 | RED | 5 | No |
+| NIGHTUSDT | 2 | GREEN | 23 | No |
+| NILUSDT | 2 | RED | 17 | No |
+| NUUSDT | 2 | GREEN | 6 | No |
+| ONDOUSDT | 2 | RED | 29 | No |
+| ONEUSDT | 2 | RED | 33 | No |
+| OPGUSDT | 2 | RED | 6 | No |
+| OPUSDT | 2 | GREEN | 15 | No |
+| ORCAUSDT | 2 | RED | 11 | No |
+| ORDIUSDT | 2 | RED | 21 | No |
+| PENDLEUSDT | 2 | RED | 22 | No |
+| PENGUUSDT | 2 | GREEN | 21 | No |
+| PEPEUSDT | 2 | RED | 33 | No |
+| PHAUSDT | 2 | GREEN | 16 | No |
+| PIEVERSEUSDT | 2 | GREEN | 30 | No |
+| PIPPINUSDT | 2 | RED | 26 | No |
+| PIUSDT | 2 | RED | 27 | No |
+| PLUMEUSDT | 2 | GREEN | 11 | No |
+| POLUSDT | 2 | RED | 23 | No |
+| PONSUSDT | 2 | RED | 29 | No |
+| POWERUSDT | 2 | RED | 18 | No |
+| PROMUSDT | 2 | RED | 34 | No |
+| PUMPUSDT | 2 | GREEN | 28 | No |
+| PYTHUSDT | 2 | RED | 26 | No |
+| QNTUSDT | 2 | GREEN | 30 | No |
+| QUSDT | 2 | RED | 18 | No |
+| RAREUSDT | 2 | RED | 15 | No |
+| RAVEUSDT | 2 | RED | 22 | No |
+| RAYUSDT | 2 | GREEN | 16 | No |
+| RENDERUSDT | 2 | GREEN | 28 | No |
+| REUSDT | 2 | RED | 11 | No |
+| RUNEUSDT | 2 | RED | 15 | No |
+| SANDUSDT | 2 | RED | 30 | No |
+| SAPIENUSDT | 2 | GREEN | 8 | No |
+| SEIUSDT | 2 | RED | 28 | No |
+| SENTUSDT | 2 | GREEN | 7 | No |
+| SHIBUSDT | 2 | RED | 26 | No |
+| SKYAIUSDT | 2 | RED | 27 | No |
+| SKYUSDT | 2 | RED | 28 | No |
+| SOLUSDT | 2 | RED | 31 | No |
+| SOONUSDT | 2 | RED | 10 | No |
+| SPKUSDT | 2 | GREEN | 9 | No |
+| SPXUSDT | 1 | RED | 10 | No |
+| STRKUSDT | 2 | GREEN | 26 | No |
+| STXUSDT | 2 | RED | 20 | No |
+| SUIUSDT | 2 | GREEN | 30 | No |
+| TAOUSDT | 2 | GREEN | 30 | No |
+| TIAUSDT | 2 | RED | 26 | No |
+| TRUMPUSDT | 2 | GREEN | 31 | No |
+| TRXUSDT | 2 | RED | 19 | No |
+| TUTUSDT | 2 | RED | 9 | No |
+| UAIUSDT | 2 | GREEN | 24 | No |
+| UBUSDT | 2 | GREEN | 15 | No |
+| UNITASUSDT | 2 | GREEN | 15 | No |
+| UNIUSDT | 2 | GREEN | 30 | No |
+| USDBRLUSDT | 2 | GREEN | 21 | No |
+| USDJPYUSDT | 2 | RED | 4 | No |
+| USELESSUSDT | 2 | RED | 27 | No |
+| USUALUSDT | 2 | RED | 15 | No |
+| VELVETUSDT | 2 | RED | 23 | No |
+| VIRTUALUSDT | 2 | GREEN | 27 | No |
+| VVVUSDT | 2 | RED | 29 | No |
+| WIFUSDT | 2 | GREEN | 19 | No |
+| WLDUSDT | 2 | GREEN | 29 | No |
+| WLFIUSDT | 2 | RED | 15 | No |
+| XLMUSDT | 2 | GREEN | 29 | No |
+| XMRUSDT | 2 | RED | 34 | No |
+| XPLUSDT | 2 | GREEN | 25 | No |
+| XRPUSDT | 2 | RED | 28 | No |
+| XVGUSDT | 2 | RED | 16 | No |
+| ZECUSDT | 2 | RED | 31 | No |
+| ZESTUSDT | 2 | RED | 8 | No |
+| ZROUSDT | 2 | RED | 34 | No |
+| 牛来USDT | 2 | GREEN | 11 | No |
+| 龙虾USDT | 2 | GREEN | 16 | No |
 
 ## Bitget futures-turnover activity-group coverage
 
 | Group | Watchlist candidates | Observation rows |
 |---|---:|---:|
-| Under $1m 24h futures turnover | 3 | 3 |
-| $1m–$10m 24h futures turnover | 3 | 3 |
-| $10m–$100m 24h futures turnover | 3 | 3 |
-| $100m+ 24h futures turnover | 2 | 2 |
+| Under $1m 24h futures turnover | 3 | 6 |
+| $1m–$10m 24h futures turnover | 3 | 6 |
+| $10m–$100m 24h futures turnover | 3 | 6 |
+| $100m+ 24h futures turnover | 2 | 4 |
 
 ## Profit-versus-loss summary (hypothetical book-walk outcomes)
 
-- Positive outcomes: 0; negative outcomes: 0; flat: 0
-- Win rate: unavailable
-- Gross positive outcomes: 0.000000 USDT
-- Gross negative outcomes: 0.000000 USDT
-- Total estimated net after trading fees: 0.000000 USDT
-- Profit factor: unavailable (no scored losses or no scored outcomes)
-- Average winning outcome: unavailable
-- Average losing outcome: unavailable
-- Mean estimated net result: unavailable
+- Positive outcomes: 198; negative outcomes: 72; flat: 0
+- Win rate among scored outcomes: 73.3%
+- Gross positive outcomes: 1395.898799 USDT
+- Gross negative outcomes: 302.799915 USDT
+- Total estimated net after trading fees: 1093.098884 USDT
+- Profit factor (gross gains / gross losses): 4.610
+- Average winning outcome: 7.049994 USDT
+- Average losing outcome: -4.205554 USDT
+- Mean estimated net result: 77.86 bps
 
 These estimates walk the visible entry book and a later visible exit book, deducting the authenticated account-specific Bitget taker fee when available, otherwise instrument metadata; missing fees are not assumed to be zero. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. The same signal is evaluated at multiple sizes and horizons, so these rows are correlated and must not be treated as independent trades. A completed simulation is not proof of profitability.
 
@@ -252,7 +254,9 @@ These estimates walk the visible entry book and a later visible exit book, deduc
 
 | Strategy | Outcomes | Positive | Negative | Mean estimated net (bps) |
 |---|---:|---:|---:|---:|
-| No scored outcomes | 0 | 0 | 0 | — |
+| breakdown | 36 | 27 | 9 | 57.91 |
+| breakout | 9 | 9 | 0 | 596.47 |
+| ema_volume | 225 | 162 | 63 | 60.31 |
 
 ## Public trader and community commentary (unverified)
 
