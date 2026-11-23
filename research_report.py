@@ -235,7 +235,7 @@ def build_report(root=ROOT):
         lines.append("| No scored outcomes | 0 | 0 | 0 | — |")
 
     lines += [
-        "", "## Legacy trader discussion records", "",
+        "", "## Legacy Trader discussion records", "",
         "Older trader discussion records, if present in the repository, are historical and unverified. The Bitget-only collector does not fetch, update or use them in research conclusions.",
         "", "## Limitations", "",
         "- The collector uses Bitget USDT perpetual market endpoints only. It samples the highest-turnover eligible contracts plus selected contracts from the current provisional four-band watchlist; market capitalisation is not inferred from ticker symbols.",
