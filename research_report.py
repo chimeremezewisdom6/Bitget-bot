@@ -76,14 +76,14 @@ def build_report(root=ROOT):
         "- Market cap is not supplied by Bitget futures endpoints; require a separately timestamped, identity-matched source.",
         "- Public trader posts are unverified statements, not authenticated fills or audited track records.",
         "- GitHub scheduled runs may be delayed or skipped; cycles and timestamps show actual collection, not guaranteed continuous monitoring.",
-        "- Forward outcomes are ticker reference-price calculations, not order-book-walk exit fills.",
+        "- Any ticker-only legacy outcomes are reference-price calculations and are kept separate from two-snapshot order-book shadow outcomes.",
         "- Small samples, repeated signals, correlated coins and changing regimes can distort apparent performance.",
         "- No Demo or Live orders were placed.", "",
         "## Research files", "",
         "- market_observations.jsonl — timestamped ticker/order-book summaries.",
         "- candles_1m.jsonl — de-duplicated one-minute candles.",
         "- public_trader_posts.jsonl — public RSS commentary and verification caveats.",
-        "- shadow_experiments.jsonl — signals and forward reference outcomes.",
+        "- shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.",
         "- collection_errors.jsonl — API/feed failures.", ""
     ]
     return "\n".join(lines)
