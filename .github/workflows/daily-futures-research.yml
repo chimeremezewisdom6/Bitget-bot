@@ -60,12 +60,18 @@ jobs:
         run: |
           python daily_research.py stop
           python research_report.py
-      - name: Collect one scheduled five-minute cycle
+      - name: Collect five one-minute research cycles
         if: github.event_name == 'schedule'
-        run: python daily_research.py collect
-      - name: Build current research summary
-        if: github.event_name == 'schedule'
-        run: python research_report.py
+        run: |
+          set -e
+          for cycle in 1 2 3 4 5; do
+            echo "Starting one-minute research cycle $cycle/5 at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            python daily_research.py collect
+            python research_report.py
+            if [ "$cycle" -lt 5 ]; then
+              sleep 60
+            fi
+          done
       - name: Check whether the session has finished
         id: completion
         if: github.event_name == 'schedule'
