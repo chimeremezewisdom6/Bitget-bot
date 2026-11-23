@@ -4,6 +4,14 @@
 
 This workflow reads public Bitget USDT perpetual market data only. It does not use Bitget API credentials and must not be connected to Demo or Live order placement. The existing scanner workflow is deliberately paused. Do not enable it as part of research.
 
+## Build the four-band watchlist first
+
+1. Open the repository Actions tab.
+2. Select **Build Four-Band Futures Watchlist (Read Only)** and run it on main.
+3. Inspect the artifact and committed report at reports/market_cap_watchlist/current_watchlist.md. Check each CoinGecko asset identity. Resolve ambiguous or mismatched tickers in config/asset_identity_overrides.json only after independent verification.
+4. The default provisional groups are lower cap below $10m, smaller cap $10m–$100m, mid cap $100m–$1bn, and mega cap $1bn or above. Change config/market_cap_bands.json if these boundaries do not match the intended study.
+5. Do not force three coins into a group when fewer qualify.
+
 ## Start the 24-hour session
 
 1. Open the repository Actions tab.
@@ -47,7 +55,7 @@ All durable records are committed under reports/daily_research:
 - A two-snapshot order-book simulation is not a real fill. It cannot know queue position, hidden liquidity, latency, or what the book did between snapshots.
 - Funding is not included in the automatic P&L; do not treat net-after-fees as fully net of all perpetual-futures costs.
 - Public trader commentary is not independently verified. Do not assume a post author traded the position.
-- Market cap is not supplied by the Bitget futures endpoints. Do not infer cap bands from symbols or spot turnover.
+- Market cap is not supplied by the Bitget futures endpoints. The watchlist uses a separate CoinGecko snapshot; exact symbol matches still require manual identity review. Do not infer cap bands from symbols or Spot turnover.
 - The top-turnover sample is not the requested verified 12-coin / four-market-cap-group watchlist. Keep this limitation visible until a timestamped identity-matched cap dataset and explicit band definitions are approved.
 - GitHub scheduled runs can be delayed or skipped. Inspect timestamps and cycle counts; never describe the recorder as guaranteed continuous monitoring.
 - A positive day or a small number of positive shadow outcomes is not evidence of a durable trading edge. Require larger samples, out-of-sample tests, regime coverage and full costs.
