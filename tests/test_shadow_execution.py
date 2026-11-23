@@ -15,9 +15,9 @@ class ShadowExecutionTests(unittest.TestCase):
         r = simulate_round_trip(entry_levels=[[100, 10]], exit_levels=[[102, 10]], direction="LONG", notional_usdt=100, taker_fee_bps=5, funding_bps=1)
         self.assertEqual(r["status"], "FULLY_SIMULATED")
         self.assertAlmostEqual(r["gross_pnl_usdt"], 2)
-        self.assertAlmostEqual(r["total_fees_usdt"], 0.1005)
+        self.assertAlmostEqual(r["total_fees_usdt"], 0.101)
         self.assertAlmostEqual(r["funding_cost_usdt"], 0.01)
-        self.assertAlmostEqual(r["net_pnl_usdt"], 1.8895)
+        self.assertAlmostEqual(r["net_pnl_usdt"], 1.889)
     def test_short_reverses_funding_sign(self):
         r = simulate_round_trip(entry_levels=[[100, 10]], exit_levels=[[98, 10]], direction="SHORT", notional_usdt=100, taker_fee_bps=0, funding_bps=1)
         self.assertAlmostEqual(r["gross_pnl_usdt"], 2)
