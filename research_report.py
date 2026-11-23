@@ -31,6 +31,8 @@ def build_report(root=ROOT):
     posts = read_jsonl(root / "public_trader_posts.jsonl")
     experiments = read_jsonl(root / "shadow_experiments.jsonl")
     errors = read_jsonl(root / "collection_errors.jsonl")
+    candle_streak_checks = read_jsonl(root / "candle_streak_checks.jsonl")
+    candle_streak_qualified = [x for x in candle_streak_checks if x.get("qualifies") is True]
 
     signals = [x for x in experiments if x.get("type") == "signal"]
     watch_conditions = [x for x in experiments if x.get("type") == "watch_condition"]
@@ -91,7 +93,18 @@ def build_report(root=ROOT):
         f"- Two-snapshot order-book shadow outcomes: {len(scored)}",
         f"- Legacy ticker-reference outcomes: {len(reference_outcomes)}",
         f"- Outcomes unavailable: {len(unavailable)}",
-        f"- Collection error records: {len(errors)}", "",
+        f"- Collection error records: {len(errors)}",
+        f"- 60-minute same-colour candle checks: {len(candle_streak_checks)}",
+        f"- Checks meeting 40+ same-colour candles: {len(candle_streak_qualified)}",
+        "",
+        "## Mandatory 60-minute same-colour candle experiment", "",
+        "Each eligible symbol is checked up to five separate times. Every check uses the latest 60 fully closed one-minute candles; green and red candles are counted separately, doji candles count toward neither colour, and a result qualifies when either colour reaches at least 40. This is a research filter, not a trade instruction.",
+        "",
+        "| Symbol | Checks recorded | Latest colour | Same-colour count | Qualified |",
+        "|---|---:|---|---:|---|",
+        *[f"| {symbol} | {sum(1 for x in candle_streak_checks if x.get(\"symbol\") == symbol)} | {next((x.get(\"dominant_colour\") for x in reversed(candle_streak_checks) if x.get(\"symbol\") == symbol), \"—\")} | {next((x.get(\"dominant_count\") for x in reversed(candle_streak_checks) if x.get(\"symbol\") == symbol), \"—\")} | {\"Yes\" if any(x.get(\"symbol\") == symbol and x.get(\"qualifies\") for x in candle_streak_checks) else \"No\"} |" for symbol in sorted({x.get("symbol") for x in candle_streak_checks if x.get("symbol")})],
+        *([] if candle_streak_checks else ["| No complete 60-candle checks yet | 0 | — | — | — |"]),
+        "",
         "## Bitget futures-turnover activity-group coverage", "",
         "| Group | Watchlist candidates | Observation rows |",
         "|---|---:|---:|",
