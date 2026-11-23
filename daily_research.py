@@ -438,6 +438,9 @@ async def collect():
 
     R.mkdir(parents=True, exist_ok=True)
     new_posts = 0
+    post_errors = 0
+    symbol_errors = 0
+    signal_count = 0
     errors = []
     state["last_cycle_started_at_utc"] = iso()
     async with aiohttp.ClientSession(headers=HEADERS) as session:
@@ -479,20 +482,22 @@ async def collect():
                     )
 
             results = await asyncio.gather(*(bounded(symbol) for symbol in selected_symbols))
+            symbol_errors = sum(1 for result in results if result.get("error"))
             signal_count = sum(record_signals_and_entries(result, state) for result in results)
             await evaluate_due_exits(session)
             if state.get("cycles", 0) % 3 == 0 and now().timestamp() < state["end_epoch"]:
-                new_posts = await collect_public_posts(session)
+                new_posts, post_errors = await collect_public_posts(session)
         except Exception as exc:
             errors.append(str(exc)[:500])
             add(R / "collection_errors.jsonl", {"at": iso(), "error": str(exc)[:500]})
-            signal_count = 0
 
     state["cycles"] = state.get("cycles", 0) + 1
     state["last_at"] = iso()
     state["signals"] = state.get("signals", 0) + signal_count
     state["posts"] = state.get("posts", 0) + new_posts
-    state["errors"] = state.get("errors", 0) + len(errors)
+    state["errors"] = state.get("errors", 0) + len(errors) + symbol_errors + post_errors
+    state["symbol_errors"] = state.get("symbol_errors", 0) + symbol_errors
+    state["feed_errors"] = state.get("feed_errors", 0) + post_errors
     state["symbols_last_cycle"] = len(selected_symbols) if "selected_symbols" in locals() else 0
     S.write_text(json.dumps(state, indent=2), encoding="utf-8")
     print(json.dumps({
@@ -512,6 +517,7 @@ async def collect_public_posts(session):
             except (json.JSONDecodeError, KeyError):
                 continue
     count = 0
+    error_count = 0
     for feed in FEEDS:
         try:
             async with session.get(feed, timeout=15) as response:
@@ -545,10 +551,11 @@ async def collect_public_posts(session):
                 known.add(identity)
                 count += 1
         except Exception as exc:
+            error_count += 1
             add(R / "collection_errors.jsonl", {
                 "at": iso(), "feed": feed, "error": str(exc)[:300]
             })
-    return count
+    return count, error_count
 
 
 def main():
