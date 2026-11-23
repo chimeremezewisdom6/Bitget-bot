@@ -82,8 +82,8 @@ jobs:
               [
                   "gh", "api", "--method", "POST",
                   f"repos/{repo}/actions/workflows/daily-futures-research.yml/dispatches",
-                  "-f", "ref=main",
-                  "-f", "inputs[action]=collect",
+                  "-F", "ref=main",
+                  "-F", "inputs[action]=collect",
               ],
               check=True,
           )
