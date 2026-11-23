@@ -290,3 +290,60 @@ Append a new dated entry for every experiment. Never overwrite a failed experime
 ---
 
 **End of current knowledge snapshot.** Add future discoveries below the appropriate section and append dated experiment entries rather than replacing historical evidence.
+
+
+## 13. Market-cap / Bitget-volume watchlist screening (2026-11-23)
+
+**User request:** Select three crypto assets in each market-cap band: below $1m, $1m-$10m, $10m-$100m, and $100m-$1bn; check their current Bitget trading activity. This is a research universe only, not a trade recommendation.
+
+### Source and measurement caveats
+
+- Bitget's own markets pages expose pair, market cap and 24-hour amount/turnover, but search-indexed snapshots are not guaranteed to be synchronized to the same minute.
+- CoinGecko's Bitget exchange page reports exchange-specific spot pair volume, spread and ±2% order-book depth; it showed BTC/USDT $429.37m, ETH/USDT $169.15m, SOL/USDT $53.35m, WLD/USDT $2.07m and other rows at the captured snapshot.
+- Coinstrooper's Bitget listings page exposes a market-cap and 24h-volume table, but some volume-to-market-cap ratios are extreme and require direct exchange/API confirmation. Treat its small-cap figures as provisional leads, not verified exchange execution quality.
+- CoinGecko exchange volume and Bitget perpetual futures volume are different markets. Do not mix spot volume with futures volume in a single ranking. The user should confirm whether the observation universe should be spot, USDT perpetuals, or both; current project strategy historically scans USDT perpetuals, so the final strategy universe should use futures volume and contracts.
+- The candidate market cap and Bitget 24h volume are snapshots, not fixed attributes. Recheck before each observation session.
+
+### Provisional candidates from the exchange-listed coin table
+
+The following first three groups are provisional screening leads from Coinstrooper's Bitget listings snapshot. Values are shown exactly as reported by that source:
+
+| Market-cap band | Coin | Reported market cap | Reported Bitget 24h volume | Status |
+|---|---|---:|---:|---|
+| Below $1m | TCOM | $730,000 | $8.69m | Provisional; verify pair/depth |
+| Below $1m | AGENDA 47 (A47) | $587,630 | $7.82m | Provisional; verify pair/depth |
+| Below $1m | Redacted Coin (RDAC) | $14,970 | $9.78m | Reject pending verification; volume/cap ratio is extreme |
+| $1m-$10m | IKA | $1.65m | $13.72m | Provisional; verify pair/depth |
+| $1m-$10m | StakeStone (STO) | $4.71m | $8.60m | Provisional; cross-check market cap source |
+| $1m-$10m | Syscoin (SYS) | $1.89m | $7.03m | Provisional; verify pair/depth |
+| $10m-$100m | HOME | $17.90m | $17.37m | Provisional; verify pair/depth |
+| $10m-$100m | BSquared (B2) | $28.73m | $13.44m | Provisional; verify pair/depth |
+| $10m-$100m | River (RIVER) | $16.39m | $13.20m | Provisional; verify pair/depth |
+
+**Important:** The table's volume-to-market-cap ratios are unusually high for several names, especially RDAC, TCOM and A47. This can reflect a genuine event, a very small circulating market cap, a data mismatch, wash trading, or thin liquidity. It is not evidence of reliable executable liquidity. RDAC is deliberately not accepted as a final watchlist coin until corroborated.
+
+### $100m-$1bn band: exchange-specific cross-checks
+
+| Coin | Market cap source snapshot | Bitget spot 24h volume | Bitget spread / depth | Status |
+|---|---:|---:|---|---|
+| Worldcoin (WLD) | approximately $884m-$899m | approximately $2.09m-$2.42m | CoinGecko snapshot: 0.04% spread; +2% depth $432,550; -2% depth $647,592 | Strongest provisional candidate in this band |
+| Official Trump (TRUMP) | approximately $249m-$265m | approximately $431k-$454k | CoinGecko snapshot: 0.11% spread; +2% depth $207,075; -2% depth $245,228 | Provisional; relatively low Bitget spot volume |
+| Artificial Superintelligence Alliance (FET) | approximately $265m (confirm current cap before use) | approximately $562k | CoinGecko snapshot: 0.09% spread; +2% depth $60,639; -2% depth $123,700 | Provisional; shallow depth relative to larger assets |
+
+### Screening conclusion
+
+This is not yet a fully verified 12-coin list. The initial exchange-listings source yields nine provisional leads in the first three bands, while WLD, TRUMP and FET have separate Bitget pair-level spot volume/depth cross-checks in the $100m-$1bn band. Several micro-cap listings have suspiciously high volume relative to reported market cap. Do not silently promote them to the approved watchlist.
+
+**Next verification step:** query Bitget's official public spot and USDT-futures instruments/ticker/order-book endpoints for each symbol; confirm online status, exact pair, 24h quote turnover, bid/ask spread, and depth for a fixed hypothetical order size. Independently retrieve circulating market cap with a timestamp. If a candidate fails any check or is not listed in the relevant product, replace it with the next qualifying coin. Keep separate spot and futures volume columns.
+
+### Sources captured 2026-11-23
+
+- Coinstrooper Bitget listings and market-cap/volume table: https://coinstrooper.com/exchange/bitget
+- CoinGecko Bitget spot exchange markets (pair-level volume, spread, depth): https://www.coingecko.com/en/exchanges/bitget
+- Bitget official spot USDT markets: https://www.bitget.com/markets/spot/USDT
+- Bitget official 24h crypto volume overview (explicitly includes assets not listed on Bitget; do not use it alone as proof of listing): https://www.bitget.com/price/crypto-top-volume-24hr
+- Worldcoin market cap and Bitget pair: https://www.coingecko.com/en/coins/worldcoin
+- Official Trump market/pair comparison: https://www.coingecko.com/en/coins/official-trump
+- Artificial Superintelligence Alliance markets: https://www.coingecko.com/en/coins/artificial-superintelligence-alliance
+
+**Decision:** treat the above as an initial candidate screen, not an approved final watchlist or a claim of profitable opportunity. All observation remains shadow-only; no Demo or Live orders.
