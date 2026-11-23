@@ -347,3 +347,41 @@ This is not yet a fully verified 12-coin list. The initial exchange-listings sou
 - Artificial Superintelligence Alliance markets: https://www.coingecko.com/en/coins/artificial-superintelligence-alliance
 
 **Decision:** treat the above as an initial candidate screen, not an approved final watchlist or a claim of profitable opportunity. All observation remains shadow-only; no Demo or Live orders.
+
+
+## 14. Futures-only market-cap screening update (2026-11-23)
+
+**User decision:** the watchlist must be restricted to Bitget **USDT perpetual futures**. Spot markets and Spot turnover are excluded. This supersedes the earlier open question in Section 13; the spot candidates there are not approved for the futures watchlist.
+
+### Evidence gathered
+
+- Bitget's official market-data documentation defines the `USDT-FUTURES` category and documents public futures instruments, tickers, order books, 24-hour turnover, bid/ask, funding and open interest. The public endpoints needed are `/api/v3/market/instruments`, `/api/v3/market/tickers`, and `/api/v3/market/orderbook`. Source: https://www.bitget.com/docs/catalog/market/market-data
+- Bitget's official markets page lists USDT perpetual contracts and displayed 24-hour amounts. A search-indexed snapshot on 2026-11-23 showed high turnover examples including BTCUSDT, ETHUSDT, IRYSUSDT, SOXLUSDT, ZECUSDT, SOLUSDT, NEARUSDT, KORUUSDT, WLDUSDT, SUIUSDT, ADAUSDT and others. Source: https://www.bitget.com/markets/
+- Loris Tools' Bitget perpetual tracker (snapshot 2026-11-23 06:56 UTC) reported BLESS about $29.15m, MMT about $27.33m, ACE about $25.81m and ELSA about $17.97m 24h futures turnover; this is a third-party tracker, not the official API. Source: https://loris.tools/markets/exchanges/bitget
+- CoinGecko historical snapshots dated 2026-11-23 reported market caps: ACE about $7.65m (CoinMarketCap snapshot), BLESS about $29.72m, MMT about $44.46m, and ELSA about $25.69m. Sources: https://coinmarketcap.com/currencies/fusionist/ ; https://www.coingecko.com/en/coins/bless/historical_data ; https://www.coingecko.com/en/coins/momentum-2/historical_data ; https://www.coingecko.com/en/coins/elsa/historical_data
+- Bitget's own WLDUSDT perpetual page showed 24h turnover about $9.48m and volume 41.25m WLD in its captured snapshot. Source: https://www.bitget.com/futures/usdt/WLDUSDT
+- Bitget's own STOUSDT perpetual page showed only about $28.87k 24h turnover in its captured snapshot. Despite a previous Spot/exchange listing screen suggesting a small market cap, that futures turnover is low and does not meet the historical scanner's $500,000 minimum-volume screen. Source: https://www.bitget.org/futures/usdt/STOUSDT
+- Bitget announced DGAIUSDT USDT-M perpetual futures listing on 2026-09-04. CoinGecko/CoinMarketCap snapshots on 2026-11-23 placed DGAI market cap around $148m-$149m, inside the $100m-$1bn band. Listing evidence: https://www.bitget.com/support/articles/12560603894266 ; market cap: https://coinmarketcap.com/currencies/dgrid-ai/
+
+### Preliminary classification (not a complete approved 12-coin watchlist)
+
+| Band | Candidate | Market cap snapshot | Bitget USDT perp evidence | Status |
+|---|---|---:|---|---|
+| Below $1m | None verified | — | No verified crypto contract with qualifying cap and turnover established in this pass | Keep band empty rather than invent candidates |
+| $1m-$10m | ACE | About $7.65m | Bitget futures tracker reported about $25.81m turnover | Strong provisional candidate; confirm via official ticker API |
+| $1m-$10m | STO | About $4.71m in earlier third-party screen | Official Bitget STOUSDT page showed about $28.87k turnover | Reject for current scanner universe; below $500k screen |
+| $1m-$10m | Other candidates | — | No two additional candidates verified to both cap band and active USDT perp turnover | Do not fill by guess |
+| $10m-$100m | BLESS | About $29.72m | Bitget futures tracker about $29.15m turnover | Strong provisional candidate; verify official ticker/order book |
+| $10m-$100m | MMT | About $44.46m | Bitget futures tracker about $27.33m turnover | Strong provisional candidate; note exceptional funding/volatility conditions require checking |
+| $10m-$100m | ELSA | About $25.69m | Bitget futures tracker about $17.97m turnover | Strong provisional candidate; verify official ticker/order book |
+| $100m-$1bn | DGAI | About $148m-$149m | Bitget official listing announcement confirms USDT-M perpetual; current exact turnover not captured from official ticker in this pass | Contract confirmed, turnover pending |
+| $100m-$1bn | WLD | About $884m-$899m in prior market-cap screen | Official Bitget WLDUSDT page about $9.48m turnover | Strong provisional candidate |
+| $100m-$1bn | Other candidates | — | No third candidate's current cap and Bitget futures turnover both confirmed in this pass | Do not fill by guess |
+
+### Screening decision and next verification
+
+This pass does **not** establish 12 qualified candidates. The under-$1m group has no verified qualifying contract, and the $1m-$10m group currently has only ACE as a promising turnover candidate. This is a real universe/liquidity constraint, not a reason to substitute Spot volume or fabricate picks. The historical scanner's $500,000 24h volume floor is a useful first screen, but turnover alone does not prove depth or low slippage.
+
+Before approving a coin, collect a same-session official Bitget API snapshot for `category=USDT-FUTURES`: instrument status must be `online`; ticker must supply `turnover24h`, `bid1Price`, `ask1Price`, `fundingRate`, `openInterest`, and timestamp; order-book depth must be walked for hypothetical fixed notionals. Independently record circulating market cap and its timestamp. Never use Spot turnover to pass a futures candidate. If fewer than three valid assets exist in a band, record fewer than three and explain why.
+
+**Operating boundary remains observation-only:** no Demo or Live orders, no order placement, no leverage changes, and no position management. All candidate names are watchlist research leads, not trade recommendations or proof of profitability.
