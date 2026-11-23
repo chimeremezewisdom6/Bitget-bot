@@ -659,3 +659,37 @@ These are operational defaults, not a claim that the user previously approved ex
 
 - Added a manual stop action to the 24-hour workflow. It marks the session inactive and preserves all records; scheduled cycles then stop collecting. Status remains read-only. A second start is rejected while the previous session or its exit-settlement grace period is active.
 - Unverified manual CoinGecko ID overrides are excluded from the selected watchlist. They must be marked verified: true after independent identity confirmation.
+
+## 20. Consolidated observation-only research workflow (2026-11-23)
+
+### User direction
+
+The user requested a lean repository for a 24-hour (or longer) observation period: no Demo or Live orders, one five-minute scheduled market-data collector, durable records written to files, and a later evidence-based rebuild of the trading scanner. Keep the existing `scanner.py` source for future work, but do not run or enable its trading workflow during this experiment.
+
+### Repository simplification
+
+- Consolidated the operational research process into `.github/workflows/daily-futures-research.yml`.
+- At manual `start`, this workflow first checks that no prior session is active, automatically builds the four-band market-cap/liquidity watchlist with `cap_watchlist.py`, then starts `daily_research.py`.
+- The same workflow attempts one public-data collection cycle every five minutes, refreshes `research_report.py`, commits records under `reports/`, and uploads a downloadable artifact when the session completes or the user manually stops it.
+- `status` and `stop` remain manual actions. Stop preserves records and uploads the package.
+- Removed duplicate/unneeded components: `.github/workflows/shadow-market-snapshot.yml`, `.github/workflows/market-cap-watchlist.yml`, `shadow_research.py`, and `tests/test_shadow_research.py`. The cap-watchlist builder itself remains because the single research workflow calls it automatically.
+- Updated README and runbook so users no longer need to launch separate market-cap and shadow-snapshot workflows.
+- Updated validation workflow to compile the retained scanner and research modules, and run the remaining unit/safety tests.
+- Corrected the per-cycle symbol counter so it counts contracts actually observed in that cycle, not every symbol returned in the exchange ticker response.
+
+### Reporting improvements
+
+- The generated Markdown report now separates completed visible-order-book shadow outcomes from legacy ticker-reference outcomes.
+- It reports positive/negative/flat counts, win rate, gross positive USDT, gross negative USDT, total estimated net after trading fees, profit factor, average win/loss and mean bps, plus strategy-level breakdowns.
+- It includes recent collected public trader/community post titles and source links. These posts remain explicitly unverified; no author identity, actual fills, or profitability is assumed.
+- Multiple sizes and horizons can originate from the same signal, so outcomes are correlated and must not be counted as independent trades.
+- Automatic short-horizon P&L still excludes funding settlement. Visible order-book walks remain estimates, not guaranteed exchange fills.
+
+### Current operational boundary and outstanding verification
+
+- The only scheduled workflow is the read-only five-minute research collector. The original Demo-capable scanner workflow remains disabled; no Demo or Live orders are authorised.
+- GitHub cron is best-effort and can be delayed or skipped. Actual timestamps and cycle counts must be inspected.
+- The user must manually dispatch `start` once from the repository Actions page. Code changes alone do not start the 24-hour session.
+- GitHub validation is triggered by pushes to `main`, but do not claim the latest run passed until its Actions result is checked.
+- The 24-hour experiment has not been proven complete until actual observations, errors, artifacts and final report have been inspected.
+- After the user supplies the downloaded artifact, analyse the collected evidence alongside independently sourced trader research and the user's prior project lessons. Only then propose a rebuilt scanner; do not infer or promise profitability from one day of observations.
