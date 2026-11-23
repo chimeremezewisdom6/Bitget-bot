@@ -13,8 +13,8 @@ class ResearchReportTests(unittest.TestCase):
             (root / "public_trader_posts.jsonl").write_text('{"source":"reddit"}\n')
             (root / "shadow_experiments.jsonl").write_text(
                 '{"type":"signal","strategy":"ema"}\n'
-                '{"type":"forward_reference_outcome","strategy":"ema","estimated_net_bps":10}\n'
-                '{"type":"forward_reference_outcome","strategy":"ema","estimated_net_bps":-5}\n')
+                '{"type":"orderbook_shadow_outcome","strategy":"ema","notional_usdt":100,"net_after_trading_fees_usdt":0.1}\n'
+                '{"type":"orderbook_shadow_outcome","strategy":"ema","notional_usdt":100,"net_after_trading_fees_usdt":-0.05}\n')
             report = build_report(root)
             self.assertIn("Distinct symbols observed: 2", report)
             self.assertIn("Candidate signals: 1", report)
