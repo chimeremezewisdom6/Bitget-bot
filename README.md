@@ -2,12 +2,18 @@
 
 A Python scanner for Bitget USDT-margined futures. The repository is deliberately locked to **Bitget Demo trading**.
 
+## Project knowledge and research history
+
+Read [docs/PROJECT_KNOWLEDGE_BASE.md](docs/PROJECT_KNOWLEDGE_BASE.md) for the dated project history, verified engineering findings, strategy parameters, test coverage, known failures, shadow-trading research protocol, and experiment log. Update that file whenever a meaningful test, finding, strategy decision, or limitation changes.
+
+**Current user instruction (2026-11-23): observation-only research.** Do not place Live or Demo orders. The scanner remains order-capable in Demo mode; keep automated trading paused and do not run it with `BOT_DRY_RUN=false`.
+
 ## Safety status
 
 - `scanner.py` hard-locks `BITGET_DEMO_MODE = True`; an environment variable cannot switch it to live trading.
 - Demo authenticated requests include Bitget's required `paptrading: 1` header.
 - `BOT_DRY_RUN=true` performs a read-only scan and must not change leverage or submit orders.
-- The automated scanner workflow is intentionally paused. Do not remove its safety condition until a supervised Demo test has verified account access, order placement, fill confirmation, position monitoring, and reduce-only closing.
+- The automated scanner workflow is intentionally paused. Do not remove its safety condition until a supervised Demo test has verified account access, order placement, fill confirmation, position monitoring, and reduce-only closing—and only after explicit authorization. The current instruction is no Demo or Live trading.
 - Passing unit tests is not proof that the exchange connection or a real Demo order lifecycle works.
 
 ## Repository layout
@@ -28,7 +34,7 @@ Runtime-generated files such as decision logs and live trade history are not sou
 
 ## GitHub Actions secrets
 
-For the manual Demo smoke test, configure these repository Actions secrets using a **Bitget Demo API key**, never a live-trading key:
+For the historical manual Demo smoke test, the workflow reads these repository Actions secrets using a **Bitget Demo API key**, never a live-trading key:
 
 - `BITGET_API_KEY`
 - `BITGET_SECRET_KEY`
@@ -48,9 +54,11 @@ python -m unittest discover -s tests -v
 
 ## Before enabling automated Demo trading
 
-1. Confirm the credentials are a Bitget Demo API key with the required read/trade permissions.
+Trading is currently prohibited by the user's observation-only instruction. Do not enable it. The following historical checklist is retained for engineering context only:
+
+1. Confirm credentials are a Bitget Demo API key with the required permissions.
 2. Run the manual read-only smoke test and inspect its logs.
-3. Verify the account mode, available Demo balance, instrument rules and open positions.
+3. Verify account mode, available Demo balance, instrument rules and open positions.
 4. Test a supervised Demo entry, confirmed fill, stop-loss, and reduce-only close.
 5. Confirm position state survives workflow restarts. GitHub-hosted runners are ephemeral; state persistence must be deliberately implemented and tested before relying on scheduled or continuous runs.
 
