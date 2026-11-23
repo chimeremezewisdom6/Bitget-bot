@@ -1,5 +1,6 @@
 """Build a transparent performance and evidence summary from research JSONL records."""
 import json
+from datetime import datetime, timezone
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -260,4 +261,49 @@ if __name__ == "__main__":
     ROOT.mkdir(parents=True, exist_ok=True)
     output = ROOT / "daily_research_summary.md"
     output.write_text(build_report(), encoding="utf-8")
+    status = {
+        "schema_version": 1,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "mode": "BITGET_ONLY_READ_ONLY",
+        "data_source": "Bitget USDT-FUTURES",
+        "trading_enabled": False,
+        "session": {
+            "active": bool(session.get("active", False)),
+            "started_at_utc": session.get("started_at_utc"),
+            "ends_at_utc": session.get("ends_at_utc"),
+            "last_collection_utc": session.get("last_at"),
+            "cycles": session.get("cycles", 0),
+            "symbols_last_cycle": session.get("symbols_last_cycle", 0),
+            "bitget_auth_status": session.get("bitget_auth_status", "NOT_CHECKED"),
+        },
+        "coverage": {
+            "distinct_symbols_observed": len(symbols),
+            "market_observation_rows": len(observations),
+            "one_minute_candle_records": len(read_jsonl(root / "candles_1m.jsonl")),
+            "long_trend_starts": len(trend_long),
+            "short_trend_starts": len(trend_short),
+            "early_window_trend_events": len(early_window_events),
+        },
+        "candle_streak_experiment": {
+            "checks": len(candle_streak_checks),
+            "qualified_40_plus": len(candle_streak_qualified),
+        },
+        "shadow_execution": {
+            "scored_orderbook_outcomes": len(scored),
+            "wins": wins,
+            "losses": losses,
+            "flat": flat,
+            "estimated_net_usdt": round(total_net, 8),
+            "mean_net_bps": round(mean_bps, 4) if mean_bps is not None else None,
+        },
+        "health": {
+            "collection_error_records": len(errors),
+            "latest_error": errors[-1] if errors else None,
+            "status": "CHECK_ERRORS" if errors else "NO_RECORDED_ERRORS",
+        },
+        "report_file": "daily_research_summary.md",
+    }
+    status_path = root / "research_status.json"
+    status_path.write_text(json.dumps(status, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8")
     print(f"Wrote {output}")
+    print(f"Wrote {status_path}")
