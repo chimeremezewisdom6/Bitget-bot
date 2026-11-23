@@ -63,3 +63,20 @@ Trading is currently prohibited by the user's observation-only instruction. Do n
 5. Confirm position state survives workflow restarts. GitHub-hosted runners are ephemeral; state persistence must be deliberately implemented and tested before relying on scheduled or continuous runs.
 
 Never use this project with live-account credentials.
+
+
+## Read-only shadow market research
+
+A separate collector now exists at `shadow_research.py`. It reads only Bitget public **USDT perpetual futures** instruments, tickers and order books. It does not use account credentials or call trading endpoints.
+
+Run locally:
+
+```bash
+python shadow_research.py --min-turnover 500000 --top-depth 50
+```
+
+Or open **Actions → Shadow Market Snapshot (Read Only) → Run workflow**. The run uploads timestamped JSON and CSV artifacts. The default screen is $500,000 24-hour USDT turnover, with order-book depth collected for the 50 highest-turnover eligible contracts.
+
+The collector estimates visible-book market buy/sell fills at $100, $500 and $1,000, plus spread and depth inside 0.1%, 0.5% and 1%. These are hypothetical estimates, not fills. Bitget futures endpoints do not supply circulating market cap; market caps must be joined separately and timestamped before any coin is assigned to a cap band.
+
+No Pollinations key is needed for numeric market collection. Pollinations may later be used for separate text analysis of public trader research, but never as the source of market prices, volume, order-book depth or P&L. Keep any future Pollinations credential in a budget-limited Actions Secret, never in source code or repository Variables.
