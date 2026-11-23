@@ -70,11 +70,25 @@ def add(path, value):
         handle.write(json.dumps(value, ensure_ascii=False) + "\n")
 
 
+def _first_env(*names):
+    """Return the first non-empty credential variable, supporting common secret names."""
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def credentials():
+    # Bitget calls this value the API passphrase. Some users store it under
+    # "password" or the shorter passphrase name in GitHub Actions secrets.
     return (
-        os.getenv("BITGET_API_KEY", "").strip(),
-        os.getenv("BITGET_API_SECRET", "").strip(),
-        os.getenv("BITGET_API_PASSPHRASE", "").strip(),
+        _first_env("BITGET_API_KEY", "BITGET_KEY"),
+        _first_env("BITGET_API_SECRET", "BITGET_SECRET_KEY", "BITGET_SECRET"),
+        _first_env(
+            "BITGET_API_PASSPHRASE", "BITGET_PASSPHRASE",
+            "BITGET_API_PASSWORD", "BITGET_PASSWORD",
+        ),
     )
 
 
