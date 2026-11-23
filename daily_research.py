@@ -660,10 +660,6 @@ async def collect():
                     completed_backtests.add(backtest["symbol"])
             state["trend_backtest_symbols_completed"] = sorted(completed_backtests)
             state["trend_backtest_symbols_this_cycle"] = sum(x is not None for x in backtest_results)
-            state["trend_backtest_events_total"] = sum(
-                row.get("events_found", 0)
-                for row in read(R / "trend_first_hour_backtest.jsonl", [])
-            )
             symbol_errors = sum(1 for result in results if result.get("error"))
             signal_count = sum(record_signals_and_entries(result, state) for result in results)
 
