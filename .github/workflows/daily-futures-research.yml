@@ -92,13 +92,16 @@ jobs:
             git commit -m "Record read-only futures research"
             git push
           fi
+      - name: Build portable CSV and ZIP research package
+        if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || (github.event_name == 'schedule' && steps.completion.outputs.complete == 'true')
+        run: |
+          python -m py_compile package_research.py
+          python package_research.py
       - name: Upload complete research package
         if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || (github.event_name == 'schedule' && steps.completion.outputs.complete == 'true')
         uses: actions/upload-artifact@v4
         with:
           name: bitget-24-hour-futures-research-${{ github.run_id }}
-          path: |
-            reports/daily_research/
-            reports/market_cap_watchlist/
-          if-no-files-found: warn
+          path: reports/bitget_24h_research_package.zip
+          if-no-files-found: error
           retention-days: 30
