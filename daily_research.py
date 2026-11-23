@@ -251,6 +251,113 @@ def evaluate_candle_streak(symbol, candles):
         "meaning": "Research condition only; not a trade instruction."
     }
 
+
+def analyze_first_hour_trends(symbol, candles, window_start_ms, window_end_ms):
+    """Find 60-minute range breakouts and measure candle colours in their first hour.
+
+    A trend start is a fully closed 1m candle closing above the previous 60
+    candles' highs (LONG) or below their lows (SHORT). Each event is measured
+    over that breakout candle plus the next 59 fully closed 1m candles.
+    Events must have a complete, gap-free first hour. This is a transparent
+    breakout proxy, not a claim that every market trend starts this way.
+    """
+    rows_by_time = {}
+    for row in candles or []:
+        try:
+            ts = int(row[0])
+            if window_start_ms <= ts and ts + 60_000 <= window_end_ms:
+                rows_by_time[ts] = row
+        except (TypeError, ValueError, IndexError):
+            continue
+    rows = [rows_by_time[key] for key in sorted(rows_by_time)]
+    events = []
+    last_event_index = -60
+    for i in range(60, len(rows) - 59):
+        first_hour = rows[i:i + 60]
+        if len(first_hour) != 60:
+            continue
+        timestamps = [int(row[0]) for row in first_hour]
+        if any(timestamps[j] - timestamps[j - 1] != 60_000 for j in range(1, 60)):
+            continue
+        if i - last_event_index < 60:
+            continue
+        previous = rows[i - 60:i]
+        previous_high = max(number(row[2]) for row in previous)
+        previous_low = min(number(row[3]) for row in previous)
+        start_close = number(rows[i][4])
+        if start_close > previous_high:
+            direction = "LONG"
+        elif start_close < previous_low:
+            direction = "SHORT"
+        else:
+            continue
+
+        green = sum(number(row[4]) > number(row[1]) for row in first_hour)
+        red = sum(number(row[4]) < number(row[1]) for row in first_hour)
+        doji = 60 - green - red
+        matching = green if direction == "LONG" else red
+        opposing = red if direction == "LONG" else green
+        end_close = number(first_hour[-1][4])
+        follow_through = (
+            (end_close / start_close - 1) * 100 if direction == "LONG" and start_close
+            else (start_close / end_close - 1) * 100 if direction == "SHORT" and end_close
+            else None
+        )
+        events.append({
+            "direction": direction,
+            "trend_start_timestamp_ms": int(rows[i][0]),
+            "first_hour_end_timestamp_ms": int(first_hour[-1][0]),
+            "trend_start_close": start_close,
+            "first_hour_end_close": end_close,
+            "green_candles": green,
+            "red_candles": red,
+            "doji_candles": doji,
+            "direction_matching_candles": matching,
+            "direction_opposing_candles": opposing,
+            "direction_matching_pct": round(matching / 60 * 100, 2),
+            "first_hour_follow_through_pct": round(follow_through, 4) if follow_through is not None else None,
+            "candles_in_first_hour": 60,
+        })
+        last_event_index = i
+
+    return {
+        "type": "first_hour_trend_candle_backtest",
+        "symbol": symbol,
+        "window_start_ms": window_start_ms,
+        "window_end_ms": window_end_ms,
+        "candles_available": len(rows),
+        "events_found": len(events),
+        "long_trends": sum(event["direction"] == "LONG" for event in events),
+        "short_trends": sum(event["direction"] == "SHORT" for event in events),
+        "events": events,
+        "trend_definition": "1m close breaks above prior 60-candle high (LONG) or below prior 60-candle low (SHORT); first hour includes breakout candle plus next 59 closed candles.",
+        "caveat": "Breakout-based trend proxy. Describes historical candle behaviour; not a prediction or trading instruction."
+    }
+
+
+async def fetch_first_hour_trend_backtest(session, symbol):
+    """Fetch a rolling 24h of 1m candles in two public-data pages."""
+    end_ms = (int(time.time() * 1000) // 60_000) * 60_000
+    start_ms = end_ms - 24 * 60 * 60 * 1000
+    midpoint_ms = start_ms + 12 * 60 * 60 * 1000
+
+    async def page(start, end):
+        payload = await get_json(session, "/api/v3/market/candles", {
+            "category": CATEGORY, "symbol": symbol, "interval": "1m",
+            "startTime": str(start), "endTime": str(end), "limit": "1000"
+        })
+        return payload.get("data", []) or []
+
+    first, second = await asyncio.gather(
+        page(start_ms, midpoint_ms), page(midpoint_ms, end_ms)
+    )
+    merged = {int(row[0]): row for row in first + second if row and len(row) >= 7}
+    result = analyze_first_hour_trends(
+        symbol, [merged[key] for key in sorted(merged)], start_ms, end_ms
+    )
+    result["collected_at_utc"] = iso()
+    return result
+
 def watchlist_activity_map():
     watchlist = read(WATCH, {})
     result = {}
@@ -526,6 +633,37 @@ async def collect():
                     )
 
             results = await asyncio.gather(*(bounded(symbol) for symbol in selected_symbols))
+
+            # Historical first-hour trend experiment: run once per symbol per
+            # research session, using a rolling 24h of public 1m candles.
+            completed_backtests = set(state.setdefault("trend_backtest_symbols_completed", []))
+            pending_backtests = [symbol for symbol in selected_symbols if symbol not in completed_backtests]
+            backtest_semaphore = asyncio.Semaphore(SYMBOL_CONCURRENCY)
+
+            async def bounded_backtest(symbol):
+                async with backtest_semaphore:
+                    try:
+                        return await fetch_first_hour_trend_backtest(session, symbol)
+                    except Exception as exc:
+                        add(R / "collection_errors.jsonl", {
+                            "at": iso(), "symbol": symbol,
+                            "source": "first_hour_trend_backtest", "error": str(exc)[:350]
+                        })
+                        return None
+
+            backtest_results = await asyncio.gather(
+                *(bounded_backtest(symbol) for symbol in pending_backtests)
+            )
+            for backtest in backtest_results:
+                if backtest is not None:
+                    add(R / "trend_first_hour_backtest.jsonl", backtest)
+                    completed_backtests.add(backtest["symbol"])
+            state["trend_backtest_symbols_completed"] = sorted(completed_backtests)
+            state["trend_backtest_symbols_this_cycle"] = sum(x is not None for x in backtest_results)
+            state["trend_backtest_events_total"] = sum(
+                row.get("events_found", 0)
+                for row in read(R / "trend_first_hour_backtest.jsonl", [])
+            )
             symbol_errors = sum(1 for result in results if result.get("error"))
             signal_count = sum(record_signals_and_entries(result, state) for result in results)
 
