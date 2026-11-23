@@ -24,6 +24,7 @@ C = R / "candles_1m.jsonl"
 P = R / "public_trader_posts.jsonl"
 E = R / "shadow_experiments.jsonl"
 F = R / "candle_streak_checks.jsonl"
+T = R / "trend_early_window_backtest.jsonl"
 Q = R / "pending.json"
 SUMMARY = R / "daily_research_summary.md"
 WATCH = ROOT / "reports/market_cap_watchlist/current_watchlist.json"
@@ -303,6 +304,56 @@ def analyze_first_hour_trends(symbol, candles, window_start_ms, window_end_ms):
             else (start_close / end_close - 1) * 100 if direction == "SHORT" and end_close
             else None
         )
+        early_windows = []
+        for minutes in (5, 10, 15, 20, 30, 60):
+            prefix = first_hour[:minutes]
+            window_green = sum(number(row[4]) > number(row[1]) for row in prefix)
+            window_red = sum(number(row[4]) < number(row[1]) for row in prefix)
+            window_doji = minutes - window_green - window_red
+            window_matching = window_green if direction == "LONG" else window_red
+            window_close = number(prefix[-1][4])
+            remaining = first_hour[minutes:]
+            if remaining and window_close > 0 and end_close > 0:
+                continuation = (
+                    (end_close / window_close - 1) * 100 if direction == "LONG"
+                    else (window_close / end_close - 1) * 100
+                )
+                favorable_values = [
+                    ((number(row[2]) / window_close - 1) * 100 if direction == "LONG"
+                     else (window_close / number(row[3]) - 1) * 100)
+                    for row in remaining
+                    if (number(row[2]) > 0 if direction == "LONG" else number(row[3]) > 0)
+                ]
+                adverse_values = [
+                    ((number(row[3]) / window_close - 1) * 100 if direction == "LONG"
+                     else (window_close / number(row[2]) - 1) * 100)
+                    for row in remaining
+                    if (number(row[3]) > 0 if direction == "LONG" else number(row[2]) > 0)
+                ]
+                max_favorable = max(favorable_values) if favorable_values else None
+                max_adverse = min(adverse_values) if adverse_values else None
+            else:
+                continuation = max_favorable = max_adverse = None
+            early_windows.append({
+                "minutes": minutes,
+                "green_candles": window_green,
+                "red_candles": window_red,
+                "doji_candles": window_doji,
+                "direction_matching_candles": window_matching,
+                "direction_matching_pct": round(window_matching / minutes * 100, 2),
+                "window_close": window_close,
+                "direction_adjusted_continuation_to_hour_end_pct": (
+                    round(continuation, 4) if continuation is not None else None
+                ),
+                "max_favorable_excursion_after_window_pct": (
+                    round(max_favorable, 4) if max_favorable is not None else None
+                ),
+                "max_adverse_excursion_after_window_pct": (
+                    round(max_adverse, 4) if max_adverse is not None else None
+                ),
+                "remaining_candles_after_window": len(remaining),
+            })
+
         events.append({
             "direction": direction,
             "trend_start_timestamp_ms": int(rows[i][0]),
@@ -317,6 +368,7 @@ def analyze_first_hour_trends(symbol, candles, window_start_ms, window_end_ms):
             "direction_matching_pct": round(matching / 60 * 100, 2),
             "first_hour_follow_through_pct": round(follow_through, 4) if follow_through is not None else None,
             "candles_in_first_hour": 60,
+            "early_window_analysis": early_windows,
         })
         last_event_index = i
 
@@ -663,6 +715,41 @@ async def collect():
             state["trend_backtest_events_this_cycle"] = sum(
                 backtest.get("events_found", 0) for backtest in backtest_results if backtest is not None
             )
+
+            # Separate early-window experiment: recalculate all symbols once into
+            # its own file so legacy first-hour records remain untouched.
+            early_completed = set(state.setdefault("trend_early_window_symbols_completed", []))
+            early_pending = [symbol for symbol in selected_symbols if symbol not in early_completed]
+            same_cycle_backtests = {
+                item["symbol"]: item for item in backtest_results if item is not None
+            }
+            async def bounded_early_backtest(symbol):
+                if symbol in same_cycle_backtests:
+                    return same_cycle_backtests[symbol]
+                async with backtest_semaphore:
+                    try:
+                        return await fetch_first_hour_trend_backtest(session, symbol)
+                    except Exception as exc:
+                        add(R / "collection_errors.jsonl", {
+                            "at": iso(), "symbol": symbol,
+                            "source": "early_window_trend_backtest", "error": str(exc)[:350]
+                        })
+                        return None
+            early_results = await asyncio.gather(
+                *(bounded_early_backtest(symbol) for symbol in early_pending)
+            )
+            for backtest in early_results:
+                if backtest is not None:
+                    add(T, backtest)
+                    early_completed.add(backtest["symbol"])
+            state["trend_early_window_symbols_completed"] = sorted(early_completed)
+            state["trend_early_window_symbols_this_cycle"] = sum(
+                item is not None for item in early_results
+            )
+            state["trend_early_window_events_this_cycle"] = sum(
+                item.get("events_found", 0) for item in early_results if item is not None
+            )
+
             symbol_errors = sum(1 for result in results if result.get("error"))
             signal_count = sum(record_signals_and_entries(result, state) for result in results)
 
@@ -711,6 +798,9 @@ async def collect():
         "trend_backtest_symbols_this_cycle": state.get("trend_backtest_symbols_this_cycle", 0),
         "trend_backtest_symbols_completed": len(state.get("trend_backtest_symbols_completed", [])),
         "trend_backtest_events_this_cycle": state.get("trend_backtest_events_this_cycle", 0),
+        "trend_early_window_symbols_this_cycle": state.get("trend_early_window_symbols_this_cycle", 0),
+        "trend_early_window_symbols_completed": len(state.get("trend_early_window_symbols_completed", [])),
+        "trend_early_window_events_this_cycle": state.get("trend_early_window_events_this_cycle", 0),
         "ends": state.get("ends_at_utc"),
     }))
 
