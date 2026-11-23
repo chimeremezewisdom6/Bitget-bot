@@ -19,6 +19,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Compile scanner
-        run: python -m py_compile scanner.py
+        run: python -m py_compile scanner.py daily_research.py
       - name: Run strategy and safety unit tests
         run: python -m unittest discover -s tests -v
