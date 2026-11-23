@@ -28,6 +28,12 @@ class CapWatchlistTests(unittest.TestCase):
         self.assertEqual(match_exact_symbol("ABC", [], {"coingecko_id": "coin-a", "verified": True}),
                          ("coin-a", "manually_verified_override"))
 
+    def test_unverified_override_is_not_selected(self):
+        candidate = {"symbol": "ABCUSDT", "market_cap_band": "lower_cap",
+                     "identity_status": "manual_override_unverified", "turnover24h_usdt": 1000}
+        result = select_watchlist([candidate], BANDS, 3)
+        self.assertEqual(result["lower_cap"], [])
+
     def test_watchlist_never_fills_missing_group_with_other_caps(self):
         candidates = [
             {"symbol": "AUSDT", "market_cap_band": "lower_cap", "identity_status": "unique_exact_symbol_needs_review", "turnover24h_usdt": 100},
