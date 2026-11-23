@@ -385,3 +385,54 @@ This pass does **not** establish 12 qualified candidates. The under-$1m group ha
 Before approving a coin, collect a same-session official Bitget API snapshot for `category=USDT-FUTURES`: instrument status must be `online`; ticker must supply `turnover24h`, `bid1Price`, `ask1Price`, `fundingRate`, `openInterest`, and timestamp; order-book depth must be walked for hypothetical fixed notionals. Independently record circulating market cap and its timestamp. Never use Spot turnover to pass a futures candidate. If fewer than three valid assets exist in a band, record fewer than three and explain why.
 
 **Operating boundary remains observation-only:** no Demo or Live orders, no order placement, no leverage changes, and no position management. All candidate names are watchlist research leads, not trade recommendations or proof of profitability.
+
+
+## 15. Read-only futures market collector setup (2026-11-23)
+
+**User authorized:** proceed with the USDT-perpetual-only market-cap and liquidity verification. User mentioned a Pollinations API key stored in repository secrets/variables and allowed its use if useful.
+
+### Security and Pollinations decision
+
+- The initial numeric market scan does not need Pollinations or any private credential. Bitget's public market-data API supplies instrument status/type, 24h quote turnover, best bid/ask, mark/index price, funding, open interest and public order-book levels.
+- Pollinations is a generative AI API, not an exchange market-data source. It may be useful in a later, separate stage to summarize public trader posts or compare written strategy claims, but it must not determine market-cap bands, volume, fills, slippage or P&L.
+- No Pollinations key was read, copied, printed, or added to code/workflow in this setup. Do not put a key in repository files or GitHub Actions Variables. If later needed, use a narrowly scoped, budget-limited GitHub Actions Secret and pass it only to the separate narrative-analysis step. Do not use the key in browser code.
+- The existing comment in `scanner.py` saying "POLLINATION KEYS" refers to the historical Bitget multi-key loader and is not an actual Pollinations integration.
+
+### New files committed
+
+- `shadow_research.py`: a separate public-data collector for Bitget `USDT-FUTURES`. It reads only:
+  - `GET /api/v3/market/instruments?category=USDT-FUTURES`
+  - `GET /api/v3/market/tickers?category=USDT-FUTURES`
+  - `GET /api/v3/market/orderbook?category=USDT-FUTURES`
+- `tests/test_shadow_research.py`: tests for price-band depth, order-book walking, VWAP/slippage and partial visible-book fills.
+- `.github/workflows/shadow-market-snapshot.yml`: manually triggered workflow that installs existing dependencies, runs the collector and uploads timestamped JSON/CSV artifacts for 30 days.
+
+### Collector behavior and limitations
+
+- Filters to online perpetual crypto instruments and a configurable minimum 24h turnover (default $500,000 USDT).
+- Sorts by Bitget 24h turnover and obtains up to the top 50 order books (configurable).
+- Captures spread, funding, open interest, mark/index/last price, maker/taker fee metadata, order-book depth within 0.1%, 0.5% and 1%, and hypothetical market buy/sell walks for $100, $500 and $1,000.
+- Uses no Bitget API keys, no account endpoints, no order endpoints, no leverage endpoint, and no position endpoints.
+- It does not claim a market cap from Bitget. Market cap must be joined from a separate source with its own timestamp and symbol-identity checks. The report deliberately labels market cap as unverified until that step is complete.
+- The script collects visible-book execution estimates only; it cannot know queue position, hidden liquidity, future book movement or guaranteed fills. These are estimates, not actual executions.
+- The workflow is manual only. No scheduled or continuous monitoring has been enabled. Artifacts expire after 30 days; GitHub-hosted runner files do not persist automatically.
+
+### Validation state
+
+- GitHub Actions validation was triggered by the new commits. At the time of this knowledge update, the latest run was still queued/in progress; do not mark tests passed until its conclusion is checked.
+- The manual snapshot workflow has been committed but has not yet been dispatched. No current live snapshot has been collected by this new script.
+- The automated trading workflow remains paused and untouched.
+
+### Commits
+
+- `88cf6d9` — add read-only Bitget USDT perpetual market collector.
+- `1615a48` — add depth and slippage unit tests.
+- `be091e2` — add manual read-only market snapshot workflow.
+
+### Next steps
+
+1. Confirm the validation workflow result, including the new tests.
+2. Run the manual snapshot workflow and inspect the artifact for actual Bitget results.
+3. Join each eligible futures base asset to a timestamped market-cap source, with ambiguous symbol matches manually reviewed.
+4. Select up to three valid coins in each cap band; leave any band short if fewer than three pass.
+5. For shortlisted candidates, collect repeat order-book snapshots and shadow observe entries/exits. Keep trader-post research separate from exchange measurements.
