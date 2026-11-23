@@ -543,6 +543,7 @@ For each new signal, the script records hypothetical reference-price entry and s
 ### Output files
 
 - `reports/daily_research/market_observations.jsonl`: repeated market observations.
+- `reports/daily_research/candles_1m.jsonl`: deduplicated raw one-minute OHLCV and quote-turnover candles.
 - `reports/daily_research/public_trader_posts.jsonl`: deduplicated public RSS items with explicit unverified classification.
 - `reports/daily_research/shadow_experiments.jsonl`: signal hypotheses and forward reference-price evaluations.
 - `reports/daily_research/collection_errors.jsonl`: source and API failures.
@@ -572,3 +573,5 @@ Questions to investigate in later analysis:
 - Added manual start/status plus every-five-minute scheduled workflow `.github/workflows/daily-futures-research.yml`.
 - Hardened Atom/RSS element parsing and added handling for missing delayed forward-evaluation prices.
 - **Not yet run or validated end-to-end.** The user must start the 24-hour session once from the new workflow. The first run's logs and resulting files must be inspected before treating the collector as proven.
+
+- Additional raw dataset: `reports/daily_research/candles_1m.jsonl` stores deduplicated 1-minute OHLCV/quote-turnover candles so later analysis can independently recompute signals and inspect price paths.
