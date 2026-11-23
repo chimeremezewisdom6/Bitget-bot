@@ -436,3 +436,11 @@ Before approving a coin, collect a same-session official Bitget API snapshot for
 3. Join each eligible futures base asset to a timestamped market-cap source, with ambiguous symbol matches manually reviewed.
 4. Select up to three valid coins in each cap band; leave any band short if fewer than three pass.
 5. For shortlisted candidates, collect repeat order-book snapshots and shadow observe entries/exits. Keep trader-post research separate from exchange measurements.
+
+
+### Validation follow-up (2026-11-23)
+
+- GitHub Actions run `45153088662` for commit `be091e2` completed with conclusion `success`.
+- Confirmed steps: dependency install, compile of `scanner.py`, and full `python -m unittest discover -s tests -v` step all succeeded. This includes the new shadow-research unit tests because they are discovered by the existing test command.
+- This validates syntax and unit tests, not a live API collection. The manual shadow snapshot workflow still needs to be run by a user from GitHub Actions before any real market snapshot is available.
+- Documentation-only commits after that successful run triggered additional validation runs which were queued when checked; no failure was observed in the successful code-validation run.
