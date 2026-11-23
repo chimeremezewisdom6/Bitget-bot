@@ -34,6 +34,35 @@ def build_report(root=ROOT):
     candle_streak_checks = read_jsonl(root / "candle_streak_checks.jsonl")
     candle_streak_qualified = [x for x in candle_streak_checks if x.get("qualifies") is True]
     trend_backtests = read_jsonl(root / "trend_first_hour_backtest.jsonl")
+    early_window_backtests = read_jsonl(root / "trend_early_window_backtest.jsonl")
+    early_window_events = [
+        event for row in early_window_backtests for event in row.get("events", [])
+        if isinstance(event.get("early_window_analysis"), list)
+    ]
+    early_window_summary = {}
+    for minutes in (5, 10, 15, 20, 30, 60):
+        samples = [
+            window for event in early_window_events
+            for window in event.get("early_window_analysis", [])
+            if window.get("minutes") == minutes
+            and isinstance(window.get("direction_adjusted_continuation_to_hour_end_pct"), (int, float))
+        ]
+        continuation_values = [
+            float(item["direction_adjusted_continuation_to_hour_end_pct"]) for item in samples
+        ]
+        matching_values = [
+            float(item.get("direction_matching_pct", 0)) for item in samples
+        ]
+        early_window_summary[minutes] = {
+            "samples": len(samples),
+            "positive": sum(value > 0 for value in continuation_values),
+            "mean_continuation": (
+                sum(continuation_values) / len(continuation_values) if continuation_values else None
+            ),
+            "mean_matching": (
+                sum(matching_values) / len(matching_values) if matching_values else None
+            ),
+        }
     trend_events = [
         {**event, "symbol": row.get("symbol")}
         for row in trend_backtests for event in row.get("events", [])
@@ -121,6 +150,27 @@ def build_report(root=ROOT):
         f"- Average direction-matching candle share in first hour: {sum(trend_matching) / len(trend_matching):.1f}%" if trend_matching else "- Average direction-matching candle share in first hour: unavailable",
         "",
         "A trend start is defined as a fully closed 1m candle closing above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT). The first hour is the breakout candle plus the next 59 fully closed 1m candles. Green, red and doji candles are counted separately. This is a consistent breakout proxy, not a universal definition of every trend.",
+        "",
+        "## Early-trend candle windows (separate experiment)",
+        "",
+        f"- Symbols with early-window backtests: {len(early_window_backtests)}",
+        f"- Complete trend events with early-window measurements: {len(early_window_events)}",
+        "",
+        "For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candles. The continuation column is the direction-adjusted price change from that window's closing price to the end of the first hour. Positive means price continued in the trend direction; negative means it reversed. The 60-minute row has no candles remaining after its close, so its continuation-to-hour-end is not scored and is excluded from that metric. These are descriptive historical samples, not proof that early candle colour predicts future returns.",
+        "",
+        "| First minutes | Events scored | Avg direction-matching candles % | Positive continuation to minute 60 | Avg continuation after window % |",
+        "|---:|---:|---:|---:|---:|",
+        *[
+            f"| {minutes} | {early_window_summary[minutes]['samples']} | "
+            f"{early_window_summary[minutes]['mean_matching']:.1f}% | "
+            f"{early_window_summary[minutes]['positive']}/{early_window_summary[minutes]['samples']} "
+            f"({early_window_summary[minutes]['positive'] / early_window_summary[minutes]['samples'] * 100:.1f}%) | "
+            f"{early_window_summary[minutes]['mean_continuation']:.4f}% |"
+            if early_window_summary[minutes]['samples'] and early_window_summary[minutes]['mean_matching'] is not None
+            and early_window_summary[minutes]['mean_continuation'] is not None
+            else f"| {minutes} | {early_window_summary[minutes]['samples']} | — | — | — |"
+            for minutes in (5, 10, 15, 20, 30, 60)
+        ],
         "",
         "| Symbol | Direction | Trend start (UTC) | Green | Red | Doji | Matching candles | Matching % | First-hour follow-through % |",
         "|---|---|---|---:|---:|---:|---:|---:|---:|",
