@@ -115,7 +115,7 @@ async def collect():
      seen=st.setdefault("signal_ids",[])
      if sid in seen:continue
      seen.append(sid);seen[:]=seen[-3000:];signals+=1
-     add(E,{"type":"signal","id":sid,"at":iso(),"symbol":sym,"strategy":strat,"direction":direction,"reason":reason,"reference_entry":mid,"fee_rate_source":"Bitget instrument metadata","taker_fee_bps":fee_bps if fee_bps>=0 else None,"funding_rate_at_entry":n(t.get("fundingRate")),"status":"unverified hypothesis"})
+     add(E,{"type":"watch_condition" if strat in ("oversold_watch","overbought_watch") else "signal","id":sid,"at":iso(),"symbol":sym,"strategy":strat,"direction":direction,"reason":reason,"reference_entry":mid,"fee_rate_source":"Bitget instrument metadata","taker_fee_bps":fee_bps if fee_bps>=0 else None,"funding_rate_at_entry":n(t.get("fundingRate")),"status":"unverified hypothesis"})
      if strat in ("oversold_watch","overbought_watch"):
       add(E,{"type":"watch_only_condition","id":sid,"at":iso(),"symbol":sym,"strategy":strat,"direction_hint":direction,"reason":reason,"note":"RSI extreme is context only; no hypothetical entry is opened without a separate reversal confirmation rule."})
       continue
