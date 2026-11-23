@@ -20,7 +20,7 @@ on:
   # GitHub Actions is only the scheduler; all market/account research requests go to Bitget.
   # Scheduled execution is best-effort and must be verified from actual schedule-event runs.
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "2-59/5 * * * *"
 
 permissions:
   contents: write
