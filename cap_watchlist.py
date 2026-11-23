@@ -64,7 +64,7 @@ def select_watchlist(candidates, bands, per_group=3):
     for row in candidates:
         name = row.get("market_cap_band")
         if name in grouped and row.get("identity_status") in (
-            "unique_exact_symbol_needs_review", "manually_verified_override", "manual_override_unverified"
+            "unique_exact_symbol_needs_review", "manually_verified_override"
         ):
             grouped[name].append(row)
     result = {}
