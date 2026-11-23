@@ -575,3 +575,38 @@ Questions to investigate in later analysis:
 - **Not yet run or validated end-to-end.** The user must start the 24-hour session once from the new workflow. The first run's logs and resulting files must be inspected before treating the collector as proven.
 
 - Additional raw dataset: `reports/daily_research/candles_1m.jsonl` stores deduplicated 1-minute OHLCV/quote-turnover candles so later analysis can independently recompute signals and inspect price paths.
+
+
+## 18. Shadow execution and 24-hour research hardening (2026-11-23)
+
+### Changes committed
+
+- Added `shadow_execution.py`, a pure calculation module with no network access. It walks visible asks for hypothetical buys and visible bids for hypothetical sells, supports quote-notional entry and base-quantity exit, computes VWAP, and reports incomplete/partial fills without inventing a full execution.
+- Added round-trip calculations for LONG and SHORT positions, separate entry/exit taker fees, and an explicitly supplied signed funding assumption. The module does not infer funding settlements or submit orders.
+- Integrated the daily collector with order-book shadow observations. At a signal it attempts hypothetical $100, $500 and $1,000 entries using the current visible book. It only schedules an outcome when the full hypothetical entry size is visible and a taker-fee rate is available from Bitget instrument metadata. Missing fee metadata fails closed rather than assuming zero fees.
+- At 5, 15 and 30 minutes, the collector requests a fresh public order book and attempts to close the exact hypothetical base quantity. It records separate entry/exit VWAP and slippage, gross P&L, entry and exit fees, net P&L after trading fees, and partial/unavailable exit states. Funding is retained as context but excluded from these short-horizon automatic results because the collector does not yet verify whether a funding settlement timestamp was crossed.
+- Added `research_report.py` to summarize actual cycle counts, symbols, observations, commentary, signals, two-snapshot order-book outcomes, unavailable outcomes, and collection errors. Ticker-only legacy outcomes are kept separate.
+- Added a 30-minute settlement grace period after the 24-hour signal-generation window so pending 30-minute shadow exits can be evaluated. No new signals or RSS commentary are added during the grace period. Starting a second session while one is active is rejected.
+- Updated GitHub Actions validation to compile the shadow modules and run the expanded unit suite. Added a static boundary test that checks the research modules contain no account/order/trade routes and no HTTP POST calls.
+
+### New files
+
+- `shadow_execution.py`
+- `research_report.py`
+- `tests/test_shadow_execution.py`
+- `tests/test_research_report.py`
+- `tests/test_shadow_only_boundary.py`
+
+### Important limitations retained
+
+- A two-snapshot book walk is still a hypothetical estimate. It cannot guarantee execution, queue priority, hidden liquidity, network latency, or unchanged depth between snapshots.
+- The automated outcome currently deducts the instrument taker-fee metadata when present. It does not yet include funding settlement costs, liquidation effects, or a separately calibrated adverse stop-market model.
+- The daily universe is the top 15 online USDT perpetual contracts above the $500,000 24-hour turnover threshold. This is not the requested approved 12-coin watchlist across four market-cap groups.
+- The Bitget futures API does not supply market cap. Asset identity and cap must be joined from an independent timestamped source; ambiguous symbols must remain unverified.
+- The public RSS feeds provide commentary, not verified trader identities, actual positions, or audited trade histories.
+- GitHub cron is best-effort, not guaranteed five-minute continuous monitoring. The actual cycle timestamps and missing intervals must be reviewed.
+- No Demo or Live trading was enabled. The automated scanner workflow remains paused.
+
+### Validation state after these commits
+
+The validation workflow is triggered by pushes to `main`. Do not claim the expanded tests passed until the latest GitHub Actions validation run has completed successfully. The research session itself has not been started by these code changes; the user must manually dispatch **24-Hour Futures Research (Read Only)** with action `start`.
