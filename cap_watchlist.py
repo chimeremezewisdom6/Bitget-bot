@@ -1,281 +1,220 @@
-"""Build a provisional 4-band Bitget USDT perpetual watchlist.
+"""Build a Bitget-only USDT perpetual activity watchlist.
 
-Uses public Bitget futures data and CoinGecko public search/market-cap data.
-Ticker-symbol matches are not treated as verified identities unless a human
-adds an explicit verified override in config/asset_identity_overrides.json.
+Bitget does not publish circulating market capitalisation in its futures
+instrument/ticker API. This module therefore never guesses market-cap bands.
+It groups contracts by Bitget-reported 24h futures turnover instead.
 """
 import asyncio
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
 
 ROOT = Path(__file__).resolve().parent
-BANDS_PATH = ROOT / "config/market_cap_bands.json"
-OVERRIDES_PATH = ROOT / "config/asset_identity_overrides.json"
 OUT_DIR = ROOT / "reports/market_cap_watchlist"
 BITGET = "https://api.bitget.com"
-COINGECKO = "https://api.coingecko.com/api/v3"
+CATEGORY = "USDT-FUTURES"
+MIN_TURNOVER_USDT = 50_000
+BANDS = [
+    {"name": "under_1m_turnover", "label": "Under $1m 24h futures turnover", "min_usd": 0, "max_usd": 1_000_000},
+    {"name": "1m_10m_turnover", "label": "$1m–$10m 24h futures turnover", "min_usd": 1_000_000, "max_usd": 10_000_000},
+    {"name": "10m_100m_turnover", "label": "$10m–$100m 24h futures turnover", "min_usd": 10_000_000, "max_usd": 100_000_000},
+    {"name": "over_100m_turnover", "label": "$100m+ 24h futures turnover", "min_usd": 100_000_000, "max_usd": None},
+]
 
 
 def number(value, default=0.0):
     try:
-        x = float(value)
-        return x if x == x and abs(x) != float("inf") else default
+        result = float(value)
+        return result if math.isfinite(result) else default
     except (TypeError, ValueError):
         return default
 
 
-def classify_market_cap(market_cap, bands):
-    if market_cap is None:
-        return "UNVERIFIED"
-    cap = number(market_cap, -1)
-    if cap < 0:
+def classify_turnover(turnover, bands=BANDS):
+    value = number(turnover, -1)
+    if value < 0:
         return "UNVERIFIED"
     for band in bands:
-        low = number(band["min_usd"])
-        high = band.get("max_usd")
-        if cap >= low and (high is None or cap < number(high)):
+        if value >= band["min_usd"] and (band["max_usd"] is None or value < band["max_usd"]):
             return band["name"]
-    return "OUT_OF_BANDS"
+    return "UNVERIFIED"
 
 
-def match_exact_symbol(base_coin, search_coins, override=None):
-    if override:
-        if isinstance(override, str):
-            return override, "manual_override_unverified"
-        if isinstance(override, dict) and override.get("coingecko_id"):
-            status = "manually_verified_override" if override.get("verified") is True else "manual_override_unverified"
-            return override["coingecko_id"], status
-    matches = {}
-    for coin in search_coins or []:
-        if str(coin.get("symbol", "")).lower() == str(base_coin).lower() and coin.get("id"):
-            matches[coin["id"]] = coin
-    if len(matches) == 1:
-        return next(iter(matches)), "unique_exact_symbol_needs_review"
-    if len(matches) > 1:
-        return None, "ambiguous_exact_symbol"
-    return None, "no_exact_symbol_match"
-
-
-def select_watchlist(candidates, bands, per_group=3):
-    grouped = {band["name"]: [] for band in bands}
-    for row in candidates:
-        name = row.get("market_cap_band")
-        if name in grouped and row.get("identity_status") in (
-            "unique_exact_symbol_needs_review", "manually_verified_override"
-        ):
-            grouped[name].append(row)
-    result = {}
-    for band in bands:
-        rows = grouped[band["name"]]
-        rows.sort(key=lambda x: (number(x.get("turnover24h_usdt")), -number(x.get("spread_bps"), 1e9)), reverse=True)
-        result[band["name"]] = rows[:per_group]
-    return result
-
-
-async def get_json(session, url, params=None):
-    last = None
+async def get_json(session, path, params=None):
+    last_error = None
     for attempt in range(4):
         try:
-            async with session.get(url, params=params, timeout=25) as response:
+            async with session.get(BITGET + path, params=params, timeout=20) as response:
                 if response.status == 429 or response.status >= 500:
-                    raise RuntimeError(f"HTTP {response.status}")
+                    raise RuntimeError(f"temporary Bitget HTTP {response.status}")
                 response.raise_for_status()
                 payload = await response.json()
-                if "api.bitget.com" in url and payload.get("code") != "00000":
+                if payload.get("code") != "00000":
                     raise RuntimeError(f"Bitget {payload.get('code')}: {payload.get('msg')}")
                 return payload
         except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as exc:
-            last = exc
+            last_error = exc
             if attempt < 3:
-                await asyncio.sleep(1.5 * (2 ** attempt))
-    raise RuntimeError(f"GET failed: {url}: {last}")
-
-
-async def build():
-    config = json.loads(BANDS_PATH.read_text(encoding="utf-8"))
-    override_config = json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
-    overrides = override_config.get("coingecko_ids_by_base_coin", {})
-    bands = config["bands"]
-    min_turnover = number(config.get("minimum_turnover_usdt"), 500000)
-    per_group = int(config.get("contracts_per_group", 3))
-    timeout = aiohttp.ClientTimeout(total=30)
-    headers = {"User-Agent": "Bitget-Cap-Watchlist-Research/1.0"}
-    errors = []
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        instruments_payload, tickers_payload = await asyncio.gather(
-            get_json(session, BITGET + "/api/v3/market/instruments", {"category": "USDT-FUTURES"}),
-            get_json(session, BITGET + "/api/v3/market/tickers", {"category": "USDT-FUTURES"}),
-        )
-        instruments = {
-            x.get("symbol"): x for x in instruments_payload.get("data", [])
-            if x.get("symbol") and x.get("status") == "online" and x.get("type") == "perpetual"
-        }
-        ticker_by_symbol = {x.get("symbol"): x for x in tickers_payload.get("data", []) if x.get("symbol")}
-        eligible = []
-        for symbol, instrument in instruments.items():
-            ticker = ticker_by_symbol.get(symbol)
-            if not ticker or number(ticker.get("turnover24h")) < min_turnover:
-                continue
-            eligible.append((instrument, ticker))
-        eligible.sort(key=lambda pair: number(pair[1].get("turnover24h")), reverse=True)
-
-        identity_by_base = {}
-        for instrument, _ticker in eligible:
-            base = str(instrument.get("baseCoin") or "").strip()
-            if not base or base in identity_by_base:
-                continue
-            override = overrides.get(base.upper()) or overrides.get(base)
-            try:
-                if override:
-                    coin_id, identity_status = match_exact_symbol(base, [], override)
-                else:
-                    search = await get_json(session, COINGECKO + "/search", {"query": base})
-                    coin_id, identity_status = match_exact_symbol(base, search.get("coins", []))
-                    await asyncio.sleep(2.1)
-                identity_by_base[base] = (coin_id, identity_status)
-            except Exception as exc:
-                identity_by_base[base] = (None, "lookup_error")
-                errors.append({"base_coin": base, "error": str(exc)[:300]})
-
-        ids = sorted({value[0] for value in identity_by_base.values() if value[0]})
-        markets = {}
-        for start in range(0, len(ids), 100):
-            batch = ids[start:start + 100]
-            try:
-                rows = await get_json(session, COINGECKO + "/coins/markets", {
-                    "vs_currency": config.get("currency", "usd"),
-                    "ids": ",".join(batch),
-                    "per_page": 100,
-                    "page": 1,
-                    "sparkline": "false",
-                })
-                for row in rows:
-                    markets[row.get("id")] = row
-            except Exception as exc:
-                errors.append({"market_cap_batch": batch, "error": str(exc)[:300]})
-
-        candidates = []
-        for instrument, ticker in eligible:
-            symbol = instrument["symbol"]
-            base = str(instrument.get("baseCoin") or "")
-            coin_id, identity_status = identity_by_base.get(base, (None, "no_base_coin"))
-            market = markets.get(coin_id, {}) if coin_id else {}
-            cap = market.get("market_cap")
-            band = classify_market_cap(cap, bands)
-            bid, ask = number(ticker.get("bid1Price")), number(ticker.get("ask1Price"))
-            mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
-            spread = (ask - bid) / mid * 10000 if mid > 0 and ask >= bid else None
-            candidates.append({
-                "symbol": symbol,
-                "base_coin": base,
-                "contract_status": instrument.get("status"),
-                "contract_type": instrument.get("type"),
-                "turnover24h_usdt": number(ticker.get("turnover24h")),
-                "last_price": number(ticker.get("lastPrice")),
-                "bid1": bid,
-                "ask1": ask,
-                "spread_bps": spread,
-                "funding_rate": number(ticker.get("fundingRate")),
-                "open_interest": number(ticker.get("openInterest")),
-                "coingecko_id": coin_id,
-                "asset_name": market.get("name"),
-                "market_cap_usd": cap,
-                "market_cap_updated_at": market.get("last_updated"),
-                "market_cap_band": band,
-                "identity_status": identity_status,
-                "identity_note": "Unique ticker match is provisional; manually verify project identity before calling the watchlist final."
-            })
-
-        watchlist = select_watchlist(candidates, bands, per_group)
-        selected = [row for group in watchlist.values() for row in group]
-        semaphore = asyncio.Semaphore(4)
-
-        async def add_depth(row):
-            async with semaphore:
-                payload = await get_json(session, BITGET + "/api/v3/market/orderbook", {
-                    "category": "USDT-FUTURES", "symbol": row["symbol"], "limit": "1000"
-                })
-                book = payload.get("data", {})
-                asks, bids = book.get("a", []), book.get("b", [])
-                mid = (row["bid1"] + row["ask1"]) / 2 if row["bid1"] and row["ask1"] else 0
-                def depth(levels):
-                    return round(sum(number(p) * number(q) for p, q in levels
-                                     if mid and abs(number(p) / mid - 1) <= 0.005), 4)
-                row["depth_0_5pct_bid_usdt"] = depth(bids)
-                row["depth_0_5pct_ask_usdt"] = depth(asks)
-                row["orderbook_timestamp_ms"] = book.get("ts")
-                row["liquidity_warning"] = (
-                    "WIDE_SPREAD_OR_SHALLOW_VISIBLE_DEPTH"
-                    if row.get("spread_bps") is None or row["spread_bps"] > 30
-                    or min(row["depth_0_5pct_bid_usdt"], row["depth_0_5pct_ask_usdt"]) < 5000
-                    else "NO_IMMEDIATE_WARNING; repeat snapshots still required"
-                )
-
-        depth_results = await asyncio.gather(*(add_depth(row) for row in selected), return_exceptions=True)
-        for row, result in zip(selected, depth_results):
-            if isinstance(result, Exception):
-                row["depth_error"] = str(result)[:300]
-
-    stamp = datetime.now(timezone.utc).isoformat()
-    symbols = sorted({row["symbol"] for row in selected})
-    report = {
-        "generated_at_utc": stamp,
-        "exchange": "Bitget",
-        "market": "USDT-FUTURES",
-        "market_cap_source": "CoinGecko public search and coins/markets API",
-        "minimum_turnover_usdt": min_turnover,
-        "cap_band_definitions": bands,
-        "candidate_count": len(candidates),
-        "eligible_contracts_with_cap_identity": sum(bool(row.get("market_cap_usd")) for row in candidates),
-        "watchlist_symbols": symbols,
-        "groups": watchlist,
-        "candidates": candidates,
-        "lookup_errors": errors,
-        "important": [
-            "Bitget public USDT perpetual contracts only; Spot turnover is not used.",
-            "A unique exact ticker match is provisional and can still be the wrong asset; manually verify identity.",
-            "Ambiguous or unmatched symbols remain unverified and are not assigned a cap band.",
-            "Market caps are provider snapshots with their own timestamp, not Bitget data.",
-            "Three contracts per group is a maximum, not a quota. Empty/short groups must remain short.",
-            "Spread and visible depth are a one-time screen, not proof of persistent liquidity or profitable execution."
-        ]
-    }
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUT_DIR / "current_watchlist.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    (OUT_DIR / "current_watchlist.md").write_text(render_markdown(report), encoding="utf-8")
-    print(json.dumps({"candidates": len(candidates), "selected": len(symbols),
-                      "groups": {k: len(v) for k, v in watchlist.items()},
-                      "errors": len(errors), "output": str(OUT_DIR)}, indent=2))
+                await asyncio.sleep(min(0.75 * (2 ** attempt), 6))
+    raise RuntimeError(f"{path} failed after retries: {last_error}")
 
 
 def render_markdown(report):
     lines = [
-        "# Provisional Bitget USDT Perpetual Market-Cap Watchlist",
+        "# Bitget USDT Perpetual Activity Watchlist",
         "",
         f"- Generated UTC: {report['generated_at_utc']}",
-        f"- Eligible contracts: {report['candidate_count']}",
+        f"- Eligible online perpetual contracts: {report['candidate_count']}",
         f"- Selected contracts: {len(report['watchlist_symbols'])}",
-        f"- Market-cap source: {report['market_cap_source']}",
+        "- Primary source: Bitget USDT-FUTURES instruments, tickers and order books",
+        "- Grouping metric: Bitget 24-hour futures turnover (USDT), NOT market capitalisation",
         "",
-        "A unique symbol match is provisional until manually identity-checked. This is a research watchlist, not a trade recommendation.",
+        "Bitget's futures market endpoints do not provide circulating market cap. No external market-cap provider or ticker-symbol guess is used.",
     ]
-    for band in report["cap_band_definitions"]:
+    for band in BANDS:
         rows = report["groups"].get(band["name"], [])
-        lines += ["", f"## {band['label']} ({band['name']})", ""]
+        lines += ["", f"## {band['label']}", ""]
         if not rows:
-            lines.append("No verified-enough candidate found in this pass. Do not fill the group by guessing.")
+            lines.append("No eligible contract in this turnover range during this snapshot.")
             continue
-        lines += ["| Contract | Asset | Market cap USD | 24h futures turnover | Spread bps | 0.5% bid/ask depth USD | Identity | Liquidity flag |",
-                  "|---|---|---:|---:|---:|---:|---|---|"]
+        lines += [
+            "| Contract | Bitget name | 24h turnover USDT | Spread bps | 0.5% bid depth USDT | 0.5% ask depth USDT | Liquidity flag |",
+            "|---|---|---:|---:|---:|---:|---|",
+        ]
         for row in rows:
-            depth = f"{row.get('depth_0_5pct_bid_usdt', 'n/a')} / {row.get('depth_0_5pct_ask_usdt', 'n/a')}"
-            lines.append(f"| {row['symbol']} | {row.get('asset_name') or row['base_coin']} | {row.get('market_cap_usd')} | {row['turnover24h_usdt']:.0f} | {row.get('spread_bps')} | {depth} | {row['identity_status']} | {row.get('liquidity_warning', row.get('depth_error', 'pending'))} |")
-    lines += ["", "## Rules", ""]
-    lines += [f"- {item}" for item in report["important"]]
+            lines.append(
+                f"| {row['symbol']} | {row.get('full_name') or row.get('base_coin') or row['symbol']} "
+                f"| {row['turnover24h_usdt']:.0f} | {row.get('spread_bps')} "
+                f"| {row.get('depth_0_5pct_bid_usdt', 'n/a')} | {row.get('depth_0_5pct_ask_usdt', 'n/a')} "
+                f"| {row.get('liquidity_flag', 'not_checked')} |"
+            )
+    lines += [
+        "",
+        "## Interpretation",
+        "",
+        "- Turnover is trading activity, not market cap and not proof of liquidity at the required size.",
+        "- A contract can have high reported turnover but a thin visible book, wide spread, or unstable depth.",
+        "- Market-cap bands cannot honestly be produced from these Bitget futures endpoints alone.",
+        "- The watchlist is a research universe, not a trade recommendation.",
+    ]
     return "\n".join(lines) + "\n"
+
+
+async def build(per_group=3):
+    timeout = aiohttp.ClientTimeout(total=35, connect=10)
+    headers = {"User-Agent": "Bitget-ReadOnly-Research/2.0"}
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        instruments, tickers = await asyncio.gather(
+            get_json(session, "/api/v3/market/instruments", {"category": CATEGORY}),
+            get_json(session, "/api/v3/market/tickers", {"category": CATEGORY}),
+        )
+        instrument_map = {
+            row["symbol"]: row for row in instruments.get("data", [])
+            if row.get("symbol") and row.get("status") == "online"
+            and (row.get("type") == "perpetual" or row.get("instrumentType") == "perpetual")
+            and row.get("symbolType", "crypto") == "crypto"
+        }
+        candidates = []
+        for ticker in tickers.get("data", []):
+            symbol = ticker.get("symbol")
+            instrument = instrument_map.get(symbol)
+            turnover = number(ticker.get("turnover24h"))
+            if not instrument or turnover < MIN_TURNOVER_USDT:
+                continue
+            bid, ask = number(ticker.get("bid1Price")), number(ticker.get("ask1Price"))
+            mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
+            candidates.append({
+                "symbol": symbol,
+                "base_coin": instrument.get("baseCoin"),
+                "full_name": instrument.get("fullName") or instrument.get("baseCoin"),
+                "turnover24h_usdt": turnover,
+                "last_price": number(ticker.get("lastPrice")),
+                "price_change_24h": number(ticker.get("price24hPcnt")),
+                "funding_rate": number(ticker.get("fundingRate")),
+                "open_interest": number(ticker.get("openInterest")),
+                "bid1": bid,
+                "ask1": ask,
+                "spread_bps": round((ask - bid) / mid * 10000, 4) if mid and ask >= bid else None,
+                "activity_band": classify_turnover(turnover),
+                "ticker_timestamp_ms": ticker.get("ts"),
+                "instrument_status": instrument.get("status"),
+            })
+
+        grouped = {band["name"]: [] for band in BANDS}
+        for row in candidates:
+            grouped[row["activity_band"]].append(row)
+        for rows in grouped.values():
+            rows.sort(key=lambda row: row["turnover24h_usdt"], reverse=True)
+
+        selected = []
+        for band in BANDS:
+            selected.extend(grouped[band["name"]][:per_group])
+
+        semaphore = asyncio.Semaphore(6)
+
+        async def enrich(row):
+            async with semaphore:
+                try:
+                    payload = await get_json(session, "/api/v3/market/orderbook", {
+                        "category": CATEGORY, "symbol": row["symbol"], "limit": "100"
+                    })
+                    book = payload.get("data", {})
+                    mid = (row["bid1"] + row["ask1"]) / 2 if row["bid1"] and row["ask1"] else 0
+
+                    def depth(levels):
+                        return round(sum(number(p) * number(q) for p, q, *_ in levels
+                                         if mid and abs(number(p) / mid - 1) <= 0.005), 4)
+
+                    row["depth_0_5pct_bid_usdt"] = depth(book.get("b", []))
+                    row["depth_0_5pct_ask_usdt"] = depth(book.get("a", []))
+                    row["orderbook_timestamp_ms"] = book.get("ts")
+                    min_depth = min(row["depth_0_5pct_bid_usdt"], row["depth_0_5pct_ask_usdt"])
+                    row["liquidity_flag"] = (
+                        "WIDE_SPREAD" if row["spread_bps"] is None or row["spread_bps"] > 30
+                        else "SHALLOW_VISIBLE_DEPTH" if min_depth < 5_000
+                        else "INITIAL_SCREEN_ONLY"
+                    )
+                except Exception as exc:
+                    row["depth_error"] = str(exc)[:300]
+                    row["liquidity_flag"] = "DEPTH_UNAVAILABLE"
+
+        await asyncio.gather(*(enrich(row) for row in selected))
+
+    stamp = datetime.now(timezone.utc).isoformat()
+    report = {
+        "generated_at_utc": stamp,
+        "exchange": "Bitget",
+        "market": CATEGORY,
+        "grouping_metric": "Bitget 24h futures turnover in USDT; not market capitalisation",
+        "market_cap_usd": None,
+        "market_cap_source": None,
+        "minimum_turnover_usdt": MIN_TURNOVER_USDT,
+        "activity_band_definitions": BANDS,
+        "candidate_count": len(candidates),
+        "watchlist_symbols": [row["symbol"] for row in selected],
+        "groups": grouped,
+        "selected_groups": {band["name"]: grouped[band["name"]][:per_group] for band in BANDS},
+        "candidates": candidates,
+        "limitations": [
+            "Bitget futures instrument/ticker endpoints do not expose circulating market cap.",
+            "Turnover bands must not be relabelled as market-cap bands.",
+            "Reported turnover is not executable depth; use repeated order-book snapshots and fills.",
+            "At most three contracts are selected per activity band; empty bands remain empty.",
+        ],
+    }
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    (OUT_DIR / "current_watchlist.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    (OUT_DIR / "current_watchlist.md").write_text(render_markdown(report), encoding="utf-8")
+    print(json.dumps({
+        "candidate_count": len(candidates),
+        "selected": len(selected),
+        "groups": {key: len(value[:per_group]) for key, value in grouped.items()},
+        "output": str(OUT_DIR),
+    }, indent=2))
+    return report
 
 
 if __name__ == "__main__":

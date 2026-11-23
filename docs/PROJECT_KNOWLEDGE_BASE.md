@@ -693,3 +693,38 @@ The user requested a lean repository for a 24-hour (or longer) observation perio
 - GitHub validation is triggered by pushes to `main`, but do not claim the latest run passed until its Actions result is checked.
 - The 24-hour experiment has not been proven complete until actual observations, errors, artifacts and final report have been inspected.
 - After the user supplies the downloaded artifact, analyse the collected evidence alongside independently sourced trader research and the user's prior project lessons. Only then propose a rebuilt scanner; do not infer or promise profitability from one day of observations.
+
+
+## 21. Bitget-first read-only research correction (2026-11-23)
+
+### User clarification
+
+The user explicitly requires the research system to query Bitget directly using their API credentials where authentication is needed, while never placing trades. CoinGecko market-cap data was considered stale and must not drive the runtime watchlist.
+
+### Architecture corrections on branch `fix/bitget-readonly-research`
+
+- Replaced the CoinGecko-dependent `cap_watchlist.py` with a Bitget-only USDT perpetual watchlist using Bitget instruments, tickers and order books.
+- Bitget futures market endpoints do not expose circulating market capitalisation. To avoid fabricating cap classifications, the current four groups are explicitly 24-hour Bitget futures-turnover activity bands: under $1m, $1m-$10m, $10m-$100m and $100m+. These must never be described as market-cap bands.
+- Reworked `daily_research.py` to collect Bitget tickers, instrument metadata, one-minute candles, visible order books and recent public fills. Records include spread, depth, turnover, price change, mark/index prices, funding, open interest and public buy/sell fill-volume context.
+- Added Bitget HMAC-SHA256 signed GET authentication. The only authenticated routes are `/api/v3/account/info` and `/api/v3/account/all-fee-rate` for permission inspection and account-specific USDT-futures taker fees. The collector does not request balances or positions.
+- Added GitHub Actions secret wiring for `BITGET_API_KEY`, `BITGET_API_SECRET` and `BITGET_API_PASSPHRASE`. Secrets must be configured by the repository owner; this code cannot inspect or retrieve secret values.
+- Missing credentials or private fee permission do not stop public market collection. Fee lookup status is recorded; absent fees are not assumed to be zero.
+- Fixed the undefined `current` reference and initialized the public-post count before error-prone collection, eliminating the reported NameError and secondary unbound-variable failure.
+- Bounded per-symbol concurrency and retry/backoff were added to reduce the sequential watchlist delay and make collection cycles more predictable.
+- Added tests for turnover classification, Bitget request signing and the no-order boundary.
+
+### Non-negotiable safety boundary
+
+- Use a dedicated Bitget API key with Read-only permission, no Trade, Transfer or Withdraw permissions, and an IP whitelist where practical.
+- Public market data is read from Bitget public endpoints. The API key is used only for signed read-only account permission/fee metadata.
+- No order placement, cancellation, modification, leverage, margin-mode, transfer, withdrawal, balance or position endpoint is part of this collector.
+- Do not start a live or demo trading workflow as part of this research session.
+
+### Verification still required
+
+- Run the repository's Python compilation and complete unit-test suite on this branch.
+- Run the GitHub Actions validation workflow and inspect its actual conclusion.
+- Confirm the three GitHub Actions secrets exist without ever printing their values.
+- Manually dispatch the 24-hour research workflow after the fix is merged to `main`; code changes do not start a session.
+- Confirm the first collector cycles contain current Bitget timestamps, non-empty symbols, book/fill/candle observations, and an authenticated fee status where the key has the required read permission.
+- Do not claim continuous collection, successful authentication, or profitability until those runtime records are inspected.

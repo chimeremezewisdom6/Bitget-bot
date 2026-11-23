@@ -21,6 +21,10 @@ concurrency:
 
 jobs:
   research:
+    env:
+      BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
+      BITGET_API_SECRET: ${{ secrets.BITGET_API_SECRET }}
+      BITGET_API_PASSPHRASE: ${{ secrets.BITGET_API_PASSPHRASE }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
