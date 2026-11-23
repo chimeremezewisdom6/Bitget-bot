@@ -12,6 +12,7 @@ PACKAGE = REPORTS / "bitget_24h_research_package.zip"
 JSONL_FILES = [
     "market_observations.jsonl",
     "candles_1m.jsonl",
+    "trend_early_window_backtest.jsonl",
     "public_trader_posts.jsonl",
     "shadow_experiments.jsonl",
     "collection_errors.jsonl",
