@@ -793,6 +793,9 @@ async def collect():
         "trend_backtest_symbols_this_cycle": state.get("trend_backtest_symbols_this_cycle", 0),
         "trend_backtest_symbols_completed": len(state.get("trend_backtest_symbols_completed", [])),
         "trend_backtest_events_this_cycle": state.get("trend_backtest_events_this_cycle", 0),
+        "trend_early_window_symbols_this_cycle": state.get("trend_early_window_symbols_this_cycle", 0),
+        "trend_early_window_symbols_completed": len(state.get("trend_early_window_symbols_completed", [])),
+        "trend_early_window_events_this_cycle": state.get("trend_early_window_events_this_cycle", 0),
         "ends": state.get("ends_at_utc"),
     }))
 
