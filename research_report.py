@@ -28,6 +28,7 @@ def build_report(root=ROOT):
     experiments = read_jsonl(root / "shadow_experiments.jsonl")
     errors = read_jsonl(root / "collection_errors.jsonl")
     signals = [x for x in experiments if x.get("type") == "signal"]
+    watch_conditions = [x for x in experiments if x.get("type") == "watch_condition"]
     outcomes = [x for x in experiments if x.get("type") == "orderbook_shadow_outcome"]
     reference_outcomes = [x for x in experiments if x.get("type") == "forward_reference_outcome"]
     unavailable = [x for x in experiments if x.get("type") == "evaluation_unavailable"]
@@ -50,7 +51,8 @@ def build_report(root=ROOT):
         f"- Distinct symbols observed: {len(symbols)}",
         f"- Market observation rows: {len(observations)}",
         f"- Public commentary items: {len(posts)}",
-        f"- Candidate signals: {len(signals)}",
+        f"- Candidate signals eligible for entry evaluation: {len(signals)}",
+        f"- Watch-only RSI conditions (no entry): {len(watch_conditions)}",
         f"- Two-snapshot order-book shadow outcomes: {len(net)}",
         f"- Legacy ticker-reference outcomes: {len(reference_outcomes)}",
         f"- Outcomes unavailable: {len(unavailable)}",
