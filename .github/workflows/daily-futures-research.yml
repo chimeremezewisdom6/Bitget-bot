@@ -7,7 +7,7 @@ on:
         description: Start a new 24-hour session or inspect status
         required: true
         type: choice
-        options: [start, status, stop]
+        options: [start, collect, status, stop]
         default: start
   schedule:
     - cron: "*/5 * * * *"
@@ -22,11 +22,11 @@ concurrency:
 jobs:
   research:
     env:
-      BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
-      BITGET_API_SECRET: ${{ secrets.BITGET_SECRET_KEY }}
-      BITGET_API_PASSPHRASE: ${{ secrets.BITGET_API_PASSPHRASE }}
+      BITGET_API_KEY: ${{ secrets.BITGET_API_KEY || secrets.BITGET_KEY }}
+      BITGET_API_SECRET: ${{ secrets.BITGET_API_SECRET || secrets.BITGET_SECRET_KEY || secrets.BITGET_SECRET }}
+      BITGET_API_PASSPHRASE: ${{ secrets.BITGET_API_PASSPHRASE || secrets.BITGET_PASSPHRASE || secrets.BITGET_API_PASSWORD || secrets.BITGET_PASSWORD }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,18 +60,12 @@ jobs:
         run: |
           python daily_research.py stop
           python research_report.py
-      - name: Collect five one-minute research cycles
+      - name: Collect one scheduled research cycle
         if: github.event_name == 'schedule'
         run: |
-          set -e
-          for cycle in 1 2 3 4 5; do
-            echo "Starting one-minute research cycle $cycle/5 at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            python daily_research.py collect
-            python research_report.py
-            if [ "$cycle" -lt 5 ]; then
-              sleep 60
-            fi
-          done
+          echo "Starting scheduled research cycle at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          python daily_research.py collect
+          python research_report.py
       - name: Check whether the session has finished
         id: completion
         if: github.event_name == 'schedule'
@@ -87,7 +81,7 @@ jobs:
               out.write("complete=" + str(not state.get("active", False)).lower() + "\n")
           PY
       - name: Commit research records and watchlist
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'stop'))
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'collect' || inputs.action == 'stop'))
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
