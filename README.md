@@ -33,6 +33,8 @@ If credentials are absent or the fee endpoint is not permitted, public Bitget ma
 
 The research worker starts itself when the workflow is first deployed and whenever no active 24-hour session remains. You do not need to ping it or manually start a session. GitHub Actions attempts a new Bitget-only collection cycle every five minutes, keeps the session and evidence in the repository, and writes a machine-readable status snapshot after each report build.
 
+The main collector now fails visibly when a collection fails or does not advance the recorded cycle count. A separate staggered GitHub Actions watchdog checks the committed heartbeat between collector slots and dispatches a recovery collection only when the heartbeat is stale/failed and no collector run is queued or running. Both schedules remain subject to GitHub Actions availability; the watchdog is a fallback, not a guarantee during a platform-wide scheduler outage.
+
 When you return, open the latest report and status snapshot below, or simply ask ChatGPT to inspect this repository:
 - `reports/daily_research/daily_research_summary.md` — readable research findings.
 - `reports/daily_research/research_status.json` — machine-readable health, progress and result summary.
