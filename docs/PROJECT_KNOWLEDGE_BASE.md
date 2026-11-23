@@ -653,3 +653,9 @@ These are operational defaults, not a claim that the user previously approved ex
 - The market-cap watchlist workflow has been added but has not yet been manually dispatched. No current four-band watchlist artifact has been produced by this new workflow.
 - The 24-hour research session has not been started. User should first run **Build Four-Band Futures Watchlist (Read Only)**, inspect/verify asset identities and the provisional bands, then start **24-Hour Futures Research (Read Only)**.
 - No Demo or Live trading was enabled; the automated scanner remains paused.
+
+
+### Session control refinement (2026-11-23)
+
+- Added a manual stop action to the 24-hour workflow. It marks the session inactive and preserves all records; scheduled cycles then stop collecting. Status remains read-only. A second start is rejected while the previous session or its exit-settlement grace period is active.
+- Unverified manual CoinGecko ID overrides are excluded from the selected watchlist. They must be marked verified: true after independent identity confirmation.
