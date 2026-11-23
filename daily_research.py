@@ -72,7 +72,7 @@ def strategy(candles,price,spread,fee):
 async def collect():
  st=read(S,{})
  if not st.get("active"):print("No active session");return
- if now().timestamp()>=st["end_epoch"]:
+ if now().timestamp()>=st.get("settle_epoch",st["end_epoch"]):
   st["active"]=False;st["ended_at_utc"]=iso();S.write_text(json.dumps(st,indent=2))
   SUMMARY.write_text("# 24-Hour Bitget Futures Research\n\n"+json.dumps(st,indent=2)+"\n\n## Evidence cautions\nPosts are unverified public claims. Signals are hypotheses. Forward outcomes are reference prices, not fills. Market cap is not provided by Bitget and remains unverified. Five-minute scheduled runs may be delayed or skipped. This exploratory day cannot prove profitability.\n\nFiles: market_observations.jsonl, candles_1m.jsonl, public_trader_posts.jsonl, shadow_experiments.jsonl, collection_errors.jsonl.\n")
   print("Session ended");return
@@ -101,7 +101,8 @@ async def collect():
     add(O,{"at":iso(),"symbol":sym,"base_coin":m.get("baseCoin"),"turnover24h_usdt":turnover,"last":n(t.get("lastPrice")),"mark":n(t.get("markPrice")),"index":n(t.get("indexPrice")),"funding":n(t.get("fundingRate")),"open_interest":n(t.get("openInterest")),"spread_bps":spread,"depth_0_5pct_bid_usdt":depth(bids),"depth_0_5pct_ask_usdt":depth(asks),"orderbook_ts":book.get("ts"),"candle_rows":len(candles.get("data",[])),"market_cap":"UNVERIFIED"})
     fee_raw=m.get("takerFeeRate")
     fee_bps=n(fee_raw,-1)*10000 if fee_raw is not None else -1
-    for strat,direction,reason in strategy(candles.get("data",[]),mid,spread,n(fee_raw)):
+    new_signals=strategy(candles.get("data",[]),mid,spread,n(fee_raw)) if now().timestamp()<st["end_epoch"] else []
+    for strat,direction,reason in new_signals:
      sid=f"{sym}:{strat}:{candles['data'][-1][0]}"
      seen=st.setdefault("signal_ids",[])
      if sid in seen:continue
@@ -148,7 +149,7 @@ async def collect():
     if now().timestamp() < x["due"]+600:keep.append(x)
     else:add(E,{"type":"evaluation_unavailable","at":iso(),**x,"note":"Exit order-book retrieval failed: "+str(ex)[:250]})
   Q.write_text(json.dumps(keep,indent=2))
-  newposts=await posts(s)
+  newposts=await posts(s) if now().timestamp()<st["end_epoch"] else 0
  if errors:add(R/"collection_errors.jsonl",{"at":iso(),"error":";".join(errors)[:800]})
  st["cycles"]=st.get("cycles",0)+1;st["last_at"]=iso();st["signals"]=st.get("signals",0)+signals;st["posts"]=st.get("posts",0)+newposts;st["errors"]=st.get("errors",0)+len(errors);st["symbols_last_cycle"]=len(current)
  S.write_text(json.dumps(st,indent=2))
@@ -156,8 +157,12 @@ async def collect():
 def main():
  p=argparse.ArgumentParser();p.add_argument("action",choices=["start","collect","status"]);a=p.parse_args()
  if a.action=="start":
-  R.mkdir(parents=True,exist_ok=True);end=now().timestamp()+86400
-  st={"active":True,"started_at_utc":iso(),"end_epoch":end,"ends_at_utc":datetime.fromtimestamp(end,timezone.utc).isoformat(),"cycles":0,"signals":0,"posts":0,"errors":0,"signal_ids":[]}
+  R.mkdir(parents=True,exist_ok=True)
+  existing=read(S,{})
+  if existing.get("active") and now().timestamp()<existing.get("settle_epoch",existing.get("end_epoch",0)):
+   raise SystemExit("A research session is already active; inspect it with the status action.")
+  end=now().timestamp()+86400;settle=end+1800
+  st={"active":True,"started_at_utc":iso(),"end_epoch":end,"ends_at_utc":datetime.fromtimestamp(end,timezone.utc).isoformat(),"settle_epoch":settle,"settle_until_utc":datetime.fromtimestamp(settle,timezone.utc).isoformat(),"cycles":0,"signals":0,"posts":0,"errors":0,"signal_ids":[]}
   S.write_text(json.dumps(st,indent=2));Q.write_text("[]");print("Started 24-hour session until "+st["ends_at_utc"])
  elif a.action=="collect":asyncio.run(collect())
  else:print(json.dumps(read(S,{"active":False}),indent=2))
