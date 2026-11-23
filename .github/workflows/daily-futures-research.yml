@@ -1,4 +1,4 @@
-name: 24-Hour Futures Research (Read Only)
+name: 24-Hour Bitget-Only Futures Research (Read Only)
 
 on:
   workflow_dispatch:
@@ -9,6 +9,8 @@ on:
         type: choice
         options: [start, collect, ping, status, stop]
         default: start
+  # GitHub Actions is only the scheduler; all market/account research requests go to Bitget.
+  # Scheduled execution is best-effort and must be verified from actual schedule-event runs.
   schedule:
     - cron: "*/5 * * * *"
 
@@ -77,7 +79,7 @@ jobs:
         run: |
           python daily_research.py stop
           python research_report.py
-      - name: Collect one scheduled research cycle
+      - name: Collect one scheduled Bitget-only research cycle
         id: scheduled_collect
         if: github.event_name == 'schedule'
         continue-on-error: true
