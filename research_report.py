@@ -58,7 +58,7 @@ def build_report(root=ROOT):
         "## Two-snapshot order-book shadow outcomes (not exchange fills)", "",
         f"- Positive: {wins}; negative: {losses}; flat: {flat}",
         f"- Mean estimated net result: {avg:.2f} bps" if avg is not None else "- Mean estimated net result: unavailable", "",
-        "These estimates walk the visible entry book and a later visible exit book, and deduct the instrument taker fee metadata when available. They are not actual fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. A completed simulation is not proof of profitability. Ticker-only reference outcomes, if any, are listed separately and must not be combined with this sample.", "",
+        "These estimates walk the visible entry book and a later visible exit book, and deduct the instrument taker fee metadata when available. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. A completed simulation is not proof of profitability. Ticker-only reference outcomes, if any, are listed separately and must not be combined with this sample.", "",
         f"- Ticker-only reference outcomes (separate, not executable): {len(reference_outcomes)}", "",
         "## Strategy breakdown", "",
         "| Strategy | Outcomes | Positive | Negative | Mean estimated net (bps) |",
