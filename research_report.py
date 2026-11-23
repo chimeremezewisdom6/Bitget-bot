@@ -79,6 +79,15 @@ def build_report(root=ROOT):
         watchlist = {}
 
     sources = Counter(x.get("source", "unknown") for x in posts)
+    streak_rows = []
+    for symbol in sorted({x.get("symbol") for x in candle_streak_checks if x.get("symbol")}):
+        symbol_checks = [x for x in candle_streak_checks if x.get("symbol") == symbol]
+        latest = symbol_checks[-1]
+        qualified = any(x.get("qualifies") for x in symbol_checks)
+        streak_rows.append(
+            f"| {symbol} | {len(symbol_checks)} | {latest.get('dominant_colour', '—')} | "
+            f"{latest.get('dominant_count', '—')} | {'Yes' if qualified else 'No'} |"
+        )
     lines = [
         "# 24-Hour Bitget USDT Perpetual Research Report", "",
         f"- Session started UTC: {session.get('started_at_utc', 'unknown')}",
@@ -102,7 +111,7 @@ def build_report(root=ROOT):
         "",
         "| Symbol | Checks recorded | Latest colour | Same-colour count | Qualified |",
         "|---|---:|---|---:|---|",
-        *[f"| {symbol} | {sum(1 for x in candle_streak_checks if x.get(\"symbol\") == symbol)} | {next((x.get(\"dominant_colour\") for x in reversed(candle_streak_checks) if x.get(\"symbol\") == symbol), \"—\")} | {next((x.get(\"dominant_count\") for x in reversed(candle_streak_checks) if x.get(\"symbol\") == symbol), \"—\")} | {\"Yes\" if any(x.get(\"symbol\") == symbol and x.get(\"qualifies\") for x in candle_streak_checks) else \"No\"} |" for symbol in sorted({x.get("symbol") for x in candle_streak_checks if x.get("symbol")})],
+        *streak_rows,
         *([] if candle_streak_checks else ["| No complete 60-candle checks yet | 0 | — | — | — |"]),
         "",
         "## Bitget futures-turnover activity-group coverage", "",
