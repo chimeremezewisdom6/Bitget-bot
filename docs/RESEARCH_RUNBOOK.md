@@ -27,15 +27,16 @@ Bitget's futures instruments/tickers do not expose circulating market capitalisa
 
 These are **turnover activity groups, not market-cap groups**. Up to three contracts are selected per group; empty groups remain empty.
 
-## Start the single observation workflow
+## Hands-off operation
 
-1. Open [24-Hour Futures Research (Read Only)](https://github.com/chimeremezewisdom6/Bitget-bot/actions/workflows/daily-futures-research.yml).
-2. Select **Run workflow** on branch `main`.
-3. Choose action **start** and dispatch once.
-4. The workflow builds the Bitget-only turnover watchlist, starts the 24-hour session and commits the initial state.
-5. Confirm the initial Actions run succeeds. Scheduled runs then attempt one collection cycle every five minutes.
+The scheduled workflow automatically starts a fresh 24-hour research session when no active session exists. It then attempts a Bitget-only collection cycle every five minutes. No manual ping or start action is required. Each cycle commits the evidence, heartbeat and refreshed report/status snapshot to the repository.
 
-No separate watchlist workflow or snapshot workflow is required.
+On return, inspect:
+- `reports/daily_research/daily_research_summary.md` for readable findings.
+- `reports/daily_research/research_status.json` for machine-readable progress and health.
+- `reports/daily_research/session.json` for session timing and last collection.
+
+GitHub schedule delivery is best-effort, so actual heartbeat timestamps—not the cron setting—are the proof that collection is happening.
 
 ## Bitget-only data policy
 
