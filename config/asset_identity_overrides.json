@@ -1,0 +1,4 @@
+{
+  "coingecko_ids_by_base_coin": {},
+  "instructions": "If a CoinGecko symbol is ambiguous or mismatched, add BASECOIN: {"coingecko_id":"exact-id","verified":true,"note":"manual identity check"}. Do not set verified true until the asset identity is independently checked."
+}
