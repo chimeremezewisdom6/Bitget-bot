@@ -3,6 +3,8 @@ name: Validate Bitget Demo Scanner and Research Collector
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'reports/**'
   workflow_dispatch:
 
 permissions:
