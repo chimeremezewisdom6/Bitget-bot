@@ -55,6 +55,22 @@ jobs:
       - name: Inspect session status
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'status'
         run: python daily_research.py status
+      - name: Check credential variables without exposing values
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'collect')
+        run: |
+          python - <<'PY'
+          import os
+          print({
+              "api_key_configured": bool(os.getenv("BITGET_API_KEY", "").strip()),
+              "api_secret_configured": bool(os.getenv("BITGET_API_SECRET", "").strip()),
+              "api_passphrase_or_password_configured": bool(os.getenv("BITGET_API_PASSPHRASE", "").strip()),
+          })
+          PY
+      - name: Collect one manual research cycle
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'collect'
+        run: |
+          python daily_research.py collect
+          python research_report.py
       - name: Stop session and build final report
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'stop'
         run: |
