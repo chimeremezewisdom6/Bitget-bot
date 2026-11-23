@@ -235,6 +235,8 @@ def build_report(root=ROOT):
         lines.append("| No scored outcomes | 0 | 0 | 0 | — |")
 
     lines += [
+        "", "## Legacy trader discussion records", "",
+        "Older trader discussion records, if present in the repository, are historical and unverified. The Bitget-only collector does not fetch, update or use them in research conclusions.",
         "", "## Limitations", "",
         "- The collector uses Bitget USDT perpetual market endpoints only. It samples the highest-turnover eligible contracts plus selected contracts from the current provisional four-band watchlist; market capitalisation is not inferred from ticker symbols.",
         "- Bitget futures endpoints do not provide circulating market cap; this report groups coins by Bitget 24h futures turnover instead.",
@@ -249,7 +251,7 @@ def build_report(root=ROOT):
         "- trend_first_hour_backtest.jsonl — rolling 24-hour breakout trend starts and first-hour candle-colour counts.",
         "- trend_early_window_backtest.jsonl — separate 5/10/15/20/30/60-minute candle-window measurements and continuation outcomes.",
         "- shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.",
-        "- collection_errors.jsonl — API/feed failures.", ""
+        "- collection_errors.jsonl — Bitget API and processing failures.", ""
     ]
     return "\n".join(lines)
 
