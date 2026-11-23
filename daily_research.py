@@ -660,6 +660,9 @@ async def collect():
                     completed_backtests.add(backtest["symbol"])
             state["trend_backtest_symbols_completed"] = sorted(completed_backtests)
             state["trend_backtest_symbols_this_cycle"] = sum(x is not None for x in backtest_results)
+            state["trend_backtest_events_this_cycle"] = sum(
+                backtest.get("events_found", 0) for backtest in backtest_results if backtest is not None
+            )
             symbol_errors = sum(1 for result in results if result.get("error"))
             signal_count = sum(record_signals_and_entries(result, state) for result in results)
 
@@ -705,6 +708,9 @@ async def collect():
         "candle_streak_checks_this_cycle": state.get("candle_streak_checks_this_cycle", 0),
         "candle_streak_qualifications_this_cycle": state.get("candle_streak_qualifications_this_cycle", 0),
         "candle_streak_checks_total": state.get("candle_streak_checks_total", 0),
+        "trend_backtest_symbols_this_cycle": state.get("trend_backtest_symbols_this_cycle", 0),
+        "trend_backtest_symbols_completed": len(state.get("trend_backtest_symbols_completed", [])),
+        "trend_backtest_events_this_cycle": state.get("trend_backtest_events_this_cycle", 0),
         "ends": state.get("ends_at_utc"),
     }))
 
