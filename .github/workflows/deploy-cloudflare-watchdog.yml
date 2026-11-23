@@ -1,0 +1,59 @@
+name: Deploy independent Cloudflare research watchdog
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "cloudflare/research-watchdog/**"
+      - ".github/workflows/deploy-cloudflare-watchdog.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required deployment secrets
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+        run: |
+          missing=0
+          for name in CF_ACCOUNT_ID CF_API_TOKEN GH_DISPATCH_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing GitHub Actions secret: ${name}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Create the missing repository Actions secrets using the documented names. Never print their values."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install and authenticate Wrangler
+        working-directory: cloudflare/research-watchdog
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm exec --yes wrangler@4 -- --version
+
+      - name: Store GitHub dispatch token as a Cloudflare Worker secret
+        working-directory: cloudflare/research-watchdog
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+        run: |
+          printf '%s' "$GH_DISPATCH_TOKEN" | npm exec --yes wrangler@4 -- secret put GH_TOKEN
+
+      - name: Deploy scheduled watchdog
+        working-directory: cloudflare/research-watchdog
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm exec --yes wrangler@4 -- deploy
