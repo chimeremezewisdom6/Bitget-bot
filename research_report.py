@@ -101,7 +101,7 @@ def build_report(root=ROOT):
             f"{cap_observations.get(band['name'], 0)} |"
             for band in watchlist.get("activity_band_definitions", [])
         ],
-        *([] if watchlist.get("cap_band_definitions") else ["| No current activity watchlist | 0 | 0 |"]),
+        *([] if watchlist.get("activity_band_definitions") else ["| No current activity watchlist | 0 | 0 |"]),
         "",
         "## Profit-versus-loss summary (hypothetical book-walk outcomes)", "",
         f"- Positive outcomes: {wins}; negative outcomes: {losses}; flat: {flat}",
@@ -114,7 +114,7 @@ def build_report(root=ROOT):
         f"- Average losing outcome: {mean_loss:.6f} USDT" if mean_loss is not None else "- Average losing outcome: unavailable",
         f"- Mean estimated net result: {mean_bps:.2f} bps" if mean_bps is not None else "- Mean estimated net result: unavailable",
         "",
-        "These estimates walk the visible entry book and a later visible exit book, deducting the instrument taker-fee metadata when available. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. The same signal is evaluated at multiple sizes and horizons, so these rows are correlated and must not be treated as independent trades. A completed simulation is not proof of profitability.",
+        "These estimates walk the visible entry book and a later visible exit book, deducting the authenticated account-specific Bitget taker fee when available, otherwise instrument metadata; missing fees are not assumed to be zero. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. The same signal is evaluated at multiple sizes and horizons, so these rows are correlated and must not be treated as independent trades. A completed simulation is not proof of profitability.",
         "",
         f"- Ticker-only reference outcomes (separate, not executable): {len(reference_outcomes)}",
         "",
@@ -146,7 +146,7 @@ def build_report(root=ROOT):
     lines += [
         "", "## Limitations", "",
         "- The collector samples the highest-turnover eligible Bitget USDT perpetual contracts plus selected contracts from the current provisional four-band watchlist. Bitget-reported contract names are used; market capitalisation is not inferred from ticker symbols.",
-        "- Market cap is not supplied by Bitget futures endpoints; require a separately timestamped, identity-matched source.",
+        "- Bitget futures endpoints do not provide circulating market cap; this report groups coins by Bitget 24h futures turnover instead.",
         "- Public trader posts are unverified statements, not authenticated fills or audited track records.",
         "- GitHub scheduled runs may be delayed or skipped; cycles and timestamps show actual collection, not guaranteed continuous monitoring.",
         "- Funding is not included in the automatic short-horizon net P&L. Fees are estimated from instrument metadata and may differ from the account's actual fee tier.",
