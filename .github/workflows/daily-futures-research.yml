@@ -7,7 +7,7 @@ on:
         description: Start a new 24-hour session or inspect status
         required: true
         type: choice
-        options: [start, collect, status, stop]
+        options: [start, collect, ping, status, stop]
         default: start
   schedule:
     - cron: "*/5 * * * *"
@@ -56,7 +56,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'status'
         run: python daily_research.py status
       - name: Check credential variables without exposing values
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'collect')
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
         run: |
           python - <<'PY'
           import os
@@ -67,7 +67,8 @@ jobs:
           })
           PY
       - name: Collect one manual research cycle
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'collect'
+        id: manual_collect
+        if: github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping')
         run: |
           python daily_research.py collect
           python research_report.py
@@ -77,11 +78,46 @@ jobs:
           python daily_research.py stop
           python research_report.py
       - name: Collect one scheduled research cycle
+        id: scheduled_collect
         if: github.event_name == 'schedule'
+        continue-on-error: true
         run: |
           echo "Starting scheduled research cycle at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python daily_research.py collect
           python research_report.py
+      - name: Record research heartbeat, including failed cycles
+        if: always()
+        env:
+          COLLECT_OUTCOME: ${{ steps.scheduled_collect.outcome || steps.manual_collect.outcome || 'not_run' }}
+          DISPATCH_ACTION: ${{ inputs.action || 'scheduled' }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+          root = Path("reports/daily_research")
+          root.mkdir(parents=True, exist_ok=True)
+          session_path = root / "session.json"
+          try:
+              session = json.loads(session_path.read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError):
+              session = {}
+          heartbeat = {
+              "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
+              "event": os.getenv("GITHUB_EVENT_NAME", "unknown"),
+              "action": os.getenv("DISPATCH_ACTION", "unknown"),
+              "collection_outcome": os.getenv("COLLECT_OUTCOME", "unknown"),
+              "run_id": os.getenv("GITHUB_RUN_ID"),
+              "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
+              "workflow": os.getenv("GITHUB_WORKFLOW"),
+              "session_active": bool(session.get("active", False)),
+              "collector_cycles": session.get("cycles"),
+              "last_collection_utc": session.get("last_at"),
+              "expected_interval_minutes": 5,
+          }
+          (root / "heartbeat.json").write_text(json.dumps(heartbeat, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(heartbeat, indent=2))
+          PY
       - name: Check whether the session has finished
         id: completion
         if: github.event_name == 'schedule'
@@ -96,8 +132,8 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write("complete=" + str(not state.get("active", False)).lower() + "\n")
           PY
-      - name: Commit research records and watchlist
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'collect' || inputs.action == 'stop'))
+      - name: Commit research records, watchlist and heartbeat
+        if: always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'collect' || inputs.action == 'ping' || inputs.action == 'stop')))
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -105,7 +141,7 @@ jobs:
             git add -A reports/
           fi
           if ! git diff --cached --quiet; then
-            git commit -m "Record read-only futures research"
+            git commit -m "Record read-only futures research heartbeat"
             git push
           fi
       - name: Build portable CSV and ZIP research package
