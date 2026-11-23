@@ -63,7 +63,7 @@ jobs:
           python cap_watchlist.py
           python daily_research.py start
       - name: Automatically ensure a research session is active
-        if: github.event_name == 'schedule' || github.event_name == 'push'
+        if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
         run: |
           python - <<'PY'
           import json, subprocess, time
@@ -95,6 +95,20 @@ jobs:
               "api_passphrase_or_password_configured": bool(os.getenv("BITGET_API_PASSPHRASE", "").strip()),
           })
           PY
+      - name: Capture cycle count before collection
+        id: prior_cycle
+        if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          try:
+              state = json.loads(Path('reports/daily_research/session.json').read_text(encoding='utf-8'))
+          except (OSError, json.JSONDecodeError):
+              state = {}
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('cycles=' + str(int(state.get('cycles', 0))) + '\\n')
+          PY
       - name: Collect one manual research cycle
         id: manual_collect
         if: github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping')
@@ -109,11 +123,32 @@ jobs:
       - name: Collect one automated Bitget-only research cycle
         id: scheduled_collect
         if: github.event_name == 'schedule' || github.event_name == 'push'
-        continue-on-error: true
         run: |
           echo "Starting scheduled research cycle at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python daily_research.py collect
           python research_report.py
+      - name: Verify that collection produced a new research cycle
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping')))
+        env:
+          PREVIOUS_CYCLES: ${{ steps.prior_cycle.outputs.cycles || '0' }}
+          COLLECT_OUTCOME: ${{ steps.scheduled_collect.outcome || steps.manual_collect.outcome || 'not_run' }}
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          outcome = os.getenv('COLLECT_OUTCOME', 'not_run')
+          if outcome != 'success':
+              sys.exit('Research collection did not succeed; see the collector step logs.')
+          try:
+              state = json.loads(Path('reports/daily_research/session.json').read_text(encoding='utf-8'))
+          except (OSError, json.JSONDecodeError) as exc:
+              sys.exit('Research session state is missing or unreadable: ' + str(exc))
+          before = int(os.getenv('PREVIOUS_CYCLES', '0'))
+          after = int(state.get('cycles', 0))
+          if after <= before:
+              sys.exit(f'No new research cycle was recorded (before={before}, after={after}).')
+          print(f'Research cycle verified: {before} -> {after}; last collection={state.get("last_at")}')
+          PY
       - name: Record research heartbeat, including failed cycles
         if: always()
         env:
