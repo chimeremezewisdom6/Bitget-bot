@@ -1,0 +1,17 @@
+{
+  "active": true,
+  "started_at_utc": "2026-11-23T11:29:36.710531+00:00",
+  "end_epoch": 1795519776.710522,
+  "ends_at_utc": "2026-11-24T11:29:36.710522+00:00",
+  "settle_epoch": 1795521576.710522,
+  "settle_until_utc": "2026-11-24T11:59:36.710522+00:00",
+  "cycles": 0,
+  "signals": 0,
+  "posts": 0,
+  "errors": 0,
+  "signal_ids": [],
+  "candle_ids": [],
+  "bitget_auth_status": "NOT_CHECKED",
+  "data_source": "Bitget USDT-FUTURES",
+  "trading_enabled": false
+}
