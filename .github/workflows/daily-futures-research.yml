@@ -1,6 +1,14 @@
 name: 24-Hour Bitget-Only Futures Research (Read Only)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/daily-futures-research.yml'
+      - 'daily_research.py'
+      - 'research_report.py'
+      - 'cap_watchlist.py'
+      - 'shadow_execution.py'
   workflow_dispatch:
     inputs:
       action:
@@ -54,6 +62,25 @@ jobs:
           PY
           python cap_watchlist.py
           python daily_research.py start
+      - name: Automatically ensure a research session is active
+        if: github.event_name == 'schedule' || github.event_name == 'push'
+        run: |
+          python - <<'PY'
+          import json, subprocess, time
+          from pathlib import Path
+          path = Path('reports/daily_research/session.json')
+          try:
+              state = json.loads(path.read_text(encoding='utf-8'))
+          except (OSError, json.JSONDecodeError):
+              state = {}
+          active = bool(state.get('active')) and time.time() < state.get('settle_epoch', state.get('end_epoch', 0))
+          if active:
+              print('Existing research session is active; continuing it.')
+          else:
+              print('No active session; preparing the Bitget watchlist and starting a fresh 24-hour session.')
+              subprocess.run(['python', 'cap_watchlist.py'], check=True)
+              subprocess.run(['python', 'daily_research.py', 'start'], check=True)
+          PY
       - name: Inspect session status
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'status'
         run: python daily_research.py status
@@ -79,9 +106,9 @@ jobs:
         run: |
           python daily_research.py stop
           python research_report.py
-      - name: Collect one scheduled Bitget-only research cycle
+      - name: Collect one automated Bitget-only research cycle
         id: scheduled_collect
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event_name == 'push'
         continue-on-error: true
         run: |
           echo "Starting scheduled research cycle at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -91,7 +118,7 @@ jobs:
         if: always()
         env:
           COLLECT_OUTCOME: ${{ steps.scheduled_collect.outcome || steps.manual_collect.outcome || 'not_run' }}
-          DISPATCH_ACTION: ${{ inputs.action || 'scheduled' }}
+          DISPATCH_ACTION: ${{ inputs.action || (github.event_name == 'push' && 'automatic_bootstrap' || 'scheduled') }}
         run: |
           python - <<'PY'
           import json, os
@@ -122,7 +149,7 @@ jobs:
           PY
       - name: Check whether the session has finished
         id: completion
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event_name == 'push'
         run: |
           python - <<'PY'
           import json, os
@@ -135,7 +162,7 @@ jobs:
               out.write("complete=" + str(not state.get("active", False)).lower() + "\n")
           PY
       - name: Commit research records, watchlist and heartbeat
-        if: always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'collect' || inputs.action == 'ping' || inputs.action == 'stop')))
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'collect' || inputs.action == 'ping' || inputs.action == 'stop')))
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -147,12 +174,12 @@ jobs:
             git push
           fi
       - name: Build portable CSV and ZIP research package
-        if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || (github.event_name == 'schedule' && steps.completion.outputs.complete == 'true')
+        if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || ((github.event_name == 'schedule' || github.event_name == 'push') && steps.completion.outputs.complete == 'true')
         run: |
           python -m py_compile package_research.py
           python package_research.py
       - name: Upload complete research package
-        if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || (github.event_name == 'schedule' && steps.completion.outputs.complete == 'true')
+        if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || ((github.event_name == 'schedule' || github.event_name == 'push') && steps.completion.outputs.complete == 'true')
         uses: actions/upload-artifact@v4
         with:
           name: bitget-24-hour-futures-research-${{ github.run_id }}
