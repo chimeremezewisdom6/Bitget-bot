@@ -297,7 +297,7 @@ def build_report(root=ROOT):
         "report_file": "daily_research_summary.md",
     }
     (root / "research_status.json").write_text(
-        json.dumps(status, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8"
+        json.dumps(status, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     return "\n".join(lines)
 
@@ -307,4 +307,3 @@ if __name__ == "__main__":
     output = ROOT / "daily_research_summary.md"
     output.write_text(build_report(), encoding="utf-8")
     print(f"Wrote {output}")
-    print(f"Wrote {status_path}")
