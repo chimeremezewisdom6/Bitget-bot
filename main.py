@@ -5,13 +5,17 @@ internal implementation modules so their tested logic stays reusable.
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-SESSION = ROOT / "reports" / "daily_research" / "session.json"
+REPORTS = ROOT / "reports" / "daily_research"
+SESSION = REPORTS / "session.json"
+HEARTBEAT = REPORTS / "heartbeat.json"
 
 
 def run(*args):
@@ -28,6 +32,26 @@ def session_state():
 def is_active(state):
     end = state.get("settle_epoch", state.get("end_epoch", 0))
     return bool(state.get("active")) and time.time() < float(end or 0)
+
+
+def write_heartbeat(state):
+    """Publish the exact health signal consumed by the independent watchdog."""
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
+        "event": os.getenv("GITHUB_EVENT_NAME", "manual"),
+        "action": os.getenv("SCANNER_ACTION", "ping"),
+        "collection_outcome": "success",
+        "run_id": os.getenv("GITHUB_RUN_ID", ""),
+        "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT", ""),
+        "workflow": "Bitget Unified Research Scanner",
+        "session_active": is_active(state),
+        "collector_cycles": int(state.get("cycles", 0)),
+        "last_collection_utc": state.get("last_at"),
+        "expected_interval_minutes": 5,
+        "trading_enabled": False,
+    }
+    HEARTBEAT.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def start():
@@ -47,6 +71,8 @@ def collect():
     print("Running one Bitget read-only research collection cycle.")
     run("daily_research.py", "collect")
     run("research_report.py")
+    state = session_state()
+    write_heartbeat(state)
 
 
 def ping():
@@ -59,6 +85,7 @@ def ping():
         "session_active": is_active(state),
         "cycles": state.get("cycles", 0),
         "last_collection_utc": state.get("last_at"),
+        "heartbeat_file": str(HEARTBEAT.relative_to(ROOT)),
         "trading_enabled": False,
     }, indent=2))
 
@@ -78,7 +105,6 @@ def main():
     elif action == "stop":
         state = session_state()
         state["active"] = False
-        from datetime import datetime, timezone
         state["stopped_at_utc"] = datetime.now(timezone.utc).isoformat()
         SESSION.parent.mkdir(parents=True, exist_ok=True)
         SESSION.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
