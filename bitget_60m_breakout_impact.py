@@ -262,7 +262,10 @@ async def main():
         universe = sorted(
             [x for x in tickers if x.get("symbol") in live],
             key=lambda x: num(x.get("turnover24h")), reverse=True
-        )[:max(1, min(200, int(__import__("os").getenv("BITGET_MAX_MARKETS", "200"))))]
+        )
+        max_markets = int(__import__("os").getenv("BITGET_MAX_MARKETS", "0"))
+        if max_markets > 0:
+            universe = universe[:max_markets]
         semaphore = asyncio.Semaphore(10)
         fetched = await asyncio.gather(*(
             fetch_symbol(session, gate, semaphore, item["symbol"], start, end)
