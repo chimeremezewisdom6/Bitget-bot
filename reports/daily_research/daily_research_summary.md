@@ -2,92 +2,92 @@
 
 - Session started UTC: 2026-11-23T11:29:36.710531+00:00
 - Session ended UTC: not recorded
-- Collector cycles: 18
-- Distinct symbols observed: 217
+- Collector cycles: 19
+- Distinct symbols observed: 221
 - Current Bitget turnover-watchlist contracts: 11
-- Market observation rows: 3600
-- Candidate signals eligible for entry evaluation: 684
-- Watch-only RSI conditions (no entry): 1121
-- Two-snapshot order-book shadow outcomes: 4980
+- Market observation rows: 3800
+- Candidate signals eligible for entry evaluation: 700
+- Watch-only RSI conditions (no entry): 1161
+- Two-snapshot order-book shadow outcomes: 6156
 - Legacy ticker-reference outcomes: 0
 - Outcomes unavailable: 0
 - Collection error records: 0
-- 60-minute same-colour candle checks: 1074
+- 60-minute same-colour candle checks: 1080
 - Checks meeting 40+ same-colour candles: 0
 
 ## Previous 24-hour trend-start candle-colour backtest
 
-- Symbols with completed historical backtests: 216
-- Breakout-based trend starts found: 3370 (LONG: 1520; SHORT: 1850)
-- Average direction-matching candle share in first hour: 31.1%
+- Symbols with completed historical backtests: 220
+- Breakout-based trend starts found: 3433 (LONG: 1546; SHORT: 1887)
+- Average direction-matching candle share in first hour: 30.9%
 - Complete exports: [all 216 coin summaries](trend_coin_summary.csv) and [all trend events with 5/10/15/20/30/60-minute candle/continuation detail](trend_event_details.csv). These files are regenerated whenever this report runs.
 
 A trend start is defined as a fully closed 1m candle closing above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT). The first hour is the breakout candle plus the next 59 fully closed 1m candles. Green, red and doji candles are counted separately. This is a consistent breakout proxy, not a universal definition of every trend.
 
 ## Early-trend candle windows (separate experiment)
 
-- Symbols with early-window backtests: 215
-- Complete trend events with early-window measurements: 3294
+- Symbols with early-window backtests: 219
+- Complete trend events with early-window measurements: 3357
 
 For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candles. The continuation column is the direction-adjusted price change from that window's closing price to the end of the first hour. Positive means price continued in the trend direction; negative means it reversed. The 60-minute row has no candles remaining after its close, so its continuation-to-hour-end is not scored and is excluded from that metric. These are descriptive historical samples, not proof that early candle colour predicts future returns.
 
 | First minutes | Events with window data | Avg direction-matching candles % | Positive continuation (scored events) | Avg continuation after window % |
 |---:|---:|---:|---:|---:|
-| 5 | 3294 | 44.1% | 1660/3294 (50.4%) | 0.0407% |
-| 10 | 3294 | 36.9% | 1676/3294 (50.9%) | 0.0692% |
-| 15 | 3294 | 34.5% | 1676/3294 (50.9%) | 0.0773% |
-| 20 | 3294 | 33.6% | 1646/3294 (50.0%) | 0.0547% |
-| 30 | 3294 | 32.5% | 1632/3294 (49.5%) | 0.0495% |
-| 60 | 3294 | 31.5% | — | — |
+| 5 | 3357 | 43.9% | 1695/3357 (50.5%) | 0.0437% |
+| 10 | 3357 | 36.6% | 1709/3357 (50.9%) | 0.0731% |
+| 15 | 3357 | 34.2% | 1713/3357 (51.0%) | 0.0807% |
+| 20 | 3357 | 33.3% | 1685/3357 (50.2%) | 0.0591% |
+| 30 | 3357 | 32.3% | 1671/3357 (49.8%) | 0.0518% |
+| 60 | 3357 | 31.2% | — | — |
 
 ## Current trend-ignition radar (latest Bitget scan per coin)
 
-- Coins with usable candle/OI analysis: 201
-- LONG/SHORT ignition candidates (score at least 4/7): 34
+- Coins with usable candle/OI analysis: 207
+- LONG/SHORT ignition candidates (score at least 4/7): 6
 - This radar ranks developing movement using 1m price/candle structure and volume, plus Bitget 5m historical aggregate open interest. OI is not long/short-specific.
 
 | Coin | Side | Score / 7 | Stage | Price 5m | Price 15m | OI 15m | Volume x | 5m candle colour | Positioning context |
 |---|---|---:|---|---:|---:|---:|---:|---|---|
-| AAVEUSDT | SHORT | 6 / 7 | IGNITION_CANDIDATE | -0.665% | -0.7666% | -0.5871% | 3.299x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| NEARUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.6129% | -0.7241% | -0.4677% | 1.14x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| PUMPUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.6667% | -0.8222% | -0.6275% | 0.876x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| BNBUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.3381% | -0.2912% | -0.1601% | 0.247x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| TAOUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.5281% | -0.4709% | -0.5608% | 0.216x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| AVAXUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.5884% | -0.4859% | -0.3123% | 0.106x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| ONDOUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.687% | -0.687% | -0.5714% | 1.322x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| XLMUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.3909% | -0.5586% | -0.4972% | 1.882x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| FILUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.6178% | -0.723% | -0.6219% | 2.485x | 0/4 | NO_CLEAR_OI_CONFIRMATION |
-| XMRUSDT | LONG | 5 / 7 | IGNITION_CANDIDATE | 0.1311% | 0.2625% | 0.1593% | 2.315x | 3/2 | NEW_POSITION_BUILDING_AGGREGATE |
-| ASTERUSDT | SHORT | 5 / 7 | IGNITION_CANDIDATE | -0.4182% | -0.4182% | -0.3784% | 0.515x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| HUSDT | LONG | 5 / 7 | IGNITION_CANDIDATE | 0.5319% | 0.7616% | 1.1211% | 0.609x | 3/1 | NEW_POSITION_BUILDING_AGGREGATE |
-| ENAUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.8202% | -0.6747% | -0.6412% | 0.562x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| DOGEUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.3181% | -0.4589% | -0.354% | 0.373x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| SUIUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.5913% | -0.4883% | -0.2914% | 0.821x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| CYSUSDT | LONG | 4 / 7 | IGNITION_CANDIDATE | 0.769% | 1.6214% | 1.6051% | 0.91x | 3/2 | NEW_POSITION_BUILDING_AGGREGATE |
-| UNIUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.7744% | -0.6124% | -0.4026% | 0.383x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| ARBUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.5519% | -0.8171% | -0.8791% | 0.099x | 1/4 | NO_CLEAR_OI_CONFIRMATION |
-| LTCUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.5251% | -0.3586% | -0.2553% | 0.626x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| BCHUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.4395% | -0.528% | -0.4375% | 0.671x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| SHIBUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.4077% | -0.3535% | -0.4058% | 2.185x | 0/4 | NO_CLEAR_OI_CONFIRMATION |
-| MUBARAKUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -1.413% | -0.4078% | 0.3173% | 1.203x | 1/4 | NEW_POSITION_BUILDING_AGGREGATE |
-| SEIUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.6924% | -0.4051% | -0.0912% | 3.149x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| HBARUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.5672% | -0.6799% | -0.512% | 0.835x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| USDBRLUSDT | LONG | 4 / 7 | IGNITION_CANDIDATE | 0.0135% | 0.1434% | -7.9884% | 4.316x | 3/2 | POSSIBLE_POSITION_CLOSING_OR_SHORT_COVERING |
-| WLFIUSDT | LONG | 4 / 7 | IGNITION_CANDIDATE | 0.2711% | 0.2958% | -0.1121% | 6.085x | 2/2 | POSSIBLE_POSITION_CLOSING_OR_SHORT_COVERING |
-| USELESSUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.9762% | -1.0779% | -1.4404% | 0.676x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| WIFUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.7855% | -0.5512% | -0.1351% | 6.697x | 1/4 | NO_CLEAR_OI_CONFIRMATION |
-| VIRTUALUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.7744% | -0.6948% | -0.6537% | 0.448x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| LITUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.5374% | -1.0284% | -0.8654% | 0.428x | 0/3 | NO_CLEAR_OI_CONFIRMATION |
-| MARSCOINUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.6393% | -0.4047% | 4.3293% | 0.282x | 0/2 | NEW_POSITION_BUILDING_AGGREGATE |
-| RAYUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.4282% | -0.4581% | -0.3565% | 0.507x | 0/3 | NO_CLEAR_OI_CONFIRMATION |
-| ARUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.578% | -0.6601% | -0.3354% | 4.629x | 0/3 | NO_CLEAR_OI_CONFIRMATION |
-| GPSUSDT | LONG | 4 / 7 | IGNITION_CANDIDATE | 0.0431% | 0.5964% | 0.6846% | 57.907x | 1/0 | NEW_POSITION_BUILDING_AGGREGATE |
-| ZECUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.6635% | -0.6932% | -0.278% | 1.806x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| HYPEUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.2866% | -0.3067% | -0.1895% | 1.689x | 1/4 | NO_CLEAR_OI_CONFIRMATION |
-| PEPEUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.5842% | -0.6539% | -0.2744% | 2.086x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| MMTUSDT | LONG | 3 / 7 | EARLY_PRESSURE | -0.429% | 1.6322% | 4.607% | 0.346x | 3/2 | NEW_POSITION_BUILDING_AGGREGATE |
-| LINKUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.4273% | -0.2305% | -0.0735% | 1.743x | 0/5 | NO_CLEAR_OI_CONFIRMATION |
-| INJUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.6968% | -0.6338% | -0.3676% | 2.446x | 0/4 | NO_CLEAR_OI_CONFIRMATION |
+| NAORISUSDT | LONG | 5 / 7 | IGNITION_CANDIDATE | 0.2614% | 0.3925% | 0.1787% | 0.249x | 4/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| BLESSUSDT | LONG | 4 / 7 | IGNITION_CANDIDATE | 0.4378% | 0.5302% | 0.4966% | 0.305x | 3/2 | NEW_POSITION_BUILDING_AGGREGATE |
+| AKEUSDT | LONG | 4 / 7 | IGNITION_CANDIDATE | 0.5605% | 0.7632% | 5.1778% | 1.635x | 4/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| CTUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -1.1422% | -0.6226% | -1.5806% | 0.796x | 0/4 | NO_CLEAR_OI_CONFIRMATION |
+| PYTHUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.6095% | -0.1974% | 0.056% | 4.983x | 1/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| PIPPINUSDT | SHORT | 4 / 7 | IGNITION_CANDIDATE | -0.5562% | -0.3344% | -0.09% | 0.081x | 0/3 | NO_CLEAR_OI_CONFIRMATION |
+| ZECUSDT | LONG | 3 / 7 | EARLY_PRESSURE | 0.0147% | 0.7113% | 0.4856% | 0.492x | 4/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| EVAAUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.2821% | -0.2127% | 0.4297% | 0.566x | 2/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| ZROUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.2241% | -0.1588% | 2.598% | 0.125x | 2/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| ICNTUSDT | LONG | 3 / 7 | EARLY_PRESSURE | 0.33% | 1.5179% | 2.04% | 0.128x | 3/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| ENSOUSDT | LONG | 3 / 7 | EARLY_PRESSURE | 0.3525% | 0.3761% | 1.1314% | 0.989x | 4/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| USELESSUSDT | LONG | 3 / 7 | EARLY_PRESSURE | 0.2161% | 0.9112% | 1.9913% | 16.223x | 2/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| ETCUSDT | LONG | 3 / 7 | EARLY_PRESSURE | -0.1896% | 0.2944% | 0.4873% | 5.375x | 0/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| RPLUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.2519% | -0.7519% | -1.3915% | 2.399x | 1/2 | NO_CLEAR_OI_CONFIRMATION |
+| MAGMAUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.4335% | -0.266% | 0.3747% | 0.16x | 0/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| REUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.8307% | -0.8214% | -0.4378% | 0.178x | 0/4 | NO_CLEAR_OI_CONFIRMATION |
+| SOONUSDT | SHORT | 3 / 7 | EARLY_PRESSURE | -0.1559% | -0.2336% | -0.1488% | 1.394x | 1/2 | NO_CLEAR_OI_CONFIRMATION |
+| KITEUSDT | LONG | 3 / 7 | EARLY_PRESSURE | 0.4384% | 0.4314% | 0.0966% | 0.808x | 2/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| BTCUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.033% | 0.3063% | 0.2088% | 0.383x | 3/2 | NEW_POSITION_BUILDING_AGGREGATE |
+| ETHUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | -0.003% | 0.3427% | 0.2585% | 0.292x | 3/2 | NEW_POSITION_BUILDING_AGGREGATE |
+| ENAUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | -0.1304% | 0.4641% | -0.1212% | 1.654x | 2/2 | POSSIBLE_POSITION_CLOSING_OR_SHORT_COVERING |
+| PEPEUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.0287% | 0.4315% | 0.2935% | 0.439x | 2/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| SUIUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | -0.1208% | 0.3186% | 0.3058% | 0.338x | 2/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| MMTUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.6914% | 0.172% | 0.0707% | 0.294x | 3/2 | NEW_POSITION_BUILDING_AGGREGATE |
+| PROMUSDT | SHORT | 2 / 7 | NO_STRONG_IGNITION | -0.3464% | 0.5427% | 0.624% | 0.178x | 2/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| ELSAUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 1.3078% | -0.4188% | -1.5151% | 0.208x | 4/1 | NO_CLEAR_OI_CONFIRMATION |
+| CYSUSDT | SHORT | 2 / 7 | NO_STRONG_IGNITION | -0.6005% | 0.0189% | 0.7857% | 0.161x | 0/5 | NEW_POSITION_BUILDING_AGGREGATE |
+| BNBUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | -0.0438% | 0.1975% | -0.0477% | 0.324x | 3/2 | POSSIBLE_POSITION_CLOSING_OR_SHORT_COVERING |
+| ACEUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.554% | 0.4149% | 0.1125% | 0.79x | 4/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| AVAXUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.0149% | 0.0894% | -0.1162% | 0.156x | 3/1 | POSSIBLE_POSITION_CLOSING_OR_SHORT_COVERING |
+| LISTAUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | -2.4569% | -2.9468% | -4.5444% | 3.166x | 2/3 | NO_CLEAR_OI_CONFIRMATION |
+| BCHUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | -0.0352% | 0.2367% | 0.4644% | 0.408x | 2/3 | NEW_POSITION_BUILDING_AGGREGATE |
+| FILUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | -0.1621% | 0.2713% | -0.0725% | 4.982x | 3/2 | POSSIBLE_POSITION_CLOSING_OR_SHORT_COVERING |
+| VVVUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.2936% | 0.3259% | -0.2676% | 0.104x | 3/0 | POSSIBLE_POSITION_CLOSING_OR_SHORT_COVERING |
+| CYBERUSDT | SHORT | 2 / 7 | NO_STRONG_IGNITION | -0.141% | -0.5152% | -0.2922% | 2.164x | 1/2 | NO_CLEAR_OI_CONFIRMATION |
+| NIGHTUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.335% | 0.9692% | 0.7984% | 0.042x | 1/1 | NEW_POSITION_BUILDING_AGGREGATE |
+| APRUSDT | SHORT | 2 / 7 | NO_STRONG_IGNITION | -0.512% | -1.3642% | -1.0776% | 0.032x | 0/3 | NO_CLEAR_OI_CONFIRMATION |
+| KASUSDT | LONG | 2 / 7 | NO_STRONG_IGNITION | 0.0% | 0.4162% | 0.2837% | 5.501x | 1/2 | NEW_POSITION_BUILDING_AGGREGATE |
+| VELVETUSDT | SHORT | 2 / 7 | NO_STRONG_IGNITION | 0.1002% | -0.3244% | -0.677% | 2.014x | 2/1 | NO_CLEAR_OI_CONFIRMATION |
+| SAPIENUSDT | SHORT | 2 / 7 | NO_STRONG_IGNITION | -0.3085% | -0.5131% | -0.8552% | 2.557x | 0/2 | NO_CLEAR_OI_CONFIRMATION |
 
 Scoring checks: aligned 5m/15m price acceleration, rising 15m OI, 5m turnover surge versus the prior 20m, directional candle pressure with real candle bodies, 20m breakout, 60m breakout, and higher-high/lower-low structure. Scores are evidence counts, not probabilities. A high score is a research watch candidate, not a buy/sell instruction. Rising aggregate OI means total outstanding positions increased; it does not reveal whether longs or shorts initiated them.
 
@@ -200,7 +200,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 
 | Symbol | Checks recorded | Latest colour | Same-colour count | Qualified |
 |---|---:|---|---:|---|
-| 0GUSDT | 4 | GREEN | 17 | No |
+| 0GUSDT | 5 | RED | 17 | No |
 | 1000BONKUSDT | 5 | RED | 10 | No |
 | AAVEUSDT | 5 | GREEN | 29 | No |
 | ACEUSDT | 5 | GREEN | 24 | No |
@@ -262,6 +262,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | DOSUSDT | 5 | RED | 17 | No |
 | DOTUSDT | 5 | GREEN | 12 | No |
 | EDGEUSDT | 5 | GREEN | 9 | No |
+| EGLDUSDT | 1 | RED | 16 | No |
 | EIGENUSDT | 5 | GREEN | 12 | No |
 | ELICEUSDT | 5 | GREEN | 5 | No |
 | ELSAUSDT | 5 | GREEN | 30 | No |
@@ -302,6 +303,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | IOSTUSDT | 5 | GREEN | 10 | No |
 | IRYSUSDT | 5 | RED | 21 | No |
 | JCTUSDT | 5 | RED | 22 | No |
+| JNJUSDT | 1 | GREEN | 12 | No |
 | JTOUSDT | 5 | RED | 13 | No |
 | JUPUSDT | 5 | RED | 26 | No |
 | KAITOUSDT | 5 | RED | 15 | No |
@@ -326,7 +328,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | MEGAUSDT | 5 | RED | 17 | No |
 | MELANIAUSDT | 5 | GREEN | 3 | No |
 | METUSDT | 5 | GREEN | 13 | No |
-| MEUSDT | 1 | GREEN | 11 | No |
+| MEUSDT | 2 | GREEN | 17 | No |
 | MMTUSDT | 5 | GREEN | 30 | No |
 | MONUSDT | 5 | RED | 17 | No |
 | MORPHOUSDT | 5 | GREEN | 15 | No |
@@ -382,6 +384,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | SKYUSDT | 5 | RED | 22 | No |
 | SOLUSDT | 5 | RED | 33 | No |
 | SOONUSDT | 5 | GREEN | 3 | No |
+| SPACEUSDT | 1 | RED | 16 | No |
 | SPKUSDT | 5 | GREEN | 8 | No |
 | SPXUSDT | 5 | GREEN | 7 | No |
 | SQDUSDT | 5 | GREEN | 24 | No |
@@ -413,6 +416,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | XRPUSDT | 5 | RED | 31 | No |
 | XVGUSDT | 5 | GREEN | 14 | No |
 | ZECUSDT | 5 | RED | 31 | No |
+| ZENUSDT | 1 | RED | 17 | No |
 | ZESTUSDT | 5 | RED | 9 | No |
 | ZROUSDT | 5 | RED | 27 | No |
 | 牛来USDT | 5 | GREEN | 9 | No |
@@ -422,22 +426,22 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 
 | Group | Watchlist candidates | Observation rows |
 |---|---:|---:|
-| Under $1m 24h futures turnover | 3 | 54 |
-| $1m–$10m 24h futures turnover | 3 | 54 |
-| $10m–$100m 24h futures turnover | 3 | 54 |
-| $100m+ 24h futures turnover | 2 | 36 |
+| Under $1m 24h futures turnover | 3 | 57 |
+| $1m–$10m 24h futures turnover | 3 | 57 |
+| $10m–$100m 24h futures turnover | 3 | 57 |
+| $100m+ 24h futures turnover | 2 | 38 |
 
 ## Profit-versus-loss summary (hypothetical book-walk outcomes)
 
-- Positive outcomes: 1496; negative outcomes: 3484; flat: 0
-- Win rate among scored outcomes: 30.0%
-- Gross positive outcomes: 7161.235727 USDT
-- Gross negative outcomes: 22986.481005 USDT
-- Total estimated net after trading fees: -15825.245278 USDT
-- Profit factor (gross gains / gross losses): 0.312
-- Average winning outcome: 4.786922 USDT
-- Average losing outcome: -6.597727 USDT
-- Mean estimated net result: -57.96 bps
+- Positive outcomes: 2282; negative outcomes: 3874; flat: 0
+- Win rate among scored outcomes: 37.1%
+- Gross positive outcomes: 14546.341940 USDT
+- Gross negative outcomes: 28034.981820 USDT
+- Total estimated net after trading fees: -13488.639881 USDT
+- Profit factor (gross gains / gross losses): 0.519
+- Average winning outcome: 6.374383 USDT
+- Average losing outcome: -7.236702 USDT
+- Mean estimated net result: -39.48 bps
 
 These estimates walk the visible entry book and a later visible exit book, deducting the authenticated account-specific Bitget taker fee when available, otherwise instrument metadata; missing fees are not assumed to be zero. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. The same signal is evaluated at multiple sizes and horizons, so these rows are correlated and must not be treated as independent trades. A completed simulation is not proof of profitability.
 
@@ -447,9 +451,9 @@ These estimates walk the visible entry book and a later visible exit book, deduc
 
 | Strategy | Outcomes | Positive | Negative | Mean estimated net (bps) |
 |---|---:|---:|---:|---:|
-| breakdown | 864 | 288 | 576 | -68.12 |
-| breakout | 444 | 55 | 389 | -37.37 |
-| ema_volume | 3672 | 1153 | 2519 | -58.06 |
+| breakdown | 1134 | 540 | 594 | -17.89 |
+| breakout | 522 | 76 | 446 | -50.93 |
+| ema_volume | 4500 | 1666 | 2834 | -43.59 |
 
 ## Legacy Trader discussion records
 
