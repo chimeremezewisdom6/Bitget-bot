@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/daily-futures-research.yml'
+      - 'main.py'
       - 'daily_research.py'
       - 'research_report.py'
       - 'cap_watchlist.py'
@@ -61,7 +62,7 @@ jobs:
               sys.exit("A research session is already active. Choose status or stop; do not start another.")
           PY
           python cap_watchlist.py
-          python daily_research.py start
+          python main.py start
       - name: Automatically ensure a research session is active
         if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
         run: |
@@ -83,7 +84,7 @@ jobs:
           PY
       - name: Inspect session status
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'status'
-        run: python daily_research.py status
+        run: python main.py status
       - name: Check credential variables without exposing values
         if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
         run: |
@@ -113,19 +114,19 @@ jobs:
         id: manual_collect
         if: github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping')
         run: |
-          python daily_research.py collect
+          python main.py collect
           python research_report.py
       - name: Stop session and build final report
         if: github.event_name == 'workflow_dispatch' && inputs.action == 'stop'
         run: |
-          python daily_research.py stop
+          python main.py stop
           python research_report.py
       - name: Collect one automated Bitget-only research cycle
         id: scheduled_collect
         if: github.event_name == 'schedule' || github.event_name == 'push'
         run: |
           echo "Starting scheduled research cycle at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          python daily_research.py collect
+          python main.py collect
           python research_report.py
       - name: Verify that collection produced a new research cycle
         if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping')))
