@@ -58,7 +58,87 @@ def _oi_change(series, minutes):
     return round((latest_value / earlier[1] - 1) * 100, 4)
 
 
-def analyze_trend_ignition(symbol, candles, oi_payload, now_ms=None):
+
+def _fill_rows(payload):
+    data = (payload or {}).get("data", [])
+    if isinstance(data, dict):
+        data = data.get("list", [])
+    rows = []
+    for item in data or []:
+        try:
+            ts = int(item.get("ts", item.get("cTime", item.get("timestamp", 0))))
+            if ts and ts < 10_000_000_000:
+                ts *= 1000
+            side = str(item.get("side", "")).lower()
+            size = _n(item.get("size", item.get("qty", item.get("baseVolume", 0))))
+            if ts > 0 and side in ("buy", "sell") and size > 0:
+                rows.append((ts, side, size))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return sorted(rows)
+
+
+def _taker_windows(payload):
+    rows = _fill_rows(payload)
+    if not rows:
+        return {str(m): {"status": "NO_RECENT_FILLS", "sample_count": 0} for m in (5, 10, 15)}
+    latest = rows[-1][0]
+    output = {}
+    for minutes in (5, 10, 15):
+        cutoff = latest - minutes * 60_000
+        sample = [x for x in rows if cutoff <= x[0] <= latest]
+        covered = (latest - rows[0][0]) / 60_000
+        buy = sum(x[2] for x in sample if x[1] == "buy")
+        sell = sum(x[2] for x in sample if x[1] == "sell")
+        total = buy + sell
+        complete = covered >= minutes and len(sample) >= 2 and total > 0
+        output[str(minutes)] = {
+            "status": "OK" if complete else "INSUFFICIENT_TRADE_HISTORY",
+            "buy_volume": round(buy, 8), "sell_volume": round(sell, 8),
+            "imbalance": round((buy - sell) / total, 6) if total else None,
+            "buy_share_pct": round(buy / total * 100, 3) if total else None,
+            "sample_count": len(sample), "available_history_minutes": round(covered, 3),
+        }
+    return output
+
+
+def _turnover_windows(rows):
+    output = {}
+    for minutes in (1, 5, 10, 15):
+        if len(rows) < minutes * 2:
+            output[str(minutes)] = {"status": "INSUFFICIENT_CANDLES"}
+            continue
+        recent = sum(x["q"] for x in rows[-minutes:])
+        prior = sum(x["q"] for x in rows[-2 * minutes:-minutes])
+        output[str(minutes)] = {
+            "status": "OK" if prior > 0 else "ZERO_BASELINE",
+            "recent_turnover": round(recent, 6),
+            "prior_equal_window_turnover": round(prior, 6),
+            "acceleration_multiple": round(recent / prior, 4) if prior > 0 else None,
+        }
+    return output
+
+
+def _path_efficiency(rows):
+    output = {}
+    for minutes in (5, 10, 15, 30, 60):
+        if len(rows) < minutes:
+            output[str(minutes)] = None
+            continue
+        sample = rows[-minutes:]
+        start, end = sample[0]["c"], sample[-1]["c"]
+        path = sum(abs(sample[i]["c"] / sample[i-1]["c"] - 1)
+                   for i in range(1, len(sample)) if sample[i-1]["c"] > 0)
+        net = abs(end / start - 1) if start > 0 else 0
+        output[str(minutes)] = {
+            "efficiency": round(net / path, 6) if path > 0 else None,
+            "absolute_net_move_pct": round(net * 100, 5),
+            "path_length_pct": round(path * 100, 5),
+        }
+    return output
+
+
+def analyze_trend_ignition(symbol, candles, oi_payload, fills_payload=None, now_ms=None):
     """Score early long/short pressure from closed 1m candles and 5m OI history.
 
     OI is market-wide aggregate, not long-vs-short positioning. Price/OI
@@ -89,6 +169,9 @@ def analyze_trend_ignition(symbol, candles, oi_payload, now_ms=None):
     volume_multiple = recent_turnover / baseline_turnover if baseline_turnover > 0 else None
 
     oi = _oi_series(oi_payload)
+    taker_windows = _taker_windows(fills_payload)
+    turnover_windows = _turnover_windows(rows)
+    efficiency_windows = _path_efficiency(rows)
     oi_changes = {m: _oi_change(oi, m) for m in (5, 15, 30, 60)}
     oi_unit = oi[-1][2] if oi else None
 
@@ -134,6 +217,9 @@ def analyze_trend_ignition(symbol, candles, oi_payload, now_ms=None):
         ) >= 6 and sum(body_ratios) / len(body_ratios) >= 0.45
         breakout = breakout_up if direction == "LONG" else breakout_down
         major_break = major_break_up if direction == "LONG" else major_break_down
+        taker_key = taker_windows.get("5", {})
+        taker_imbalance = taker_key.get("imbalance")
+        taker_confirm = taker_key.get("status") == "OK" and taker_imbalance is not None and (taker_imbalance > 0 if direction == "LONG" else taker_imbalance < 0)
         oi_build = oi15 is not None and oi15 >= 0.25
         oi_build_30 = oi30 is not None and oi30 >= 0.5
         volume_surge = volume_multiple is not None and volume_multiple >= 1.5
@@ -142,6 +228,7 @@ def analyze_trend_ignition(symbol, candles, oi_payload, now_ms=None):
         checks = {
             "price_acceleration_5m_15m": price_accel,
             "open_interest_build_15m": oi_build,
+            "taker_imbalance_5m_confirmed": taker_confirm,
             "volume_surge_5m_vs_prior20m": volume_surge,
             "directional_candle_pressure": green_pressure and body_pressure,
             "20m_range_breakout": breakout,
@@ -168,6 +255,9 @@ def analyze_trend_ignition(symbol, candles, oi_payload, now_ms=None):
                 "30m": round(price_30m, 4), "60m": round(price_60m, 4),
             },
             "open_interest_change_pct": oi_changes,
+            "taker_imbalance_5_10_15m": taker_windows,
+            "turnover_acceleration_1_5_10_15m": turnover_windows,
+            "price_path_efficiency_5_10_15_30_60m": efficiency_windows,
             "open_interest_unit": oi_unit,
             "positioning_context": positioning,
         }
@@ -179,6 +269,9 @@ def analyze_trend_ignition(symbol, candles, oi_payload, now_ms=None):
         "last_closed_candle_ms": last["ts"],
         "price": close, "volume_multiple_5m_vs_prior20m": round(volume_multiple, 3) if volume_multiple is not None else None,
         "candle_windows": windows,
+        "turnover_acceleration_1_5_10_15m": turnover_windows,
+        "taker_imbalance_5_10_15m": taker_windows,
+        "price_path_efficiency_5_10_15_30_60m": efficiency_windows,
         "candle_structure": {
             "green_last10": green10, "red_last10": red10,
             "mean_body_to_range_last10": round(sum(body_ratios)/len(body_ratios), 3),
