@@ -6,6 +6,7 @@ on:
     paths:
       - "bitget_14d_backtest.py"
       - "bitget_60m_breakout_impact.py"
+      - "bitget_fuel_trade_simulation.py"
       - ".github/workflows/bitget-14d-backtest.yml"
   workflow_dispatch:
 
@@ -39,11 +40,13 @@ jobs:
         run: python -u bitget_60m_breakout_impact.py
       - name: Enrich breakout events with historical derivatives data
         run: python -u bitget_fuel_enrichment.py
+      - name: Simulate fuel-conditioned trades with fees and order-book slippage proxy
+        run: python -u bitget_fuel_trade_simulation.py
       - name: Publish research artifacts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/daily_research/bitget_60m_breakout_impact_summary.json reports/daily_research/bitget_60m_breakout_impact_events.jsonl reports/daily_research/bitget_60m_breakout_control_windows.jsonl reports/daily_research/bitget_60m_breakout_impact_report.md reports/daily_research/bitget_14d_trend_fuel_summary.json reports/daily_research/bitget_14d_trend_fuel_events.jsonl reports/daily_research/bitget_14d_trend_fuel_report.md reports/daily_research/bitget_14d_gradual_event_details.jsonl reports/daily_research/bitget_14d_derivatives_fuel_report.md reports/daily_research/bitget_14d_derivatives_fuel_events.jsonl
+          git add reports/daily_research/bitget_60m_breakout_impact_summary.json reports/daily_research/bitget_60m_breakout_impact_events.jsonl reports/daily_research/bitget_60m_breakout_control_windows.jsonl reports/daily_research/bitget_60m_breakout_impact_report.md reports/daily_research/bitget_14d_trend_fuel_summary.json reports/daily_research/bitget_14d_trend_fuel_events.jsonl reports/daily_research/bitget_14d_trend_fuel_report.md reports/daily_research/bitget_14d_gradual_event_details.jsonl reports/daily_research/bitget_14d_derivatives_fuel_report.md reports/daily_research/bitget_14d_derivatives_fuel_events.jsonl reports/daily_research/bitget_fuel_trade_simulation_summary.json reports/daily_research/bitget_fuel_trade_simulation_events.jsonl reports/daily_research/bitget_fuel_trade_simulation_trades.csv reports/daily_research/bitget_fuel_trade_simulation_report.md
           git diff --cached --quiet && exit 0
           git commit -m "Publish 14-day Bitget trend fuel backtest"
           git pull --rebase origin main
