@@ -1,10 +1,9 @@
-"""Autonomous OpenAI research/development agent for the Bitget research repository.
+"""Autonomous Gemini research/development agent for the Bitget research repository.
 
-Requires OPENAI_API_KEY in GitHub Actions secrets. Uses OpenAI Responses API
-with web search, reads an explicit research-only allowlist, proposes full-file
-updates, runs the repository test suite, and rolls back every proposed change
-if validation fails. It never receives Bitget credentials and cannot edit
-trading/execution modules or GitHub workflows.
+Uses the Gemini Developer API free-tier model via GEMINI_API_KEY. It reads an
+explicit research-only allowlist, proposes full-file updates, runs tests, and
+rolls back proposed changes if validation fails. It never receives Bitget
+credentials and cannot edit trading/execution modules or GitHub workflows.
 """
 import json
 import os
@@ -18,8 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPORT_DIR = ROOT / "reports" / "daily_research" / "autonomous_agent"
-MODEL = os.getenv("OPENAI_MODEL", "gpt-6.2-sol")
-API_URL = "https://api.openai.com/v1/responses"
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 MAX_FILE_CHARS = 18000
 MAX_TOTAL_CHARS = 65000
 
@@ -86,9 +85,9 @@ def collect_context():
 
 
 def call_model(context):
-    key = os.getenv("OPENAI_API_KEY")
+    key = os.getenv("GEMINI_API_KEY")
     if not key:
-        raise RuntimeError("OPENAI_API_KEY GitHub Secret is missing.")
+        raise RuntimeError("GEMINI_API_KEY GitHub Secret is missing.")
     today = datetime.now(timezone.utc).isoformat()
     instructions = f"""
 You are the autonomous research scientist and cautious research-code maintainer
@@ -98,11 +97,11 @@ Current UTC time: {today}.
 MISSION
 Find evidence for what causes crypto price movements: aggressive buy/sell flow,
 available liquidity and its withdrawal, liquidations, open-interest changes,
-turnover/participation, and price continuation. Use web search to check current
-credible exchange, institutional, academic and public trader material. Prefer
-primary sources and link/cite sources in reports. Distinguish measured repository
-observations, external evidence, hypotheses and unknowns. Never fabricate a
-backtest, sample size, source, API result, or completed experiment.
+turnover/participation, and price continuation. Use only repository evidence and public market data already collected by the
+project. This free-tier integration does not enable external web grounding.
+Never claim to have searched the web or invent sources. Distinguish measured
+repository observations, hypotheses and unknowns. Never fabricate a backtest,
+sample size, source, API result, or completed experiment.
 
 AUTONOMOUS WORK
 1. Read the supplied source and reports carefully.
@@ -138,16 +137,20 @@ Do not return diffs; content must be complete replacement text. Keep report
 specific and concise. Cite external claims with direct URLs and access date.
 """
     payload = {
-        "model": MODEL,
-        "instructions": instructions,
-        "input": "Repository context follows. Analyse it and perform the research task.\n" + context,
-        "tools": [{"type": "web_search"}],
-        "max_output_tokens": 10000,
-        "text": {"format": {"type": "json_object"}},
+        "systemInstruction": {"parts": [{"text": instructions}]},
+        "contents": [{"role": "user", "parts": [{
+            "text": "Repository context follows. Analyse it and perform the research task.\\n" + context
+        }]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 10000,
+            "temperature": 0.2
+        }
     }
     req = urllib.request.Request(
-        API_URL, data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        API_URL.format(model=MODEL),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -155,17 +158,18 @@ specific and concise. Cite external claims with direct URLs and access date.
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
-        raise RuntimeError(f"OpenAI API HTTP {exc.code}: {detail}") from exc
-    text_out = result.get("output_text")
+        detail = detail.replace(key, "[REDACTED]")
+        raise RuntimeError(f"Gemini API HTTP {exc.code}: {detail}") from exc
+    parts = []
+    for candidate in result.get("candidates", []):
+        for part in candidate.get("content", {}).get("parts", []):
+            if isinstance(part.get("text"), str):
+                parts.append(part["text"])
+    text_out = "\\n".join(parts).strip()
     if not text_out:
-        parts = []
-        for item in result.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") == "output_text":
-                    parts.append(content.get("text", ""))
-        text_out = "\n".join(parts)
-    if not text_out:
-        raise RuntimeError("OpenAI response contained no output text.")
+        feedback = result.get("promptFeedback", {})
+        raise RuntimeError("Gemini response contained no output text: " +
+                           json.dumps(feedback)[:800])
     return json.loads(text_out)
 
 
@@ -201,7 +205,7 @@ def rollback(before):
 def run_validation():
     # Never expose the OpenAI API key to model-edited modules or test subprocesses.
     safe_env = os.environ.copy()
-    safe_env.pop("OPENAI_API_KEY", None)
+    safe_env.pop("GEMINI_API_KEY", None)
     subprocess.run([sys.executable, "-m", "compileall", "-q",
                     "daily_research.py", "movement_mechanics.py",
                     "fuel_attribution.py", "research_report.py", "trend_ignition.py"],
