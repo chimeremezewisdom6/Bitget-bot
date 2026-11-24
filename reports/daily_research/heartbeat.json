@@ -1,14 +1,14 @@
 {
-  "heartbeat_utc": "2026-11-24T06:01:51.519607+00:00",
+  "heartbeat_utc": "2026-11-24T06:08:10.983899+00:00",
   "event": "push",
   "action": "ping",
   "collection_outcome": "success",
-  "run_id": "45337284009",
+  "run_id": "45338089549",
   "run_attempt": "1",
   "workflow": "Bitget Unified Research Scanner",
   "session_active": true,
-  "collector_cycles": 14,
-  "last_collection_utc": "2026-11-24T06:01:50.534295+00:00",
+  "collector_cycles": 15,
+  "last_collection_utc": "2026-11-24T06:08:09.765482+00:00",
   "expected_interval_minutes": 5,
   "trading_enabled": false
 }
