@@ -1,0 +1,1274 @@
+{
+  "generated_at_utc": "2026-11-24T08:23:18.943186+00:00",
+  "window_start_ms": 1795422120000,
+  "window_end_ms": 1795508520000,
+  "authenticated": true,
+  "permission_type": "readonly",
+  "fee_schedule_available": true,
+  "symbols_requested": 200,
+  "symbols_with_usable_candles": 200,
+  "candles": 288000,
+  "fetch_errors": [],
+  "candidate_events": 1801,
+  "gradual_trends": 10,
+  "fast_spikes": 30,
+  "comparison": {
+    "group_counts": {
+      "GRADUAL_TREND": 10,
+      "FAST_SPIKE": 30,
+      "FAILED_OR_WEAK": 1761
+    },
+    "by_horizon": {
+      "1": {
+        "turnover_vs_pre20": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 1.97197
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 7.2795
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.80803
+          }
+        },
+        "directional_candle_share": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 1.0
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 1.0
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.0
+          }
+        },
+        "path_efficiency": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 1.0
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 1.0
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.0
+          }
+        },
+        "directional_return_pct": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.24278
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.99984
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.25105
+          }
+        }
+      },
+      "3": {
+        "turnover_vs_pre20": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 3.76668
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 11.11735
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.85691
+          }
+        },
+        "directional_candle_share": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.66667
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.83333
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.66667
+          }
+        },
+        "path_efficiency": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.68419
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.98431
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.81253
+          }
+        },
+        "directional_return_pct": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.61251
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 2.43373
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.24969
+          }
+        }
+      },
+      "5": {
+        "turnover_vs_pre20": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 2.76144
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 8.76878
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.72265
+          }
+        },
+        "directional_candle_share": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.6
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.7
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.4
+          }
+        },
+        "path_efficiency": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.69743
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.75138
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.56965
+          }
+        },
+        "directional_return_pct": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.67883
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 2.90839
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.26059
+          }
+        }
+      },
+      "10": {
+        "turnover_vs_pre20": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 2.33532
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 6.83113
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.68523
+          }
+        },
+        "directional_candle_share": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.5
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.6
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.4
+          }
+        },
+        "path_efficiency": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.39444
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.6559
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.35982
+          }
+        },
+        "directional_return_pct": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.81229
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 3.14838
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.25365
+          }
+        }
+      },
+      "15": {
+        "turnover_vs_pre20": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 2.20093
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 7.72558
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.63109
+          }
+        },
+        "directional_candle_share": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.53333
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.6
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.4
+          }
+        },
+        "path_efficiency": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.47108
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.50768
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.28133
+          }
+        },
+        "directional_return_pct": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 1.26909
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 4.00388
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.25556
+          }
+        }
+      },
+      "30": {
+        "turnover_vs_pre20": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 2.42356
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 5.05533
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 1.62182
+          }
+        },
+        "directional_candle_share": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.5
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.53333
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.36667
+          }
+        },
+        "path_efficiency": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 0.33093
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 0.25351
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.19867
+          }
+        },
+        "directional_return_pct": {
+          "GRADUAL_TREND": {
+            "n": 10,
+            "median": 2.15481
+          },
+          "FAST_SPIKE": {
+            "n": 30,
+            "median": 4.91645
+          },
+          "FAILED_OR_WEAK": {
+            "n": 1761,
+            "median": 0.32908
+          }
+        }
+      }
+    },
+    "10m_feature_comparison": [
+      {
+        "feature": "turnover_vs_pre20",
+        "gradual_median": 2.33532,
+        "control_median": 1.71256,
+        "median_ratio": 1.3636
+      },
+      {
+        "feature": "directional_candle_share",
+        "gradual_median": 0.5,
+        "control_median": 0.4,
+        "median_ratio": 1.25
+      },
+      {
+        "feature": "path_efficiency",
+        "gradual_median": 0.39444,
+        "control_median": 0.36888,
+        "median_ratio": 1.0693
+      }
+    ]
+  },
+  "oi_coverage": [
+    {
+      "symbol": "0GUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "1000BONKUSDT",
+      "oi_points": 24,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "ACEUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "ACUUSDT",
+      "oi_points": 18,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ADAUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "AEONUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "AEROUSDT",
+      "oi_points": 26,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "AKEUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ALLOUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "AMDLUSDT",
+      "oi_points": 24,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "APRUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "APTUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ARBUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ARIAUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ARKMUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ARUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ARXUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ASTERUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ATUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "AXISUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BABYUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "BANKUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BARDUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BCHUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BEAMUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BEATUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "BERAUSDT",
+      "oi_points": 21,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "BGBUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BLESSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BLURUSDT",
+      "oi_points": 12,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "BNBUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BOMEUSDT",
+      "oi_points": 24,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "BREVUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "BTCUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "BTWUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "CAPUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "CFGUSDT",
+      "oi_points": 26,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "CHIPUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "CLSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "COOKIEUSDT",
+      "oi_points": 17,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "CPUSDT",
+      "oi_points": 22,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "CROSSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "CRVUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "CSTOCKUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "CTUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "CYBERUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "CYSUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "DASHUSDT",
+      "oi_points": 24,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "DEXEUSDT",
+      "oi_points": 24,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "DGAIUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "DOSUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "DOTUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "EDGEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "EIGENUSDT",
+      "oi_points": 25,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ELICEUSDT",
+      "oi_points": 15,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ELSAUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ENAUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "ENSOUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ENSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ERAUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ETCUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ETHFIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "EVAAUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "FARTCOINUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "FCXUSDT",
+      "oi_points": 17,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "FETUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "FILUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "FLOCKUSDT",
+      "oi_points": 15,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "FLOKIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "GALAUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "GPSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "GRAMUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "GRASSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "GRTUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "GRVTUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "GWEIUSDT",
+      "oi_points": 20,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "HBARUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "HUMAUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "HUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "ICNTUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "ICPUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "IDOLUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "INITUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "INJUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "INXUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "IOSTUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "IRYSUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "JCTUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "JTOUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "JUPUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "KAITOUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "KASUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "KERNELUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "KGENUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "KITEUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "KUAISHOUUSDT",
+      "oi_points": 25,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "LABUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "LAUSDT",
+      "oi_points": 24,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "LDOUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "LINKUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "LISTAUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "LITUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "LSKUSDT",
+      "oi_points": 22,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "LTCUSDT",
+      "oi_points": 29,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "LUNCUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "MAGICUSDT",
+      "oi_points": 27,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "MAGMAUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "MARSCOINUSDT",
+      "oi_points": 28,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "MEGAUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "METUSDT",
+      "oi_points": 17,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "MMTUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "MONUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "MORPHOUSDT",
+      "oi_points": 27,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "MSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "MUBARAKUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "MYXUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "NAORISUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "NEARUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "NEMUSDT",
+      "oi_points": 19,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "NIGHTUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "NILUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "NUUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ONDOUSDT",
+      "oi_points": 30,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "ONEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ONGUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "OPUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ORCAUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ORDIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PBRUSDT",
+      "oi_points": 10,
+      "events_with_aligned_oi": 1
+    },
+    {
+      "symbol": "PENDLEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PENGUUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PEOPLEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PHAUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PIEVERSEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PIPPINUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PLUMEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "POLUSDT",
+      "oi_points": 27,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "PONSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "POWERUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PROMUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "PYTHUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "QNTUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "QUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "RAREUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "RAVEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "RAYUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "RENDERUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "REUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "RIVERUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "RPLUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SAHARAUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SANDUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SAPIENUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SEIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SHIBUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SKYAIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SKYUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SOONUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SPACEUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SPKUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SQDUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "STRKUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "STXUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "SUIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "TAOUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "TIAUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "TRUMPUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "TRXUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "UAIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "UNITASUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "UNIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "USDBRLUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "USDJPYUSDT",
+      "oi_points": 18,
+      "events_with_aligned_oi": 0
+    },
+    {
+      "symbol": "USELESSUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "USUALUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "VELVETUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "VIRTUALUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "VVVUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "WIFUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "WLDUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "WLFIUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "XLMUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "XMRUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "XPLUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ZECUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "ZROUSDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "\u725b\u6765USDT",
+      "error": "HTTP 429"
+    },
+    {
+      "symbol": "\u9f99\u867eUSDT",
+      "oi_points": 20,
+      "events_with_aligned_oi": 0
+    }
+  ],
+  "causality": "observational only"
+}
