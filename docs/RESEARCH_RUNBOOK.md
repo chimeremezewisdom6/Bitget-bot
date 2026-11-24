@@ -27,6 +27,10 @@ Bitget's futures instruments/tickers do not expose circulating market capitalisa
 
 These are **turnover activity groups, not market-cap groups**. Up to three contracts are selected per group; empty groups remain empty.
 
+## Canonical scanner entry point
+
+The scanner has a visible root-level entry point, `main.py`, on the `main` branch. The five-minute GitHub Actions collector invokes `python main.py collect` directly. The research implementation lives in `daily_research.py`; `main.py` is the stable, explicit launcher used by cron and manual workflow actions.
+
 ## Hands-off operation
 
 The scheduled workflow automatically starts a fresh 24-hour research session when no active session exists. It then attempts a Bitget-only collection cycle every five minutes. No manual ping or start action is required. Each cycle commits the evidence, heartbeat and refreshed report/status snapshot to the repository.
