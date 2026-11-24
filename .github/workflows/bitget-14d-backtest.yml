@@ -38,7 +38,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/daily_research/bitget_14d_trend_fuel_summary.json reports/daily_research/bitget_14d_trend_fuel_events.jsonl reports/daily_research/bitget_14d_trend_fuel_report.md
+          git add reports/daily_research/bitget_14d_trend_fuel_summary.json reports/daily_research/bitget_14d_trend_fuel_events.jsonl reports/daily_research/bitget_14d_trend_fuel_report.md reports/daily_research/bitget_14d_gradual_event_details.jsonl
           git diff --cached --quiet && exit 0
           git commit -m "Publish 14-day Bitget trend fuel backtest"
           git pull --rebase origin main
