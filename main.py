@@ -71,6 +71,12 @@ def collect():
         start()
     print("Running one Bitget read-only research collection cycle.")
     run("daily_research.py", "collect")
+    # Capture contemporaneous fills, depth, OI and liquidation context. This is
+    # research-only; a microstructure API failure must not stop the core scanner.
+    try:
+        run("movement_mechanics.py")
+    except subprocess.CalledProcessError as exc:
+        print(f"WARNING: movement-mechanics sample failed (exit {exc.returncode}); core research continues.")
     run("research_report.py")
     state = session_state()
     write_heartbeat(state)
