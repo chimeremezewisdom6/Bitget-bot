@@ -2,42 +2,42 @@
 
 - Session started UTC: 2026-11-23T11:29:36.710531+00:00
 - Session ended UTC: not recorded
-- Collector cycles: 9
-- Distinct symbols observed: 206
+- Collector cycles: 10
+- Distinct symbols observed: 215
 - Current Bitget turnover-watchlist contracts: 11
-- Market observation rows: 1800
-- Candidate signals eligible for entry evaluation: 381
-- Watch-only RSI conditions (no entry): 592
-- Two-snapshot order-book shadow outcomes: 2376
+- Market observation rows: 2000
+- Candidate signals eligible for entry evaluation: 412
+- Watch-only RSI conditions (no entry): 692
+- Two-snapshot order-book shadow outcomes: 3429
 - Legacy ticker-reference outcomes: 0
 - Outcomes unavailable: 0
 - Collection error records: 0
-- 60-minute same-colour candle checks: 1017
+- 60-minute same-colour candle checks: 1028
 - Checks meeting 40+ same-colour candles: 0
 
 ## Previous 24-hour trend-start candle-colour backtest
 
-- Symbols with completed historical backtests: 205
-- Breakout-based trend starts found: 3200 (LONG: 1443; SHORT: 1757)
-- Average direction-matching candle share in first hour: 31.8%
+- Symbols with completed historical backtests: 214
+- Breakout-based trend starts found: 3333 (LONG: 1504; SHORT: 1829)
+- Average direction-matching candle share in first hour: 31.2%
 
 A trend start is defined as a fully closed 1m candle closing above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT). The first hour is the breakout candle plus the next 59 fully closed 1m candles. Green, red and doji candles are counted separately. This is a consistent breakout proxy, not a universal definition of every trend.
 
 ## Early-trend candle windows (separate experiment)
 
-- Symbols with early-window backtests: 204
-- Complete trend events with early-window measurements: 3124
+- Symbols with early-window backtests: 213
+- Complete trend events with early-window measurements: 3257
 
 For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candles. The continuation column is the direction-adjusted price change from that window's closing price to the end of the first hour. Positive means price continued in the trend direction; negative means it reversed. The 60-minute row has no candles remaining after its close, so its continuation-to-hour-end is not scored and is excluded from that metric. These are descriptive historical samples, not proof that early candle colour predicts future returns.
 
 | First minutes | Events with window data | Avg direction-matching candles % | Positive continuation (scored events) | Avg continuation after window % |
 |---:|---:|---:|---:|---:|
-| 5 | 3124 | 44.7% | 1568/3124 (50.2%) | 0.0343% |
-| 10 | 3124 | 37.5% | 1582/3124 (50.6%) | 0.0631% |
-| 15 | 3124 | 35.2% | 1589/3124 (50.9%) | 0.0725% |
-| 20 | 3124 | 34.3% | 1557/3124 (49.8%) | 0.0496% |
-| 30 | 3124 | 33.2% | 1545/3124 (49.5%) | 0.0490% |
-| 60 | 3124 | 32.2% | — | — |
+| 5 | 3257 | 44.2% | 1638/3257 (50.3%) | 0.0398% |
+| 10 | 3257 | 37.0% | 1658/3257 (50.9%) | 0.0687% |
+| 15 | 3257 | 34.6% | 1660/3257 (51.0%) | 0.0774% |
+| 20 | 3257 | 33.8% | 1628/3257 (50.0%) | 0.0546% |
+| 30 | 3257 | 32.7% | 1616/3257 (49.6%) | 0.0505% |
+| 60 | 3257 | 31.6% | — | — |
 
 | Symbol | Direction | Trend start (UTC) | Green | Red | Doji | Matching candles | Matching % | First-hour follow-through % |
 |---|---|---|---:|---:|---:|---:|---:|---:|
@@ -129,6 +129,7 @@ For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candle
 | PIPPINUSDT | LONG | 2026-11-23 13:46 | 34 | 24 | 2 | 34 / 60 | 56.67% | -1.0343%
 | QUSDT | LONG | 2026-11-23 10:37 | 34 | 19 | 7 | 34 / 60 | 56.67% | 1.5107%
 | MYXUSDT | LONG | 2026-11-23 14:10 | 34 | 25 | 1 | 34 / 60 | 56.67% | 0.727%
+| RPLUSDT | LONG | 2026-11-24 02:39 | 34 | 24 | 2 | 34 / 60 | 56.67% | 5.3913%
 | BTCUSDT | SHORT | 2026-11-23 01:47 | 27 | 33 | 0 | 33 / 60 | 55.0% | 0.5239%
 | BTCUSDT | SHORT | 2026-11-23 16:03 | 27 | 33 | 0 | 33 / 60 | 55.0% | 0.7979%
 | SOLUSDT | LONG | 2026-11-23 05:21 | 33 | 27 | 0 | 33 / 60 | 55.0% | 0.38%
@@ -140,7 +141,6 @@ For each detected trend, this compares the first 5, 10, 15, 20, 30 and 60 candle
 | HYPEUSDT | SHORT | 2026-11-23 19:21 | 27 | 33 | 0 | 33 / 60 | 55.0% | 0.421%
 | EVAAUSDT | SHORT | 2026-11-22 22:15 | 27 | 33 | 0 | 33 / 60 | 55.0% | 0.2424%
 | EVAAUSDT | LONG | 2026-11-23 06:49 | 33 | 26 | 1 | 33 / 60 | 55.0% | -2.4956%
-| PEPEUSDT | SHORT | 2026-11-23 01:44 | 24 | 33 | 3 | 33 / 60 | 55.0% | 1.1464%
 
 ## Mandatory 60-minute same-colour candle experiment
 
@@ -151,6 +151,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | 1000BONKUSDT | 5 | RED | 10 | No |
 | AAVEUSDT | 5 | GREEN | 29 | No |
 | ACEUSDT | 5 | GREEN | 24 | No |
+| ACUUSDT | 1 | GREEN | 8 | No |
 | ADAUSDT | 5 | GREEN | 25 | No |
 | AEONUSDT | 5 | RED | 9 | No |
 | AEROUSDT | 5 | GREEN | 18 | No |
@@ -165,11 +166,13 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | ARIAUSDT | 5 | GREEN | 32 | No |
 | ARKMUSDT | 5 | RED | 4 | No |
 | ARUSDT | 5 | GREEN | 16 | No |
+| ARXUSDT | 1 | GREEN | 28 | No |
 | ASTERUSDT | 5 | GREEN | 24 | No |
 | ATOMUSDT | 5 | RED | 24 | No |
+| ATUSDT | 1 | GREEN | 8 | No |
 | AVAXUSDT | 5 | RED | 28 | No |
 | AXISUSDT | 5 | GREEN | 21 | No |
-| BABYUSDT | 2 | GREEN | 12 | No |
+| BABYUSDT | 3 | RED | 23 | No |
 | BANKUSDT | 5 | GREEN | 11 | No |
 | BARDUSDT | 5 | GREEN | 11 | No |
 | BATUSDT | 5 | RED | 13 | No |
@@ -264,11 +267,13 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | LSKUSDT | 5 | GREEN | 23 | No |
 | LTCUSDT | 5 | RED | 30 | No |
 | LUNCUSDT | 5 | GREEN | 16 | No |
+| MAGICUSDT | 1 | GREEN | 13 | No |
 | MAGMAUSDT | 5 | GREEN | 22 | No |
 | MARSCOINUSDT | 5 | GREEN | 14 | No |
 | MEGAUSDT | 5 | RED | 17 | No |
 | MELANIAUSDT | 5 | GREEN | 3 | No |
 | METUSDT | 5 | GREEN | 13 | No |
+| MEUSDT | 1 | GREEN | 11 | No |
 | MMTUSDT | 5 | GREEN | 30 | No |
 | MONUSDT | 5 | RED | 17 | No |
 | MORPHOUSDT | 5 | GREEN | 15 | No |
@@ -287,6 +292,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | OPUSDT | 5 | RED | 12 | No |
 | ORCAUSDT | 5 | GREEN | 10 | No |
 | ORDIUSDT | 5 | RED | 18 | No |
+| PBRUSDT | 1 | GREEN | 3 | No |
 | PENDLEUSDT | 5 | RED | 19 | No |
 | PENGUUSDT | 5 | GREEN | 24 | No |
 | PEOPLEUSDT | 5 | RED | 14 | No |
@@ -309,8 +315,10 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | RAYUSDT | 5 | GREEN | 16 | No |
 | RENDERUSDT | 5 | GREEN | 27 | No |
 | REUSDT | 5 | RED | 15 | No |
-| RIVERUSDT | 2 | RED | 9 | No |
+| RIVERUSDT | 3 | GREEN | 18 | No |
+| RPLUSDT | 1 | GREEN | 33 | No |
 | RUNEUSDT | 5 | RED | 18 | No |
+| SAHARAUSDT | 1 | GREEN | 30 | No |
 | SANDUSDT | 5 | GREEN | 28 | No |
 | SAPIENUSDT | 5 | RED | 9 | No |
 | SEIUSDT | 5 | RED | 27 | No |
@@ -322,6 +330,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | SOONUSDT | 5 | GREEN | 3 | No |
 | SPKUSDT | 5 | GREEN | 8 | No |
 | SPXUSDT | 5 | GREEN | 7 | No |
+| SQDUSDT | 1 | GREEN | 25 | No |
 | STRKUSDT | 5 | GREEN | 29 | No |
 | STXUSDT | 5 | RED | 15 | No |
 | SUIUSDT | 5 | RED | 29 | No |
@@ -359,22 +368,22 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 
 | Group | Watchlist candidates | Observation rows |
 |---|---:|---:|
-| Under $1m 24h futures turnover | 3 | 27 |
-| $1m–$10m 24h futures turnover | 3 | 27 |
-| $10m–$100m 24h futures turnover | 3 | 27 |
-| $100m+ 24h futures turnover | 2 | 18 |
+| Under $1m 24h futures turnover | 3 | 30 |
+| $1m–$10m 24h futures turnover | 3 | 30 |
+| $10m–$100m 24h futures turnover | 3 | 30 |
+| $100m+ 24h futures turnover | 2 | 20 |
 
 ## Profit-versus-loss summary (hypothetical book-walk outcomes)
 
-- Positive outcomes: 913; negative outcomes: 1463; flat: 0
-- Win rate among scored outcomes: 38.4%
-- Gross positive outcomes: 3334.275252 USDT
-- Gross negative outcomes: 5398.613906 USDT
-- Total estimated net after trading fees: -2064.338653 USDT
-- Profit factor (gross gains / gross losses): 0.618
-- Average winning outcome: 3.651999 USDT
-- Average losing outcome: -3.690098 USDT
-- Mean estimated net result: -14.85 bps
+- Positive outcomes: 1096; negative outcomes: 2333; flat: 0
+- Win rate among scored outcomes: 32.0%
+- Gross positive outcomes: 5247.734730 USDT
+- Gross negative outcomes: 19005.188591 USDT
+- Total estimated net after trading fees: -13757.453862 USDT
+- Profit factor (gross gains / gross losses): 0.276
+- Average winning outcome: 4.788079 USDT
+- Average losing outcome: -8.146245 USDT
+- Mean estimated net result: -73.68 bps
 
 These estimates walk the visible entry book and a later visible exit book, deducting the authenticated account-specific Bitget taker fee when available, otherwise instrument metadata; missing fees are not assumed to be zero. They are not executable fills and may omit queue position, latency, hidden liquidity, book changes between snapshots and funding. The same signal is evaluated at multiple sizes and horizons, so these rows are correlated and must not be treated as independent trades. A completed simulation is not proof of profitability.
 
@@ -384,9 +393,9 @@ These estimates walk the visible entry book and a later visible exit book, deduc
 
 | Strategy | Outcomes | Positive | Negative | Mean estimated net (bps) |
 |---|---:|---:|---:|---:|
-| breakdown | 387 | 180 | 207 | -12.01 |
-| breakout | 246 | 18 | 228 | -51.08 |
-| ema_volume | 1743 | 715 | 1028 | -10.37 |
+| breakdown | 612 | 216 | 396 | -86.67 |
+| breakout | 270 | 27 | 243 | -55.75 |
+| ema_volume | 2547 | 853 | 1694 | -72.46 |
 
 ## Legacy Trader discussion records
 
