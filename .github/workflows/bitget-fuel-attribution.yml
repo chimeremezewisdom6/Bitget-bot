@@ -1,0 +1,45 @@
+name: Bitget Fuel Attribution Research
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "fuel_attribution.py"
+      - ".github/workflows/bitget-fuel-attribution.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bitget-fuel-attribution
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BITGET_API_KEY: ${{ secrets.BITGET_API_KEY || secrets.BITGET_KEY }}
+      BITGET_API_SECRET: ${{ secrets.BITGET_API_SECRET || secrets.BITGET_SECRET_KEY || secrets.BITGET_SECRET }}
+      BITGET_API_PASSPHRASE: ${{ secrets.BITGET_API_PASSPHRASE || secrets.BITGET_PASSPHRASE || secrets.BITGET_API_PASSWORD || secrets.BITGET_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run authenticated Bitget fuel attribution study
+        run: python fuel_attribution.py
+      - name: Publish event data and findings
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/daily_research/bitget_fuel_attribution_report.md reports/daily_research/bitget_fuel_attribution_events.jsonl reports/daily_research/bitget_fuel_attribution_summary.json
+          git commit -m "Publish Bitget fuel attribution research"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
