@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
-          persist-credentials: true
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -42,6 +42,8 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-6.2-sol' }}
         run: python autonomous_research_agent.py
       - name: Commit validated agent work
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -51,4 +53,5 @@ jobs:
             exit 0
           fi
           git commit -m "Autonomous ChatGPT research update"
+          git remote set-url origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
           git push origin HEAD:main
