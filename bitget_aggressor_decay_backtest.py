@@ -121,7 +121,7 @@ async def main():
   else: coverage.append(x[0]); events+=x[1]
  allstats=stats(events); dirs={d:stats([e for e in events if e["direction"]==d]) for d in ("LONG","SHORT")}
  payload={"generated_at_utc":datetime.now(timezone.utc).isoformat(),"start_utc":datetime.fromtimestamp(START/1000,timezone.utc).isoformat(),"end_utc":datetime.fromtimestamp(END/1000,timezone.utc).isoformat(),"universe":"top 10 current turnover USDT perpetuals","coverage":coverage,"failures":failures,"signals":len(events),"definition":"last 3m mean aggressive-side quote notional <=50% of first 3m mean in a 10m window; negative linear slope; final 3m <= prior 6h 25th percentile; take opposite side; same-side signal throttle 10m","results":allstats,"by_direction":dirs,"events":events,"limitations":["Trade side is used as aggressor-side proxy; validate side semantics.","Current top-turnover universe creates survivorship bias.","Last-trade entry/exit omits spread and slippage.","Contract taker fee metadata used; no account-specific tier adjustment.","Signals require continuous minute buckets and full 30m forward data."]}
- (OUT/"aggressor_decay_events.json").write_text(json.dumps(payload,indent=2)+"\\n")
+ (OUT/"aggressor_decay_events.json").write_text(json.dumps(payload,indent=2)+"\n")
  lines=["# Bitget aggressor-decay reversal backtest","",f"Window: {payload['start_utc']} to {payload['end_utc']}",f"Universe: {len(coverage)} top-current-turnover USDT perpetuals; events: {len(events)}",f"Fetch failures: {len(failures)}","","Signal: "+payload["definition"],"","## Combined outcomes (estimated round-trip taker fees deducted; spread/slippage excluded)","| Horizon | Trades | Net win % | Mean net % | Median net % | Mean MFE % | Mean MAE % |","|---:|---:|---:|---:|---:|---:|---:|"]
  for h,x in allstats.items(): lines.append(f"| {h}m | {x['trades']} | {x['net_win_rate_pct']} | {x['mean_net_pct']} | {x['median_net_pct']} | {x['mean_mfe_pct']} | {x['mean_mae_pct']} |")
  for d,xs in dirs.items():
@@ -130,6 +130,6 @@ async def main():
  lines+=["","## Coverage","| Symbol | Trades | Minutes | Signals | Pages |","|---|---:|---:|---:|---:|"]
  for x in coverage: lines.append(f"| {x['symbol']} | {x['raw_trades']} | {x['minutes']} | {x['signals']} | {x['pages']} |")
  lines+=["","## Limitations"]+["- "+x for x in payload["limitations"]]
- (OUT/"aggressor_decay_report.md").write_text("\\n".join(lines)+"\\n")
+ (OUT/"aggressor_decay_report.md").write_text("\n".join(lines)+"\n")
  print(json.dumps({"status":"complete","coverage":coverage,"failures":failures,"signals":len(events),"results":allstats,"by_direction":dirs},indent=2))
 if __name__=="__main__": asyncio.run(main())
