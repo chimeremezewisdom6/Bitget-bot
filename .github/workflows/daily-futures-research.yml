@@ -1,43 +1,41 @@
-name: 24-Hour Bitget-Only Futures Research (Read Only)
+name: Bitget Unified Research Scanner
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/daily-futures-research.yml'
-      - 'main.py'
-      - 'daily_research.py'
-      - 'research_report.py'
-      - 'cap_watchlist.py'
-      - 'shadow_execution.py'
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       action:
-        description: Start a new 24-hour session or inspect status
+        description: Action for the single root-level scanner
         required: true
         type: choice
-        options: [start, collect, ping, status, stop]
-        default: start
-  # GitHub Actions is only the scheduler; all market/account research requests go to Bitget.
-  # Scheduled execution is best-effort and must be verified from actual schedule-event runs.
-  schedule:
-    - cron: "*/5 * * * *"
+        options: [ping, start, collect, status, stop]
+        default: ping
+  push:
+    branches: [main]
+    paths:
+      - "main.py"
+      - "daily_research.py"
+      - "cap_watchlist.py"
+      - "research_report.py"
+      - "shadow_execution.py"
+      - ".github/workflows/daily-futures-research.yml"
 
 permissions:
   contents: write
 
 concurrency:
-  group: bitget-24h-research
+  group: bitget-unified-research-scanner
   cancel-in-progress: false
 
 jobs:
-  research:
+  scanner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       BITGET_API_KEY: ${{ secrets.BITGET_API_KEY || secrets.BITGET_KEY }}
       BITGET_API_SECRET: ${{ secrets.BITGET_API_SECRET || secrets.BITGET_SECRET_KEY || secrets.BITGET_SECRET }}
       BITGET_API_PASSPHRASE: ${{ secrets.BITGET_API_PASSPHRASE || secrets.BITGET_PASSPHRASE || secrets.BITGET_API_PASSWORD || secrets.BITGET_PASSWORD }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,158 +45,33 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Prepare one four-band watchlist and start session
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'start'
+      - name: Run the one scanner entry point
+        env:
+          SCANNER_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.action || 'ping' }}
+        run: |
+          echo "Scanner action: $SCANNER_ACTION"
+          python main.py "$SCANNER_ACTION"
+      - name: Verify scanner heartbeat
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.action == 'ping' || inputs.action == 'collect' || inputs.action == 'start')
         run: |
           python - <<'PY'
-          import json, sys, time
+          import json
           from pathlib import Path
           p = Path("reports/daily_research/session.json")
-          try:
-              state = json.loads(p.read_text())
-          except (OSError, json.JSONDecodeError):
-              state = {}
-          if state.get("active") and time.time() < state.get("settle_epoch", state.get("end_epoch", 0)):
-              sys.exit("A research session is already active. Choose status or stop; do not start another.")
+          if not p.exists():
+              raise SystemExit("Scanner did not create session state.")
+          state = json.loads(p.read_text(encoding="utf-8"))
+          if int(state.get("cycles", 0)) < 1:
+              raise SystemExit("Scanner has not recorded a successful collection cycle.")
+          print(json.dumps({
+              "cycles": state.get("cycles"),
+              "last_collection_utc": state.get("last_at"),
+              "session_active": state.get("active"),
+              "trading_enabled": state.get("trading_enabled", False),
+          }, indent=2))
           PY
-          python cap_watchlist.py
-          python main.py start
-      - name: Automatically ensure a research session is active
-        if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
-        run: |
-          python - <<'PY'
-          import json, subprocess, time
-          from pathlib import Path
-          path = Path('reports/daily_research/session.json')
-          try:
-              state = json.loads(path.read_text(encoding='utf-8'))
-          except (OSError, json.JSONDecodeError):
-              state = {}
-          active = bool(state.get('active')) and time.time() < state.get('settle_epoch', state.get('end_epoch', 0))
-          if active:
-              print('Existing research session is active; continuing it.')
-          else:
-              print('No active session; preparing the Bitget watchlist and starting a fresh 24-hour session.')
-              subprocess.run(['python', 'cap_watchlist.py'], check=True)
-              subprocess.run(['python', 'daily_research.py', 'start'], check=True)
-          PY
-      - name: Inspect session status
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'status'
-        run: python main.py status
-      - name: Check credential variables without exposing values
-        if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
-        run: |
-          python - <<'PY'
-          import os
-          print({
-              "api_key_configured": bool(os.getenv("BITGET_API_KEY", "").strip()),
-              "api_secret_configured": bool(os.getenv("BITGET_API_SECRET", "").strip()),
-              "api_passphrase_or_password_configured": bool(os.getenv("BITGET_API_PASSPHRASE", "").strip()),
-          })
-          PY
-      - name: Capture cycle count before collection
-        id: prior_cycle
-        if: github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping'))
-        run: |
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          try:
-              state = json.loads(Path('reports/daily_research/session.json').read_text(encoding='utf-8'))
-          except (OSError, json.JSONDecodeError):
-              state = {}
-          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-              output.write('cycles=' + str(int(state.get('cycles', 0))) + '\n')
-          PY
-      - name: Collect one manual research cycle
-        id: manual_collect
-        if: github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping')
-        run: |
-          python main.py collect
-          python research_report.py
-      - name: Stop session and build final report
-        if: github.event_name == 'workflow_dispatch' && inputs.action == 'stop'
-        run: |
-          python main.py stop
-          python research_report.py
-      - name: Collect one automated Bitget-only research cycle
-        id: scheduled_collect
-        if: github.event_name == 'schedule' || github.event_name == 'push'
-        run: |
-          echo "Starting scheduled research cycle at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          python main.py collect
-          python research_report.py
-      - name: Verify that collection produced a new research cycle
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'collect' || inputs.action == 'ping')))
-        env:
-          PREVIOUS_CYCLES: ${{ steps.prior_cycle.outputs.cycles || '0' }}
-          COLLECT_OUTCOME: ${{ steps.scheduled_collect.outcome || steps.manual_collect.outcome || 'not_run' }}
-        run: |
-          python - <<'PY'
-          import json, os, sys
-          from pathlib import Path
-          outcome = os.getenv('COLLECT_OUTCOME', 'not_run')
-          if outcome != 'success':
-              sys.exit('Research collection did not succeed; see the collector step logs.')
-          try:
-              state = json.loads(Path('reports/daily_research/session.json').read_text(encoding='utf-8'))
-          except (OSError, json.JSONDecodeError) as exc:
-              sys.exit('Research session state is missing or unreadable: ' + str(exc))
-          before = int(os.getenv('PREVIOUS_CYCLES', '0'))
-          after = int(state.get('cycles', 0))
-          if after <= before:
-              sys.exit(f'No new research cycle was recorded (before={before}, after={after}).')
-          print(f'Research cycle verified: {before} -> {after}; last collection={state.get("last_at")}')
-          PY
-      - name: Record research heartbeat, including failed cycles
-        if: always()
-        env:
-          COLLECT_OUTCOME: ${{ steps.scheduled_collect.outcome || steps.manual_collect.outcome || 'not_run' }}
-          DISPATCH_ACTION: ${{ inputs.action || (github.event_name == 'push' && 'automatic_bootstrap' || 'scheduled') }}
-        run: |
-          python - <<'PY'
-          import json, os
-          from datetime import datetime, timezone
-          from pathlib import Path
-          root = Path("reports/daily_research")
-          root.mkdir(parents=True, exist_ok=True)
-          session_path = root / "session.json"
-          try:
-              session = json.loads(session_path.read_text(encoding="utf-8"))
-          except (OSError, json.JSONDecodeError):
-              session = {}
-          heartbeat = {
-              "heartbeat_utc": datetime.now(timezone.utc).isoformat(),
-              "event": os.getenv("GITHUB_EVENT_NAME", "unknown"),
-              "action": os.getenv("DISPATCH_ACTION", "unknown"),
-              "collection_outcome": os.getenv("COLLECT_OUTCOME", "unknown"),
-              "run_id": os.getenv("GITHUB_RUN_ID"),
-              "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
-              "workflow": os.getenv("GITHUB_WORKFLOW"),
-              "session_active": bool(session.get("active", False)),
-              "collector_cycles": session.get("cycles"),
-              "last_collection_utc": session.get("last_at"),
-              "expected_interval_minutes": 5,
-          }
-          (root / "heartbeat.json").write_text(json.dumps(heartbeat, indent=2) + "\n", encoding="utf-8")
-          print(json.dumps(heartbeat, indent=2))
-          PY
-      - name: Check whether the session has finished
-        id: completion
-        if: github.event_name == 'schedule' || github.event_name == 'push'
-        run: |
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          try:
-              state = json.loads(Path("reports/daily_research/session.json").read_text())
-          except (OSError, json.JSONDecodeError):
-              state = {"active": False}
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write("complete=" + str(not state.get("active", False)).lower() + "\n")
-          PY
-      - name: Commit research records, watchlist and heartbeat
-        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.action == 'start' || inputs.action == 'collect' || inputs.action == 'ping' || inputs.action == 'stop')))
+      - name: Commit scanner records and heartbeat
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.action == 'ping' || inputs.action == 'collect' || inputs.action == 'start' || inputs.action == 'stop')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -206,20 +79,18 @@ jobs:
             git add -A reports/
           fi
           if ! git diff --cached --quiet; then
-            git commit -m "Record read-only futures research heartbeat"
+            git commit -m "Record unified Bitget scanner heartbeat"
             git pull --rebase origin main
             git push origin HEAD:main
           fi
-      - name: Build portable CSV and ZIP research package
-        if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || ((github.event_name == 'schedule' || github.event_name == 'push') && steps.completion.outputs.complete == 'true')
-        run: |
-          python -m py_compile package_research.py
-          python package_research.py
-      - name: Upload complete research package
-        if: (github.event_name == 'workflow_dispatch' && inputs.action == 'stop') || ((github.event_name == 'schedule' || github.event_name == 'push') && steps.completion.outputs.complete == 'true')
+      - name: Build portable research package when session ends
+        if: inputs.action == 'stop'
+        run: python package_research.py
+      - name: Upload final research package
+        if: inputs.action == 'stop'
         uses: actions/upload-artifact@v4
         with:
-          name: bitget-24-hour-futures-research-${{ github.run_id }}
+          name: bitget-research-package-${{ github.run_id }}
           path: reports/bitget_24h_research_package.zip
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
