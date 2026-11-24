@@ -144,7 +144,7 @@ async def main():
  "symbols_95pct_coverage":sum(x["coverage_pct"]>=95 for x in coverage),"candles":sum(x["candles"] for x in coverage),"symbols_with_errors":sum(bool(x["errors"]) for x in coverage),
  "candidate_events":len(events),"labels":counts,"strict_gradual":sum(x["gradual_strict"] for x in events),"tolerant_gradual":sum(x["gradual_tolerant"] for x in events),
  "pre_breakout_medians":pre,"post_breakout_medians":post,"chronological_splits":splits,"daily_counts":{k:dict(v) for k,v in sorted(daily.items())},"coverage":coverage,
- "limitations":["Current top-200 universe creates survivorship bias; historical listings are not reconstructed.","Observational associations do not prove causality.",
+ "limitations":["Current live universe creates survivorship bias; historical listings/delisted contracts are not reconstructed.","Observational associations do not prove causality.",
  "Pre-breakout features are separate from post-breakout features.","No historical taker-side flow, funding history or historical order-book depth is claimed.",
  "Aggregate OI is not used to infer which side opened positions.","Fee schedule alone is not a complete execution-cost model; spread, slippage and funding need historical data.",
  "Strict label requires all 120 closes beyond boundary; tolerant label permits three retests.","14 days is exploratory; extend out-of-sample before treating any pattern as predictive."],"trading_enabled":False}
