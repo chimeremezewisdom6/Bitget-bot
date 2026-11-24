@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 from shadow_execution import walk_book
+from trend_ignition import analyze_trend_ignition
 
 ROOT = Path(__file__).resolve().parent
 R = ROOT / "reports/daily_research"
@@ -415,7 +416,7 @@ def watchlist_activity_map():
 async def collect_symbol(session, symbol, ticker, instrument, fee_map, activity_map, state):
     """Fetch one symbol's public market evidence concurrently; never places orders."""
     try:
-        book_payload, candle_payload, fills_payload = await asyncio.gather(
+        book_payload, candle_payload, fills_payload, oi_payload = await asyncio.gather(
             get_json(session, "/api/v3/market/orderbook", {
                 "category": CATEGORY, "symbol": symbol, "limit": "100"
             }),
@@ -424,6 +425,9 @@ async def collect_symbol(session, symbol, ticker, instrument, fee_map, activity_
             }),
             get_json(session, "/api/v3/market/fills", {
                 "category": CATEGORY, "symbol": symbol, "limit": "100"
+            }),
+            get_json(session, "/api/v3/market/open-interest-history", {
+                "symbol": symbol, "period": "5m"
             }),
         )
         book = book_payload.get("data", {}) or {}
@@ -470,6 +474,7 @@ async def collect_symbol(session, symbol, ticker, instrument, fee_map, activity_
             "index": number(ticker.get("indexPrice")), "price_change_24h": number(ticker.get("price24hPcnt")),
             "funding_rate": number(ticker.get("fundingRate")),
             "open_interest": number(ticker.get("openInterest")),
+            "open_interest_history_points": len((oi_payload.get("data", {}) or {}).get("list", [])),
             "spread_bps": spread, "depth_0_5pct_bid_usdt": depth(bids),
             "depth_0_5pct_ask_usdt": depth(asks), "orderbook_ts": book.get("ts"),
             "candle_rows_returned": len(candle_rows), "new_candles_saved": len(new_candles),
@@ -483,7 +488,7 @@ async def collect_symbol(session, symbol, ticker, instrument, fee_map, activity_
         }
         add(O, observation)
         return {"symbol": symbol, "ticker": ticker, "instrument": instrument,
-                "book": book, "candles": candle_rows, "mid": mid,
+                "book": book, "candles": candle_rows, "open_interest_history": oi_payload, "mid": mid,
                 "spread_bps": spread, "fee_bps": fee_bps, "error": None}
     except Exception as exc:
         add(R / "collection_errors.jsonl", {
@@ -676,6 +681,28 @@ async def collect():
 
             results = await asyncio.gather(*(bounded(symbol) for symbol in selected_symbols))
 
+            # Live trend-ignition evidence: 1m candle structure/volume plus
+            # Bitget's historical 5m aggregate open-interest series. Record
+            # every cycle so candidates can be ranked and their evolution tracked.
+            ignition_count = 0
+            ignition_candidates = 0
+            for result in results:
+                if result.get("error"):
+                    continue
+                ignition = analyze_trend_ignition(
+                    result["symbol"], result.get("candles", []),
+                    result.get("open_interest_history", {})
+                )
+                ignition["collected_at_utc"] = iso()
+                add(R / "trend_ignition.jsonl", ignition)
+                ignition_count += 1
+                ignition_candidates += sum(
+                    item.get("stage") == "IGNITION_CANDIDATE"
+                    for item in ignition.get("directions", {}).values()
+                )
+            state["trend_ignition_symbols_this_cycle"] = ignition_count
+            state["trend_ignition_candidates_this_cycle"] = ignition_candidates
+
             # Historical first-hour trend experiment: run once per symbol per
             # research session, using a rolling 24h of public 1m candles.
             completed_backtests = set(state.setdefault("trend_backtest_symbols_completed", []))
@@ -787,6 +814,8 @@ async def collect():
         "trend_early_window_symbols_this_cycle": state.get("trend_early_window_symbols_this_cycle", 0),
         "trend_early_window_symbols_completed": len(state.get("trend_early_window_symbols_completed", [])),
         "trend_early_window_events_this_cycle": state.get("trend_early_window_events_this_cycle", 0),
+        "trend_ignition_symbols_this_cycle": state.get("trend_ignition_symbols_this_cycle", 0),
+        "trend_ignition_candidates_this_cycle": state.get("trend_ignition_candidates_this_cycle", 0),
         "ends": state.get("ends_at_utc"),
     }))
 
