@@ -27,6 +27,22 @@
 - Mean 2h-to-first-10m ratio: 7.895x
 
 ## What the data says fuels the move
+
+### Findings from the 33 qualifying events
+- The sample contains 18 LONG and 15 SHORT trends.
+- Mean two-hour directional return was 7.13%; median was 5.76%.
+- The mean two-hour / first-10-minute movement ratio was 7.90x; median was 6.31x. The minimum qualifying ratio was 4.06x.
+- The first 10-minute move averaged 1.10% (median 0.96%).
+- First-10-minute quote turnover was available for 32 events: median 2.10x the 20-minute pre-breakout baseline. 18/32 were at least 1.5x and 17/32 were at least 2x. The mean was 5.77x, inflated by a few very large turnover bursts, so the median is more representative.
+- Direction-matching candle share averaged 49.1% in the first 15 minutes and 47.7% across the full two hours. This supports measuring net progress and defended structure rather than requiring nearly every candle to be the same colour.
+- Historical OI could be aligned to both event boundaries for only 1 of 33 events. ELSAUSDT LONG had +19.88% aggregate OI change over the event window. This is one observation and aggregate OI cannot identify whether longs or shorts opened.
+- Funding snapshots were retrieved for qualifying symbols, but they are current readings, not the funding at the historical event time. The order-book endpoint did not yield usable bid/ask depth for this sample. No historical taker-buy/sell split was available.
+
+### Interpretation
+- The most repeatable evidence in this 24h sample is persistent price structure plus participation: a 120-minute hold, approximately half of the candles closing in the trend direction, and often higher quote turnover near the start.
+- Turnover acceleration is a useful supporting feature, not a sufficient cause or standalone signal. Several qualifying trends had turnover below 1x, so a strict volume-surge requirement would miss some.
+- The test can describe which market conditions accompanied the moves, but it cannot yet prove what caused them. A causal fuel study needs historical OI snapshots across the full 2h event, historical funding and order-book/trade-side data aligned to the same timestamps.
+
 - Persistence: 120m breakout-level hold, direction-matching candle counts, and maximum adverse/favorable excursion.
 - Participation: first-10m and first-30m quote-turnover acceleration versus the 20m before the breakout.
 - Historical open interest: reported only when Bitget's returned 5m observations cover both event boundaries; otherwise left blank.
