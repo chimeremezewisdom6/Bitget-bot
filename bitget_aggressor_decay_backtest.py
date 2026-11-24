@@ -5,8 +5,8 @@ from datetime import datetime,timezone
 from pathlib import Path
 BASE="https://api.bitget.com"; ROOT=Path(__file__).resolve().parent
 OUT=ROOT/"reports/aggressor_decay"
-START=int(datetime(2026,11,10,tzinfo=timezone.utc).timestamp()*1000)
-END=int(datetime(2026,11,24,tzinfo=timezone.utc).timestamp()*1000)
+START=int(datetime(2026,11,10,11,20,tzinfo=timezone.utc).timestamp()*1000)
+END=int(datetime(2026,11,24,11,20,tzinfo=timezone.utc).timestamp()*1000)
 TOP_N=10; GAP=.13; H=(1,3,5,10,20,30)
 class Gate:
  def __init__(self): self.lock=asyncio.Lock(); self.last=0
@@ -94,14 +94,14 @@ def run_symbol(sym,b,fee):
     mfe=((entry/min(x["lo"] for x in f))-1)*100 if direction=="SHORT" else (max(x["hi"] for x in f)/entry-1)*100
     mae=((entry/max(x["hi"] for x in f))-1)*100 if direction=="SHORT" else (min(x["lo"] for x in f)/entry-1)*100
     net=gross-fee*200
-    row["outcomes"][str(h)]={"gross_pct":gross,"net_pct":net,"mfe_pct":mfe,"mae_pct":mae,"win":net>0}
+    row["outcomes"][str(h)]={"gross_pct":gross,"net_pct":net,"same_side_net_pct":-gross-fee*200,"mfe_pct":mfe,"mae_pct":mae,"win":net>0}
    ev.append(row)
  return ev
 def stats(es):
  out={}
  for h in H:
   a=[x["outcomes"][str(h)] for x in es]; r=[x["net_pct"] for x in a]
-  out[str(h)]={"trades":len(r),"net_win_rate_pct":round(sum(x>0 for x in r)*100/len(r),2) if r else None,"mean_net_pct":round(statistics.mean(r),5) if r else None,"median_net_pct":round(statistics.median(r),5) if r else None,"mean_mfe_pct":round(statistics.mean(x["mfe_pct"] for x in a),5) if r else None,"mean_mae_pct":round(statistics.mean(x["mae_pct"] for x in a),5) if r else None}
+  out[str(h)]={"trades":len(r),"net_win_rate_pct":round(sum(x>0 for x in r)*100/len(r),2) if r else None,"mean_net_pct":round(statistics.mean(r),5) if r else None,"median_net_pct":round(statistics.median(r),5) if r else None,"same_side_mean_net_pct":round(statistics.mean(x["same_side_net_pct"] for x in a),5) if r else None,"same_side_win_rate_pct":round(sum(x["same_side_net_pct"]>0 for x in a)*100/len(a),2) if r else None,"mean_mfe_pct":round(statistics.mean(x["mfe_pct"] for x in a),5) if r else None,"mean_mae_pct":round(statistics.mean(x["mae_pct"] for x in a),5) if r else None}
  return out
 async def main():
  OUT.mkdir(parents=True,exist_ok=True); gate=Gate()
