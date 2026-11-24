@@ -1,4 +1,4 @@
-name: Autonomous ChatGPT Research Agent
+name: Autonomous Gemini Research Agent
 
 on:
   schedule:
@@ -28,18 +28,18 @@ jobs:
           python-version: "3.11"
       - name: Install test runner
         run: python -m pip install pytest
-      - name: Check OpenAI connection
+      - name: Check Gemini free API connection
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          if [ -z "$OPENAI_API_KEY" ]; then
-            echo "::error::Add OPENAI_API_KEY in repository Settings > Secrets and variables > Actions."
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::error::Add GEMINI_API_KEY in repository Settings > Secrets and variables > Actions."
             exit 1
           fi
-      - name: Run autonomous research and code review
+      - name: Run autonomous Gemini research and code review
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-6.2-sol' }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.1-flash-lite' }}
         run: python autonomous_research_agent.py
       - name: Commit validated agent work
         env:
