@@ -91,10 +91,13 @@ def scan(sym,rs):
   if s=="LONG":mfe=max((x["h"]/c["o"]-1)*100 for x in fut);mae=min((x["l"]/c["o"]-1)*100 for x in fut)
   else:mfe=max((c["o"]/x["l"]-1)*100 if x["l"] else 0 for x in fut);mae=min((c["o"]/x["h"]-1)*100 if x["h"] else 0 for x in fut)
   label="GRADUAL_TREND" if gradual else ("FAST_SPIKE" if spike else "FAILED_OR_WEAK")
+  first_hour=fut[:60]
+  colors=["GREEN" if x["c"]>x["o"] else ("RED" if x["c"]<x["o"] else "DOJI") for x in first_hour]
+  first_hour_counts={"green":colors.count("GREEN"),"red":colors.count("RED"),"doji":colors.count("DOJI"),"directional":sum(x["c"]>x["o"] if s=="LONG" else x["c"]<x["o"] for x in first_hour)}
   out.append({"symbol":sym,"direction":s,"timestamp_ms":c["ts"],"timestamp_utc":datetime.fromtimestamp(c["ts"]/1000,timezone.utc).isoformat(),
   "two_hour_return_pct":round(final,6) if final is not None else None,"first10_directional_move_pct":round(early,6) if early is not None else None,
   "two_hour_first10_ratio":round(ratio,6) if ratio is not None else None,"max_favorable_excursion_pct":round(mfe,6),"max_adverse_excursion_pct":round(mae,6),
-  "strict_hold":strict,"tolerant_117_of_120_hold":tolerant,"gradual_strict":gradual,"gradual_tolerant":tg,"fast_spike":spike,"label":label,
+  "strict_hold":strict,"tolerant_117_of_120_hold":tolerant,"gradual_strict":gradual,"gradual_tolerant":tg,"fast_spike":spike,"label":label,"first_hour_candle_counts":first_hour_counts,"first_hour_candle_colors":colors,
   "pre_breakout_features":pf,"post_breakout_features":post})
  return out
 def med(a):
@@ -142,6 +145,8 @@ async def main():
  "Strict label requires all 120 closes beyond boundary; tolerant label permits three retests.","14 days is exploratory; extend out-of-sample before treating any pattern as predictive."],"trading_enabled":False}
  (OUT/"bitget_14d_trend_fuel_summary.json").write_text(json.dumps(summary,indent=2)+"\n")
  (OUT/"bitget_14d_trend_fuel_events.jsonl").write_text("".join(json.dumps(x,separators=(",",":"))+"\n" for x in events))
+ qualifying=[e for e in events if e["gradual_tolerant"]]
+ (OUT/"bitget_14d_gradual_event_details.jsonl").write_text("".join(json.dumps(e,separators=(",",":"))+"\n" for e in qualifying))
  lines=["# Bitget 14-day trend fuel backtest","",f"Window: {summary['window_start_utc']} to {summary['window_end_utc']}",f"Authenticated read: SUCCESS; permission: {permission}; fee schedule: {fee_ok}",
  f"Markets: {len(uni)}; candles: {summary['candles']}; symbols with >=95% coverage: {summary['symbols_95pct_coverage']}",
  f"Candidates: {len(events)}; groups: {json.dumps(counts)}",f"Strict gradual: {summary['strict_gradual']}; tolerant gradual: {summary['tolerant_gradual']}","",
@@ -151,7 +156,7 @@ async def main():
  "## Pre-breakout feature medians","JSON follows:",json.dumps(pre,indent=2),"## Post-breakout features (not advance predictors)",json.dumps(post,indent=2),
  "## Chronological splits",json.dumps(splits,indent=2),"## Daily event counts",json.dumps({k:dict(v) for k,v in sorted(daily.items())},indent=2),
  "## Coverage",json.dumps(coverage,indent=2),"## Limitations"]
- lines.extend("- "+x for x in summary["limitations"]);lines.append("Raw event rows: bitget_14d_trend_fuel_events.jsonl")
+ lines.extend("- "+x for x in summary["limitations"]);lines.extend(["Raw event rows: bitget_14d_trend_fuel_events.jsonl","Gradual event details with first-hour candle colours: bitget_14d_gradual_event_details.jsonl"])
  (OUT/"bitget_14d_trend_fuel_report.md").write_text("\n".join(lines)+"\n")
  print(json.dumps({"status":"complete","authenticated":True,"permission":permission,"markets":len(uni),"candles":summary["candles"],"events":len(events),"groups":counts,"strict_gradual":summary["strict_gradual"],"tolerant_gradual":summary["tolerant_gradual"]},indent=2))
 if __name__=="__main__":asyncio.run(main())
