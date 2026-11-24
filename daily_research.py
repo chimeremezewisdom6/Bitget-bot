@@ -416,6 +416,18 @@ def watchlist_activity_map():
 async def collect_symbol(session, symbol, ticker, instrument, fee_map, activity_map, state):
     """Fetch one symbol's public market evidence concurrently; never places orders."""
     try:
+        async def fetch_oi_history():
+            try:
+                return await get_json(session, "/api/v3/market/open-interest-history", {
+                    "symbol": symbol, "period": "5m"
+                })
+            except Exception as exc:
+                add(R / "collection_errors.jsonl", {
+                    "at": iso(), "symbol": symbol, "source": "open_interest_history",
+                    "error": str(exc)[:250]
+                })
+                return {"data": {"list": []}}
+
         book_payload, candle_payload, fills_payload, oi_payload = await asyncio.gather(
             get_json(session, "/api/v3/market/orderbook", {
                 "category": CATEGORY, "symbol": symbol, "limit": "100"
@@ -426,9 +438,7 @@ async def collect_symbol(session, symbol, ticker, instrument, fee_map, activity_
             get_json(session, "/api/v3/market/fills", {
                 "category": CATEGORY, "symbol": symbol, "limit": "100"
             }),
-            get_json(session, "/api/v3/market/open-interest-history", {
-                "symbol": symbol, "period": "5m"
-            }),
+            fetch_oi_history(),
         )
         book = book_payload.get("data", {}) or {}
         asks, bids = book.get("a", []), book.get("b", [])
