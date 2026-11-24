@@ -142,7 +142,7 @@ specific and concise. Cite external claims with direct URLs and access date.
         "input": "Repository context follows. Analyse it and perform the research task.\\n" + context,
         "tools": [{"type": "web_search"}],
         "max_output_tokens": 10000,
-        "store": false,
+        "store": False,
         "text": {"format": {"type": "json_object"}}
     }
     req = urllib.request.Request(
