@@ -1,13 +1,14 @@
 {
-  "heartbeat_utc": "2026-11-24T05:57:26.914597+00:00",
+  "heartbeat_utc": "2026-11-24T06:01:20.640954+00:00",
   "event": "push",
-  "action": "automatic_bootstrap",
+  "action": "ping",
   "collection_outcome": "success",
-  "run_id": "45336861492",
+  "run_id": "45337279508",
   "run_attempt": "1",
-  "workflow": "24-Hour Bitget-Only Futures Research (Read Only)",
+  "workflow": "Bitget Unified Research Scanner",
   "session_active": true,
-  "collector_cycles": 12,
-  "last_collection_utc": "2026-11-24T05:57:25.127409+00:00",
-  "expected_interval_minutes": 5
+  "collector_cycles": 13,
+  "last_collection_utc": "2026-11-24T06:01:19.894883+00:00",
+  "expected_interval_minutes": 5,
+  "trading_enabled": false
 }
