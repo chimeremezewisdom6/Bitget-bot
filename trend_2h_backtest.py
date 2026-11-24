@@ -98,6 +98,7 @@ def analyze(symbol,rows,start_ms,end_ms):
         else: continue
         future=rows[i:i+DURATION]
         if any((x["c"]<=boundary if side=="LONG" else x["c"]>=boundary) for x in future): continue
+        last_i=i  # Avoid counting overlapping starts inside the same confirmed 2h move.
         diagnostics["breakout_2h_hold"]+=1
         total=directional_pct(first["c"],future[-1]["c"],side)
         # Check every rolling 10m interval, not only the opening 10m.
@@ -151,7 +152,6 @@ def analyze(symbol,rows,start_ms,end_ms):
             "historical_open_interest_change_pct":None,
             "definition":"120m breakout hold, >=4% directional return, and >=4x the absolute directional move in the first 10m"
         })
-        last_i=i
     return events,diagnostics,near_misses
 
 def oi_points(payload):
@@ -295,7 +295,7 @@ async def main():
       "## Aggregate findings",
       ("- Mean qualifying 2h directional return: %.4f%%" % statistics.mean(returns)) if returns else "- No events passed all rules.",
       ("- Median qualifying 2h directional return: %.4f%%" % statistics.median(returns)) if returns else "",
-      ("- Mean 2h-to-fastest-10m ratio: %.3fx" % statistics.mean([e["two_hour_to_first10m_ratio"] for e in events])) if events else "",
+      ("- Mean 2h-to-first-10m ratio: %.3fx" % statistics.mean([e["two_hour_to_first10m_ratio"] for e in events])) if events else "",
       "",
       "## What the data says fuels the move",
       "- Persistence: 120m breakout-level hold, direction-matching candle counts, and maximum adverse/favorable excursion.",
