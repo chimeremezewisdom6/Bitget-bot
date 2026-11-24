@@ -303,7 +303,7 @@ async def main():
         "window_start_utc": datetime.fromtimestamp(start / 1000, timezone.utc).isoformat(),
         "window_end_utc": datetime.fromtimestamp(end / 1000, timezone.utc).isoformat(),
         "duration_days": DAYS, "horizon_minutes": HORIZON,
-        "universe": "Top 200 currently online USDT perpetuals by current 24h turnover; point-in-time historical universe is not reconstructed.",
+        "universe": "All currently online eligible USDT perpetuals ordered by current 24h turnover; point-in-time historical universe is not reconstructed.",
         "symbols_requested": len(universe),
         "symbols_with_95pct_candle_coverage": sum(x["coverage_pct"] >= 95 for x in coverage),
         "candles_collected": sum(x["candles"] for x in coverage),
@@ -318,7 +318,7 @@ async def main():
         "limitations": [
             "This is observational association, not proof that the breakout caused the move.",
             "The control group is a transparent non-breakout baseline, not a randomized experiment.",
-            "Current top-200 universe creates survivorship bias; historical listings are not reconstructed.",
+            "Current live universe creates survivorship bias; historical listings/delisted contracts are not reconstructed.",
             "Events without a complete 240-minute future window are excluded.",
             "Duration is capped/right-censored at 240 minutes; longer duration requires a longer study horizon.",
             "A 1m close back inside the boundary counts as a failed hold even if price later re-breaks.",
