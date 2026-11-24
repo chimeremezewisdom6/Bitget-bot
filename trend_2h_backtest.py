@@ -86,8 +86,12 @@ def backtest(symbol, rows, start_ms, end_ms):
             continue
         start_price=start["c"]
         end_price=future[-1]["c"]
-        ret=((end_price/start_price)-1)*100 if side=="LONG" and start_price else (
-            (start_price/end_price)-1)*100 if side=="SHORT" and end_price else 0.0)
+        if side=="LONG" and start_price:
+            ret=(end_price/start_price-1)*100
+        elif side=="SHORT" and end_price:
+            ret=(start_price/end_price-1)*100
+        else:
+            ret=0.0
         aligned=sum(x["c"]>x["o"] if side=="LONG" else x["c"]<x["o"] for x in future)
         first15=future[:15]
         aligned15=sum(x["c"]>x["o"] if side=="LONG" else x["c"]<x["o"] for x in first15)
