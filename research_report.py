@@ -42,6 +42,23 @@ def build_report(root=ROOT):
     candle_streak_qualified = [x for x in candle_streak_checks if x.get("qualifies") is True]
     trend_backtests = read_jsonl(root / "trend_first_hour_backtest.jsonl")
     early_window_backtests = read_jsonl(root / "trend_early_window_backtest.jsonl")
+    ignition_records = read_jsonl(root / "trend_ignition.jsonl")
+    ignition_latest = {}
+    for item in ignition_records:
+        if item.get("symbol") and item.get("status") == "ANALYZED":
+            ignition_latest[item["symbol"]] = item
+    ignition_ranked = sorted(
+        ignition_latest.values(),
+        key=lambda item: max(
+            (direction.get("score", 0) for direction in item.get("directions", {}).values()),
+            default=0
+        ), reverse=True
+    )
+    ignition_candidates = [
+        item for item in ignition_ranked
+        if any(direction.get("stage") == "IGNITION_CANDIDATE"
+               for direction in item.get("directions", {}).values())
+    ]
     early_window_events = [
         event for row in early_window_backtests for event in row.get("events", [])
         if isinstance(event.get("early_window_analysis"), list)
@@ -183,6 +200,30 @@ def build_report(root=ROOT):
             for minutes in (5, 10, 15, 20, 30, 60)
         ],
         "",
+        "## Current trend-ignition radar (latest Bitget scan per coin)", "",
+        f"- Coins with usable candle/OI analysis: {len(ignition_latest)}",
+        f"- LONG/SHORT ignition candidates (score at least 4/7): {len(ignition_candidates)}",
+        "- This radar ranks developing movement using 1m price/candle structure and volume, plus Bitget 5m historical aggregate open interest. OI is not long/short-specific.",
+        "",
+        "| Coin | Side | Score / 7 | Stage | Price 5m | Price 15m | OI 15m | Volume x | 5m candle colour | Positioning context |",
+        "|---|---|---:|---|---:|---:|---:|---:|---|---|",
+        *[
+            (
+                f"| {item.get('symbol')} | {side} | {data.get('score')} / 7 | {data.get('stage')} | "
+                f"{data.get('price_change_pct', {}).get('5m')}% | {data.get('price_change_pct', {}).get('15m')}% | "
+                f"{(str(data.get('open_interest_change_pct', {}).get(15)) + '%') if data.get('open_interest_change_pct', {}).get(15) is not None else 'unavailable'} | "
+                f"{item.get('volume_multiple_5m_vs_prior20m')}x | "
+                f"{item.get('candle_windows', {}).get('5', {}).get('green')}/{item.get('candle_windows', {}).get('5', {}).get('red')} | "
+                f"{data.get('positioning_context')} |"
+            )
+            for item in ignition_ranked[:40]
+            for side, data in sorted(item.get("directions", {}).items(),
+                                     key=lambda pair: pair[1].get("score", 0), reverse=True)[:1]
+        ],
+        *([] if ignition_ranked else ["| No completed ignition analyses yet | — | — | — | — | — | — | — | — | — |"]),
+        "",
+        "Scoring checks: aligned 5m/15m price acceleration, rising 15m OI, 5m turnover surge versus the prior 20m, directional candle pressure with real candle bodies, 20m breakout, 60m breakout, and higher-high/lower-low structure. Scores are evidence counts, not probabilities. A high score is a research watch candidate, not a buy/sell instruction. Rising aggregate OI means total outstanding positions increased; it does not reveal whether longs or shorts initiated them.",
+        "",
         "| Symbol | Direction | Trend start (UTC) | Green | Red | Doji | Matching candles | Matching % | First-hour follow-through % |",
         "|---|---|---|---:|---:|---:|---:|---:|---:|",
         *[
@@ -258,6 +299,7 @@ def build_report(root=ROOT):
         "- candles_1m.jsonl — de-duplicated one-minute candles.",
         "- trend_first_hour_backtest.jsonl — rolling 24-hour breakout trend starts and first-hour candle-colour counts.",
         "- trend_early_window_backtest.jsonl — separate 5/10/15/20/30/60-minute candle-window measurements and continuation outcomes.",
+        "- trend_ignition.jsonl — per-cycle LONG/SHORT trend-development scores combining Bitget 1m candle structure, turnover acceleration and historical 5m open interest.",
         "- shadow_experiments.jsonl — signals, partial entry/exit records, book-walk outcomes and unavailable evaluations.",
         "- collection_errors.jsonl — Bitget API and processing failures.", ""
     ]
@@ -283,6 +325,9 @@ def build_report(root=ROOT):
             "long_trend_starts": len(trend_long),
             "short_trend_starts": len(trend_short),
             "early_window_trend_events": len(early_window_events),
+            "trend_ignition_latest_symbols": len(ignition_latest),
+            "trend_ignition_candidates": len(ignition_candidates),
+            "trend_ignition_records": len(ignition_records),
         },
         "candle_streak_experiment": {
             "checks": len(candle_streak_checks),
