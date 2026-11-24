@@ -139,7 +139,7 @@ def analyze(symbol,rows,start_ms,end_ms):
             "direction_adjusted_120m_return_pct":round(total,5),
             "first_10m_directional_move_pct":round(first10,5),
             "largest_rolling_10m_directional_move_pct":round(max10,5),
-            "two_hour_to_fastest_10m_ratio":round(ratio,4),
+            "two_hour_to_first10m_ratio":round(ratio,4),
             "direction_matching_candles_first15m":aligned15,
             "direction_matching_candles_first30m":aligned30,
             "direction_matching_candles_120m":aligned120,
@@ -295,7 +295,7 @@ async def main():
       "## Aggregate findings",
       ("- Mean qualifying 2h directional return: %.4f%%" % statistics.mean(returns)) if returns else "- No events passed all rules.",
       ("- Median qualifying 2h directional return: %.4f%%" % statistics.median(returns)) if returns else "",
-      ("- Mean 2h-to-fastest-10m ratio: %.3fx" % statistics.mean([e["two_hour_to_fastest_10m_ratio"] for e in events])) if events else "",
+      ("- Mean 2h-to-fastest-10m ratio: %.3fx" % statistics.mean([e["two_hour_to_first10m_ratio"] for e in events])) if events else "",
       "",
       "## What the data says fuels the move",
       "- Persistence: 120m breakout-level hold, direction-matching candle counts, and maximum adverse/favorable excursion.",
@@ -312,7 +312,7 @@ async def main():
         lines.append("| %s | %s | %s | %.4f | %.4f | %.4f | %.2fx | %s/15 | %s/120 | %s | %s |" % (
             e["symbol"],e["direction"],e["start_utc"],e["direction_adjusted_120m_return_pct"],
             e["first_10m_directional_move_pct"],e["largest_rolling_10m_directional_move_pct"],
-            e["two_hour_to_fastest_10m_ratio"],e["direction_matching_candles_first15m"],
+            e["two_hour_to_first10m_ratio"],e["direction_matching_candles_first15m"],
             e["direction_matching_candles_120m"],e["first10m_quote_turnover_vs_prior20m"],
             e["historical_open_interest_change_pct"]))
     lines += ["","## Per-coin coverage","| Symbol | Candles | Trends | LONG | SHORT | Status |",
