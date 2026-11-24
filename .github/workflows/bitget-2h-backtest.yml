@@ -1,0 +1,39 @@
+name: Bitget 24h 2h Trend Backtest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "trend_2h_backtest.py"
+      - ".github/workflows/bitget-2h-backtest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bitget-24h-2h-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Fetch and backtest 200 Bitget USDT perpetuals
+        run: python trend_2h_backtest.py
+      - name: Publish full report and event data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/daily_research/bitget_24h_2h_trend_backtest.md reports/daily_research/bitget_24h_2h_trend_events.jsonl reports/daily_research/bitget_24h_2h_trend_coin_summary.json
+          git commit -m "Publish fresh Bitget 24h two-hour trend backtest"
+          git push origin HEAD:main
