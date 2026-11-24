@@ -1,4 +1,4 @@
-name: Autonomous Gemini Research Agent
+name: Autonomous Pollinations Research Agent
 
 on:
   schedule:
@@ -28,18 +28,18 @@ jobs:
           python-version: "3.11"
       - name: Install test runner
         run: python -m pip install pytest
-      - name: Check Gemini free API connection
+      - name: Check Pollinations API connection
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
         run: |
-          if [ -z "$GEMINI_API_KEY" ]; then
-            echo "::error::Add GEMINI_API_KEY in repository Settings > Secrets and variables > Actions."
+          if [ -z "$POLLINATIONS_API_KEY" ]; then
+            echo "::error::Ensure the existing Pollinations key is saved as POLLINATIONS_API_KEY in repository Settings > Secrets and variables > Actions."
             exit 1
           fi
-      - name: Run autonomous Gemini research and code review
+      - name: Run autonomous Pollinations research and code review
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.1-flash-lite' }}
+          POLLINATIONS_API_KEY: ${{ secrets.POLLINATIONS_API_KEY }}
+          POLLINATIONS_MODEL: ${{ vars.POLLINATIONS_MODEL || 'google/gemini-2.5-flash-lite:search' }}
         run: python autonomous_research_agent.py
       - name: Commit validated agent work
         env:
@@ -52,6 +52,6 @@ jobs:
             echo "No agent changes to commit."
             exit 0
           fi
-          git commit -m "Autonomous Gemini research update"
+          git commit -m "Autonomous Pollinations research update"
           git remote set-url origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
           git push origin HEAD:main
