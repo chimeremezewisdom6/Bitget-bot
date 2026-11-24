@@ -203,6 +203,17 @@ def analyze_trend_ignition(symbol, candles, oi_payload, fills_payload=None, now_
     breakout_down = close < low20
     major_break_up = close > high60
     major_break_down = close < low60
+    hold_windows = {}
+    for minutes in (5, 10, 15, 30, 60):
+        sample = rows[-minutes:]
+        hold_windows[str(minutes)] = {
+            "long_closes_above_60m_high": sum(x["c"] > high60 for x in sample),
+            "short_closes_below_60m_low": sum(x["c"] < low60 for x in sample),
+            "long_hold_pct": round(sum(x["c"] > high60 for x in sample) / minutes * 100, 2),
+            "short_hold_pct": round(sum(x["c"] < low60 for x in sample) / minutes * 100, 2),
+        }
+    long_retests = sum(x["l"] <= high60 <= x["h"] and x["c"] > high60 for x in rows[-15:])
+    short_retests = sum(x["l"] <= low60 <= x["h"] and x["c"] < low60 for x in rows[-15:])
 
     directions = {}
     for direction in ("LONG", "SHORT"):
@@ -217,6 +228,8 @@ def analyze_trend_ignition(symbol, candles, oi_payload, fills_payload=None, now_
         ) >= 6 and sum(body_ratios) / len(body_ratios) >= 0.45
         breakout = breakout_up if direction == "LONG" else breakout_down
         major_break = major_break_up if direction == "LONG" else major_break_down
+        hold_last5 = (hold_windows["5"]["long_hold_pct"] == 100 if direction == "LONG" else hold_windows["5"]["short_hold_pct"] == 100)
+        retest_count = long_retests if direction == "LONG" else short_retests
         taker_key = taker_windows.get("5", {})
         taker_imbalance = taker_key.get("imbalance")
         taker_confirm = taker_key.get("status") == "OK" and taker_imbalance is not None and (taker_imbalance > 0 if direction == "LONG" else taker_imbalance < 0)
@@ -233,6 +246,7 @@ def analyze_trend_ignition(symbol, candles, oi_payload, fills_payload=None, now_
             "directional_candle_pressure": green_pressure and body_pressure,
             "20m_range_breakout": breakout,
             "60m_range_breakout": major_break,
+            "breakout_held_for_last5_closes": hold_last5,
             "higher_high_lower_low_structure": structure,
         }
         score = sum(checks.values())
@@ -256,6 +270,8 @@ def analyze_trend_ignition(symbol, candles, oi_payload, fills_payload=None, now_
             },
             "open_interest_change_pct": oi_changes,
             "taker_imbalance_5_10_15m": taker_windows,
+            "breakout_hold_windows": hold_windows,
+            "breakout_retests_last15m": retest_count,
             "turnover_acceleration_1_5_10_15m": turnover_windows,
             "price_path_efficiency_5_10_15_30_60m": efficiency_windows,
             "open_interest_unit": oi_unit,
@@ -269,6 +285,8 @@ def analyze_trend_ignition(symbol, candles, oi_payload, fills_payload=None, now_
         "last_closed_candle_ms": last["ts"],
         "price": close, "volume_multiple_5m_vs_prior20m": round(volume_multiple, 3) if volume_multiple is not None else None,
         "candle_windows": windows,
+        "breakout_hold_windows": hold_windows,
+        "breakout_retests_last15m": {"LONG": long_retests, "SHORT": short_retests},
         "turnover_acceleration_1_5_10_15m": turnover_windows,
         "taker_imbalance_5_10_15m": taker_windows,
         "price_path_efficiency_5_10_15_30_60m": efficiency_windows,
