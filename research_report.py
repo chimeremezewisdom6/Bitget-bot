@@ -1,5 +1,6 @@
 """Build a transparent performance and evidence summary from research JSONL records."""
 import json
+import csv
 from datetime import datetime, timezone
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -97,6 +98,108 @@ def build_report(root=ROOT):
     trend_short = [x for x in trend_events if x.get("direction") == "SHORT"]
     trend_matching = [x.get("direction_matching_pct", 0) for x in trend_events]
 
+    # Export every detected event and a per-coin rollup on every report build.
+    early_event_lookup = {
+        (row.get("symbol"), str(event.get("trend_start_timestamp_ms"))): event
+        for row in early_window_backtests for event in row.get("events", [])
+    }
+    coin_rollups = {}
+    for event in trend_events:
+        symbol = event.get("symbol")
+        if not symbol:
+            continue
+        item = coin_rollups.setdefault(symbol, {
+            "events": 0, "long": 0, "short": 0, "positive": 0,
+            "matching_sum": 0.0, "follow_sum": 0.0,
+            "best": None, "worst": None,
+        })
+        item["events"] += 1
+        item[event.get("direction", "").lower()] += 1
+        follow = float(event.get("first_hour_follow_through_pct", 0) or 0)
+        item["positive"] += int(follow > 0)
+        item["matching_sum"] += float(event.get("direction_matching_pct", 0) or 0)
+        item["follow_sum"] += follow
+        detail = {
+            "direction": event.get("direction"),
+            "start": event.get("trend_start_timestamp_ms"),
+            "follow": follow,
+        }
+        if item["best"] is None or follow > item["best"]["follow"]:
+            item["best"] = detail
+        if item["worst"] is None or follow < item["worst"]["follow"]:
+            item["worst"] = detail
+
+    def utc_text(timestamp_ms):
+        return datetime.fromtimestamp(
+            int(timestamp_ms) / 1000, timezone.utc
+        ).isoformat().replace("+00:00", "Z") if timestamp_ms else ""
+
+    coin_csv = root / "trend_coin_summary.csv"
+    with coin_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
+            "symbol", "trend_events", "long_events", "short_events",
+            "positive_first_hour_events", "positive_first_hour_pct",
+            "avg_direction_matching_candles_pct", "avg_first_hour_follow_through_pct",
+            "best_event_direction", "best_event_start_utc", "best_event_follow_through_pct",
+            "worst_event_direction", "worst_event_start_utc", "worst_event_follow_through_pct",
+        ])
+        for symbol, item in sorted(coin_rollups.items(), key=lambda pair: (-pair[1]["events"], pair[0])):
+            count = item["events"]
+            best, worst = item["best"], item["worst"]
+            writer.writerow([
+                symbol, count, item["long"], item["short"], item["positive"],
+                round(item["positive"] / count * 100, 2),
+                round(item["matching_sum"] / count, 2),
+                round(item["follow_sum"] / count, 4),
+                best["direction"], utc_text(best["start"]), best["follow"],
+                worst["direction"], utc_text(worst["start"]), worst["follow"],
+            ])
+
+    event_csv = root / "trend_event_details.csv"
+    windows = (5, 10, 15, 20, 30, 60)
+    with event_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        header = [
+            "symbol", "trend_start_utc", "direction", "trend_start_close",
+            "first_hour_end_utc", "first_hour_end_close", "first_hour_follow_through_pct",
+            "green_candles_60m", "red_candles_60m", "doji_candles_60m",
+            "direction_matching_candles_60m", "direction_matching_pct_60m",
+        ]
+        for minutes in windows:
+            header.extend([
+                f"green_{minutes}m", f"red_{minutes}m", f"doji_{minutes}m",
+                f"direction_match_pct_{minutes}m", f"continuation_after_{minutes}m_pct",
+                f"max_favorable_after_{minutes}m_pct", f"max_adverse_after_{minutes}m_pct",
+            ])
+        writer.writerow(header)
+        for event in trend_events:
+            detail = early_event_lookup.get((
+                event.get("symbol"), str(event.get("trend_start_timestamp_ms"))
+            ), {})
+            by_window = {
+                window.get("minutes"): window
+                for window in detail.get("early_window_analysis", [])
+            }
+            row = [
+                event.get("symbol"), utc_text(event.get("trend_start_timestamp_ms")),
+                event.get("direction"), event.get("trend_start_close"),
+                utc_text(event.get("first_hour_end_timestamp_ms")),
+                event.get("first_hour_end_close"), event.get("first_hour_follow_through_pct"),
+                event.get("green_candles"), event.get("red_candles"), event.get("doji_candles"),
+                event.get("direction_matching_candles"), event.get("direction_matching_pct"),
+            ]
+            for minutes in windows:
+                window = by_window.get(minutes, {})
+                row.extend([
+                    window.get("green_candles"), window.get("red_candles"),
+                    window.get("doji_candles"), window.get("direction_matching_pct"),
+                    window.get("direction_adjusted_continuation_to_hour_end_pct"),
+                    window.get("max_favorable_excursion_after_window_pct"),
+                    window.get("max_adverse_excursion_after_window_pct"),
+                ])
+            writer.writerow(row)
+
     signals = [x for x in experiments if x.get("type") == "signal"]
     watch_conditions = [x for x in experiments if x.get("type") == "watch_condition"]
     outcomes = [x for x in experiments if x.get("type") == "orderbook_shadow_outcome"]
@@ -172,6 +275,7 @@ def build_report(root=ROOT):
         f"- Symbols with completed historical backtests: {len(trend_backtests)}",
         f"- Breakout-based trend starts found: {len(trend_events)} (LONG: {len(trend_long)}; SHORT: {len(trend_short)})",
         f"- Average direction-matching candle share in first hour: {sum(trend_matching) / len(trend_matching):.1f}%" if trend_matching else "- Average direction-matching candle share in first hour: unavailable",
+        "- Complete exports: [all 216 coin summaries](trend_coin_summary.csv) and [all trend events with 5/10/15/20/30/60-minute candle/continuation detail](trend_event_details.csv). These files are regenerated whenever this report runs.",
         "",
         "A trend start is defined as a fully closed 1m candle closing above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT). The first hour is the breakout candle plus the next 59 fully closed 1m candles. Green, red and doji candles are counted separately. This is a consistent breakout proxy, not a universal definition of every trend.",
         "",
