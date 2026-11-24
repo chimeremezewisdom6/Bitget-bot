@@ -2,17 +2,17 @@
 
 - Session started UTC: 2026-11-23T11:29:36.710531+00:00
 - Session ended UTC: not recorded
-- Collector cycles: 13
+- Collector cycles: 14
 - Distinct symbols observed: 216
 - Current Bitget turnover-watchlist contracts: 11
-- Market observation rows: 2600
+- Market observation rows: 2800
 - Candidate signals eligible for entry evaluation: 533
 - Watch-only RSI conditions (no entry): 872
 - Two-snapshot order-book shadow outcomes: 3705
 - Legacy ticker-reference outcomes: 0
 - Outcomes unavailable: 0
 - Collection error records: 0
-- 60-minute same-colour candle checks: 1059
+- 60-minute same-colour candle checks: 1068
 - Checks meeting 40+ same-colour candles: 0
 
 ## Previous 24-hour trend-start candle-colour backtest
@@ -151,7 +151,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | 1000BONKUSDT | 5 | RED | 10 | No |
 | AAVEUSDT | 5 | GREEN | 29 | No |
 | ACEUSDT | 5 | GREEN | 24 | No |
-| ACUUSDT | 4 | GREEN | 9 | No |
+| ACUUSDT | 5 | GREEN | 9 | No |
 | ADAUSDT | 5 | GREEN | 25 | No |
 | AEONUSDT | 5 | RED | 9 | No |
 | AEROUSDT | 5 | GREEN | 18 | No |
@@ -166,10 +166,10 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | ARIAUSDT | 5 | GREEN | 32 | No |
 | ARKMUSDT | 5 | RED | 4 | No |
 | ARUSDT | 5 | GREEN | 16 | No |
-| ARXUSDT | 4 | GREEN | 28 | No |
+| ARXUSDT | 5 | GREEN | 28 | No |
 | ASTERUSDT | 5 | GREEN | 24 | No |
 | ATOMUSDT | 5 | RED | 24 | No |
-| ATUSDT | 4 | RED | 8 | No |
+| ATUSDT | 5 | RED | 8 | No |
 | AVAXUSDT | 5 | RED | 28 | No |
 | AXISUSDT | 5 | GREEN | 21 | No |
 | BABYUSDT | 5 | RED | 20 | No |
@@ -267,7 +267,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | LSKUSDT | 5 | GREEN | 23 | No |
 | LTCUSDT | 5 | RED | 30 | No |
 | LUNCUSDT | 5 | GREEN | 16 | No |
-| MAGICUSDT | 4 | GREEN | 13 | No |
+| MAGICUSDT | 5 | GREEN | 13 | No |
 | MAGMAUSDT | 5 | GREEN | 22 | No |
 | MARSCOINUSDT | 5 | GREEN | 14 | No |
 | MEGAUSDT | 5 | RED | 17 | No |
@@ -288,12 +288,12 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | NUUSDT | 5 | GREEN | 7 | No |
 | ONDOUSDT | 5 | RED | 27 | No |
 | ONEUSDT | 5 | GREEN | 26 | No |
-| ONGUSDT | 3 | GREEN | 33 | No |
+| ONGUSDT | 4 | GREEN | 33 | No |
 | OPGUSDT | 5 | RED | 6 | No |
 | OPUSDT | 5 | RED | 12 | No |
 | ORCAUSDT | 5 | GREEN | 10 | No |
 | ORDIUSDT | 5 | RED | 18 | No |
-| PBRUSDT | 4 | GREEN | 3 | No |
+| PBRUSDT | 5 | GREEN | 3 | No |
 | PENDLEUSDT | 5 | RED | 19 | No |
 | PENGUUSDT | 5 | GREEN | 24 | No |
 | PEOPLEUSDT | 5 | RED | 14 | No |
@@ -317,9 +317,9 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | RENDERUSDT | 5 | GREEN | 27 | No |
 | REUSDT | 5 | RED | 15 | No |
 | RIVERUSDT | 5 | GREEN | 15 | No |
-| RPLUSDT | 4 | GREEN | 29 | No |
+| RPLUSDT | 5 | GREEN | 29 | No |
 | RUNEUSDT | 5 | RED | 18 | No |
-| SAHARAUSDT | 4 | GREEN | 29 | No |
+| SAHARAUSDT | 5 | GREEN | 29 | No |
 | SANDUSDT | 5 | GREEN | 28 | No |
 | SAPIENUSDT | 5 | RED | 9 | No |
 | SEIUSDT | 5 | RED | 27 | No |
@@ -331,7 +331,7 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 | SOONUSDT | 5 | GREEN | 3 | No |
 | SPKUSDT | 5 | GREEN | 8 | No |
 | SPXUSDT | 5 | GREEN | 7 | No |
-| SQDUSDT | 4 | GREEN | 24 | No |
+| SQDUSDT | 5 | GREEN | 24 | No |
 | STRKUSDT | 5 | GREEN | 29 | No |
 | STXUSDT | 5 | RED | 15 | No |
 | SUIUSDT | 5 | RED | 29 | No |
@@ -369,10 +369,10 @@ Each eligible symbol is checked up to five separate times. Every check uses the 
 
 | Group | Watchlist candidates | Observation rows |
 |---|---:|---:|
-| Under $1m 24h futures turnover | 3 | 39 |
-| $1m–$10m 24h futures turnover | 3 | 39 |
-| $10m–$100m 24h futures turnover | 3 | 39 |
-| $100m+ 24h futures turnover | 2 | 26 |
+| Under $1m 24h futures turnover | 3 | 42 |
+| $1m–$10m 24h futures turnover | 3 | 42 |
+| $10m–$100m 24h futures turnover | 3 | 42 |
+| $100m+ 24h futures turnover | 2 | 28 |
 
 ## Profit-versus-loss summary (hypothetical book-walk outcomes)
 
