@@ -1,9 +1,9 @@
-"""Autonomous Gemini research/development agent for the Bitget research repository.
+"""Autonomous Pollinations research/development agent for the Bitget repository.
 
-Uses the Gemini Developer API free-tier model via GEMINI_API_KEY. It reads an
-explicit research-only allowlist, proposes full-file updates, runs tests, and
-rolls back proposed changes if validation fails. It never receives Bitget
-credentials and cannot edit trading/execution modules or GitHub workflows.
+Uses Pollinations OpenAI-compatible Responses API via POLLINATIONS_API_KEY.
+It reads an explicit research-only allowlist, proposes full-file updates, runs
+tests, and rolls back proposed changes if validation fails. It never receives
+Bitget credentials and cannot edit trading/execution modules or workflows.
 """
 import json
 import os
@@ -17,8 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPORT_DIR = ROOT / "reports" / "daily_research" / "autonomous_agent"
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
-API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+MODEL = os.getenv("POLLINATIONS_MODEL", "google/gemini-2.5-flash-lite:search")
+API_URL = "https://gen.pollinations.ai/v1/responses"
 MAX_FILE_CHARS = 18000
 MAX_TOTAL_CHARS = 65000
 
@@ -85,9 +85,9 @@ def collect_context():
 
 
 def call_model(context):
-    key = os.getenv("GEMINI_API_KEY")
+    key = os.getenv("POLLINATIONS_API_KEY")
     if not key:
-        raise RuntimeError("GEMINI_API_KEY GitHub Secret is missing.")
+        raise RuntimeError("POLLINATIONS_API_KEY GitHub Secret is missing.")
     today = datetime.now(timezone.utc).isoformat()
     instructions = f"""
 You are the autonomous research scientist and cautious research-code maintainer
@@ -97,10 +97,10 @@ Current UTC time: {today}.
 MISSION
 Find evidence for what causes crypto price movements: aggressive buy/sell flow,
 available liquidity and its withdrawal, liquidations, open-interest changes,
-turnover/participation, and price continuation. Use only repository evidence and public market data already collected by the
-project. This free-tier integration does not enable external web grounding.
-Never claim to have searched the web or invent sources. Distinguish measured
-repository observations, hypotheses and unknowns. Never fabricate a backtest,
+turnover/participation, and price continuation. Use the web_search tool to check current credible exchange, institutional,
+academic and market-structure sources. Prefer primary sources and cite direct
+URLs in reports. Distinguish measured repository observations, external
+published evidence, hypotheses and unknowns. Never fabricate a backtest,
 sample size, source, API result, or completed experiment.
 
 AUTONOMOUS WORK
@@ -137,20 +137,18 @@ Do not return diffs; content must be complete replacement text. Keep report
 specific and concise. Cite external claims with direct URLs and access date.
 """
     payload = {
-        "systemInstruction": {"parts": [{"text": instructions}]},
-        "contents": [{"role": "user", "parts": [{
-            "text": "Repository context follows. Analyse it and perform the research task.\\n" + context
-        }]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "maxOutputTokens": 10000,
-            "temperature": 0.2
-        }
+        "model": MODEL,
+        "instructions": instructions,
+        "input": "Repository context follows. Analyse it and perform the research task.\\n" + context,
+        "tools": [{"type": "web_search"}],
+        "max_output_tokens": 10000,
+        "store": false,
+        "text": {"format": {"type": "json_object"}}
     }
     req = urllib.request.Request(
-        API_URL.format(model=MODEL),
+        API_URL,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -159,17 +157,17 @@ specific and concise. Cite external claims with direct URLs and access date.
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1200]
         detail = detail.replace(key, "[REDACTED]")
-        raise RuntimeError(f"Gemini API HTTP {exc.code}: {detail}") from exc
-    parts = []
-    for candidate in result.get("candidates", []):
-        for part in candidate.get("content", {}).get("parts", []):
-            if isinstance(part.get("text"), str):
-                parts.append(part["text"])
-    text_out = "\\n".join(parts).strip()
+        raise RuntimeError(f"Pollinations API HTTP {exc.code}: {detail}") from exc
+    text_out = result.get("output_text")
     if not text_out:
-        feedback = result.get("promptFeedback", {})
-        raise RuntimeError("Gemini response contained no output text: " +
-                           json.dumps(feedback)[:800])
+        parts = []
+        for item in result.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") == "output_text":
+                    parts.append(content.get("text", ""))
+        text_out = "\\n".join(parts)
+    if not text_out:
+        raise RuntimeError("Pollinations response contained no output text.")
     return json.loads(text_out)
 
 
@@ -203,9 +201,9 @@ def rollback(before):
 
 
 def run_validation():
-    # Never expose the OpenAI API key to model-edited modules or test subprocesses.
+    # Never expose the Pollinations API key to model-edited modules or test subprocesses.
     safe_env = os.environ.copy()
-    safe_env.pop("GEMINI_API_KEY", None)
+    safe_env.pop("POLLINATIONS_API_KEY", None)
     subprocess.run([sys.executable, "-m", "compileall", "-q",
                     "daily_research.py", "movement_mechanics.py",
                     "fuel_attribution.py", "research_report.py", "trend_ignition.py"],
