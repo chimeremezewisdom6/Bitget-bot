@@ -1,232 +1,325 @@
-"""24h, 1m Bitget USDT-perpetual backtest for trends lasting at least 2 hours.
-Public market data only. No account access and no orders.
-"""
-import asyncio, json, math
+"""Authenticated, read-only Bitget research for gradual trends lasting 2+ hours."""
+import asyncio, base64, hashlib, hmac, json, math, os, statistics, time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 import aiohttp
 
-ROOT = Path(__file__).resolve().parent
-OUT = ROOT / "reports/daily_research"
-BITGET = "https://api.bitget.com"
-CATEGORY = "USDT-FUTURES"
-LIMIT = 200
-CONCURRENCY = 10
-MIN_DURATION = 120
+ROOT=Path(__file__).resolve().parent
+OUT=ROOT/"reports/daily_research"
+BITGET="https://api.bitget.com"
+CATEGORY="USDT-FUTURES"
+LIMIT=200
+DURATION=120
+MIN_TREND_PCT=4.0
+SPEED_MULTIPLE=4.0
 
-
-def num(x, default=0.0):
+def num(v, default=0.0):
     try:
-        v=float(x)
-        return v if math.isfinite(v) else default
-    except (TypeError, ValueError):
+        x=float(v)
+        return x if math.isfinite(x) else default
+    except (TypeError,ValueError):
         return default
 
+def credentials():
+    def first(*keys):
+        for key in keys:
+            value=os.getenv(key,"").strip()
+            if value: return value
+        return ""
+    return (first("BITGET_API_KEY","BITGET_KEY"),
+            first("BITGET_API_SECRET","BITGET_SECRET_KEY","BITGET_SECRET"),
+            first("BITGET_API_PASSPHRASE","BITGET_PASSPHRASE","BITGET_API_PASSWORD","BITGET_PASSWORD"))
 
-async def get(session, path, params=None):
-    last=None
+def signed_headers(path, params=None):
+    key,secret,phrase=credentials()
+    if not all((key,secret,phrase)):
+        raise RuntimeError("Bitget API credentials missing from GitHub Actions Secrets.")
+    query=urlencode(sorted((params or {}).items()))
+    ts=str(int(time.time()*1000))
+    request_path=path+(("?"+query) if query else "")
+    message=ts+"GET"+request_path
+    sign=base64.b64encode(hmac.new(secret.encode(),message.encode(),hashlib.sha256).digest()).decode()
+    return {"ACCESS-KEY":key,"ACCESS-SIGN":sign,"ACCESS-TIMESTAMP":ts,
+            "ACCESS-PASSPHRASE":phrase,"locale":"en-US","Content-Type":"application/json"},query
+
+async def get(session,path,params=None,auth=False):
+    headers=None
+    if auth:
+        headers,query=signed_headers(path,params)
+        url=BITGET+path+(("?"+query) if query else "")
+        params=None
+    else: url=BITGET+path
+    error=None
     for attempt in range(4):
         try:
-            async with session.get(BITGET+path, params=params, timeout=25) as r:
-                if r.status == 429 or r.status >= 500:
-                    raise RuntimeError(f"HTTP {r.status}")
-                r.raise_for_status()
-                data=await r.json()
-                if data.get("code") != "00000":
-                    raise RuntimeError(f"Bitget {data.get('code')}: {data.get('msg')}")
-                return data.get("data", [])
-        except Exception as e:
-            last=e
-            if attempt<3: await asyncio.sleep(0.8*(2**attempt))
-    raise RuntimeError(f"{path}: {last}")
-
+            async with session.get(url,params=params,headers=headers,timeout=30) as response:
+                if response.status==429 or response.status>=500: raise RuntimeError("Bitget HTTP "+str(response.status))
+                response.raise_for_status()
+                payload=await response.json()
+                if payload.get("code")!="00000":
+                    raise RuntimeError("Bitget "+str(payload.get("code"))+": "+str(payload.get("msg")))
+                return payload.get("data",[])
+        except Exception as exc:
+            error=exc
+            if attempt<3: await asyncio.sleep(1*(2**attempt))
+    raise RuntimeError(str(error))
 
 def normalize(raw):
     by={}
-    for r in raw:
+    for r in raw or []:
         try:
             if len(r)>=7:
                 ts=int(r[0])
                 by[ts]={"ts":ts,"o":num(r[1]),"h":num(r[2]),"l":num(r[3]),
-                        "c":num(r[4]),"v":num(r[5]),"q":num(r[6])}
-        except (TypeError,ValueError,IndexError):
-            pass
+                        "c":num(r[4]),"base_volume":num(r[5]),"quote_volume":num(r[6])}
+        except (ValueError,TypeError,IndexError): pass
     return [by[k] for k in sorted(by)]
 
+def directional_pct(start,end,side):
+    if start<=0 or end<=0: return 0.0
+    return ((end/start)-1)*100*(1 if side=="LONG" else -1)
 
-def backtest(symbol, rows, start_ms, end_ms):
-    # Retain only fully closed, gap-free 1m candles inside the requested window.
-    rows=[r for r in rows if start_ms <= r["ts"] and r["ts"]+60000 <= end_ms]
+def analyze(symbol,rows,start_ms,end_ms):
+    rows=[r for r in rows if start_ms<=r["ts"] and r["ts"]+60000<=end_ms]
     events=[]
-    last_start=-120
-    for i in range(60, len(rows)-MIN_DURATION):
-        if i-last_start < MIN_DURATION: continue
-        window=rows[i-60:i+MIN_DURATION]
-        if len(window)!=60+MIN_DURATION: continue
-        if any(window[j]["ts"]-window[j-1]["ts"]!=60000 for j in range(1,len(window))): continue
+    last_i=-DURATION
+    for i in range(60,len(rows)-DURATION+1):
+        if i-last_i<DURATION: continue
+        sample=rows[i-60:i+DURATION]
+        if len(sample)!=180 or any(sample[j]["ts"]-sample[j-1]["ts"]!=60000 for j in range(1,180)): continue
         prior=rows[i-60:i]
-        ceiling=max(x["h"] for x in prior)
-        floor=min(x["l"] for x in prior)
-        start=rows[i]
-        if start["c"]>ceiling:
-            side="LONG"; boundary=ceiling
-        elif start["c"]<floor:
-            side="SHORT"; boundary=floor
-        else:
-            continue
-        future=rows[i:i+MIN_DURATION]
-        # A breakout remains valid while closes hold outside the broken 60m range.
-        invalid=None
-        for k,x in enumerate(future):
-            if (side=="LONG" and x["c"]<=boundary) or (side=="SHORT" and x["c"]>=boundary):
-                invalid=k
-                break
-        duration=MIN_DURATION if invalid is None else invalid
-        if duration<MIN_DURATION:
-            continue
-        start_price=start["c"]
-        end_price=future[-1]["c"]
-        if side=="LONG" and start_price:
-            ret=(end_price/start_price-1)*100
-        elif side=="SHORT" and end_price:
-            ret=(start_price/end_price-1)*100
-        else:
-            ret=0.0
-        aligned=sum(x["c"]>x["o"] if side=="LONG" else x["c"]<x["o"] for x in future)
-        first15=future[:15]
-        aligned15=sum(x["c"]>x["o"] if side=="LONG" else x["c"]<x["o"] for x in first15)
-        turnover15=sum(x["q"] for x in first15)/15
-        baseline=sum(x["q"] for x in prior[-20:])/20
-        favorable=max((((x["h"]/start_price)-1)*100 if side=="LONG" else ((start_price/x["l"])-1)*100)
-                      for x in future if (x["l"]>0 if side=="SHORT" else x["h"]>0))
-        adverse=min((((x["l"]/start_price)-1)*100 if side=="LONG" else ((start_price/x["h"])-1)*100)
-                    for x in future if (x["h"]>0 if side=="SHORT" else x["l"]>0))
+        high=max(x["h"] for x in prior); low=min(x["l"] for x in prior)
+        first=rows[i]
+        if first["c"]>high: side,boundary="LONG",high
+        elif first["c"]<low: side,boundary="SHORT",low
+        else: continue
+        future=rows[i:i+DURATION]
+        if any((x["c"]<=boundary if side=="LONG" else x["c"]>=boundary) for x in future): continue
+        total=directional_pct(first["c"],future[-1]["c"],side)
+        if total<MIN_TREND_PCT: continue
+        # Check every rolling 10m interval, not only the opening 10m.
+        moves=[directional_pct(future[j]["o"],future[j+9]["c"],side) for j in range(DURATION-9)]
+        max10=max([0.0]+moves)
+        ratio=(total/max10) if max10>0 else None
+        if ratio is None or ratio<SPEED_MULTIPLE: continue
+        first10=directional_pct(future[0]["o"],future[9]["c"],side)
+        match=lambda x: x["c"]>x["o"] if side=="LONG" else x["c"]<x["o"]
+        aligned15=sum(match(x) for x in future[:15])
+        aligned30=sum(match(x) for x in future[:30])
+        aligned120=sum(match(x) for x in future)
+        baseline=sum(x["quote_volume"] for x in prior[-20:])/20
+        turn10=sum(x["quote_volume"] for x in future[:10])/10
+        turn30=sum(x["quote_volume"] for x in future[:30])/30
+        fav=[]; adverse=[]
+        for x in future:
+            if side=="LONG":
+                fav.append((x["h"]/first["c"]-1)*100); adverse.append((x["l"]/first["c"]-1)*100)
+            elif x["l"]>0 and x["h"]>0:
+                fav.append((first["c"]/x["l"]-1)*100); adverse.append((first["c"]/x["h"]-1)*100)
         events.append({
             "symbol":symbol,"direction":side,
-            "start_utc":datetime.fromtimestamp(start["ts"]/1000,timezone.utc).isoformat(),
-            "start_timestamp_ms":start["ts"],"start_close":start_price,
-            "prior_60m_break_level":boundary,"duration_minutes":duration,
-            "end_120m_close":end_price,"direction_adjusted_120m_return_pct":round(ret,4),
-            "direction_matching_candles_120m":aligned,
-            "direction_matching_pct_120m":round(aligned/120*100,2),
+            "start_utc":datetime.fromtimestamp(first["ts"]/1000,timezone.utc).isoformat(),
+            "start_timestamp_ms":first["ts"],"start_close":first["c"],"breakout_level":boundary,
+            "duration_minutes":120,"end_120m_close":future[-1]["c"],
+            "direction_adjusted_120m_return_pct":round(total,5),
+            "first_10m_directional_move_pct":round(first10,5),
+            "largest_rolling_10m_directional_move_pct":round(max10,5),
+            "two_hour_to_fastest_10m_ratio":round(ratio,4),
             "direction_matching_candles_first15m":aligned15,
-            "direction_matching_pct_first15m":round(aligned15/15*100,2),
-            "first15m_quote_turnover_vs_prior20m":round(turnover15/baseline,3) if baseline else None,
-            "max_favorable_excursion_pct":round(favorable,4),
-            "max_adverse_excursion_pct":round(adverse,4),
-            "definition":"1m close breaks previous 60m high/low; no 1m close returns inside that level for 120 full minutes"
+            "direction_matching_candles_first30m":aligned30,
+            "direction_matching_candles_120m":aligned120,
+            "direction_matching_pct_120m":round(aligned120/120*100,2),
+            "first10m_quote_turnover_vs_prior20m":round(turn10/baseline,4) if baseline else None,
+            "first30m_quote_turnover_vs_prior20m":round(turn30/baseline,4) if baseline else None,
+            "max_favorable_excursion_pct":round(max(fav),5) if fav else None,
+            "max_adverse_excursion_pct":round(min(adverse),5) if adverse else None,
+            "historical_open_interest_change_pct":None,
+            "definition":"120m breakout hold, >=4% directional return, and >=4x the largest same-direction rolling 10m return"
         })
-        last_start=i
+        last_i=i
     return events
 
+def oi_points(payload):
+    data=payload.get("list",[]) if isinstance(payload,dict) else (payload if isinstance(payload,list) else [])
+    result=[]
+    for x in data or []:
+        try:
+            ts=int(x.get("timestamp",x.get("ts",0)))
+            val=num(x.get("openInterestValue")) or num(x.get("openInterest"))
+            if ts and val>0: result.append((ts,val))
+        except (AttributeError,TypeError,ValueError): pass
+    return sorted(result)
 
-async def run():
+def oi_change(series,start,end):
+    if len(series)<2: return None
+    a=min(series,key=lambda x:abs(x[0]-start)); b=min(series,key=lambda x:abs(x[0]-end))
+    if abs(a[0]-start)>600000 or abs(b[0]-end)>600000 or b[0]<=a[0]: return None
+    return round((b[1]/a[1]-1)*100,5)
+
+async def enrich(session,symbol,events,sem):
+    async with sem:
+        out={"symbol":symbol,"oi_points_returned":0,"current_funding_rate":None,
+             "current_orderbook_imbalance_pct":None,"notes":[]}
+        try:
+            raw=await get(session,"/api/v3/market/open-interest-history",{"symbol":symbol,"period":"5m"})
+            series=oi_points(raw); out["oi_points_returned"]=len(series)
+            changes=[]
+            for e in events:
+                change=oi_change(series,e["start_timestamp_ms"],e["start_timestamp_ms"]+120*60000)
+                e["historical_open_interest_change_pct"]=change
+                if change is not None: changes.append(change)
+            out["historical_oi_changes_found"]=len(changes)
+            if not changes: out["notes"].append("OI endpoint did not return observations near both event boundaries; historical OI left blank.")
+        except Exception as exc:
+            out["notes"].append("OI history unavailable: "+str(exc)[:120])
+        try:
+            fund=await get(session,"/api/v3/market/current-fund-rate",{"category":CATEGORY,"symbol":symbol})
+            if isinstance(fund,list) and fund: out["current_funding_rate"]=num(fund[0].get("fundingRate"),None)
+            elif isinstance(fund,dict): out["current_funding_rate"]=num(fund.get("fundingRate"),None)
+            out["notes"].append("Funding is a current snapshot, not historical event-time funding.")
+        except Exception as exc: out["notes"].append("Current funding unavailable: "+str(exc)[:100])
+        try:
+            book=await get(session,"/api/v3/market/orderbook",{"category":CATEGORY,"symbol":symbol,"limit":"50"})
+            if isinstance(book,list) and book: book=book[0]
+            if isinstance(book,dict):
+                bid=sum(num(x[1]) for x in book.get("bids",[]) if len(x)>1)
+                ask=sum(num(x[1]) for x in book.get("asks",[]) if len(x)>1)
+                if bid+ask: out["current_orderbook_imbalance_pct"]=round((bid-ask)/(bid+ask)*100,3)
+            out["notes"].append("Order book is a current snapshot, not historical event-time depth.")
+        except Exception as exc: out["notes"].append("Current order book unavailable: "+str(exc)[:100])
+        return out
+
+async def authenticate(session):
+    # Only signed account-info and fee reads. No balances, positions, or order endpoints.
+    info=await get(session,"/api/v3/account/info",auth=True)
+    permission=info.get("permType","unknown") if isinstance(info,dict) else "unknown"
+    try:
+        fees=await get(session,"/api/v3/account/all-fee-rate",{"category":CATEGORY},auth=True)
+        fee_status="AVAILABLE" if fees else "EMPTY_RESPONSE"
+    except Exception as exc: fee_status="UNAVAILABLE: "+str(exc)[:150]
+    return {"authenticated":True,"permission_type":permission,"fee_schedule_status":fee_status,
+            "scope":"Signed account-info and fee-rate reads only; no balances, positions, orders, or withdrawals."}
+
+async def main():
     OUT.mkdir(parents=True,exist_ok=True)
     end_ms=(int(datetime.now(timezone.utc).timestamp()*1000)//60000)*60000
-    start_ms=end_ms-24*60*60000
-    mid_ms=start_ms+12*60*60000
-    timeout=aiohttp.ClientTimeout(total=40,connect=12)
-    headers={"User-Agent":"Bitget-2h-Trend-Research/1.0"}
-    async with aiohttp.ClientSession(timeout=timeout,headers=headers) as s:
+    start_ms=end_ms-24*60*60000; midpoint=start_ms+12*60*60000
+    timeout=aiohttp.ClientTimeout(total=50,connect=15)
+    async with aiohttp.ClientSession(timeout=timeout,headers={"User-Agent":"Bitget-Genuine-Trend-Research/2.0"}) as s:
+        auth=await authenticate(s)
         instruments,tickers=await asyncio.gather(
             get(s,"/api/v3/market/instruments",{"category":CATEGORY}),
             get(s,"/api/v3/market/tickers",{"category":CATEGORY}))
-        live={x.get("symbol") for x in instruments if x.get("status")=="online"
-              and (x.get("type")=="perpetual" or x.get("instrumentType")=="perpetual")
-              and x.get("symbolType","crypto")=="crypto"}
-        universe=sorted([x for x in tickers if x.get("symbol") in live],
+        online={x.get("symbol") for x in instruments if x.get("status")=="online"
+                and (x.get("type")=="perpetual" or x.get("instrumentType")=="perpetual")
+                and x.get("symbolType","crypto")=="crypto"}
+        universe=sorted([x for x in tickers if x.get("symbol") in online],
                         key=lambda x:num(x.get("turnover24h")),reverse=True)[:LIMIT]
-        sem=asyncio.Semaphore(CONCURRENCY)
-        errors=[]
-        async def one(t):
+        sem=asyncio.Semaphore(6)
+        async def fetch_one(t):
             symbol=t["symbol"]
             async with sem:
+                async def page(a,b):
+                    return await get(s,"/api/v3/market/candles",{"category":CATEGORY,"symbol":symbol,
+                        "interval":"1m","startTime":str(a),"endTime":str(b),"limit":"1000"})
                 try:
-                    async def page(a,b):
-                        return await get(s,"/api/v3/market/candles",{
-                            "category":CATEGORY,"symbol":symbol,"interval":"1m",
-                            "startTime":str(a),"endTime":str(b),"limit":"1000"})
-                    a,b=await asyncio.gather(page(start_ms,mid_ms),page(mid_ms,end_ms))
+                    a,b=await asyncio.gather(page(start_ms,midpoint),page(midpoint,end_ms))
                     rows=normalize(a+b)
-                    if len(rows)<120:
-                        raise RuntimeError(f"only {len(rows)} candles returned")
+                    if len(rows)<120: raise RuntimeError("Only "+str(len(rows))+" candles returned")
                     return symbol,num(t.get("turnover24h")),rows,None
-                except Exception as e:
-                    return symbol,num(t.get("turnover24h")),[],str(e)[:250]
-        fetched=await asyncio.gather(*(one(t) for t in universe))
-    all_events=[]
-    coverage=[]
-    for symbol,turnover,rows,error in fetched:
-        if error: errors.append({"symbol":symbol,"error":error})
-        ev=backtest(symbol,rows,start_ms,end_ms) if rows else []
-        all_events.extend(ev)
-        coverage.append({"symbol":symbol,"turnover24h_usdt":turnover,
-                         "closed_1m_candles":len(rows),"qualifying_2h_trends":len(ev),
-                         "long_trends":sum(x["direction"]=="LONG" for x in ev),
-                         "short_trends":sum(x["direction"]=="SHORT" for x in ev),
-                         "error":error})
-    by_symbol=[]
-    for c in coverage:
-        ev=[x for x in all_events if x["symbol"]==c["symbol"]]
-        c["positive_120m_follow_through"]=sum(x["direction_adjusted_120m_return_pct"]>0 for x in ev)
-        c["avg_120m_direction_adjusted_return_pct"]=round(sum(x["direction_adjusted_120m_return_pct"] for x in ev)/len(ev),4) if ev else None
-        c["avg_first15m_direction_matching_pct"]=round(sum(x["direction_matching_pct_first15m"] for x in ev)/len(ev),2) if ev else None
-        by_symbol.append(c)
-    successful=[x for x in coverage if not x["error"]]
-    returns=[x["direction_adjusted_120m_return_pct"] for x in all_events]
+                except Exception as exc: return symbol,num(t.get("turnover24h")),[],str(exc)[:200]
+        fetched=await asyncio.gather(*(fetch_one(t) for t in universe))
+        events=[]; coverage=[]; errors=[]
+        for symbol,turnover,rows,error in fetched:
+            found=analyze(symbol,rows,start_ms,end_ms) if rows else []
+            events.extend(found)
+            if error: errors.append({"symbol":symbol,"error":error})
+            coverage.append({"symbol":symbol,"turnover24h_usdt":turnover,"closed_1m_candles":len(rows),
+                "qualifying_trends":len(found),"long":sum(e["direction"]=="LONG" for e in found),
+                "short":sum(e["direction"]=="SHORT" for e in found),"error":error})
+        grouped={}
+        for e in events: grouped.setdefault(e["symbol"],[]).append(e)
+        enrich_sem=asyncio.Semaphore(3)
+        enrichment=await asyncio.gather(*(enrich(s,symbol,ev,enrich_sem) for symbol,ev in grouped.items()))
+        enrich_map={x["symbol"]:x for x in enrichment}
+        for e in events:
+            extra=enrich_map.get(e["symbol"],{})
+            e["current_funding_rate"]=extra.get("current_funding_rate")
+            e["current_orderbook_imbalance_pct"]=extra.get("current_orderbook_imbalance_pct")
+            e["market_context_notes"]=extra.get("notes",[])
+
+    returns=[e["direction_adjusted_120m_return_pct"] for e in events]
     lines=[
-      "# Bitget 24-hour 1-minute backtest: trends lasting 2+ hours","",
-      f"- Run time UTC: {datetime.now(timezone.utc).isoformat()}",
-      f"- Window UTC: {datetime.fromtimestamp(start_ms/1000,timezone.utc).isoformat()} to {datetime.fromtimestamp(end_ms/1000,timezone.utc).isoformat()}",
-      f"- Universe: top {len(universe)} online crypto USDT perpetuals by Bitget 24h turnover",
-      f"- Candle interval: 1 minute; incomplete candle excluded",
-      f"- Coverage: {len(successful)}/{len(universe)} symbols fetched successfully; {sum(x['closed_1m_candles'] for x in coverage):,} closed candles",
-      f"- Qualifying sustained trends: {len(all_events)} (LONG {sum(x['direction']=='LONG' for x in all_events)}, SHORT {sum(x['direction']=='SHORT' for x in all_events)})",
-      f"- Fetch errors: {len(errors)}",
+      "# Bitget authenticated 24-hour genuine-trend backtest","",
+      "- Generated UTC: "+datetime.now(timezone.utc).isoformat(),
+      "- Window UTC: "+datetime.fromtimestamp(start_ms/1000,timezone.utc).isoformat()+" to "+datetime.fromtimestamp(end_ms/1000,timezone.utc).isoformat(),
+      "- Bitget API key authentication: SUCCESS",
+      "- Key permission type: "+str(auth["permission_type"]),
+      "- Account fee schedule: "+str(auth["fee_schedule_status"]),
+      "- Access scope: "+auth["scope"],
+      "- Universe: top "+str(len(universe))+" online crypto USDT perpetuals by 24h turnover.",
+      "- Coverage: "+str(sum(not x["error"] for x in coverage))+"/"+str(len(universe))+" symbols; "+format(sum(x["closed_1m_candles"] for x in coverage),",")+" closed 1m candles; "+str(len(errors))+" fetch errors.",
+      "- Qualifying gradual trends: "+str(len(events))+" (LONG "+str(sum(e["direction"]=="LONG" for e in events))+", SHORT "+str(sum(e["direction"]=="SHORT" for e in events))+").",
       "",
-      "## How a 2-hour trend is defined",
-      "A start is a fully closed 1m candle closing above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT). It qualifies only if every subsequent closed 1m candle for 120 minutes remains outside that broken level. This deliberately strict rule avoids calling a brief spike a 2-hour trend. It is a reproducible breakout/hold proxy, not a universal definition of trend.",
+      "## Exact trend rules",
+      "1. A closed 1m candle closes above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT).",
+      "2. Every subsequent closed 1m candle remains outside that breakout level for 120 complete minutes.",
+      "3. Direction-adjusted net movement from breakout close to the 120th-minute close is at least 4%.",
+      "4. The 120m directional move is at least 4 times the largest same-direction move in ANY rolling 10m window during the 120 minutes. Each 10m window uses its first candle open and tenth candle close.",
+      "5. LONG and SHORT are evaluated separately; gaps and incomplete candles invalidate a sample.",
       "",
       "## Aggregate findings",
-      f"- Positive direction-adjusted return at 120m: {sum(x>0 for x in returns)}/{len(returns)} ({(sum(x>0 for x in returns)/len(returns)*100):.1f}%)" if returns else "- No qualifying 2-hour trends found.",
-      f"- Mean direction-adjusted 120m return: {sum(returns)/len(returns):.4f}%" if returns else "",
-      f"- Median direction-adjusted 120m return: {sorted(returns)[len(returns)//2]:.4f}%" if returns else "",
-      f"- Mean matching candle share in first 15m: {sum(x['direction_matching_pct_first15m'] for x in all_events)/len(all_events):.1f}%" if all_events else "",
-      f"- Mean matching candle share over 120m: {sum(x['direction_matching_pct_120m'] for x in all_events)/len(all_events):.1f}%" if all_events else "",
+      ("- Mean qualifying 2h directional return: %.4f%%" % statistics.mean(returns)) if returns else "- No events passed all rules.",
+      ("- Median qualifying 2h directional return: %.4f%%" % statistics.median(returns)) if returns else "",
+      ("- Mean 2h-to-fastest-10m ratio: %.3fx" % statistics.mean([e["two_hour_to_fastest_10m_ratio"] for e in events])) if events else "",
       "",
-      "## Per-coin coverage and results",
-      "| Symbol | 1m candles | 2h trends | LONG | SHORT | Positive 120m | Avg 120m return % | First 15m matching % | Status |",
-      "|---|---:|---:|---:|---:|---:|---:|---:|---|"
+      "## What the data says fuels the move",
+      "- Persistence: 120m breakout-level hold, direction-matching candle counts, and maximum adverse/favorable excursion.",
+      "- Participation: first-10m and first-30m quote-turnover acceleration versus the 20m before the breakout.",
+      "- Historical open interest: reported only when Bitget's returned 5m observations cover both event boundaries; otherwise left blank.",
+      "- Funding and order book: current snapshots for qualifying symbols only. They are not falsely described as historical causes.",
+      "- Aggressive buyer/seller dominance: not inferred from OHLCV candles; no unsupported taker-side conclusion.",
+      "",
+      "## Qualifying events",
+      "| Symbol | Side | Start UTC | 2h move % | First 10m % | Fastest 10m % | Ratio | 15m aligned | 120m aligned | First 10m turnover x | Historical OI % |",
+      "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     ]
-    for c in sorted(by_symbol,key=lambda x:(x["qualifying_2h_trends"],x["turnover24h_usdt"]),reverse=True):
-        lines.append(f"| {c['symbol']} | {c['closed_1m_candles']} | {c['qualifying_2h_trends']} | {c['long_trends']} | {c['short_trends']} | {c['positive_120m_follow_through']} | {c['avg_120m_direction_adjusted_return_pct']} | {c['avg_first15m_direction_matching_pct']} | {'ERROR: '+c['error'] if c['error'] else 'OK'} |")
-    lines += ["","## Every qualifying trend event",
-      "| Symbol | Direction | Start UTC | 120m return % | Matching candles 15m | Matching candles 120m | Volume x | Max favorable % | Max adverse % |",
-      "|---|---|---|---:|---:|---:|---:|---:|---:|"]
-    for e in sorted(all_events,key=lambda x:x["direction_adjusted_120m_return_pct"],reverse=True):
-        lines.append(f"| {e['symbol']} | {e['direction']} | {e['start_utc']} | {e['direction_adjusted_120m_return_pct']} | {e['direction_matching_candles_first15m']}/15 | {e['direction_matching_candles_120m']}/120 | {e['first15m_quote_turnover_vs_prior20m']} | {e['max_favorable_excursion_pct']} | {e['max_adverse_excursion_pct']} |")
-    lines += ["","## Data quality and caveats",
-      "- Public Bitget candle data only; no private account access and no orders.",
-      "- The requested 24h window is freshly fetched for this run; it does not depend on how long the existing scanner session has been collecting.",
-      "- The top 200 universe is selected at run time by reported 24h turnover, so it is a defined and reproducible liquid-activity sample, not every listed contract.",
-      "- A strict 60m breakout plus 120m hold rule can miss trends that start without a range breakout, or trends that briefly retest the breakout level.",
-      "- Returns are raw direction-adjusted price changes, before fees, spread, slippage and funding. They are not a profitable strategy claim.",
-      "- First 15m candle alignment is descriptive only; it must be compared with continuation and adverse excursion, not used alone.",
-      ""]
-    report="\n".join(x for x in lines if x is not None)+"\n"
-    (OUT/"bitget_24h_2h_trend_backtest.md").write_text(report,encoding="utf-8")
-    (OUT/"bitget_24h_2h_trend_events.jsonl").write_text("".join(json.dumps(x,ensure_ascii=False)+"\n" for x in all_events),encoding="utf-8")
+    for e in sorted(events,key=lambda x:x["direction_adjusted_120m_return_pct"],reverse=True):
+        lines.append("| %s | %s | %s | %.4f | %.4f | %.4f | %.2fx | %s/15 | %s/120 | %s | %s |" % (
+            e["symbol"],e["direction"],e["start_utc"],e["direction_adjusted_120m_return_pct"],
+            e["first_10m_directional_move_pct"],e["largest_rolling_10m_directional_move_pct"],
+            e["two_hour_to_fastest_10m_ratio"],e["direction_matching_candles_first15m"],
+            e["direction_matching_candles_120m"],e["first10m_quote_turnover_vs_prior20m"],
+            e["historical_open_interest_change_pct"]))
+    lines += ["","## Per-coin coverage","| Symbol | Candles | Trends | LONG | SHORT | Status |",
+              "|---|---:|---:|---:|---:|---|"]
+    for c in sorted(coverage,key=lambda x:x["qualifying_trends"],reverse=True):
+        lines.append("| %s | %s | %s | %s | %s | %s |" % (
+            c["symbol"],c["closed_1m_candles"],c["qualifying_trends"],c["long"],c["short"],
+            ("ERROR: "+c["error"]) if c["error"] else "OK"))
+    lines += ["","## Limitations",
+      "- Historical research only; not current entry signals or a profitability claim.",
+      "- Breakout/hold is a defined proxy and can miss trends without a 60m range break or with a brief retest.",
+      "- The four-times filter is deliberately strict and checks all rolling 10m windows.",
+      "- Historical OI, funding, order-book depth and taker-side history may not cover past events. Missing evidence is not fabricated.",
+      "- Returns exclude fees, spread, slippage, funding payments and execution latency. No orders were placed.",
+      "- Top 200 means the highest 24h-turnover online crypto USDT perpetuals at test time.",""]
+    (OUT/"bitget_24h_2h_trend_backtest.md").write_text("\n".join(lines),encoding="utf-8")
+    (OUT/"bitget_24h_2h_trend_events.jsonl").write_text("".join(json.dumps(e)+"\n" for e in events),encoding="utf-8")
     (OUT/"bitget_24h_2h_trend_coin_summary.json").write_text(json.dumps({
-      "generated_at_utc":datetime.now(timezone.utc).isoformat(),"window_start_ms":start_ms,
-      "window_end_ms":end_ms,"symbols_requested":len(universe),"symbols_successful":len(successful),
-      "symbols_failed":len(errors),"events":len(all_events),"coverage":coverage,"errors":errors
-    },indent=2)+"\n",encoding="utf-8")
-    print(json.dumps({"report":"reports/daily_research/bitget_24h_2h_trend_backtest.md",
-      "symbols_requested":len(universe),"symbols_successful":len(successful),
-      "symbols_failed":len(errors),"closed_1m_candles":sum(x["closed_1m_candles"] for x in coverage),
-      "qualifying_2h_trends":len(all_events),"long":sum(x["direction"]=="LONG" for x in all_events),
-      "short":sum(x["direction"]=="SHORT" for x in all_events)},indent=2))
-
+        "generated_at_utc":datetime.now(timezone.utc).isoformat(),"window_start_ms":start_ms,"window_end_ms":end_ms,
+        "authentication":auth,"symbols_requested":len(universe),"symbols_successful":sum(not x["error"] for x in coverage),
+        "symbols_failed":len(errors),"closed_1m_candles":sum(x["closed_1m_candles"] for x in coverage),
+        "qualifying_trends":len(events),"long":sum(e["direction"]=="LONG" for e in events),
+        "short":sum(e["direction"]=="SHORT" for e in events),"coverage":coverage,"errors":errors,
+        "enrichment":enrichment},indent=2)+"\n",encoding="utf-8")
+    print(json.dumps({"authenticated":True,"permission_type":auth["permission_type"],
+        "symbols_requested":len(universe),"symbols_successful":sum(not x["error"] for x in coverage),
+        "symbols_failed":len(errors),"closed_1m_candles":sum(x["closed_1m_candles"] for x in coverage),
+        "qualifying_trends":len(events),"long":sum(e["direction"]=="LONG" for e in events),
+        "short":sum(e["direction"]=="SHORT" for e in events),
+        "report":"reports/daily_research/bitget_24h_2h_trend_backtest.md"},indent=2))
 
 if __name__=="__main__":
-    asyncio.run(run())
+    asyncio.run(main())
