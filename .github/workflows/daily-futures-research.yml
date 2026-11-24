@@ -51,6 +51,9 @@ jobs:
         run: |
           echo "Scanner action: $SCANNER_ACTION"
           python main.py "$SCANNER_ACTION"
+      - name: Run fresh 24-hour two-hour trend backtest
+        if: github.event_name == 'push' && contains(github.event.head_commit.message, 'Launch Bitget 2h backtest')
+        run: python trend_2h_backtest.py
       - name: Verify scanner heartbeat
         if: always() && (github.event_name == 'schedule' || github.event_name == 'push' || inputs.action == 'ping' || inputs.action == 'collect' || inputs.action == 'start')
         run: |
