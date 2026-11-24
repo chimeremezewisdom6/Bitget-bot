@@ -45,6 +45,8 @@ When you return, open the latest report and status snapshot below, or simply ask
 - Online Bitget USDT perpetual contracts, instrument metadata and 24-hour futures turnover.
 - Latest/mark/index prices, 24-hour change, funding rate and open interest.
 - One-minute candles, 100-level visible order books, spread and depth within 0.5% of mid.
+- Per-cycle trend-ignition radar for every scanned coin: 5/10/15/20/30/60-minute candle colour and price movement, candle-body/structure checks, volume acceleration, and Bitget 5-minute historical open-interest changes.
+- Ranked LONG/SHORT early-pressure candidates in `reports/daily_research/daily_research_summary.md` and raw per-cycle evidence in `trend_ignition.jsonl`.
 - Recent public Bitget fills, buy/sell volume and order-book timestamps.
 - Account-specific taker fees from the signed read-only fee endpoint when available.
 - Rule-based LONG/SHORT research hypotheses and hypothetical $100/$500/$1,000 order-book entries.
@@ -76,6 +78,7 @@ GitHub's five-minute schedule is best-effort; runs may be delayed or skipped. Ch
 ## Project files
 
 - `daily_research.py` — read-only Bitget collector and signed account-fee lookup.
+- `trend_ignition.py` — transparent candle/volume/open-interest trend-development scoring.
 - `cap_watchlist.py` — Bitget-only futures-turnover activity watchlist.
 - `shadow_execution.py` — pure order-book fill, slippage and fee calculations.
 - `research_report.py` — profit/loss and evidence summaries.
@@ -90,6 +93,6 @@ Python 3.11 or newer:
 
 ```bash
 python -m pip install -r requirements.txt
-python -m py_compile daily_research.py shadow_execution.py research_report.py cap_watchlist.py
+python -m py_compile daily_research.py shadow_execution.py research_report.py cap_watchlist.py trend_ignition.py
 python -m unittest discover -s tests -v
 ```
