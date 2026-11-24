@@ -1,4 +1,7 @@
-"""14-day Bitget USDT perpetual trend research. Read-only; no order endpoints."""
+"""14-day Bitget USDT perpetual trend research. Read-only; no order endpoints.
+
+Fresh reruns are triggered by the dedicated 14-day GitHub Actions workflow.
+"""
 import asyncio,base64,hashlib,hmac,json,math,os,statistics,time
 from collections import Counter,defaultdict
 from datetime import datetime,timezone
