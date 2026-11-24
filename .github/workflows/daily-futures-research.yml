@@ -18,6 +18,7 @@ on:
       - "daily_research.py"
       - "cap_watchlist.py"
       - "research_report.py"
+      - "movement_mechanics.py"
       - "shadow_execution.py"
       - ".github/workflows/daily-futures-research.yml"
 
