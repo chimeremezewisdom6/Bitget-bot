@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at_utc": "2026-11-24T05:54:14.716943+00:00",
+  "updated_at_utc": "2026-11-24T05:57:26.204151+00:00",
   "mode": "BITGET_ONLY_READ_ONLY",
   "data_source": "Bitget USDT-FUTURES",
   "trading_enabled": false,
@@ -8,21 +8,21 @@
     "active": true,
     "started_at_utc": "2026-11-23T11:29:36.710531+00:00",
     "ends_at_utc": "2026-11-24T11:29:36.710522+00:00",
-    "last_collection_utc": "2026-11-24T05:54:14.451488+00:00",
-    "cycles": 11,
+    "last_collection_utc": "2026-11-24T05:57:25.127409+00:00",
+    "cycles": 12,
     "symbols_last_cycle": 200,
     "bitget_auth_status": "KEY_PERMISSION_readonly"
   },
   "coverage": {
     "distinct_symbols_observed": 216,
-    "market_observation_rows": 2200,
-    "one_minute_candle_records": 173599,
+    "market_observation_rows": 2400,
+    "one_minute_candle_records": 187012,
     "long_trend_starts": 1513,
     "short_trend_starts": 1839,
     "early_window_trend_events": 3276
   },
   "candle_streak_experiment": {
-    "checks": 1039,
+    "checks": 1050,
     "qualified_40_plus": 0
   },
   "shadow_execution": {
