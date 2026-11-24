@@ -38,7 +38,7 @@ jobs:
           fi
       - name: Run autonomous Gemini research and code review
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.1-flash-lite' }}
         run: python autonomous_research_agent.py
       - name: Commit validated agent work
@@ -52,6 +52,6 @@ jobs:
             echo "No agent changes to commit."
             exit 0
           fi
-          git commit -m "Autonomous ChatGPT research update"
+          git commit -m "Autonomous Gemini research update"
           git remote set-url origin "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
           git push origin HEAD:main
