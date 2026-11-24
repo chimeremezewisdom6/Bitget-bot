@@ -123,7 +123,9 @@ async def main():
   except Exception as e:fee_ok=False;fee_err=str(e)[:150]
   ins,ticks=await asyncio.gather(get(ss,g,"/api/v3/market/instruments",{"category":CAT}),get(ss,g,"/api/v3/market/tickers",{"category":CAT}))
   live={x.get("symbol") for x in ins if x.get("status")=="online" and x.get("symbol") and (x.get("type")=="perpetual" or x.get("instrumentType")=="perpetual") and x.get("symbolType","crypto")=="crypto"}
-  uni=sorted([x for x in ticks if x.get("symbol") in live],key=lambda x:n(x.get("turnover24h"),0),reverse=True)[:max(1, min(200, int(os.getenv("BITGET_MAX_MARKETS", "200"))))]
+  uni=sorted([x for x in ticks if x.get("symbol") in live],key=lambda x:n(x.get("turnover24h"),0),reverse=True)
+  max_markets=int(os.getenv("BITGET_MAX_MARKETS","0"))
+  if max_markets>0: uni=uni[:max_markets]
   sem=asyncio.Semaphore(10);data=await asyncio.gather(*(fetch(ss,g,sem,x["symbol"],start,end) for x in uni))
  events=[];coverage=[]
  for sym,rs,errs in data:
