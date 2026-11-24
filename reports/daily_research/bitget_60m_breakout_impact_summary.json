@@ -1,0 +1,1842 @@
+{
+  "generated_at_utc": "2026-11-24T11:35:04.359511+00:00",
+  "window_start_utc": "2026-11-10T11:26:00+00:00",
+  "window_end_utc": "2026-11-24T11:26:00+00:00",
+  "duration_days": 14,
+  "horizon_minutes": 240,
+  "universe": "Top 200 currently online USDT perpetuals by current 24h turnover; point-in-time historical universe is not reconstructed.",
+  "symbols_requested": 200,
+  "symbols_with_95pct_candle_coverage": 197,
+  "candles_collected": 3991389,
+  "breakout_events": 14884,
+  "control_windows": 16431,
+  "by_direction": {
+    "LONG": {
+      "breakouts": {
+        "n": 6980,
+        "horizons": {
+          "5": {
+            "median_directional_return_pct": 0.0,
+            "positive_rate_pct": 40.072,
+            "median_absolute_return_pct": 0.173009,
+            "still_beyond_breakout_level_pct": 55.731
+          },
+          "10": {
+            "median_directional_return_pct": 0.0,
+            "positive_rate_pct": 42.665,
+            "median_absolute_return_pct": 0.263599,
+            "still_beyond_breakout_level_pct": 43.954
+          },
+          "15": {
+            "median_directional_return_pct": -0.027155,
+            "positive_rate_pct": 42.622,
+            "median_absolute_return_pct": 0.32539,
+            "still_beyond_breakout_level_pct": 36.834
+          },
+          "30": {
+            "median_directional_return_pct": -0.049152,
+            "positive_rate_pct": 44.011,
+            "median_absolute_return_pct": 0.453375,
+            "still_beyond_breakout_level_pct": 26.519
+          },
+          "60": {
+            "median_directional_return_pct": -0.076395,
+            "positive_rate_pct": 44.04,
+            "median_absolute_return_pct": 0.600858,
+            "still_beyond_breakout_level_pct": 18.926
+          },
+          "120": {
+            "median_directional_return_pct": -0.175277,
+            "positive_rate_pct": 42.45,
+            "median_absolute_return_pct": 0.86586,
+            "still_beyond_breakout_level_pct": 12.751
+          },
+          "240": {
+            "median_directional_return_pct": -0.275141,
+            "positive_rate_pct": 41.791,
+            "median_absolute_return_pct": 1.264757,
+            "still_beyond_breakout_level_pct": 8.467
+          }
+        },
+        "duration": {
+          "median_minutes_capped_at_240": 8.0,
+          "mean_minutes_capped_at_240": 41.315,
+          "still_beyond_after_240m_pct": 8.467,
+          "median_max_favorable_excursion_pct": 1.113212,
+          "median_max_adverse_excursion_pct": -1.450963
+        }
+      },
+      "controls": {
+        "n": 7820,
+        "horizons": {
+          "5": {
+            "median_directional_return_pct": 0.0,
+            "positive_rate_pct": 35.09,
+            "median_absolute_return_pct": 0.173287
+          },
+          "10": {
+            "median_directional_return_pct": -0.03204,
+            "positive_rate_pct": 37.621,
+            "median_absolute_return_pct": 0.251497
+          },
+          "15": {
+            "median_directional_return_pct": -0.048108,
+            "positive_rate_pct": 39.182,
+            "median_absolute_return_pct": 0.294776
+          },
+          "30": {
+            "median_directional_return_pct": -0.073388,
+            "positive_rate_pct": 40.269,
+            "median_absolute_return_pct": 0.380228
+          },
+          "60": {
+            "median_directional_return_pct": -0.103974,
+            "positive_rate_pct": 42.008,
+            "median_absolute_return_pct": 0.564795
+          },
+          "120": {
+            "median_directional_return_pct": -0.131711,
+            "positive_rate_pct": 43.606,
+            "median_absolute_return_pct": 0.806793
+          },
+          "240": {
+            "median_directional_return_pct": -0.186887,
+            "positive_rate_pct": 44.233,
+            "median_absolute_return_pct": 1.155121
+          }
+        }
+      },
+      "breakout_minus_control_median_return_pct": {
+        "5": 0,
+        "10": 0.03204,
+        "15": 0.020953,
+        "30": 0.024236,
+        "60": 0.027579,
+        "120": -0.043566,
+        "240": -0.088254
+      }
+    },
+    "SHORT": {
+      "breakouts": {
+        "n": 7904,
+        "horizons": {
+          "5": {
+            "median_directional_return_pct": -0.0,
+            "positive_rate_pct": 38.778,
+            "median_absolute_return_pct": 0.154006,
+            "still_beyond_breakout_level_pct": 53.897
+          },
+          "10": {
+            "median_directional_return_pct": -0.0,
+            "positive_rate_pct": 41.903,
+            "median_absolute_return_pct": 0.235479,
+            "still_beyond_breakout_level_pct": 42.055
+          },
+          "15": {
+            "median_directional_return_pct": -0.018908,
+            "positive_rate_pct": 43.332,
+            "median_absolute_return_pct": 0.294551,
+            "still_beyond_breakout_level_pct": 35.109
+          },
+          "30": {
+            "median_directional_return_pct": -0.015634,
+            "positive_rate_pct": 46.318,
+            "median_absolute_return_pct": 0.416419,
+            "still_beyond_breakout_level_pct": 25.645
+          },
+          "60": {
+            "median_directional_return_pct": -0.0,
+            "positive_rate_pct": 48.861,
+            "median_absolute_return_pct": 0.623516,
+            "still_beyond_breakout_level_pct": 18.94
+          },
+          "120": {
+            "median_directional_return_pct": -0.020925,
+            "positive_rate_pct": 48.33,
+            "median_absolute_return_pct": 0.889582,
+            "still_beyond_breakout_level_pct": 13.79
+          },
+          "240": {
+            "median_directional_return_pct": 0.082631,
+            "positive_rate_pct": 51.569,
+            "median_absolute_return_pct": 1.251811,
+            "still_beyond_breakout_level_pct": 10.4
+          }
+        },
+        "duration": {
+          "median_minutes_capped_at_240": 7.0,
+          "mean_minutes_capped_at_240": 42.864,
+          "still_beyond_after_240m_pct": 10.4,
+          "median_max_favorable_excursion_pct": 1.314191,
+          "median_max_adverse_excursion_pct": -1.192146
+        }
+      },
+      "controls": {
+        "n": 8611,
+        "horizons": {
+          "5": {
+            "median_directional_return_pct": -0.0,
+            "positive_rate_pct": 43.909,
+            "median_absolute_return_pct": 0.178711
+          },
+          "10": {
+            "median_directional_return_pct": -0.0,
+            "positive_rate_pct": 47.753,
+            "median_absolute_return_pct": 0.255791
+          },
+          "15": {
+            "median_directional_return_pct": -0.0,
+            "positive_rate_pct": 47.451,
+            "median_absolute_return_pct": 0.297974
+          },
+          "30": {
+            "median_directional_return_pct": 0.024105,
+            "positive_rate_pct": 51.33,
+            "median_absolute_return_pct": 0.397953
+          },
+          "60": {
+            "median_directional_return_pct": -0.0,
+            "positive_rate_pct": 48.484,
+            "median_absolute_return_pct": 0.600079
+          },
+          "120": {
+            "median_directional_return_pct": -0.038239,
+            "positive_rate_pct": 47.555,
+            "median_absolute_return_pct": 0.849371
+          },
+          "240": {
+            "median_directional_return_pct": 0.086237,
+            "positive_rate_pct": 52.003,
+            "median_absolute_return_pct": 1.245675
+          }
+        }
+      },
+      "breakout_minus_control_median_return_pct": {
+        "5": 0,
+        "10": 0,
+        "15": -0.018908,
+        "30": -0.039739,
+        "60": 0,
+        "120": 0.017314,
+        "240": -0.003606
+      }
+    }
+  },
+  "coverage": [
+    {
+      "symbol": "BTCUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ETHUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SOLUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "XRPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ZECUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "NEARUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ENAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MMTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "EVAAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SUIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BLESSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "WLDUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ADAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 72,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PROMUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ELSAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PIEVERSEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ARIAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LISTAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CYSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "UNIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BNBUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "AKEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ARBUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 78,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LINKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "TAOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ACEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "INJUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ONDOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "APTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "TRUMPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LTCUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BCHUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "QNTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "XLMUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SKYUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "RENDERUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "FILUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "XMRUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ZROUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "FARTCOINUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "VVVUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SHIBUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "JUPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "INXUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "DOSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PENGUUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SAHARAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ICNTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MUBARAKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "DOTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "FETUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "TIAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CRVUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "HBARUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SEIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 78,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "FLOCKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ASTERUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LSKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LUNCUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ICPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "IRYSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "USDBRLUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PONSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "\u725b\u6765USDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "APRUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "DGAIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MONUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ENSOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "WLFIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LDOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "JCTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "WIFUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "VIRTUALUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CLSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 72,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "USELESSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "NIGHTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ETCUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "TRXUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 78,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ELICEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "XPLUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BTWUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SKYAIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SANDUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "VELVETUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CYBERUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PYTHUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SAPIENUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ONEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "RPLUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 66,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ETHFIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "KASUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BGBUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "INITUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CHIPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "HUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "GRAMUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LITUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CROSSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BABYUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "UNITASUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "OPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "IDOLUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "HUMAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "REUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PROSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BREVUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ORDIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BEATUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "GALAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "AMDLUSDT",
+      "candles": 5725,
+      "coverage_pct": 28.398,
+      "breakouts": 20,
+      "controls": 23,
+      "errors": []
+    },
+    {
+      "symbol": "ERAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "AEROUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MARSCOINUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MEGAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "STRKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PLUMEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CAPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CFGUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PIPPINUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MORPHOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BANKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "DEXEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "STXUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "RAYUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SQDUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 72,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "1000BONKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MAGMAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ARUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "JTOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "GWEIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "QUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ENSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "USUALUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MYXUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "NAORISUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "KAITOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SOONUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "GRASSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PENDLEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BOMEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ONGUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "FLOKIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "\u9f99\u867eUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "0GUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BARDUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "IOSTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "UAIUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "LABUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ORCAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "NEMUSDT",
+      "candles": 8416,
+      "coverage_pct": 41.746,
+      "breakouts": 29,
+      "controls": 34,
+      "errors": []
+    },
+    {
+      "symbol": "ARXUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 78,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ALLOUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "KERNELUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "RAREUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "FCXUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 67,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "AXISUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 72,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "GRVTUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "KGENUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SPACEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 73,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "KITEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "POWERUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "GPSUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ACUUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "KUAISHOUUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 70,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BLURUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BEAMUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PHAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ARKMUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "PBRUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 72,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "NILUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ATUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "CPUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "EGLDUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "MEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "USDJPYUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 70,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "POLUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "RIVERUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "SPKUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "COOKIEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "DASHUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "METUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 77,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "JNJUSDT",
+      "candles": 5728,
+      "coverage_pct": 28.413,
+      "breakouts": 21,
+      "controls": 23,
+      "errors": []
+    },
+    {
+      "symbol": "LAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "FFUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "EIGENUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "BERAUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "AEONUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 74,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "ZENUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 75,
+      "controls": 83,
+      "errors": []
+    },
+    {
+      "symbol": "RAVEUSDT",
+      "candles": 20160,
+      "coverage_pct": 100.0,
+      "breakouts": 76,
+      "controls": 83,
+      "errors": []
+    }
+  ],
+  "definitions": {
+    "breakout": "First 1m candle close above the previous 60 completed 1m candles' high (LONG) or below their low (SHORT).",
+    "event_deduplication": "At most one breakout event per symbol in each 240-minute period.",
+    "duration": "Minutes until the first subsequent 1m close returns inside the breakout boundary; events still outside at 240m are right-censored at 240m.",
+    "control": "Non-breakout timestamp sampled at most every 240m; direction follows the prior 60m return sign."
+  },
+  "limitations": [
+    "This is observational association, not proof that the breakout caused the move.",
+    "The control group is a transparent non-breakout baseline, not a randomized experiment.",
+    "Current top-200 universe creates survivorship bias; historical listings are not reconstructed.",
+    "Events without a complete 240-minute future window are excluded.",
+    "Duration is capped/right-censored at 240 minutes; longer duration requires a longer study horizon.",
+    "A 1m close back inside the boundary counts as a failed hold even if price later re-breaks.",
+    "No taker flow, OI, funding, liquidation, spread, or slippage is included in this price-impact study."
+  ]
+}

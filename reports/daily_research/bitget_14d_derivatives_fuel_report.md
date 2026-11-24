@@ -1,6 +1,6 @@
 # Bitget 14-day derivatives fuel enrichment
 
-Generated UTC: 2026-11-24T10:01:52.557733+00:00
+Generated UTC: 2026-11-24T11:38:42.533118+00:00
 Events: 27254; symbols: 200
 
 Only observations timestamped at or before the breakout are joined. OI/taker/long-short are accepted only when recent enough (30m/15m/30m); funding may be up to 10 days old because settlement intervals vary.
@@ -25,34 +25,7 @@ A missing match is reported as missing, never filled with a later observation.
 ## Event groups
 {
   "GRADUAL_TREND": {
-    "events": 191,
-    "OI change %": {
-      "n": 3,
-      "median": -0.589019,
-      "mean": -0.737101
-    },
-    "taker imbalance": {
-      "n": 3,
-      "median": -1.0,
-      "mean": -0.520338
-    },
-    "long/short ratio": {
-      "n": 3,
-      "median": 1.2552,
-      "mean": 1.1937
-    },
-    "funding rate": {
-      "n": 183,
-      "median": 5e-05,
-      "mean": -0.000182
-    },
-    "OI matched": 3,
-    "taker matched": 3,
-    "long/short matched": 3,
-    "funding matched": 183
-  },
-  "FAST_SPIKE": {
-    "events": 324,
+    "events": 193,
     "OI change %": {
       "n": 0,
       "median": null,
@@ -69,41 +42,68 @@ A missing match is reported as missing, never filled with a later observation.
       "mean": null
     },
     "funding rate": {
-      "n": 308,
+      "n": 185,
       "median": 5e-05,
-      "mean": -0.000431
+      "mean": -0.00018
     },
     "OI matched": 0,
     "taker matched": 0,
     "long/short matched": 0,
-    "funding matched": 308
+    "funding matched": 185
   },
-  "FAILED_OR_WEAK": {
-    "events": 26739,
+  "FAST_SPIKE": {
+    "events": 327,
     "OI change %": {
-      "n": 23,
-      "median": -0.144755,
-      "mean": -0.244313
+      "n": 0,
+      "median": null,
+      "mean": null
     },
     "taker imbalance": {
-      "n": 29,
-      "median": -0.413096,
-      "mean": -0.229308
+      "n": 0,
+      "median": null,
+      "mean": null
     },
     "long/short ratio": {
-      "n": 37,
-      "median": 1.4503,
-      "mean": 1.667878
+      "n": 0,
+      "median": null,
+      "mean": null
     },
     "funding rate": {
-      "n": 26349,
+      "n": 312,
       "median": 5e-05,
-      "mean": -6.4e-05
+      "mean": -0.000428
     },
-    "OI matched": 33,
-    "taker matched": 29,
-    "long/short matched": 37,
-    "funding matched": 26349
+    "OI matched": 0,
+    "taker matched": 0,
+    "long/short matched": 0,
+    "funding matched": 312
+  },
+  "FAILED_OR_WEAK": {
+    "events": 26734,
+    "OI change %": {
+      "n": 11,
+      "median": 0.112582,
+      "mean": -0.226252
+    },
+    "taker imbalance": {
+      "n": 11,
+      "median": -0.285447,
+      "mean": -0.186149
+    },
+    "long/short ratio": {
+      "n": 22,
+      "median": 1.4141,
+      "mean": 1.684559
+    },
+    "funding rate": {
+      "n": 26344,
+      "median": 5e-05,
+      "mean": -6.5e-05
+    },
+    "OI matched": 22,
+    "taker matched": 11,
+    "long/short matched": 22,
+    "funding matched": 26344
   }
 }
 

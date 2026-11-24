@@ -1,10 +1,10 @@
 # Bitget 14-day trend fuel backtest
 
-Window: 2026-11-10T09:52:00+00:00 to 2026-11-24T09:52:00+00:00
+Window: 2026-11-10T11:20:00+00:00 to 2026-11-24T11:20:00+00:00
 Authenticated read: SUCCESS; permission: readonly; fee schedule: True
-Markets: 200; candles: 3991107; symbols with >=95% coverage: 197
-Candidates: 27254; groups: {"GRADUAL_TREND": 191, "FAST_SPIKE": 324, "FAILED_OR_WEAK": 26739}
-Strict gradual: 191; tolerant gradual: 293
+Markets: 200; candles: 3991371; symbols with >=95% coverage: 197
+Candidates: 27254; groups: {"GRADUAL_TREND": 193, "FAST_SPIKE": 327, "FAILED_OR_WEAK": 26734}
+Strict gradual: 193; tolerant gradual: 299
 
 Candidate: closed 1m close beyond previous 60m high/low. Outcomes measured over following 120m.
 Gradual: >=4% direction-adjusted return, full 2h move at least 4x absolute first-10m move, and all 120 closes beyond breakout boundary.
@@ -15,405 +15,405 @@ JSON follows:
   "1": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.0
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.103083
+        "n": 327,
+        "median": 0.099157
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.0
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.0
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 1.0
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.0
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 1.0
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 1.0
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 1.0
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.037212
+        "n": 193,
+        "median": 0.030507
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.520914
+        "n": 327,
+        "median": 0.545239
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.02943
+        "n": 26734,
+        "median": 0.030485
       }
     }
   },
   "3": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.06006
+        "n": 193,
+        "median": 0.060569
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.29921
+        "n": 327,
+        "median": 0.295858
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.053996
+        "n": 26734,
+        "median": 0.053545
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.333333
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.666667
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.333333
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.925564
+        "n": 193,
+        "median": 0.938017
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.812531
+        "n": 327,
+        "median": 0.812541
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.99917
+        "n": 26734,
+        "median": 0.999152
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.274154
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.695528
+        "n": 327,
+        "median": 0.71538
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.251579
+        "n": 26734,
+        "median": 0.252338
       }
     }
   },
   "5": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.12132
+        "n": 193,
+        "median": 0.120919
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.494511
+        "n": 327,
+        "median": 0.492424
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.114286
+        "n": 26734,
+        "median": 0.114972
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.4
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.6
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.4
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.62061
+        "n": 193,
+        "median": 0.610976
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.546752
+        "n": 327,
+        "median": 0.549945
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.703588
+        "n": 26734,
+        "median": 0.698714
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.435415
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.766944
+        "n": 327,
+        "median": 0.778511
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.384313
+        "n": 26734,
+        "median": 0.384075
       }
     }
   },
   "10": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.277367
+        "n": 193,
+        "median": 0.278508
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.660283
+        "n": 327,
+        "median": 0.65138
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.205592
+        "n": 26734,
+        "median": 0.206655
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.3
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.5
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.3
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.484859
+        "n": 193,
+        "median": 0.474699
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.395197
+        "n": 327,
+        "median": 0.392926
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.462375
+        "n": 26734,
+        "median": 0.460823
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.631676
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.816516
+        "n": 327,
+        "median": 0.828762
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.57929
+        "n": 26734,
+        "median": 0.579758
       }
     }
   },
   "15": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.373878
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.7231
+        "n": 327,
+        "median": 0.736196
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.255918
+        "n": 26734,
+        "median": 0.259067
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.333333
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.466667
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.333333
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.343349
+        "n": 193,
+        "median": 0.337759
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.274316
+        "n": 327,
+        "median": 0.28322
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.349581
+        "n": 26734,
+        "median": 0.349444
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.764477
+        "n": 193,
+        "median": 0.766671
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.860385
+        "n": 327,
+        "median": 0.864491
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.690945
+        "n": 26734,
+        "median": 0.688848
       }
     }
   },
   "30": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.532044
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.987327
+        "n": 327,
+        "median": 1.036546
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.359308
+        "n": 26734,
+        "median": 0.362573
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.3
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.466667
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.3
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.230159
+        "n": 193,
+        "median": 0.227605
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.177095
+        "n": 327,
+        "median": 0.178769
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.218273
+        "n": 26734,
+        "median": 0.217925
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.916015
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.950256
+        "n": 327,
+        "median": 0.947249
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.897055
+        "n": 26734,
+        "median": 0.89483
       }
     }
   },
   "60": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.691489
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 1.163023
+        "n": 327,
+        "median": 1.163529
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.378822
+        "n": 26734,
+        "median": 0.384818
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.266667
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.466667
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.283333
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.139108
+        "n": 193,
+        "median": 0.139045
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.097065
+        "n": 327,
+        "median": 0.097969
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.113256
+        "n": 26734,
+        "median": 0.113147
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 1.0
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 1.0
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 1.0
       }
     }
@@ -424,406 +424,406 @@ JSON follows:
   "1": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.415081
+        "n": 193,
+        "median": 0.4158
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.981709
+        "n": 327,
+        "median": 0.990099
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.250671
+        "n": 26734,
+        "median": 0.252506
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 1.0
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 1.0
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 1.0
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 1.0
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 1.0
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 1.0
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 2.0658
+        "n": 193,
+        "median": 2.198227
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 3.790683
+        "n": 327,
+        "median": 3.835683
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 1.555963
+        "n": 26734,
+        "median": 1.536196
       }
     }
   },
   "3": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.570776
+        "n": 193,
+        "median": 0.571141
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 1.332388
+        "n": 327,
+        "median": 1.370826
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.240251
+        "n": 26734,
+        "median": 0.241362
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.666667
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.666667
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.333333
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.998718
+        "n": 193,
+        "median": 0.998674
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.886772
+        "n": 327,
+        "median": 0.899895
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.835709
+        "n": 26734,
+        "median": 0.83394
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 2.840538
+        "n": 193,
+        "median": 2.915111
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 3.481985
+        "n": 327,
+        "median": 3.464964
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 1.427287
+        "n": 26734,
+        "median": 1.419542
       }
     }
   },
   "5": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.69869
+        "n": 193,
+        "median": 0.706964
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 1.601258
+        "n": 327,
+        "median": 1.637666
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.236314
+        "n": 26734,
+        "median": 0.238305
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.6
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.6
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.4
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.864732
+        "n": 193,
+        "median": 0.842411
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.716451
+        "n": 327,
+        "median": 0.725321
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.557597
+        "n": 26734,
+        "median": 0.555812
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 2.710819
+        "n": 193,
+        "median": 2.715323
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 3.154406
+        "n": 327,
+        "median": 3.170646
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 1.355889
+        "n": 26734,
+        "median": 1.349524
       }
     }
   },
   "10": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.794724
+        "n": 193,
+        "median": 0.807985
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 2.446842
+        "n": 327,
+        "median": 2.489019
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.224972
+        "n": 26734,
+        "median": 0.225394
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.5
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.6
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.3
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.541716
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.587297
+        "n": 327,
+        "median": 0.596053
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.353562
+        "n": 26734,
+        "median": 0.350754
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 2.657946
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 3.084943
+        "n": 327,
+        "median": 3.082307
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 1.278879
+        "n": 26734,
+        "median": 1.277213
       }
     }
   },
   "15": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 1.040316
+        "n": 193,
+        "median": 1.056466
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 2.717403
+        "n": 327,
+        "median": 2.748815
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.212224
+        "n": 26734,
+        "median": 0.214143
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.466667
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.6
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.333333
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.499028
+        "n": 193,
+        "median": 0.495814
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.445837
+        "n": 327,
+        "median": 0.447128
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.278895
+        "n": 26734,
+        "median": 0.277627
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 2.413355
+        "n": 193,
+        "median": 2.421188
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 2.84126
+        "n": 327,
+        "median": 2.829586
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 1.266526
+        "n": 26734,
+        "median": 1.264285
       }
     }
   },
   "30": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 1.786781
+        "n": 193,
+        "median": 1.849359
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 3.374334
+        "n": 327,
+        "median": 3.388682
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.204918
+        "n": 26734,
+        "median": 0.208417
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.433333
       },
       "FAST_SPIKE": {
-        "n": 324,
+        "n": 327,
         "median": 0.533333
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
+        "n": 26734,
         "median": 0.3
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.410958
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.310412
+        "n": 327,
+        "median": 0.306106
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.19294
+        "n": 26734,
+        "median": 0.193199
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 2.622284
+        "n": 193,
+        "median": 2.636728
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 2.407202
+        "n": 327,
+        "median": 2.422193
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 1.271234
+        "n": 26734,
+        "median": 1.26774
       }
     }
   },
   "60": {
     "directional_return_pct": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 3.587444
+        "n": 193,
+        "median": 3.589606
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 4.371296
+        "n": 327,
+        "median": 4.344328
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.203948
+        "n": 26734,
+        "median": 0.204827
       }
     },
     "directional_candle_share": {
       "GRADUAL_TREND": {
-        "n": 191,
+        "n": 193,
         "median": 0.45
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.5
+        "n": 327,
+        "median": 0.516667
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.283333
+        "n": 26734,
+        "median": 0.3
       }
     },
     "path_efficiency": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 0.325482
+        "n": 193,
+        "median": 0.333566
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 0.212041
+        "n": 327,
+        "median": 0.212388
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 0.135243
+        "n": 26734,
+        "median": 0.135136
       }
     },
     "turnover_vs_pre60": {
       "GRADUAL_TREND": {
-        "n": 191,
-        "median": 3.571001
+        "n": 193,
+        "median": 3.593527
       },
       "FAST_SPIKE": {
-        "n": 324,
-        "median": 2.17057
+        "n": 327,
+        "median": 2.214349
       },
       "FAILED_OR_WEAK": {
-        "n": 26739,
-        "median": 1.312836
+        "n": 26734,
+        "median": 1.315543
       }
     }
   }
@@ -831,100 +831,100 @@ JSON follows:
 ## Chronological splits
 {
   "train_days_1_9": {
-    "events": 17548,
+    "events": 17553,
     "gradual": 96,
-    "spikes": 173,
-    "failed": 17279
+    "spikes": 177,
+    "failed": 17280
   },
   "validation_days_10_11": {
-    "events": 3924,
-    "gradual": 49,
+    "events": 3948,
+    "gradual": 50,
     "spikes": 62,
-    "failed": 3813
+    "failed": 3836
   },
   "test_days_12_14": {
-    "events": 5782,
-    "gradual": 46,
-    "spikes": 89,
-    "failed": 5647
+    "events": 5753,
+    "gradual": 47,
+    "spikes": 88,
+    "failed": 5618
   }
 }
 ## Daily event counts
 {
   "2026-11-10": {
-    "FAILED_OR_WEAK": 1111,
-    "GRADUAL_TREND": 2,
-    "FAST_SPIKE": 11
+    "FAILED_OR_WEAK": 987,
+    "GRADUAL_TREND": 3,
+    "FAST_SPIKE": 10
   },
   "2026-11-11": {
-    "FAILED_OR_WEAK": 1928,
+    "FAILED_OR_WEAK": 1929,
     "GRADUAL_TREND": 2,
-    "FAST_SPIKE": 20
+    "FAST_SPIKE": 18
   },
   "2026-11-12": {
-    "FAILED_OR_WEAK": 1917,
+    "FAILED_OR_WEAK": 1919,
     "FAST_SPIKE": 17,
     "GRADUAL_TREND": 8
   },
   "2026-11-13": {
     "FAILED_OR_WEAK": 1910,
-    "FAST_SPIKE": 19,
+    "FAST_SPIKE": 20,
     "GRADUAL_TREND": 20
   },
   "2026-11-14": {
-    "FAILED_OR_WEAK": 1889,
+    "FAILED_OR_WEAK": 1886,
     "GRADUAL_TREND": 30,
     "FAST_SPIKE": 22
   },
   "2026-11-15": {
-    "FAILED_OR_WEAK": 1877,
+    "FAILED_OR_WEAK": 1878,
     "FAST_SPIKE": 20,
     "GRADUAL_TREND": 3
   },
   "2026-11-16": {
-    "FAILED_OR_WEAK": 1980,
+    "FAILED_OR_WEAK": 1981,
     "FAST_SPIKE": 18,
     "GRADUAL_TREND": 6
   },
   "2026-11-17": {
-    "FAILED_OR_WEAK": 1909,
-    "FAST_SPIKE": 19,
+    "FAILED_OR_WEAK": 1907,
+    "FAST_SPIKE": 20,
     "GRADUAL_TREND": 13
   },
   "2026-11-18": {
-    "FAILED_OR_WEAK": 1979,
-    "GRADUAL_TREND": 8,
-    "FAST_SPIKE": 15
+    "FAILED_OR_WEAK": 1974,
+    "GRADUAL_TREND": 7,
+    "FAST_SPIKE": 17
   },
   "2026-11-19": {
-    "FAILED_OR_WEAK": 1904,
-    "GRADUAL_TREND": 10,
+    "FAILED_OR_WEAK": 1906,
+    "GRADUAL_TREND": 11,
     "FAST_SPIKE": 23
   },
   "2026-11-20": {
-    "FAILED_OR_WEAK": 1937,
+    "FAILED_OR_WEAK": 1939,
     "GRADUAL_TREND": 19,
     "FAST_SPIKE": 39
   },
   "2026-11-21": {
-    "FAILED_OR_WEAK": 1895,
-    "FAST_SPIKE": 27,
+    "FAILED_OR_WEAK": 1893,
+    "FAST_SPIKE": 28,
     "GRADUAL_TREND": 35
   },
   "2026-11-22": {
-    "FAILED_OR_WEAK": 1938,
+    "FAILED_OR_WEAK": 1942,
     "FAST_SPIKE": 18,
     "GRADUAL_TREND": 11
   },
   "2026-11-23": {
-    "FAILED_OR_WEAK": 1922,
+    "FAILED_OR_WEAK": 1921,
     "FAST_SPIKE": 46,
     "GRADUAL_TREND": 15
   },
   "2026-11-24": {
-    "FAILED_OR_WEAK": 643,
-    "FAST_SPIKE": 10,
-    "GRADUAL_TREND": 9
+    "FAILED_OR_WEAK": 762,
+    "FAST_SPIKE": 11,
+    "GRADUAL_TREND": 10
   }
 }
 ## Coverage
@@ -947,7 +947,7 @@ JSON follows:
     "symbol": "SOLUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 132,
+    "events": 133,
     "errors": []
   },
   {
@@ -961,21 +961,21 @@ JSON follows:
     "symbol": "ZECUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 135,
+    "events": 134,
     "errors": []
   },
   {
     "symbol": "HYPEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
+    "events": 137,
     "errors": []
   },
   {
     "symbol": "NEARUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
+    "events": 140,
     "errors": []
   },
   {
@@ -989,7 +989,7 @@ JSON follows:
     "symbol": "PEPEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 135,
+    "events": 136,
     "errors": []
   },
   {
@@ -1003,7 +1003,7 @@ JSON follows:
     "symbol": "EVAAUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 131,
+    "events": 130,
     "errors": []
   },
   {
@@ -1024,35 +1024,7 @@ JSON follows:
     "symbol": "BLESSUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 139,
-    "errors": []
-  },
-  {
-    "symbol": "PROMUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 142,
-    "errors": []
-  },
-  {
-    "symbol": "PIEVERSEUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 135,
-    "errors": []
-  },
-  {
-    "symbol": "ELSAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "ADAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 128,
+    "events": 138,
     "errors": []
   },
   {
@@ -1063,17 +1035,38 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "ARIAUSDT",
+    "symbol": "ADAUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 133,
+    "events": 127,
     "errors": []
   },
   {
-    "symbol": "CYSUSDT",
+    "symbol": "PIEVERSEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
+    "events": 136,
+    "errors": []
+  },
+  {
+    "symbol": "PROMUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
+    "errors": []
+  },
+  {
+    "symbol": "ELSAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "ARIAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 132,
     "errors": []
   },
   {
@@ -1081,6 +1074,13 @@ JSON follows:
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 134,
+    "errors": []
+  },
+  {
+    "symbol": "CYSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 141,
     "errors": []
   },
   {
@@ -1101,7 +1101,7 @@ JSON follows:
     "symbol": "BNBUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
+    "events": 139,
     "errors": []
   },
   {
@@ -1115,7 +1115,7 @@ JSON follows:
     "symbol": "ARBUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
+    "events": 140,
     "errors": []
   },
   {
@@ -1126,24 +1126,24 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "ACEUSDT",
+    "symbol": "AVAXUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
+    "events": 140,
     "errors": []
   },
   {
     "symbol": "TAOUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 139,
+    "events": 140,
     "errors": []
   },
   {
-    "symbol": "AVAXUSDT",
+    "symbol": "ACEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 139,
+    "events": 138,
     "errors": []
   },
   {
@@ -1171,35 +1171,14 @@ JSON follows:
     "symbol": "TRUMPUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 136,
+    "events": 135,
     "errors": []
   },
   {
     "symbol": "LTCUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "SKYUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "BCHUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 139,
-    "errors": []
-  },
-  {
-    "symbol": "QNTUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
+    "events": 140,
     "errors": []
   },
   {
@@ -1210,10 +1189,31 @@ JSON follows:
     "errors": []
   },
   {
+    "symbol": "BCHUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 138,
+    "errors": []
+  },
+  {
+    "symbol": "QNTUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 140,
+    "errors": []
+  },
+  {
     "symbol": "XLMUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 138,
+    "errors": []
+  },
+  {
+    "symbol": "SKYUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 140,
     "errors": []
   },
   {
@@ -1231,6 +1231,13 @@ JSON follows:
     "errors": []
   },
   {
+    "symbol": "XMRUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 143,
+    "errors": []
+  },
+  {
     "symbol": "ZROUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
@@ -1238,10 +1245,31 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "XMRUSDT",
+    "symbol": "FARTCOINUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 143,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "VVVUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 141,
+    "errors": []
+  },
+  {
+    "symbol": "SHIBUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
+    "errors": []
+  },
+  {
+    "symbol": "JUPUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
     "errors": []
   },
   {
@@ -1252,31 +1280,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "FARTCOINUSDT",
+    "symbol": "INXUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "VVVUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "SHIBUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
-    "errors": []
-  },
-  {
-    "symbol": "JUPUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 136,
+    "events": 138,
     "errors": []
   },
   {
@@ -1284,34 +1291,6 @@ JSON follows:
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 136,
-    "errors": []
-  },
-  {
-    "symbol": "INXUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 139,
-    "errors": []
-  },
-  {
-    "symbol": "MUBARAKUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 143,
-    "errors": []
-  },
-  {
-    "symbol": "DOTUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 130,
-    "errors": []
-  },
-  {
-    "symbol": "ICNTUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 135,
     "errors": []
   },
   {
@@ -1329,10 +1308,31 @@ JSON follows:
     "errors": []
   },
   {
+    "symbol": "ICNTUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
+    "errors": []
+  },
+  {
+    "symbol": "MUBARAKUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
+    "errors": []
+  },
+  {
+    "symbol": "DOTUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 130,
+    "errors": []
+  },
+  {
     "symbol": "FETUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 135,
+    "events": 136,
     "errors": []
   },
   {
@@ -1343,13 +1343,6 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "TIAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 142,
-    "errors": []
-  },
-  {
     "symbol": "SEIUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
@@ -1357,17 +1350,24 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "LSKUSDT",
+    "symbol": "TIAUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 139,
+    "events": 141,
     "errors": []
   },
   {
     "symbol": "CRVUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "HBARUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 140,
     "errors": []
   },
   {
@@ -1378,13 +1378,6 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "HBARUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 139,
-    "errors": []
-  },
-  {
     "symbol": "ASTERUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
@@ -1392,17 +1385,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "ICPUSDT",
+    "symbol": "LSKUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 139,
-    "errors": []
-  },
-  {
-    "symbol": "DGAIUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 130,
+    "events": 138,
     "errors": []
   },
   {
@@ -1413,10 +1399,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "USDBRLUSDT",
+    "symbol": "ICPUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 137,
+    "events": 139,
     "errors": []
   },
   {
@@ -1427,24 +1413,17 @@ JSON follows:
     "errors": []
   },
   {
+    "symbol": "USDBRLUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
+    "errors": []
+  },
+  {
     "symbol": "PONSUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "APRUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "\u725b\u6765USDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 138,
+    "events": 141,
     "errors": []
   },
   {
@@ -1455,14 +1434,49 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "ENSOUSDT",
+    "symbol": "\u725b\u6765USDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "APRUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 140,
     "errors": []
   },
   {
+    "symbol": "DGAIUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 131,
+    "errors": []
+  },
+  {
+    "symbol": "MONUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
+    "errors": []
+  },
+  {
+    "symbol": "ENSOUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
     "symbol": "WLFIUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "LDOUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 139,
@@ -1476,7 +1490,49 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "MONUSDT",
+    "symbol": "WIFUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 138,
+    "errors": []
+  },
+  {
+    "symbol": "VIRTUALUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 141,
+    "errors": []
+  },
+  {
+    "symbol": "CLSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 129,
+    "errors": []
+  },
+  {
+    "symbol": "BTWUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 134,
+    "errors": []
+  },
+  {
+    "symbol": "USELESSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 143,
+    "errors": []
+  },
+  {
+    "symbol": "NIGHTUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 141,
+    "errors": []
+  },
+  {
+    "symbol": "ETCUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 141,
@@ -1490,206 +1546,17 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "LDOUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 139,
-    "errors": []
-  },
-  {
-    "symbol": "WIFUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
-    "errors": []
-  },
-  {
-    "symbol": "NIGHTUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "BTWUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 135,
-    "errors": []
-  },
-  {
-    "symbol": "VIRTUALUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "USELESSUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 143,
-    "errors": []
-  },
-  {
-    "symbol": "CLSUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 128,
-    "errors": []
-  },
-  {
-    "symbol": "VELVETUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 136,
-    "errors": []
-  },
-  {
-    "symbol": "CTUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 145,
-    "errors": []
-  },
-  {
     "symbol": "ELICEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 131,
-    "errors": []
-  },
-  {
-    "symbol": "ETCUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "HUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 143,
-    "errors": []
-  },
-  {
-    "symbol": "SANDUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 142,
-    "errors": []
-  },
-  {
-    "symbol": "CYBERUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 138,
-    "errors": []
-  },
-  {
-    "symbol": "SAPIENUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 133,
-    "errors": []
-  },
-  {
-    "symbol": "PYTHUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "ONEUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "IDOLUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 136,
-    "errors": []
-  },
-  {
-    "symbol": "CHIPUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "KASUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 136,
-    "errors": []
-  },
-  {
-    "symbol": "INITUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 135,
-    "errors": []
-  },
-  {
-    "symbol": "RPLUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 115,
-    "errors": []
-  },
-  {
-    "symbol": "ETHFIUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 144,
-    "errors": []
-  },
-  {
-    "symbol": "BGBUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 133,
-    "errors": []
-  },
-  {
-    "symbol": "GRAMUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 136,
+    "events": 130,
     "errors": []
   },
   {
     "symbol": "XPLUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "LITUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 136,
-    "errors": []
-  },
-  {
-    "symbol": "UNITASUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
-    "errors": []
-  },
-  {
-    "symbol": "CROSSUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
+    "events": 142,
     "errors": []
   },
   {
@@ -1700,108 +1567,129 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "OPUSDT",
+    "symbol": "VELVETUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 137,
+    "events": 136,
     "errors": []
   },
   {
-    "symbol": "BREVUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 135,
-    "errors": []
-  },
-  {
-    "symbol": "HUMAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "REUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "ORDIUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "ERAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 143,
-    "errors": []
-  },
-  {
-    "symbol": "GALAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
-    "errors": []
-  },
-  {
-    "symbol": "PIPPINUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
-    "errors": []
-  },
-  {
-    "symbol": "AEROUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "STRKUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 144,
-    "errors": []
-  },
-  {
-    "symbol": "MARSCOINUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "AMDLUSDT",
-    "candles": 5631,
-    "coverage_pct": 27.932,
-    "events": 38,
-    "errors": []
-  },
-  {
-    "symbol": "BEATUSDT",
+    "symbol": "SANDUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 142,
     "errors": []
   },
   {
-    "symbol": "CFGUSDT",
+    "symbol": "CTUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
+    "events": 145,
     "errors": []
   },
   {
-    "symbol": "PLUMEUSDT",
+    "symbol": "CYBERUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 138,
+    "errors": []
+  },
+  {
+    "symbol": "PYTHUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 140,
+    "errors": []
+  },
+  {
+    "symbol": "SAPIENUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 133,
+    "errors": []
+  },
+  {
+    "symbol": "ONEUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 140,
+    "errors": []
+  },
+  {
+    "symbol": "RPLUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 116,
+    "errors": []
+  },
+  {
+    "symbol": "ETHFIUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 144,
+    "errors": []
+  },
+  {
+    "symbol": "KASUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 135,
+    "errors": []
+  },
+  {
+    "symbol": "CHIPUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "BGBUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 133,
+    "errors": []
+  },
+  {
+    "symbol": "INITUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 135,
+    "errors": []
+  },
+  {
+    "symbol": "HUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 144,
+    "errors": []
+  },
+  {
+    "symbol": "GRAMUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 137,
+    "errors": []
+  },
+  {
+    "symbol": "LITUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
+    "errors": []
+  },
+  {
+    "symbol": "CROSSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
+    "errors": []
+  },
+  {
+    "symbol": "UNITASUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
     "errors": []
   },
   {
@@ -1812,21 +1700,133 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "CAPUSDT",
+    "symbol": "IDOLUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 136,
     "errors": []
   },
   {
-    "symbol": "DEXEUSDT",
+    "symbol": "OPUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
+    "errors": []
+  },
+  {
+    "symbol": "HUMAUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 140,
     "errors": []
   },
   {
+    "symbol": "REUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "BREVUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 135,
+    "errors": []
+  },
+  {
+    "symbol": "ORDIUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "PROSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 135,
+    "errors": []
+  },
+  {
+    "symbol": "BEATUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
+    "errors": []
+  },
+  {
+    "symbol": "GALAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 138,
+    "errors": []
+  },
+  {
+    "symbol": "ERAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
+    "errors": []
+  },
+  {
+    "symbol": "AMDLUSDT",
+    "candles": 5719,
+    "coverage_pct": 28.368,
+    "events": 39,
+    "errors": []
+  },
+  {
+    "symbol": "AEROUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 140,
+    "errors": []
+  },
+  {
+    "symbol": "MARSCOINUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "STRKUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 144,
+    "errors": []
+  },
+  {
     "symbol": "MEGAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
+    "errors": []
+  },
+  {
+    "symbol": "PLUMEUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
+    "errors": []
+  },
+  {
+    "symbol": "CAPUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 135,
+    "errors": []
+  },
+  {
+    "symbol": "CFGUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
+    "errors": []
+  },
+  {
+    "symbol": "PIPPINUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 137,
@@ -1840,13 +1840,6 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "MAGMAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
     "symbol": "BANKUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
@@ -1854,17 +1847,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "1000BONKUSDT",
+    "symbol": "DEXEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "SQDUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 132,
+    "events": 139,
     "errors": []
   },
   {
@@ -1875,24 +1861,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "ARUSDT",
+    "symbol": "SQDUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 136,
-    "errors": []
-  },
-  {
-    "symbol": "QUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 138,
-    "errors": []
-  },
-  {
-    "symbol": "GWEIUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 133,
+    "events": 131,
     "errors": []
   },
   {
@@ -1903,10 +1875,24 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "ENSUSDT",
+    "symbol": "1000BONKUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
+    "events": 140,
+    "errors": []
+  },
+  {
+    "symbol": "MAGMAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "ARUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
     "errors": []
   },
   {
@@ -1914,6 +1900,27 @@ JSON follows:
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 139,
+    "errors": []
+  },
+  {
+    "symbol": "GWEIUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 133,
+    "errors": []
+  },
+  {
+    "symbol": "QUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
+    "errors": []
+  },
+  {
+    "symbol": "ENSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 141,
     "errors": []
   },
   {
@@ -1938,13 +1945,6 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "PENDLEUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 143,
-    "errors": []
-  },
-  {
     "symbol": "KAITOUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
@@ -1955,14 +1955,14 @@ JSON follows:
     "symbol": "SOONUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
+    "events": 139,
     "errors": []
   },
   {
-    "symbol": "ONGUSDT",
+    "symbol": "PENDLEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 145,
+    "events": 144,
     "errors": []
   },
   {
@@ -1973,14 +1973,21 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "RAREUSDT",
+    "symbol": "BOMEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 132,
+    "events": 141,
     "errors": []
   },
   {
-    "symbol": "BOMEUSDT",
+    "symbol": "ONGUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 144,
+    "errors": []
+  },
+  {
+    "symbol": "FLOKIUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 140,
@@ -1994,20 +2001,6 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "ORCAUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
-    "errors": []
-  },
-  {
-    "symbol": "FCXUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 118,
-    "errors": []
-  },
-  {
     "symbol": "0GUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
@@ -2015,10 +2008,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "LABUSDT",
+    "symbol": "IOSTUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 137,
+    "events": 140,
     "errors": []
   },
   {
@@ -2029,38 +2022,45 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "MSUSDT",
+    "symbol": "\u9f99\u867eUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 133,
+    "events": 136,
     "errors": []
   },
   {
-    "symbol": "BLURUSDT",
+    "symbol": "LABUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 137,
     "errors": []
   },
   {
-    "symbol": "FLOKIUSDT",
+    "symbol": "ORCAUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 139,
+    "events": 137,
     "errors": []
   },
   {
-    "symbol": "IOSTUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 139,
+    "symbol": "NEMUSDT",
+    "candles": 8410,
+    "coverage_pct": 41.716,
+    "events": 51,
     "errors": []
   },
   {
     "symbol": "ALLOUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
+    "events": 142,
+    "errors": []
+  },
+  {
+    "symbol": "RAREUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 133,
     "errors": []
   },
   {
@@ -2071,73 +2071,45 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "POWERUSDT",
+    "symbol": "ARXUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
+    "events": 139,
     "errors": []
   },
   {
     "symbol": "AXISUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
+    "events": 137,
     "errors": []
   },
   {
-    "symbol": "ARXUSDT",
+    "symbol": "FCXUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
+    "events": 119,
+    "errors": []
+  },
+  {
+    "symbol": "MSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 134,
     "errors": []
   },
   {
     "symbol": "GRVTUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 142,
-    "errors": []
-  },
-  {
-    "symbol": "NEMUSDT",
-    "candles": 8322,
-    "coverage_pct": 41.28,
-    "events": 51,
+    "events": 141,
     "errors": []
   },
   {
     "symbol": "KGENUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 138,
-    "errors": []
-  },
-  {
-    "symbol": "SPKUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 137,
-    "errors": []
-  },
-  {
-    "symbol": "ACUUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 131,
-    "errors": []
-  },
-  {
-    "symbol": "GPSUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 135,
-    "errors": []
-  },
-  {
-    "symbol": "KUAISHOUUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 125,
+    "events": 139,
     "errors": []
   },
   {
@@ -2148,17 +2120,59 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "PHAUSDT",
+    "symbol": "KITEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 136,
+    "events": 141,
     "errors": []
   },
   {
-    "symbol": "CPUSDT",
+    "symbol": "POWERUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 136,
+    "events": 141,
+    "errors": []
+  },
+  {
+    "symbol": "BLURUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
+    "errors": []
+  },
+  {
+    "symbol": "GPSUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 134,
+    "errors": []
+  },
+  {
+    "symbol": "ACUUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 131,
+    "errors": []
+  },
+  {
+    "symbol": "KUAISHOUUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 126,
+    "errors": []
+  },
+  {
+    "symbol": "PHAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
+    "errors": []
+  },
+  {
+    "symbol": "ARKMUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 130,
     "errors": []
   },
   {
@@ -2169,17 +2183,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "KITEUSDT",
+    "symbol": "PBRUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 140,
-    "errors": []
-  },
-  {
-    "symbol": "ARKMUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 131,
+    "events": 136,
     "errors": []
   },
   {
@@ -2190,41 +2197,6 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "PBRUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 135,
-    "errors": []
-  },
-  {
-    "symbol": "POLUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "USDJPYUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 133,
-    "errors": []
-  },
-  {
-    "symbol": "MEUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "AEONUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 139,
-    "errors": []
-  },
-  {
     "symbol": "EGLDUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
@@ -2232,45 +2204,17 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "BERAUSDT",
+    "symbol": "CPUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 136,
+    "events": 135,
     "errors": []
   },
   {
-    "symbol": "EDGEUSDT",
+    "symbol": "SPKUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "COOKIEUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 138,
-    "errors": []
-  },
-  {
-    "symbol": "DASHUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 142,
-    "errors": []
-  },
-  {
-    "symbol": "METUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
-    "errors": []
-  },
-  {
-    "symbol": "RIVERUSDT",
-    "candles": 20160,
-    "coverage_pct": 100.0,
-    "events": 141,
+    "events": 137,
     "errors": []
   },
   {
@@ -2281,17 +2225,59 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "CSTOCKUSDT",
+    "symbol": "MEUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 127,
+    "events": 141,
+    "errors": []
+  },
+  {
+    "symbol": "USDJPYUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 132,
+    "errors": []
+  },
+  {
+    "symbol": "POLUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 141,
+    "errors": []
+  },
+  {
+    "symbol": "RIVERUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 140,
+    "errors": []
+  },
+  {
+    "symbol": "COOKIEUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 137,
+    "errors": []
+  },
+  {
+    "symbol": "DASHUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 143,
+    "errors": []
+  },
+  {
+    "symbol": "METUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
     "errors": []
   },
   {
     "symbol": "JNJUSDT",
-    "candles": 5634,
-    "coverage_pct": 27.946,
-    "events": 36,
+    "candles": 5722,
+    "coverage_pct": 28.383,
+    "events": 37,
     "errors": []
   },
   {
@@ -2302,10 +2288,10 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "MAGICUSDT",
+    "symbol": "FFUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 140,
+    "events": 138,
     "errors": []
   },
   {
@@ -2316,17 +2302,31 @@ JSON follows:
     "errors": []
   },
   {
-    "symbol": "FFUSDT",
+    "symbol": "BERAUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 136,
+    "errors": []
+  },
+  {
+    "symbol": "AEONUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
     "events": 138,
     "errors": []
   },
   {
+    "symbol": "RAVEUSDT",
+    "candles": 20160,
+    "coverage_pct": 100.0,
+    "events": 142,
+    "errors": []
+  },
+  {
     "symbol": "ZENUSDT",
     "candles": 20160,
     "coverage_pct": 100.0,
-    "events": 137,
+    "events": 136,
     "errors": []
   }
 ]
