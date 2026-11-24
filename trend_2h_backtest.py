@@ -103,16 +103,19 @@ def analyze(symbol,rows,start_ms,end_ms):
         # Check every rolling 10m interval, not only the opening 10m.
         moves=[directional_pct(future[j]["o"],future[j+9]["c"],side) for j in range(DURATION-9)]
         max10=max([0.0]+moves)
-        ratio=(total/max10) if max10>0 else None
         first10=directional_pct(future[0]["o"],future[9]["c"],side)
+        # User rule compares the full two-hour move with the FIRST 10 minutes.
+        # Later rolling 10m bursts are measured and reported, not used to change that rule.
+        speed_move=abs(first10)
+        ratio=(total/speed_move) if speed_move>0 else None
         if total<MIN_TREND_PCT:
             diagnostics["rejected_below_4pct"]+=1
-            near_misses.append({"symbol":symbol,"direction":side,"start_timestamp_ms":first["ts"],"start_close":first["c"],"two_hour_move_pct":round(total,5),"fastest_10m_move_pct":round(max10,5),"ratio":round(ratio,4) if ratio is not None else None,"rejection":"TWO_HOUR_MOVE_BELOW_4_PERCENT"})
+            near_misses.append({"symbol":symbol,"direction":side,"start_timestamp_ms":first["ts"],"start_close":first["c"],"two_hour_move_pct":round(total,5),"first_10m_move_pct":round(first10,5),"fastest_rolling_10m_move_pct":round(max10,5),"ratio":round(ratio,4) if ratio is not None else None,"rejection":"TWO_HOUR_MOVE_BELOW_4_PERCENT"})
             continue
         diagnostics["return_at_least_4pct"]+=1
         if ratio is None or ratio<SPEED_MULTIPLE:
             diagnostics["rejected_speed_ratio"]+=1
-            near_misses.append({"symbol":symbol,"direction":side,"start_timestamp_ms":first["ts"],"start_close":first["c"],"two_hour_move_pct":round(total,5),"fastest_10m_move_pct":round(max10,5),"ratio":round(ratio,4) if ratio is not None else None,"rejection":"FAST_10M_MOVE_EXCEEDED_ONE_QUARTER_OF_2H_MOVE"})
+            near_misses.append({"symbol":symbol,"direction":side,"start_timestamp_ms":first["ts"],"start_close":first["c"],"two_hour_move_pct":round(total,5),"first_10m_move_pct":round(first10,5),"fastest_rolling_10m_move_pct":round(max10,5),"ratio":round(ratio,4) if ratio is not None else None,"rejection":"FAST_10M_MOVE_EXCEEDED_ONE_QUARTER_OF_2H_MOVE"})
             continue
         diagnostics["speed_rule_pass"]+=1
         match=lambda x: x["c"]>x["o"] if side=="LONG" else x["c"]<x["o"]
@@ -146,7 +149,7 @@ def analyze(symbol,rows,start_ms,end_ms):
             "max_favorable_excursion_pct":round(max(fav),5) if fav else None,
             "max_adverse_excursion_pct":round(min(adverse),5) if adverse else None,
             "historical_open_interest_change_pct":None,
-            "definition":"120m breakout hold, >=4% directional return, and >=4x the largest same-direction rolling 10m return"
+            "definition":"120m breakout hold, >=4% directional return, and >=4x the absolute directional move in the first 10m"
         })
         last_i=i
     return events,diagnostics,near_misses
@@ -286,7 +289,7 @@ async def main():
       "1. A closed 1m candle closes above the previous 60 candles' highest high (LONG) or below their lowest low (SHORT).",
       "2. Every subsequent closed 1m candle remains outside that breakout level for 120 complete minutes.",
       "3. Direction-adjusted net movement from breakout close to the 120th-minute close is at least 4%.",
-      "4. The 120m directional move is at least 4 times the largest same-direction move in ANY rolling 10m window during the 120 minutes. Each 10m window uses its first candle open and tenth candle close.",
+      "4. The 120m directional move is at least 4 times the absolute directional move in the FIRST 10 minutes. The largest rolling 10m move later in the trend is measured separately as a diagnostic, not used to reject the trend.",
       "5. LONG and SHORT are evaluated separately; gaps and incomplete candles invalidate a sample.",
       "",
       "## Aggregate findings",
@@ -321,7 +324,7 @@ async def main():
     lines += ["","## Limitations",
       "- Historical research only; not current entry signals or a profitability claim.",
       "- Breakout/hold is a defined proxy and can miss trends without a 60m range break or with a brief retest.",
-      "- The four-times filter is deliberately strict and checks all rolling 10m windows.",
+      "- The four-times filter compares the 2h movement with the first 10m movement. Later fast bursts are reported separately.",
       "- Historical OI, funding, order-book depth and taker-side history may not cover past events. Missing evidence is not fabricated.",
       "- Returns exclude fees, spread, slippage, funding payments and execution latency. No orders were placed.",
       "- Top 200 means the highest 24h-turnover online crypto USDT perpetuals at test time.",""]
