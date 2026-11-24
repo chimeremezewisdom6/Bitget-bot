@@ -211,7 +211,7 @@ def build_report(root=ROOT):
             (
                 f"| {item.get('symbol')} | {side} | {data.get('score')} / 7 | {data.get('stage')} | "
                 f"{data.get('price_change_pct', {}).get('5m')}% | {data.get('price_change_pct', {}).get('15m')}% | "
-                f"{(str(data.get('open_interest_change_pct', {}).get(15)) + '%') if data.get('open_interest_change_pct', {}).get(15) is not None else 'unavailable'} | "
+                f"{(str(data.get('open_interest_change_pct', {}).get('15')) + '%') if data.get('open_interest_change_pct', {}).get('15') is not None else 'unavailable'} | "
                 f"{item.get('volume_multiple_5m_vs_prior20m')}x | "
                 f"{item.get('candle_windows', {}).get('5', {}).get('green')}/{item.get('candle_windows', {}).get('5', {}).get('red')} | "
                 f"{data.get('positioning_context')} |"
