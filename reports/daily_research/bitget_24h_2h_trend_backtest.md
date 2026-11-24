@@ -1,13 +1,17 @@
 # Bitget authenticated 24-hour genuine-trend backtest
 
-- Generated UTC: 2026-11-24T06:45:43.990131+00:00
-- Window UTC: 2026-11-23T06:45:00+00:00 to 2026-11-24T06:45:00+00:00
+- Generated UTC: 2026-11-24T06:46:52.172352+00:00
+- Window UTC: 2026-11-23T06:46:00+00:00 to 2026-11-24T06:46:00+00:00
 - Bitget API key authentication: SUCCESS
 - Key permission type: readonly
 - Account fee schedule: AVAILABLE
 - Access scope: Signed account-info and fee-rate reads only; no balances, positions, orders, or withdrawals.
 - Universe: top 200 online crypto USDT perpetuals by 24h turnover.
 - Coverage: 200/200 symbols; 288,000 closed 1m candles; 0 fetch errors.
+- 2h breakout-and-hold candidates before the 4%/speed filters: 2057
+- Candidates reaching 4% over 2h: 239
+- Rejected below 4%: 1818
+- Rejected by the 4x speed rule: 239
 - Qualifying gradual trends: 0 (LONG 0, SHORT 0).
 
 ## Exact trend rules
@@ -115,8 +119,8 @@
 | IDOLUSDT | 1440 | 0 | 0 | 0 | OK |
 | PIUSDT | 1440 | 0 | 0 | 0 | OK |
 | WLFIUSDT | 1440 | 0 | 0 | 0 | OK |
-| CYBERUSDT | 1440 | 0 | 0 | 0 | OK |
 | APRUSDT | 1440 | 0 | 0 | 0 | OK |
+| CYBERUSDT | 1440 | 0 | 0 | 0 | OK |
 | NIGHTUSDT | 1440 | 0 | 0 | 0 | OK |
 | BTWUSDT | 1440 | 0 | 0 | 0 | OK |
 | LDOUSDT | 1440 | 0 | 0 | 0 | OK |
@@ -130,8 +134,8 @@
 | USELESSUSDT | 1440 | 0 | 0 | 0 | OK |
 | ELICEUSDT | 1440 | 0 | 0 | 0 | OK |
 | CLSUSDT | 1440 | 0 | 0 | 0 | OK |
-| UNITASUSDT | 1440 | 0 | 0 | 0 | OK |
 | VIRTUALUSDT | 1440 | 0 | 0 | 0 | OK |
+| UNITASUSDT | 1440 | 0 | 0 | 0 | OK |
 | LUNCUSDT | 1440 | 0 | 0 | 0 | OK |
 | ETCUSDT | 1440 | 0 | 0 | 0 | OK |
 | SANDUSDT | 1440 | 0 | 0 | 0 | OK |
@@ -141,8 +145,8 @@
 | CHIPUSDT | 1440 | 0 | 0 | 0 | OK |
 | PYTHUSDT | 1440 | 0 | 0 | 0 | OK |
 | XPLUSDT | 1440 | 0 | 0 | 0 | OK |
-| BGBUSDT | 1440 | 0 | 0 | 0 | OK |
 | LITUSDT | 1440 | 0 | 0 | 0 | OK |
+| BGBUSDT | 1440 | 0 | 0 | 0 | OK |
 | RPLUSDT | 1440 | 0 | 0 | 0 | OK |
 | INITUSDT | 1440 | 0 | 0 | 0 | OK |
 | CROSSUSDT | 1440 | 0 | 0 | 0 | OK |
@@ -164,9 +168,9 @@
 | MEGAUSDT | 1440 | 0 | 0 | 0 | OK |
 | DEXEUSDT | 1440 | 0 | 0 | 0 | OK |
 | 1000BONKUSDT | 1440 | 0 | 0 | 0 | OK |
-| MAGMAUSDT | 1440 | 0 | 0 | 0 | OK |
 | PLUMEUSDT | 1440 | 0 | 0 | 0 | OK |
 | MORPHOUSDT | 1440 | 0 | 0 | 0 | OK |
+| MAGMAUSDT | 1440 | 0 | 0 | 0 | OK |
 | USUALUSDT | 1440 | 0 | 0 | 0 | OK |
 | CAPUSDT | 1440 | 0 | 0 | 0 | OK |
 | RAREUSDT | 1440 | 0 | 0 | 0 | OK |
@@ -199,23 +203,23 @@
 | AXISUSDT | 1440 | 0 | 0 | 0 | OK |
 | IOSTUSDT | 1440 | 0 | 0 | 0 | OK |
 | NEMUSDT | 1440 | 0 | 0 | 0 | OK |
-| UAIUSDT | 1440 | 0 | 0 | 0 | OK |
-| CPUSDT | 1440 | 0 | 0 | 0 | OK |
-| ACUUSDT | 1440 | 0 | 0 | 0 | OK |
 | ALLOUSDT | 1440 | 0 | 0 | 0 | OK |
+| UAIUSDT | 1440 | 0 | 0 | 0 | OK |
+| ACUUSDT | 1440 | 0 | 0 | 0 | OK |
 | FLOKIUSDT | 1440 | 0 | 0 | 0 | OK |
 | BEAMUSDT | 1440 | 0 | 0 | 0 | OK |
+| CPUSDT | 1440 | 0 | 0 | 0 | OK |
 | 0GUSDT | 1440 | 0 | 0 | 0 | OK |
-| ARXUSDT | 1440 | 0 | 0 | 0 | OK |
 | BERAUSDT | 1440 | 0 | 0 | 0 | OK |
+| ARXUSDT | 1440 | 0 | 0 | 0 | OK |
 | GPSUSDT | 1440 | 0 | 0 | 0 | OK |
 | KUAISHOUUSDT | 1440 | 0 | 0 | 0 | OK |
 | ONGUSDT | 1440 | 0 | 0 | 0 | OK |
-| ORCAUSDT | 1440 | 0 | 0 | 0 | OK |
 | PBRUSDT | 1440 | 0 | 0 | 0 | OK |
 | METUSDT | 1440 | 0 | 0 | 0 | OK |
-| SPKUSDT | 1440 | 0 | 0 | 0 | OK |
+| ORCAUSDT | 1440 | 0 | 0 | 0 | OK |
 | KITEUSDT | 1440 | 0 | 0 | 0 | OK |
+| SPKUSDT | 1440 | 0 | 0 | 0 | OK |
 | ARKMUSDT | 1440 | 0 | 0 | 0 | OK |
 | KERNELUSDT | 1440 | 0 | 0 | 0 | OK |
 | NUUSDT | 1440 | 0 | 0 | 0 | OK |
