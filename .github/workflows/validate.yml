@@ -22,6 +22,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Compile research modules
-        run: python -m py_compile main.py daily_research.py cap_watchlist.py research_report.py shadow_execution.py shadow_execution.py research_report.py cap_watchlist.py package_research.py
+        run: python -m py_compile main.py daily_research.py cap_watchlist.py research_report.py shadow_execution.py package_research.py
       - name: Run research and read-only safety tests
         run: python -m unittest discover -s tests -v
