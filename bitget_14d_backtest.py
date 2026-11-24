@@ -140,7 +140,7 @@ async def main():
   splits[name]={"events":len(es),"gradual":sum(x["label"]=="GRADUAL_TREND" for x in es),"spikes":sum(x["label"]=="FAST_SPIKE" for x in es),"failed":sum(x["label"]=="FAILED_OR_WEAK" for x in es)}
  summary={"generated_at_utc":datetime.now(timezone.utc).isoformat(),"window_start_utc":datetime.fromtimestamp(start/1000,timezone.utc).isoformat(),"window_end_utc":datetime.fromtimestamp(end/1000,timezone.utc).isoformat(),
  "duration_days":14,"authenticated_read":True,"permission_type":permission,"fee_schedule_available":fee_ok,"fee_schedule_error":fee_err,
- "universe":"Top 200 currently online USDT perpetuals by current turnover; not historical point-in-time universe.","symbols_requested":len(uni),
+ "universe":"All currently online eligible USDT perpetuals ordered by current 24h turnover; not historical point-in-time universe.","symbols_requested":len(uni),
  "symbols_95pct_coverage":sum(x["coverage_pct"]>=95 for x in coverage),"candles":sum(x["candles"] for x in coverage),"symbols_with_errors":sum(bool(x["errors"]) for x in coverage),
  "candidate_events":len(events),"labels":counts,"strict_gradual":sum(x["gradual_strict"] for x in events),"tolerant_gradual":sum(x["gradual_tolerant"] for x in events),
  "pre_breakout_medians":pre,"post_breakout_medians":post,"chronological_splits":splits,"daily_counts":{k:dict(v) for k,v in sorted(daily.items())},"coverage":coverage,
