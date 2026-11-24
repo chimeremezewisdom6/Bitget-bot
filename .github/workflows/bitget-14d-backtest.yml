@@ -1,0 +1,45 @@
+name: Bitget 14-Day Trend Fuel Backtest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bitget_14d_backtest.py"
+      - ".github/workflows/bitget-14d-backtest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bitget-14d-trend-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BITGET_API_KEY: ${{ secrets.BITGET_API_KEY || secrets.BITGET_KEY }}
+      BITGET_API_SECRET: ${{ secrets.BITGET_API_SECRET || secrets.BITGET_SECRET_KEY || secrets.BITGET_SECRET }}
+      BITGET_API_PASSPHRASE: ${{ secrets.BITGET_API_PASSPHRASE || secrets.BITGET_PASSPHRASE || secrets.BITGET_API_PASSWORD || secrets.BITGET_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run 14-day authenticated read-only backtest
+        run: python -u bitget_14d_backtest.py
+      - name: Publish research artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/daily_research/bitget_14d_trend_fuel_summary.json reports/daily_research/bitget_14d_trend_fuel_events.jsonl reports/daily_research/bitget_14d_trend_fuel_report.md
+          git diff --cached --quiet && exit 0
+          git commit -m "Publish 14-day Bitget trend fuel backtest"
+          git pull --rebase origin main
+          git push origin HEAD:main
