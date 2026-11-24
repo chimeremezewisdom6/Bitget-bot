@@ -498,7 +498,7 @@ async def collect_symbol(session, symbol, ticker, instrument, fee_map, activity_
         }
         add(O, observation)
         return {"symbol": symbol, "ticker": ticker, "instrument": instrument,
-                "book": book, "candles": candle_rows, "open_interest_history": oi_payload, "mid": mid,
+                "book": book, "candles": candle_rows, "open_interest_history": oi_payload, "fills": fills_payload, "mid": mid,
                 "spread_bps": spread, "fee_bps": fee_bps, "error": None}
     except Exception as exc:
         add(R / "collection_errors.jsonl", {
@@ -701,7 +701,7 @@ async def collect():
                     continue
                 ignition = analyze_trend_ignition(
                     result["symbol"], result.get("candles", []),
-                    result.get("open_interest_history", {})
+                    result.get("open_interest_history", {}), result.get("fills", {})
                 )
                 ignition["collected_at_utc"] = iso()
                 add(R / "trend_ignition.jsonl", ignition)
