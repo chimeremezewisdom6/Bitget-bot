@@ -83,6 +83,8 @@ def directional_pct(start,end,side):
 def analyze(symbol,rows,start_ms,end_ms):
     rows=[r for r in rows if start_ms<=r["ts"] and r["ts"]+60000<=end_ms]
     events=[]
+    diagnostics={"breakout_2h_hold":0,"return_at_least_4pct":0,"speed_rule_pass":0,"rejected_below_4pct":0,"rejected_speed_ratio":0}
+    near_misses=[]
     last_i=-DURATION
     for i in range(60,len(rows)-DURATION+1):
         if i-last_i<DURATION: continue
@@ -96,14 +98,23 @@ def analyze(symbol,rows,start_ms,end_ms):
         else: continue
         future=rows[i:i+DURATION]
         if any((x["c"]<=boundary if side=="LONG" else x["c"]>=boundary) for x in future): continue
+        diagnostics["breakout_2h_hold"]+=1
         total=directional_pct(first["c"],future[-1]["c"],side)
-        if total<MIN_TREND_PCT: continue
         # Check every rolling 10m interval, not only the opening 10m.
         moves=[directional_pct(future[j]["o"],future[j+9]["c"],side) for j in range(DURATION-9)]
         max10=max([0.0]+moves)
         ratio=(total/max10) if max10>0 else None
-        if ratio is None or ratio<SPEED_MULTIPLE: continue
         first10=directional_pct(future[0]["o"],future[9]["c"],side)
+        if total<MIN_TREND_PCT:
+            diagnostics["rejected_below_4pct"]+=1
+            near_misses.append({"symbol":symbol,"direction":side,"start_timestamp_ms":first["ts"],"start_close":first["c"],"two_hour_move_pct":round(total,5),"fastest_10m_move_pct":round(max10,5),"ratio":round(ratio,4) if ratio is not None else None,"rejection":"TWO_HOUR_MOVE_BELOW_4_PERCENT"})
+            continue
+        diagnostics["return_at_least_4pct"]+=1
+        if ratio is None or ratio<SPEED_MULTIPLE:
+            diagnostics["rejected_speed_ratio"]+=1
+            near_misses.append({"symbol":symbol,"direction":side,"start_timestamp_ms":first["ts"],"start_close":first["c"],"two_hour_move_pct":round(total,5),"fastest_10m_move_pct":round(max10,5),"ratio":round(ratio,4) if ratio is not None else None,"rejection":"FAST_10M_MOVE_EXCEEDED_ONE_QUARTER_OF_2H_MOVE"})
+            continue
+        diagnostics["speed_rule_pass"]+=1
         match=lambda x: x["c"]>x["o"] if side=="LONG" else x["c"]<x["o"]
         aligned15=sum(match(x) for x in future[:15])
         aligned30=sum(match(x) for x in future[:30])
@@ -138,7 +149,7 @@ def analyze(symbol,rows,start_ms,end_ms):
             "definition":"120m breakout hold, >=4% directional return, and >=4x the largest same-direction rolling 10m return"
         })
         last_i=i
-    return events
+    return events,diagnostics,near_misses
 
 def oi_points(payload):
     data=payload.get("list",[]) if isinstance(payload,dict) else (payload if isinstance(payload,list) else [])
@@ -230,13 +241,18 @@ async def main():
                     return symbol,num(t.get("turnover24h")),rows,None
                 except Exception as exc: return symbol,num(t.get("turnover24h")),[],str(exc)[:200]
         fetched=await asyncio.gather(*(fetch_one(t) for t in universe))
-        events=[]; coverage=[]; errors=[]
+        events=[]; coverage=[]; errors=[]; diagnostic_totals={"breakout_2h_hold":0,"return_at_least_4pct":0,"speed_rule_pass":0,"rejected_below_4pct":0,"rejected_speed_ratio":0}; near_misses=[]
         for symbol,turnover,rows,error in fetched:
-            found=analyze(symbol,rows,start_ms,end_ms) if rows else []
+            if rows:
+                found,diag,near=analyze(symbol,rows,start_ms,end_ms)
+                for key in diagnostic_totals: diagnostic_totals[key]+=diag[key]
+                near_misses.extend(near)
+            else:
+                found=[]; diag={key:0 for key in diagnostic_totals}
             events.extend(found)
             if error: errors.append({"symbol":symbol,"error":error})
             coverage.append({"symbol":symbol,"turnover24h_usdt":turnover,"closed_1m_candles":len(rows),
-                "qualifying_trends":len(found),"long":sum(e["direction"]=="LONG" for e in found),
+                "qualifying_trends":len(found),"breakout_2h_hold_candidates":diag["breakout_2h_hold"],"rejected_below_4pct":diag["rejected_below_4pct"],"rejected_speed_ratio":diag["rejected_speed_ratio"],"long":sum(e["direction"]=="LONG" for e in found),
                 "short":sum(e["direction"]=="SHORT" for e in found),"error":error})
         grouped={}
         for e in events: grouped.setdefault(e["symbol"],[]).append(e)
@@ -260,6 +276,10 @@ async def main():
       "- Access scope: "+auth["scope"],
       "- Universe: top "+str(len(universe))+" online crypto USDT perpetuals by 24h turnover.",
       "- Coverage: "+str(sum(not x["error"] for x in coverage))+"/"+str(len(universe))+" symbols; "+format(sum(x["closed_1m_candles"] for x in coverage),",")+" closed 1m candles; "+str(len(errors))+" fetch errors.",
+      "- 2h breakout-and-hold candidates before the 4%/speed filters: "+str(diagnostic_totals["breakout_2h_hold"]),
+      "- Candidates reaching 4% over 2h: "+str(diagnostic_totals["return_at_least_4pct"]),
+      "- Rejected below 4%: "+str(diagnostic_totals["rejected_below_4pct"]),
+      "- Rejected by the 4x speed rule: "+str(diagnostic_totals["rejected_speed_ratio"]),
       "- Qualifying gradual trends: "+str(len(events))+" (LONG "+str(sum(e["direction"]=="LONG" for e in events))+", SHORT "+str(sum(e["direction"]=="SHORT" for e in events))+").",
       "",
       "## Exact trend rules",
@@ -311,7 +331,7 @@ async def main():
         "generated_at_utc":datetime.now(timezone.utc).isoformat(),"window_start_ms":start_ms,"window_end_ms":end_ms,
         "authentication":auth,"symbols_requested":len(universe),"symbols_successful":sum(not x["error"] for x in coverage),
         "symbols_failed":len(errors),"closed_1m_candles":sum(x["closed_1m_candles"] for x in coverage),
-        "qualifying_trends":len(events),"long":sum(e["direction"]=="LONG" for e in events),
+        "qualifying_trends":len(events),"diagnostics":diagnostic_totals,"near_misses":near_misses[:500],"long":sum(e["direction"]=="LONG" for e in events),
         "short":sum(e["direction"]=="SHORT" for e in events),"coverage":coverage,"errors":errors,
         "enrichment":enrichment},indent=2)+"\n",encoding="utf-8")
     print(json.dumps({"authenticated":True,"permission_type":auth["permission_type"],
