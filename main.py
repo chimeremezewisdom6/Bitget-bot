@@ -1,7 +1,8 @@
 """Single public entry point for every Bitget read-only research action.
 
-The scheduler and manual ping both call this file. Specialist modules remain
-internal implementation modules so their tested logic stays reusable.
+The scheduler, push-triggered refresh, and manual ping all call this file.
+Specialist modules remain internal implementation modules so their tested
+logic stays reusable.
 """
 import argparse
 import json
