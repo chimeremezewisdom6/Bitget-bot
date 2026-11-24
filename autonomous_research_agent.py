@@ -199,13 +199,17 @@ def rollback(before):
 
 
 def run_validation():
+    # Never expose the OpenAI API key to model-edited modules or test subprocesses.
+    safe_env = os.environ.copy()
+    safe_env.pop("OPENAI_API_KEY", None)
     subprocess.run([sys.executable, "-m", "compileall", "-q",
                     "daily_research.py", "movement_mechanics.py",
                     "fuel_attribution.py", "research_report.py", "trend_ignition.py"],
-                   cwd=ROOT, check=True)
+                   cwd=ROOT, check=True, env=safe_env)
     test_dir = ROOT / "tests"
     if test_dir.exists():
-        subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=ROOT, check=True)
+        subprocess.run([sys.executable, "-m", "pytest", "-q"],
+                       cwd=ROOT, check=True, env=safe_env)
 
 
 def main():
