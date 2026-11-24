@@ -57,15 +57,22 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          p = Path("reports/daily_research/session.json")
-          if not p.exists():
+          session = Path("reports/daily_research/session.json")
+          heartbeat = Path("reports/daily_research/heartbeat.json")
+          if not session.exists():
               raise SystemExit("Scanner did not create session state.")
-          state = json.loads(p.read_text(encoding="utf-8"))
+          if not heartbeat.exists():
+              raise SystemExit("Scanner did not write the watchdog heartbeat.")
+          state = json.loads(session.read_text(encoding="utf-8"))
+          beat = json.loads(heartbeat.read_text(encoding="utf-8"))
           if int(state.get("cycles", 0)) < 1:
               raise SystemExit("Scanner has not recorded a successful collection cycle.")
+          if beat.get("collection_outcome") != "success" or beat.get("collector_cycles") != state.get("cycles"):
+              raise SystemExit("Watchdog heartbeat does not match the latest successful collection.")
           print(json.dumps({
               "cycles": state.get("cycles"),
               "last_collection_utc": state.get("last_at"),
+              "heartbeat_utc": beat.get("heartbeat_utc"),
               "session_active": state.get("active"),
               "trading_enabled": state.get("trading_enabled", False),
           }, indent=2))
@@ -80,8 +87,23 @@ jobs:
           fi
           if ! git diff --cached --quiet; then
             git commit -m "Record unified Bitget scanner heartbeat"
-            git pull --rebase origin main
-            git push origin HEAD:main
+            # Another workflow may update main between fetch and push. Retry
+            # the fast-forward integration instead of failing on a stale lease.
+            pushed=false
+            for attempt in 1 2 3 4 5; do
+              git fetch origin main
+              git rebase origin/main
+              if git push origin HEAD:main; then
+                pushed=true
+                break
+              fi
+              echo "Push raced with another main update (attempt $attempt); retrying."
+              sleep "$attempt"
+            done
+            if [ "$pushed" != true ]; then
+              echo "::error::Could not publish scanner records after five push attempts."
+              exit 1
+            fi
           fi
       - name: Build portable research package when session ends
         if: inputs.action == 'stop'
