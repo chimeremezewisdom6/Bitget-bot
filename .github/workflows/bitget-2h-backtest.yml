@@ -1,4 +1,4 @@
-name: Bitget 24h 2h Trend Backtest
+name: Bitget 24h Genuine Trend Research
 
 on:
   push:
@@ -12,13 +12,17 @@ permissions:
   contents: write
 
 concurrency:
-  group: bitget-24h-2h-backtest
+  group: bitget-24h-genuine-trend-research
   cancel-in-progress: false
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
+    env:
+      BITGET_API_KEY: ${{ secrets.BITGET_API_KEY || secrets.BITGET_KEY }}
+      BITGET_API_SECRET: ${{ secrets.BITGET_API_SECRET || secrets.BITGET_SECRET_KEY || secrets.BITGET_SECRET }}
+      BITGET_API_PASSPHRASE: ${{ secrets.BITGET_API_PASSPHRASE || secrets.BITGET_PASSPHRASE || secrets.BITGET_API_PASSWORD || secrets.BITGET_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,12 +32,25 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Fetch and backtest 200 Bitget USDT perpetuals
+      - name: Authenticate with Bitget and backtest 200 USDT perpetuals
         run: python trend_2h_backtest.py
-      - name: Publish full report and event data
+      - name: Publish research report and raw event data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add reports/daily_research/bitget_24h_2h_trend_backtest.md reports/daily_research/bitget_24h_2h_trend_events.jsonl reports/daily_research/bitget_24h_2h_trend_coin_summary.json
-          git commit -m "Publish fresh Bitget 24h two-hour trend backtest"
-          git push origin HEAD:main
+          if git diff --cached --quiet; then
+            echo "No report changes to publish."
+            exit 0
+          fi
+          git commit -m "Publish authenticated Bitget genuine trend research"
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git rebase origin/main
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep "$attempt"
+          done
+          echo "::error::Could not publish report after five attempts."
+          exit 1
