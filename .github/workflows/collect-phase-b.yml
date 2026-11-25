@@ -1,0 +1,49 @@
+name: Phase B Collector (Read Only)
+
+on:
+  schedule:
+    - cron: "1-59/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-b-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: vars.PHASE_B_COLLECTOR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      PHASE_B_COLLECTOR_ENABLED: ${{ vars.PHASE_B_COLLECTOR_ENABLED }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            collector
+            research
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Collect one read-only bundle
+        run: |
+          python -m collector.cli \
+            --out-dir artifacts \
+            --top-n 100 \
+            --max-bytes 300000 \
+            --concurrency 4 \
+            --rate-per-sec 4 \
+            --burst 4
+      - name: Upload bundle and summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bitget-5m-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 4
