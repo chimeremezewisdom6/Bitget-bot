@@ -1,14 +1,14 @@
 {
-  "heartbeat_utc": "2026-11-25T09:38:27.241130+00:00",
-  "event": "schedule",
-  "action": "ping",
+  "heartbeat_utc": "2026-11-25T09:47:43.539685+00:00",
+  "event": "workflow_dispatch",
+  "action": "collect",
   "collection_outcome": "success",
-  "run_id": "45587208354",
+  "run_id": "45588676262",
   "run_attempt": "1",
   "workflow": "Bitget Unified Research Scanner",
   "session_active": true,
-  "collector_cycles": 5,
-  "last_collection_utc": "2026-11-25T09:38:19.554203+00:00",
+  "collector_cycles": 6,
+  "last_collection_utc": "2026-11-25T09:47:36.152509+00:00",
   "expected_interval_minutes": 5,
   "trading_enabled": false
 }
