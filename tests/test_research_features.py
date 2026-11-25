@@ -76,6 +76,18 @@ class OtherFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(result["imbalance"], 0.4, places=6)
         self.assertEqual(result["quality"], "SAMPLED")
 
+    def test_taker_adequate_requires_50_fills_and_60_seconds(self):
+        fills = [
+            {"side": "buy" if index % 2 == 0 else "sell", "size": "1", "price": "100",
+             "ts": str(1_000 + index * 1_000)}
+            for index in range(61)
+        ]
+        result = features.taker_imbalance(fills, now_ms=61_000)
+        self.assertEqual(result["quality"], "ADEQUATE")
+        self.assertEqual(result["coverage_pct"], 20.0)
+        stale = features.taker_imbalance(fills, now_ms=122_000)
+        self.assertEqual(stale["quality"], "STALE")
+
     def test_absorption_proxy(self):
         result = features.absorption_proxy(0.5, 0.05, -5.0)
         self.assertTrue(result["absorbed"])
@@ -97,6 +109,14 @@ class OtherFeatureTests(unittest.TestCase):
         self.assertTrue(result["breakout_60m"])
         self.assertEqual(result["direction"], "LONG")
         self.assertFalse(result["failed_breakout"])
+
+    def test_first_move_ts_uses_first_crossing(self):
+        start = 1_800_000_000_000
+        rows = candles([100.0] * 5 + [100.3, 100.1])
+        closed = features.closed_candles(rows, now_ms=start + 7 * 60_000)
+        self.assertEqual(features.first_move_ts(closed), start + 5 * 60_000)
+        flat = features.closed_candles(candles([100.0] * 7), now_ms=start + 7 * 60_000)
+        self.assertIsNone(features.first_move_ts(flat))
 
 
 if __name__ == "__main__":

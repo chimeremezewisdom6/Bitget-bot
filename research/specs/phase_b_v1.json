@@ -1,0 +1,377 @@
+{
+  "created_at": "2026-11-25T00:00:00Z",
+  "defaults": {
+    "bootstrap": {
+      "alpha": 0.05,
+      "block": "day",
+      "n_boot": 2000
+    },
+    "dedupe_ms": 3600000,
+    "entry_latency_bars": 1,
+    "fdr_q": 0.1,
+    "fee_bps_per_side": 6.0,
+    "horizons_min": [
+      5,
+      15,
+      30,
+      60
+    ],
+    "min_days": {
+      "holdout": 20,
+      "pipeline": 1,
+      "validation": 10
+    },
+    "min_n": {
+      "holdout": 200,
+      "pipeline": 30,
+      "validation": 100
+    },
+    "non_overlapping": true,
+    "slippage_bps": 5.0,
+    "slippage_sensitivity_bps": [
+      0,
+      2,
+      5,
+      10
+    ]
+  },
+  "families": {
+    "primary_v1": {
+      "fdr_q": 0.1,
+      "specs": [
+        "taker_aggression_v1",
+        "turnover_expansion_v1",
+        "oi_change_v1",
+        "liquidation_fade_v1",
+        "liquidation_follow_v1",
+        "spot_lead_v1",
+        "absorption_depth_v1",
+        "breakout_continuation_v1",
+        "breakout_failure_v1"
+      ]
+    },
+    "secondary_absorption_v1": {
+      "fdr_q": 0.1,
+      "specs": [
+        "absorption_strict_v1"
+      ]
+    }
+  },
+  "frozen": true,
+  "holdout": {
+    "evaluated": false,
+    "policy": "locked_newest_day",
+    "requires": [
+      "manual_confirmation",
+      "spec_hash",
+      "holdout_unlock_at"
+    ],
+    "unlock_after_days": 30,
+    "unlock_at": null
+  },
+  "registry_version": "phase_b_v1",
+  "specs": [
+    {
+      "buckets": [
+        "flag_0_7",
+        "turnover_band",
+        "taker_quality"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "taker_aggression",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "Aggressive taker imbalance of at least 0.50 with adequate fill coverage predicts a continuation in the aggressor direction after costs.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "min_coverage_pct": 20.0,
+        "min_imbalance": 0.5,
+        "min_quality": "ADEQUATE"
+      },
+      "rationale": "0.50 means buy volume is at least 3x sell volume; ADEQUATE prevents a short fill sample from being treated as a full-interval flow signal.",
+      "spec_hash": "549492abc086f6685d1021ba90dff2ce2d613544203024d4dc3a42e5d6fd010e",
+      "spec_id": "taker_aggression_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "turnover_band"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "turnover_expansion",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "Turnover at least 2 standard deviations above its trailing 60-minute baseline, with a directional 1-minute move of at least 0.1%, predicts continuation.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "min_abs_return_pct": 0.1,
+        "turnover_z": 2.0
+      },
+      "rationale": "z=2.0 is the approved primary threshold; the 0.1% return filter removes turnover bursts without a directional move.",
+      "spec_hash": "3a7c8608147043bc782ff64514a9cd2dca2e5c9c809eef7a727b5e46a12eb1b1",
+      "spec_id": "turnover_expansion_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "oi_regime",
+        "oi_price_alignment"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "oi_change",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "A 15-minute absolute open-interest change of at least 2.0% with a 15-minute absolute price move of at least 0.2% predicts continuation in the price direction.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "min_abs_oi_delta_pct": 2.0,
+        "min_abs_return_pct": 0.2
+      },
+      "rationale": "OI and price directions are recorded separately; alignment is a reported bucket, not an undocumented filter.",
+      "spec_hash": "317ab5000f2a2017e2652ba63fca3c6821623891535540d614cdf303a0b9c85a",
+      "spec_id": "oi_change_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "liquidation_side",
+        "turnover_band"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "liquidation_spike",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "A liquidation spike of at least 5,000 USDT is followed by a short-term reversal against the forced side.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "min_notional_usdt": 5000.0,
+        "min_records": 1,
+        "mode": "fade"
+      },
+      "rationale": "Fade and follow are pre-registered together and corrected under the same FDR family; liquidation size is recorded for later threshold studies.",
+      "spec_hash": "feccccdc01cd48607cc2d2bd45116daac5ea5a02769cc897344bc49aa3f7bd89",
+      "spec_id": "liquidation_fade_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "liquidation_side",
+        "turnover_band"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "liquidation_spike",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "A liquidation spike of at least 5,000 USDT is followed by continuation in the forced side's direction.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "min_notional_usdt": 5000.0,
+        "min_records": 1,
+        "mode": "follow"
+      },
+      "rationale": "Fade and follow are pre-registered together and corrected under the same FDR family; liquidation size is recorded for later threshold studies.",
+      "spec_hash": "76c462a316975a0135e8c56b3f22d9ba2b32757cd428b827d83daed5b0b8633e",
+      "spec_id": "liquidation_follow_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "spot_status"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "spot_lead",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "Spot turnover at least 2 standard deviations above baseline with a spot move of at least 0.2% leads the perpetual in the same direction.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "min_abs_spot_return_pct": 0.2,
+        "spot_turnover_z": 2.0
+      },
+      "rationale": "Uses the approved 2.0/0.2% thresholds; unmapped spot symbols are reported, not imputed.",
+      "spec_hash": "e1beea5aeabc77c4a06aef6ba21b70e9291c5b9f5fdbc873ced98c2ec567d762",
+      "spec_id": "spot_lead_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "turnover_band"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "absorption",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "Aggressive flow of at least 0.50 with little price progress and a non-collapsing opposite depth predicts a fade.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "max_price_move_pct": 0.1,
+        "min_depth_change_pct": -10.0,
+        "min_imbalance": 0.5,
+        "require_book_imbalance": false,
+        "require_depth_known": true
+      },
+      "rationale": "Depth-only is the approved primary to obtain a larger sample; book-quality fields are recorded for the separately registered strict secondary hypothesis.",
+      "spec_hash": "24ffa609ced2a0e7aa81040afc4bf058d544f27692c9122fc6f2112848e54706",
+      "spec_id": "absorption_depth_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "turnover_band"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "breakout",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "A 60-bar breakout with turnover z of at least 2.0 and no failure within 3 bars continues in the breakout direction.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "turnover_z": 2.0
+      },
+      "rationale": "The 60-bar lookback and 3-bar confirmation are the existing breakout_state defaults; z=2.0 is the approved threshold.",
+      "spec_hash": "e013266c6249a1d4ec20507f53fec854679efc5b6debe11dbb48d42032c950a7",
+      "spec_id": "breakout_continuation_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "turnover_band"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "failed_breakout",
+      "family": "primary_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "A 60-bar breakout with turnover z of at least 2.0 that fails within 3 bars reverses against the breakout direction.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "turnover_z": 2.0
+      },
+      "rationale": "Reported alongside continuation so successful and unsuccessful breakouts are both visible.",
+      "spec_hash": "c16d25c66f2029774f62fe6d32ddb3556c815e0653d6dff60b12a824659f80ce",
+      "spec_id": "breakout_failure_v1",
+      "version": 1
+    },
+    {
+      "buckets": [
+        "flag_0_7",
+        "turnover_band"
+      ],
+      "direction": "SIGNAL",
+      "event_type": "absorption",
+      "family": "secondary_absorption_v1",
+      "horizons_min": [
+        5,
+        15,
+        30,
+        60
+      ],
+      "hypothesis": "The depth-only absorption effect is stronger when the opposite book side is also aligned with the fade.",
+      "min_n": {
+        "holdout": 200,
+        "pipeline": 30,
+        "validation": 100
+      },
+      "params": {
+        "max_price_move_pct": 0.1,
+        "min_abs_book_imbalance": 0.2,
+        "min_depth_change_pct": -10.0,
+        "min_imbalance": 0.5,
+        "require_book_imbalance": true,
+        "require_depth_known": true
+      },
+      "rationale": "Separately registered secondary hypothesis; it has its own FDR family and never replaces the primary result.",
+      "spec_hash": "3f1eaed125ee391ab248a0f012c0d05a0d9fa5d7cfe7f0fd7d596ee11bdd51fa",
+      "spec_id": "absorption_strict_v1",
+      "version": 1
+    }
+  ]
+}

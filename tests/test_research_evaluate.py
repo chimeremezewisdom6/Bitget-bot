@@ -50,7 +50,7 @@ def candles():
 class EvaluateTests(unittest.TestCase):
     def test_evaluate_produces_split_metrics(self):
         metrics = evaluate.evaluate(
-            spec(), features(), {"BTCUSDT": candles()}, start_ms=START, fee_bps=6,
+            spec(), features(), {"BTCUSDT": candles()}, start_ms=START, fee_bps=6, funding_bps=0.0,
         )
         self.assertEqual(metrics["experiment_id"], "EXP-0001")
         self.assertEqual(metrics["split_sizes"], {"train": 1, "validation": 1, "test": 1})
@@ -60,7 +60,7 @@ class EvaluateTests(unittest.TestCase):
 
     def test_report_and_outputs(self):
         metrics = evaluate.evaluate(
-            spec(), features(), {"BTCUSDT": candles()}, start_ms=START, fee_bps=6,
+            spec(), features(), {"BTCUSDT": candles()}, start_ms=START, fee_bps=6, funding_bps=0.0,
         )
         report = evaluate.render_report(metrics)
         self.assertIn("EXP-0001", report)
@@ -72,7 +72,7 @@ class EvaluateTests(unittest.TestCase):
 
     def test_volatility_buckets_are_reported(self):
         metrics = evaluate.evaluate(
-            spec(), features(), {"BTCUSDT": candles()}, start_ms=START, fee_bps=6,
+            spec(), features(), {"BTCUSDT": candles()}, start_ms=START, fee_bps=6, funding_bps=0.0,
         )
         self.assertIn("volatility_normal", metrics["splits"]["train"]["by_bucket"])
 

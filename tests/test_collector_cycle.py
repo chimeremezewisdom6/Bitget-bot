@@ -11,15 +11,18 @@ NOW = 1_800_000_000_000
 SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 
 
-def instruments():
-    return {"code": "00000", "data": [
-        {
+def instruments(*, fee: bool = True):
+    rows = []
+    for symbol in SYMBOLS:
+        row = {
             "symbol": symbol, "baseCoin": symbol.replace("USDT", ""), "quoteCoin": "USDT",
             "status": "online", "type": "perpetual", "instrumentType": "crypto",
-            "symbolType": "crypto", "takerFeeRate": "0.0006",
+            "symbolType": "crypto",
         }
-        for symbol in SYMBOLS
-    ]}
+        if fee:
+            row["takerFeeRate"] = "0.0006"
+        rows.append(row)
+    return {"code": "00000", "data": rows}
 
 
 def tickers():
@@ -91,7 +94,7 @@ def book_payload():
     }}
 
 
-def make_client(fail_symbol="SOLUSDT"):
+def make_client(fail_symbol="SOLUSDT", *, fee: bool = True):
     def candles_route(params):
         if params.get("category") == "SPOT":
             return candles_payload()
@@ -100,7 +103,7 @@ def make_client(fail_symbol="SOLUSDT"):
         return candles_payload()
 
     return FakeClient({
-        ("/api/v3/market/instruments", "USDT-FUTURES"): instruments(),
+        ("/api/v3/market/instruments", "USDT-FUTURES"): instruments(fee=fee),
         ("/api/v3/market/tickers", "USDT-FUTURES"): tickers(),
         ("/api/v3/market/instruments", "SPOT"): spot_instruments(),
         ("/api/v3/market/tickers", "SPOT"): spot_tickers(),
@@ -137,6 +140,45 @@ class CycleTests(unittest.IsolatedAsyncioTestCase):
             loaded = load_bundle(result.bundle_path)
             self.assertEqual(len(loaded["rows"]["features"]), 2)
             self.assertEqual(len(loaded["rows"]["candles"]), result.candles_new)
+
+    async def test_public_fee_metadata_is_recorded_without_auth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = await cycle.run_cycle(
+                client=make_client(),
+                now_ms=NOW,
+                config=cycle.Config(
+                    top_n=10, max_spread_bps=100, min_depth_usdt=0,
+                    spot_max_symbols=3, micro_enabled=False,
+                ),
+                out_dir=tmp,
+            )
+            loaded = load_bundle(result.bundle_path)
+        self.assertEqual(loaded["meta"]["data_source"], "Bitget USDT-FUTURES public market data")
+        self.assertEqual(loaded["meta"]["fee_estimated"], 0)
+        self.assertEqual(result.metrics["fee_estimated"], 0)
+        self.assertNotIn("auth_status", loaded["meta"])
+        self.assertTrue(loaded["rows"]["features"])
+        self.assertTrue(all(row["fee_status"] == "PROVIDED" for row in loaded["rows"]["features"]))
+        for row in loaded["rows"]["features"]:
+            self.assertAlmostEqual(row["taker_fee_bps"], 6.0, places=6)
+
+    async def test_missing_public_fee_is_marked_fee_estimated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = await cycle.run_cycle(
+                client=make_client(fee=False),
+                now_ms=NOW,
+                config=cycle.Config(
+                    top_n=10, max_spread_bps=100, min_depth_usdt=0,
+                    spot_max_symbols=3, micro_enabled=False,
+                ),
+                out_dir=tmp,
+            )
+            loaded = load_bundle(result.bundle_path)
+        self.assertEqual(loaded["meta"]["fee_estimated"], len(loaded["rows"]["features"]))
+        self.assertEqual(result.metrics["fee_estimated"], len(loaded["rows"]["features"]))
+        self.assertTrue(loaded["rows"]["features"])
+        self.assertTrue(all(row["fee_status"] == "FEE_ESTIMATED" for row in loaded["rows"]["features"]))
+        self.assertTrue(all(row["taker_fee_bps"] is None for row in loaded["rows"]["features"]))
 
     async def test_slot_is_aligned_to_five_minutes(self):
         with tempfile.TemporaryDirectory() as tmp:

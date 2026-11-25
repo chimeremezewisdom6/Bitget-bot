@@ -31,23 +31,55 @@ class EventTests(unittest.TestCase):
         self.assertEqual(event.direction, "LONG")
         self.assertIsNone(events.detect(feature(oi_delta_15m_pct=-0.6), "oi_build"))
 
-    def test_taker_aggression_requires_coverage(self):
-        self.assertIsNotNone(events.detect(feature(), "taker_aggression"))
-        self.assertIsNone(events.detect(feature(taker_coverage_pct=10.0), "taker_aggression"))
+    def test_taker_aggression_requires_adequate_quality(self):
+        params = {"min_quality": "ADEQUATE"}
+        self.assertIsNotNone(events.detect(feature(), "taker_aggression", params))
+        self.assertIsNone(events.detect(feature(taker_quality="SAMPLED"), "taker_aggression", params))
+        # Coverage is diagnostic context, not a separate threshold.
+        self.assertIsNotNone(events.detect(feature(taker_coverage_pct=10.0), "taker_aggression", params))
 
     def test_absorption_fades_the_aggressor(self):
         event = events.detect(feature(), "absorption")
         self.assertEqual(event.direction, "SHORT")
         self.assertIsNone(events.detect(feature(absorption={"absorbed": False}), "absorption"))
 
-    def test_spot_lead_requires_spot_to_lead(self):
-        self.assertIsNotNone(events.detect(feature(), "spot_lead"))
-        self.assertIsNone(events.detect(feature(return_5m_pct=0.9), "spot_lead"))
+    def test_spot_lead_requires_timestamp_leadership(self):
+        params = {"require_timestamp_lead": True}
+        self.assertIsNotNone(events.detect(
+            feature(spot_move_5m_ts_ms=1_000, perp_move_5m_ts_ms=2_000), "spot_lead", params
+        ))
+        self.assertIsNone(events.detect(
+            feature(spot_move_5m_ts_ms=2_000, perp_move_5m_ts_ms=1_000), "spot_lead", params
+        ))
+        # The perp need not have crossed yet; the spot move still leads.
+        self.assertIsNotNone(events.detect(
+            feature(spot_move_5m_ts_ms=1_000, perp_move_5m_ts_ms=None), "spot_lead", params
+        ))
+        self.assertIsNone(events.detect(feature(), "spot_lead", params))
+        # Return magnitude is no longer a filter.
+        self.assertIsNotNone(events.detect(
+            feature(spot_move_5m_ts_ms=1_000, perp_move_5m_ts_ms=2_000, return_5m_pct=0.9),
+            "spot_lead", params,
+        ))
+        self.assertIsNotNone(events.detect(
+            feature(spot_move_5m_ts_ms=1_000, perp_move_5m_ts_ms=2_000, spot_return_5m_pct=0.05),
+            "spot_lead", params,
+        ))
 
     def test_failed_breakout_fades_direction(self):
         event = events.detect(feature(failed_breakout=True), "failed_breakout")
         self.assertEqual(event.direction, "SHORT")
         self.assertIsNone(events.detect(feature(), "failed_breakout"))
+
+    def test_breakout_requires_present_turnover_z(self):
+        self.assertIsNone(events.detect(feature(turnover_z_60m=None), "breakout"))
+        self.assertIsNone(events.detect(
+            feature(failed_breakout=True, turnover_z_60m=None), "failed_breakout"
+        ))
+
+    def test_breakout_continuation_excludes_failed_breakout(self):
+        self.assertIsNone(events.detect(feature(failed_breakout=True), "breakout"))
+        self.assertIsNotNone(events.detect(feature(failed_breakout=False), "breakout"))
 
     def test_unknown_event_type_raises(self):
         with self.assertRaises(ValueError):

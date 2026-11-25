@@ -32,6 +32,21 @@ class DatasetTests(unittest.TestCase):
         split = dataset.split_30d([last], START)
         self.assertEqual(split["test"], [])
 
+    def test_validation_event_with_trailing_lookback_across_boundary_is_excluded(self):
+        early = {"symbol": "BTCUSDT", "ts_ms": START + 15 * DAY + 30 * 60_000}
+        split = dataset.split_30d([early], START)
+        self.assertEqual(split["validation"], [])
+
+    def test_validation_event_after_lookback_is_included(self):
+        later = {"symbol": "BTCUSDT", "ts_ms": START + 15 * DAY + 2 * 3_600_000}
+        split = dataset.split_30d([later], START)
+        self.assertEqual(len(split["validation"]), 1)
+
+    def test_test_event_with_trailing_lookback_across_boundary_is_excluded(self):
+        early = {"symbol": "BTCUSDT", "ts_ms": START + 22 * DAY + 30 * 60_000}
+        split = dataset.split_30d([early], START)
+        self.assertEqual(split["test"], [])
+
     def test_bundle_roundtrip_and_hash(self):
         meta = {"slot": "slot", "symbols_ok": 1, "symbols_failed": 0}
         sections = {

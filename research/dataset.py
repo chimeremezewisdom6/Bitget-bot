@@ -72,6 +72,7 @@ def split_30d(
     test_days: int = 8,
     embargo_minutes: int = 60,
     max_horizon_min: int = 60,
+    feature_lookback_min: int = 64,
 ) -> dict[str, list[dict[str, Any]]]:
     """Chronological split with an embargo at both internal boundaries.
 
@@ -105,7 +106,18 @@ def split_30d(
         # Exclude events too close to either internal boundary or crossing the end.
         near_boundary = any(abs(int(ts) + horizon_ms - boundary) < embargo_ms for boundary in boundaries[:2])
         crosses_end = int(ts) + horizon_ms > boundaries[2]
-        if near_boundary or crosses_end:
+        # Also exclude the first feature_lookback_min of a later split, because
+        # its trailing features would otherwise use candles from the prior split.
+        lookback_ms = int(feature_lookback_min) * 60_000
+        split_start = (
+            start_ms + validation_start * DAY_MS
+            if split == "validation"
+            else start_ms + test_start * DAY_MS
+            if split == "test"
+            else None
+        )
+        backward_leak = split_start is not None and int(ts) - lookback_ms < split_start
+        if near_boundary or crosses_end or backward_leak:
             continue
         out[split].append(row)
     return out

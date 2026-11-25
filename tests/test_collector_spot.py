@@ -59,6 +59,7 @@ class SpotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(row.error)
         self.assertIsNotNone(row.ret_5m_pct)
         self.assertIsNotNone(row.turnover_z)
+        self.assertIsNotNone(row.move_5m_ts_ms)
         self.assertAlmostEqual(row.basis_bps, (100.05 / 99.05 - 1) * 10_000, places=3)
 
     async def test_unmapped_spot_is_explicit(self):

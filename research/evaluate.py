@@ -22,13 +22,14 @@ def _bucket(row: dict[str, Any]) -> str:
 
 def _aggregate(rows: Sequence[dict[str, Any]], event_type: str, params: dict[str, Any] | None,
                candles_by_symbol: dict[str, Sequence[Any]], horizons: Sequence[int],
-               fee_bps: float, now_ms: int, seed: int = 0) -> dict[str, Any]:
+               fee_bps: float, funding_bps: float | None, now_ms: int, seed: int = 0) -> dict[str, Any]:
     detected = event_module.dedupe(
         event_module.detect_all(rows, event_type, params),
         min_gap_ms=3_600_000,
     )
     scored = outcome_module.score_events(
-        detected, candles_by_symbol, horizons=horizons, fee_bps=fee_bps, now_ms=now_ms
+        detected, candles_by_symbol, horizons=horizons, fee_bps=fee_bps,
+        funding_bps=funding_bps, now_ms=now_ms,
     )
     result: dict[str, Any] = {
         "events": len(detected),
@@ -49,7 +50,8 @@ def _aggregate(rows: Sequence[dict[str, Any]], event_type: str, params: dict[str
             min_gap_ms=3_600_000,
         )
         bucket_scored = outcome_module.score_events(
-            bucket_events, candles_by_symbol, horizons=horizons, fee_bps=fee_bps, now_ms=now_ms
+            bucket_events, candles_by_symbol, horizons=horizons, fee_bps=fee_bps,
+            funding_bps=funding_bps, now_ms=now_ms,
         )
         result["by_bucket"][bucket] = {
             "events": len(bucket_events),
@@ -71,6 +73,7 @@ def evaluate(
     *,
     start_ms: int,
     fee_bps: float = 6.0,
+    funding_bps: float | None = None,
     seed: int = 0,
 ) -> dict[str, Any]:
     split_cfg = spec.get("split") or {}
@@ -98,6 +101,7 @@ def evaluate(
         "start_ms": start_ms,
         "end_ms": end_ms,
         "fee_bps": fee_bps,
+        "funding_bps": funding_bps,
         "event_type": event_cfg.get("type"),
         "split_sizes": {name: len(rows) for name, rows in split.items()},
         "splits": {},
@@ -105,7 +109,7 @@ def evaluate(
     for name, rows in split.items():
         aggregate = _aggregate(
             rows, event_cfg.get("type"), event_cfg.get("params"),
-            candles_by_symbol, horizons, fee_bps, end_ms, seed,
+            candles_by_symbol, horizons, fee_bps, funding_bps, end_ms, seed,
         )
         for horizon, summary in aggregate["by_horizon"].items():
             summary["verdict"] = stats.verdict(
@@ -128,6 +132,7 @@ def render_report(metrics: dict[str, Any]) -> str:
         "",
         f"- Event type: `{metrics.get('event_type')}`",
         f"- Fee assumption: {metrics.get('fee_bps')} bps per side",
+        f"- Funding assumption: {metrics.get('funding_bps')} bps per horizon",
         f"- Split sizes: {json.dumps(metrics.get('split_sizes'), sort_keys=True)}",
         "",
     ]

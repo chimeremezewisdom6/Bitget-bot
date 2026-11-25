@@ -1,0 +1,408 @@
+name: Phase B Nightly Evaluation (Read Only)
+
+on:
+  schedule:
+    - cron: "15 2 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Complete UTC days to evaluate"
+        default: "3"
+      confirm_holdout:
+        description: "Set true only after manual holdout authorization"
+        default: "false"
+      registry_hash:
+        description: "Frozen registry hash for holdout confirmation"
+        default: ""
+      holdout_unlock_at:
+        description: "Authorized holdout date, YYYY-MM-DD"
+        default: ""
+      retry_authorization:
+        description: "Exact frozen registry hash; required only to retry after a closed unmerged ledger PR"
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: phase-b-evaluation
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: inputs.confirm_holdout == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      registry_hash: ${{ steps.registry-hash.outputs.registry_hash }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            research
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Verify frozen registry hash before any data download
+        id: registry-hash
+        env:
+          REQUESTED_HASH: ${{ inputs.registry_hash }}
+          REQUESTED_DAYS: ${{ inputs.days }}
+          ENVIRONMENT_READY: ${{ vars.PHASE_B_HOLDOUT_ENVIRONMENT_READY }}
+        run: |
+          if [ "${ENVIRONMENT_READY}" != "true" ]; then
+            echo "::error::phase-b-holdout is not attested ready; refusing holdout"
+            exit 1
+          fi
+          HASH=$(python -m research.nightly \
+            --preflight-holdout \
+            --spec-hash "${REQUESTED_HASH}" \
+            --days "${REQUESTED_DAYS}" \
+            --require-linux-ci)
+          echo "registry_hash=${HASH}" >> "$GITHUB_OUTPUT"
+
+  check-pending:
+    needs: preflight
+    if: inputs.confirm_holdout == 'true' && vars.PHASE_B_HOLDOUT_ENVIRONMENT_READY == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            research
+            requirements.txt
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check out the holdout ledger for the PR gate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: holdout-ledger
+          path: ledger
+          fetch-depth: 0
+      - name: Check open and closed holdout ledger PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_HASH: ${{ inputs.registry_hash }}
+          RETRY_AUTHORIZATION: ${{ inputs.retry_authorization }}
+        run: |
+          set -euo pipefail
+          gh pr list \
+            --repo "${{ github.repository }}" \
+            --base holdout-ledger \
+            --state open \
+            --limit 1000 \
+            --json number,title,headRefName,body,mergedAt > open-prs.json
+          gh pr list \
+            --repo "${{ github.repository }}" \
+            --base holdout-ledger \
+            --state closed \
+            --limit 1000 \
+            --json number,title,headRefName,body,mergedAt > closed-prs.json
+          python -m research.nightly \
+            --check-holdout-prs \
+            --open-prs open-prs.json \
+            --closed-prs closed-prs.json \
+            --holdout-ledger ledger/holdout_ledger.json \
+            --spec-hash "${REQUESTED_HASH}" \
+            --retry-authorization "${RETRY_AUTHORIZATION}"
+
+  prepare-ledger:
+    needs: [preflight, check-pending]
+    if: inputs.confirm_holdout == 'true' && vars.PHASE_B_HOLDOUT_ENVIRONMENT_READY == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    environment: phase-b-holdout
+    concurrency:
+      group: phase-b-holdout-ledger
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            research
+            requirements.txt
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify protected phase-b-holdout environment
+        env:
+          GH_TOKEN: ${{ secrets.HOLDOUT_ENVIRONMENT_READ_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/environments/phase-b-holdout" > environment.json
+          python -m research.nightly \
+            --verify-holdout-environment \
+            --environment-json environment.json
+      - name: Check out the protected holdout ledger branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: holdout-ledger
+          path: ledger
+          fetch-depth: 0
+      - name: Verify the ledger record exists
+        run: test -f ledger/holdout_ledger.json
+      - name: Upload the ledger for the evaluation job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: holdout-ledger
+          path: ledger/holdout_ledger.json
+          if-no-files-found: error
+          retention-days: 1
+
+  evaluate:
+    needs: [preflight, check-pending, prepare-ledger]
+    if: |
+      always() &&
+      (needs.prepare-ledger.result == 'success' ||
+        (inputs.confirm_holdout != 'true' && needs.prepare-ledger.result == 'skipped')) &&
+      (inputs.confirm_holdout != 'true' || needs.preflight.result == 'success') &&
+      (inputs.confirm_holdout != 'true' || needs.check-pending.result == 'success') &&
+      (inputs.confirm_holdout != 'true' || vars.PHASE_B_HOLDOUT_ENVIRONMENT_READY == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      REPORT_DIR: reports/research/run-${{ github.run_id }}
+    outputs:
+      holdout_evaluated: ${{ steps.holdout-status.outputs.holdout_evaluated }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            collector
+            research
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Download the protected holdout ledger
+        if: inputs.confirm_holdout == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: holdout-ledger
+          path: ledger
+      - name: Download Phase B bundles
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python -m research.artifacts download \
+            --repo "${{ github.repository }}" \
+            --prefix bitget-5m- \
+            --days "${{ inputs.days || 3 }}" \
+            --out bundles \
+            --max-artifacts 900
+      - name: Verify hash and ledger immediately before evaluation
+        if: inputs.confirm_holdout == 'true'
+        env:
+          REGISTRY_HASH: ${{ needs.preflight.outputs.registry_hash || inputs.registry_hash }}
+          HOLDOUT_UNLOCK_AT: ${{ inputs.holdout_unlock_at }}
+        run: |
+          python -m research.nightly \
+            --verify-holdout-state \
+            --holdout-ledger ledger/holdout_ledger.json \
+            --spec-hash "${REGISTRY_HASH}" \
+            --holdout-unlock-at "${HOLDOUT_UNLOCK_AT}" \
+            --days "${{ inputs.days }}" \
+            --require-linux-ci
+      - name: Evaluate frozen specifications
+        id: evaluate
+        env:
+          CONFIRM_HOLDOUT: ${{ inputs.confirm_holdout }}
+          REGISTRY_HASH: ${{ needs.preflight.outputs.registry_hash || inputs.registry_hash }}
+          HOLDOUT_UNLOCK_AT: ${{ inputs.holdout_unlock_at }}
+        run: |
+          CONFIRM_FLAG=""
+          LEDGER_FLAG=""
+          if [ "${CONFIRM_HOLDOUT}" = "true" ]; then
+            CONFIRM_FLAG="--confirm-holdout"
+            LEDGER_FLAG="--holdout-ledger ledger/holdout_ledger.json"
+          fi
+          python -m research.nightly \
+            --bundles bundles \
+            --days "${{ inputs.days || 3 }}" \
+            --out "${REPORT_DIR}" \
+            --fdr-q 0.10 \
+            --min-n 30 \
+            ${CONFIRM_FLAG} \
+            ${LEDGER_FLAG} \
+            --spec-hash "${REGISTRY_HASH}" \
+            --holdout-unlock-at "${HOLDOUT_UNLOCK_AT}" \
+            --require-linux-ci
+      - name: Record holdout status
+        id: holdout-status
+        if: always()
+        env:
+          EVALUATE_OUTCOME: ${{ steps.evaluate.outcome }}
+        run: |
+          STATUS_FILE="${REPORT_DIR}/holdout_status.json"
+          EVALUATED="false"
+          if [ "${EVALUATE_OUTCOME}" = "success" ] && [ -f "${STATUS_FILE}" ]; then
+            EVALUATED=$(python -c "import json; print(str(json.load(open('${STATUS_FILE}')).get('evaluated', False)).lower())")
+          fi
+          echo "holdout_evaluated=${EVALUATED}" >> "$GITHUB_OUTPUT"
+      - name: Upload holdout result
+        if: always() && inputs.confirm_holdout == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: holdout-result
+          path: |
+            ${{ env.REPORT_DIR }}/holdout_status.json
+            ${{ env.REPORT_DIR }}/data_quality.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload research report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: research-report-${{ github.run_id }}
+          path: ${{ env.REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 30
+
+  record-ledger:
+    needs: evaluate
+    if: |
+      inputs.confirm_holdout == 'true' &&
+      vars.PHASE_B_HOLDOUT_ENVIRONMENT_READY == 'true' &&
+      needs.evaluate.result == 'success' &&
+      needs.evaluate.outputs.holdout_evaluated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    environment: phase-b-holdout
+    concurrency:
+      group: phase-b-holdout-ledger
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: |
+            research
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Verify protected phase-b-holdout environment
+        env:
+          GH_TOKEN: ${{ secrets.HOLDOUT_ENVIRONMENT_READ_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/environments/phase-b-holdout" > environment.json
+          python -m research.nightly \
+            --verify-holdout-environment \
+            --environment-json environment.json
+      - name: Mint dedicated ledger app token
+        id: ledger-token
+        if: vars.HOLDOUT_LEDGER_MODE == 'app'
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.HOLDOUT_LEDGER_APP_ID }}
+          private-key: ${{ secrets.HOLDOUT_LEDGER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+      - name: Check out the protected holdout ledger branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: holdout-ledger
+          path: ledger
+          fetch-depth: 0
+          token: ${{ steps.ledger-token.outputs.token || github.token }}
+      - name: Download the holdout result
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: holdout-result
+          path: holdout-result
+      - name: Verify the ledger file exists
+        run: test -f ledger/holdout_ledger.json
+      - name: Verify result, hash, and ledger immediately before recording
+        env:
+          REQUESTED_HASH: ${{ inputs.registry_hash }}
+        run: |
+          python -m research.nightly \
+            --verify-holdout-result \
+            --holdout-result holdout-result \
+            --holdout-ledger ledger/holdout_ledger.json \
+            --spec-hash "${REQUESTED_HASH}" \
+            --days "${{ inputs.days }}" \
+            --require-linux-ci
+      - name: Append hash to ledger
+        env:
+          REQUESTED_HASH: ${{ inputs.registry_hash }}
+        run: |
+          ATTEMPTED_AT=$(python -c "import json; print(json.load(open('holdout-result/holdout_status.json', encoding='utf-8')).get('attempted_at', ''))")
+          python -m research.nightly \
+            --record-holdout ledger/holdout_ledger.json \
+            --holdout-hash "${REQUESTED_HASH}" \
+            --attempted-at "${ATTEMPTED_AT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --require-linux-ci
+          cd ledger
+          git config user.name "holdout-ledger[bot]"
+          git config user.email "holdout-ledger[bot]@users.noreply.github.com"
+          git add holdout_ledger.json
+          if git diff --cached --quiet; then
+            echo "Hash already present; no ledger change."
+            exit 0
+          fi
+          git commit -m "Record Phase B holdout evaluation ${GITHUB_RUN_ID}"
+      - name: Push ledger directly (app mode)
+        id: ledger-push
+        if: vars.HOLDOUT_LEDGER_MODE == 'app' && steps.ledger-token.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cd ledger
+          git push origin HEAD:holdout-ledger
+      - name: Verify remote ledger contains the hash
+        if: steps.ledger-push.outcome == 'success'
+        env:
+          REQUESTED_HASH: ${{ inputs.registry_hash }}
+        run: |
+          cd ledger
+          git fetch origin holdout-ledger
+          git show origin/holdout-ledger:holdout_ledger.json > /tmp/ledger.json
+          python - <<'PY'
+          import json
+          import os
+          ledger = json.load(open("/tmp/ledger.json", encoding="utf-8"))
+          assert os.environ["REQUESTED_HASH"] in (ledger.get("evaluated_hashes") or [])
+          print("Remote ledger contains the approved hash")
+          PY
+      - name: Open ledger PR (fallback or PR mode)
+        if: vars.HOLDOUT_LEDGER_MODE != 'app' || steps.ledger-token.outcome != 'success' || steps.ledger-push.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_HASH: ${{ inputs.registry_hash }}
+        run: |
+          cd ledger
+          BRANCH="holdout-ledger-${GITHUB_RUN_ID}"
+          git checkout -B "${BRANCH}"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --base holdout-ledger \
+            --head "${BRANCH}" \
+            --title "Record Phase B holdout evaluation ${GITHUB_RUN_ID}" \
+            --body "Automated holdout ledger update. Registry hash: ${REQUESTED_HASH}. Run: ${GITHUB_RUN_ID}. This PR requires human review and merge under the protected ledger branch."

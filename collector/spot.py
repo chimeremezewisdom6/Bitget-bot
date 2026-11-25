@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from research.features import (
     basis_bps,
     closed_candles,
+    first_move_ts,
     return_pct,
     spread_bps,
     turnover_z,
@@ -30,6 +31,7 @@ class SpotSnapshot:
     ret_60m_pct: float | None
     turnover_z: float | None
     basis_bps: float | None
+    move_5m_ts_ms: int | None = None
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -46,6 +48,7 @@ class SpotSnapshot:
             "ret_60m_pct": self.ret_60m_pct,
             "turnover_z": self.turnover_z,
             "basis_bps": self.basis_bps,
+            "move_5m_ts_ms": self.move_5m_ts_ms,
             "error": self.error,
         }
 
@@ -139,5 +142,6 @@ async def spot_snapshot(
             ret_60m_pct=return_pct(candles, 60),
             turnover_z=z.get("turnover_z"),
             basis_bps=basis_bps(perp.mid, spot_mid),
+            move_5m_ts_ms=first_move_ts(candles),
         ))
     return results

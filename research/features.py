@@ -139,7 +139,9 @@ def volatility_60(
         "sum_abs_1m_pct": round(total, 6),
         "vol60_pct": round(stdev, 6),
         "vol60_bps": round(stdev * 100.0, 6),
-        "flag_0_7": (maximum >= threshold) if status == "OK" else None,
+        # Round at 1e-9 percentage points so an exact 0.7% boundary is not
+        # rejected by binary floating-point representation.
+        "flag_0_7": (round(maximum, 9) >= float(threshold)) if status == "OK" else None,
         "threshold": threshold,
         "first_ts": window[0]["ts"],
         "last_ts": window[-1]["ts"],
@@ -154,6 +156,25 @@ def return_pct(candles: Sequence[dict[str, Any]], minutes: int) -> float | None:
     if previous <= 0 or current <= 0:
         return None
     return round(100.0 * (current / previous - 1.0), 6)
+
+
+def first_move_ts(
+    candles: Sequence[dict[str, Any]],
+    *,
+    minutes: int = 5,
+    threshold_pct: float = 0.2,
+) -> int | None:
+    """First closed-candle timestamp whose trailing return crosses the threshold."""
+    if minutes <= 0:
+        return None
+    for index in range(minutes, len(candles)):
+        previous = candles[index - minutes]["close"]
+        current = candles[index]["close"]
+        if previous <= 0 or current <= 0:
+            continue
+        if abs(100.0 * (current / previous - 1.0)) >= threshold_pct:
+            return int(candles[index]["ts"])
+    return None
 
 
 def turnover_z(rows: Iterable[Any], now_ms: int | None = None, window: int = 60) -> dict[str, Any]:
@@ -303,33 +324,48 @@ def absorption_proxy(
     price_change_pct: float | None,
     opposite_depth_change_pct: float | None,
     *,
+    book_imbalance: float | None = None,
     min_imbalance: float = 0.4,
     max_price_move_pct: float = 0.1,
     min_depth_change_pct: float = -10.0,
+    require_depth_known: bool = False,
+    require_book_imbalance: bool = False,
+    min_abs_book_imbalance: float = 0.2,
 ) -> dict[str, Any]:
     """Approximate absorption: aggressive flow with little price progress.
 
-    The fade direction opposes the aggressor. A missing depth change does not
-    invalidate the proxy but is reported as ``depth_known=False``.
+    The fade direction opposes the aggressor. A missing depth change is
+    reported as ``depth_known=False`` and can be rejected explicitly.
     """
     depth_known = opposite_depth_change_pct is not None
+    book_known = book_imbalance is not None
+    direction = "SHORT" if (imbalance or 0) > 0 else "LONG"
+    book_aligned = bool(
+        book_known
+        and (
+            (direction == "SHORT" and book_imbalance <= -min_abs_book_imbalance)
+            or (direction == "LONG" and book_imbalance >= min_abs_book_imbalance)
+        )
+    )
     absorbed = (
         imbalance is not None
         and price_change_pct is not None
         and abs(imbalance) >= min_imbalance
         and abs(price_change_pct) <= max_price_move_pct
         and (not depth_known or opposite_depth_change_pct >= min_depth_change_pct)
+        and (not require_depth_known or depth_known)
+        and (not require_book_imbalance or book_aligned)
     )
-    direction = None
-    if absorbed:
-        direction = "SHORT" if imbalance > 0 else "LONG"
     return {
         "absorbed": bool(absorbed),
-        "direction": direction,
+        "direction": direction if absorbed else None,
         "depth_known": depth_known,
+        "book_known": book_known,
+        "book_aligned": book_aligned,
         "imbalance": imbalance,
         "price_change_pct": price_change_pct,
         "opposite_depth_change_pct": opposite_depth_change_pct,
+        "book_imbalance": book_imbalance,
     }
 
 

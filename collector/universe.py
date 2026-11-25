@@ -51,6 +51,7 @@ class Perp:
     bid_depth_usdt: float
     ask_depth_usdt: float
     taker_fee: float | None = None
+    funding_rate: float | None = None
     launch_ms: int | None = None
 
     @property
@@ -72,6 +73,7 @@ class Perp:
             "bid_depth_usdt": self.bid_depth_usdt,
             "ask_depth_usdt": self.ask_depth_usdt,
             "taker_fee": self.taker_fee,
+            "funding_rate": self.funding_rate,
             "launch_ms": self.launch_ms,
         }
 
@@ -154,6 +156,10 @@ def rank_candidates(
             "ask": ask,
             "spread_bps": spread_bps(bid, ask),
             "taker_fee": _num(instrument.get("takerFeeRate"), 0.0) or None,
+            "funding_rate": (
+                None if ticker.get("fundingRate") is None
+                else _num(ticker.get("fundingRate"), 0.0)
+            ),
             "launch_ms": int(_num(instrument.get("launchTime"), 0.0)) or None,
         })
     candidates.sort(key=lambda row: row["turnover24h"], reverse=True)
@@ -220,6 +226,7 @@ def select(
             bid_depth_usdt=bid_depth,
             ask_depth_usdt=ask_depth,
             taker_fee=row.get("taker_fee"),
+            funding_rate=row.get("funding_rate"),
             launch_ms=row.get("launch_ms"),
         ))
     band_counts = {band["name"]: 0 for band in TURNOVER_BANDS}
