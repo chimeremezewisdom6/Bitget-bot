@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at_utc": "2026-11-25T00:59:31.018505+00:00",
+  "updated_at_utc": "2026-11-25T09:38:25.616264+00:00",
   "mode": "BITGET_ONLY_READ_ONLY",
   "data_source": "Bitget USDT-FUTURES",
   "trading_enabled": false,
@@ -8,33 +8,33 @@
     "active": true,
     "started_at_utc": "2026-11-24T12:53:32.795728+00:00",
     "ends_at_utc": "2026-11-25T12:53:32.795726+00:00",
-    "last_collection_utc": "2026-11-25T00:59:25.735853+00:00",
-    "cycles": 4,
+    "last_collection_utc": "2026-11-25T09:38:19.554203+00:00",
+    "cycles": 5,
     "symbols_last_cycle": 200,
     "bitget_auth_status": "KEY_PERMISSION_readonly"
   },
   "coverage": {
-    "distinct_symbols_observed": 240,
-    "market_observation_rows": 4800,
-    "one_minute_candle_records": 370777,
-    "long_trend_starts": 3054,
-    "short_trend_starts": 3970,
-    "early_window_trend_events": 6948,
-    "trend_ignition_latest_symbols": 229,
-    "trend_ignition_candidates": 14,
-    "trend_ignition_records": 2000
+    "distinct_symbols_observed": 251,
+    "market_observation_rows": 5000,
+    "one_minute_candle_records": 390777,
+    "long_trend_starts": 3129,
+    "short_trend_starts": 4082,
+    "early_window_trend_events": 7135,
+    "trend_ignition_latest_symbols": 240,
+    "trend_ignition_candidates": 12,
+    "trend_ignition_records": 2200
   },
   "candle_streak_experiment": {
-    "checks": 1887,
+    "checks": 2087,
     "qualified_40_plus": 0
   },
   "shadow_execution": {
-    "scored_orderbook_outcomes": 6741,
-    "wins": 2489,
-    "losses": 4252,
+    "scored_orderbook_outcomes": 7038,
+    "wins": 2636,
+    "losses": 4402,
     "flat": 0,
-    "estimated_net_usdt": -17243.17108263,
-    "mean_net_bps": -46.3112
+    "estimated_net_usdt": -16687.49684833,
+    "mean_net_bps": -42.8171
   },
   "health": {
     "collection_error_records": 0,

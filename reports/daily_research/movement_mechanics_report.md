@@ -1,9 +1,9 @@
 # Bitget movement mechanics: live microstructure event study
 
-Generated UTC: 2026-11-25T00:59:25.917000+00:00
+Generated UTC: 2026-11-25T09:38:19.751000+00:00
 This is a forward-collected observational study. Historical order-book depth and recent public fills are not backfilled by these endpoints.
 Universe: top 50 eligible online USDT perpetuals by current 24h turnover; existing candle scanner covers its wider universe.
-Latest cycle: {"liquidation_records_in_collection_interval": 100, "liquidation_records_seen_in_recent_global_page": 100, "symbols_requested": 50, "symbols_with_book": 50, "symbols_with_fills": 50, "symbols_with_oi": 50, "timestamp_ms": 1795568365917, "timestamp_utc": "2026-11-25T00:59:25.917000+00:00", "trading_enabled": false}
+Latest cycle: {"liquidation_records_in_collection_interval": 100, "liquidation_records_seen_in_recent_global_page": 100, "symbols_requested": 50, "symbols_with_book": 50, "symbols_with_fills": 50, "symbols_with_oi": 50, "timestamp_ms": 1795599499751, "timestamp_utc": "2026-11-25T09:38:19.751000+00:00", "trading_enabled": false}
 
 ## What is being measured
 - Aggressive-flow proxy: Bitget-reported buy/sell side of the latest public fills, weighted by price × size. The side is a proxy; do not label it proven aggressor flow without exchange-side semantic validation.
@@ -15,7 +15,7 @@ Latest cycle: {"liquidation_records_in_collection_interval": 100, "liquidation_r
 ## Event versus control cohorts
 Event = absolute 5m candle return >= 0.50%; control = absolute 5m candle return <= 0.15%.
 Events: {
-  "observations": 34,
+  "observations": 41,
   "with_forward_outcome": 0,
   "median_forward_10m_directional_return_pct": null,
   "positive_forward_rate_pct": null,
@@ -46,7 +46,7 @@ Events: {
   }
 }
 Controls: {
-  "observations": 95,
+  "observations": 123,
   "with_forward_outcome": 0,
   "median_forward_10m_directional_return_pct": null,
   "positive_forward_rate_pct": null,

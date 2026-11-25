@@ -1,6 +1,6 @@
 {
   "events": {
-    "observations": 34,
+    "observations": 41,
     "with_forward_outcome": 0,
     "median_forward_10m_directional_return_pct": null,
     "positive_forward_rate_pct": null,
@@ -31,7 +31,7 @@
     }
   },
   "controls": {
-    "observations": 95,
+    "observations": 123,
     "with_forward_outcome": 0,
     "median_forward_10m_directional_return_pct": null,
     "positive_forward_rate_pct": null,
@@ -151,6 +151,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "EVAAUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.8016197677781722,
+      "turnover_5m_usdt": 96749.2788,
+      "taker_imbalance": -0.0496320108143313,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 50.704,
+      "fill_newest_age_seconds": -1.04,
+      "spread_bps": 6.159278953744048,
+      "opposing_depth_change_pct": -7.8849880150799745,
+      "oi_change_pct_since_previous_sample": 6.009675885790999,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "MMTUSDT",
       "timestamp_ms": 1795524876073,
       "direction": "SHORT",
@@ -239,6 +261,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "BLESSUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.884683909811379,
+      "turnover_5m_usdt": 21615.402642999998,
+      "taker_imbalance": -0.11879191047287649,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 137.49,
+      "fill_newest_age_seconds": -1.083,
+      "spread_bps": 10.559990061185609,
+      "opposing_depth_change_pct": -5.219088511050984,
+      "oi_change_pct_since_previous_sample": -1.791267844334865,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "LISTAUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "LONG",
@@ -279,6 +323,28 @@
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
         "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "LISTAUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.8277976494634687,
+      "turnover_5m_usdt": 23367.63382,
+      "taker_imbalance": 0.3666913280601681,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 184.267,
+      "fill_newest_age_seconds": 4.356,
+      "spread_bps": 9.278828805609232,
+      "opposing_depth_change_pct": -60.125507305147075,
+      "oi_change_pct_since_previous_sample": -17.168473718622646,
+      "aligned_liquidation_usdt": 4136.181282685172,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": true
       },
       "forward_10m_return_pct": null
     },
@@ -388,6 +454,28 @@
         "taker_aligned": true,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "ARIAUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -1.294400963275144,
+      "turnover_5m_usdt": 6911.83824,
+      "taker_imbalance": -0.12288790995827331,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 247.866,
+      "fill_newest_age_seconds": -1.818,
+      "spread_bps": 11.159770717437883,
+      "opposing_depth_change_pct": 10.06479924149508,
+      "oi_change_pct_since_previous_sample": 0.42742323114930425,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -809,6 +897,72 @@
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "PROSUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -1.291879613855762,
+      "turnover_5m_usdt": 34383.1777,
+      "taker_imbalance": -0.2689775268179398,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 121.038,
+      "fill_newest_age_seconds": 5.63,
+      "spread_bps": 25.903007626997034,
+      "opposing_depth_change_pct": -6.421750105752233,
+      "oi_change_pct_since_previous_sample": 5.249690905978355,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "MONUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.5847953216374213,
+      "turnover_5m_usdt": 15937.017050000002,
+      "taker_imbalance": -0.29877356494341173,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 313.767,
+      "fill_newest_age_seconds": 1.003,
+      "spread_bps": 19.569471624265347,
+      "opposing_depth_change_pct": -11.686605387607097,
+      "oi_change_pct_since_previous_sample": 9.990859288100019,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "BIGTIMEUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.9515313707998851,
+      "turnover_5m_usdt": 163481.741704,
+      "taker_imbalance": 0.11437392782885972,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 17.966,
+      "fill_newest_age_seconds": -0.711,
+      "spread_bps": 7.357810315649762,
+      "opposing_depth_change_pct": null,
+      "oi_change_pct_since_previous_sample": null,
+      "aligned_liquidation_usdt": 14846.5714336107,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": true
+      },
+      "forward_10m_return_pct": null
     }
   ],
   "control_rows": [
@@ -879,6 +1033,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "BTCUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.06469447566912478,
+      "turnover_5m_usdt": 6138244.278170001,
+      "taker_imbalance": -0.9328518537620112,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 3.433,
+      "fill_newest_age_seconds": 0.365,
+      "spread_bps": 0.01698137397970298,
+      "opposing_depth_change_pct": -1.1872014227352512,
+      "oi_change_pct_since_previous_sample": 1.8430756068616772,
+      "aligned_liquidation_usdt": 30412.944055955446,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": true
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "ETHUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "LONG",
@@ -938,6 +1114,28 @@
       "aligned_liquidation_usdt": 3425.517399234603,
       "features": {
         "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": true
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "ETHUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.1335911622431185,
+      "turnover_5m_usdt": 4041345.6784,
+      "taker_imbalance": 0.8093146675225719,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 5.06,
+      "fill_newest_age_seconds": -0.55,
+      "spread_bps": 0.060966501955445104,
+      "opposing_depth_change_pct": -2.566982626367187,
+      "oi_change_pct_since_previous_sample": 3.2455133451127827,
+      "aligned_liquidation_usdt": 264.811726949795,
+      "features": {
+        "taker_aligned": true,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": true,
         "aligned_liquidations_present": true
@@ -1011,6 +1209,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "SOLUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.035530815580253616,
+      "turnover_5m_usdt": 120941.035,
+      "taker_imbalance": -0.3984866226428589,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 44.229,
+      "fill_newest_age_seconds": 0.677,
+      "spread_bps": 0.1481031686680008,
+      "opposing_depth_change_pct": -11.514024076245,
+      "oi_change_pct_since_previous_sample": -0.21263923739556212,
+      "aligned_liquidation_usdt": 239.90786915699618,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": true
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "XRPUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -1051,6 +1271,28 @@
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
         "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "XRPUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.04372540446000439,
+      "turnover_5m_usdt": 130210.26400000001,
+      "taker_imbalance": 0.342771390101588,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 86.831,
+      "fill_newest_age_seconds": 1.339,
+      "spread_bps": 1.0931948619840284,
+      "opposing_depth_change_pct": -19.186362461136376,
+      "oi_change_pct_since_previous_sample": 0.08459418537893892,
+      "aligned_liquidation_usdt": 410.4405396410154,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": true
       },
       "forward_10m_return_pct": null
     },
@@ -1121,6 +1363,50 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "ZECUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.06202362410926421,
+      "turnover_5m_usdt": 78937.01788,
+      "taker_imbalance": 0.48470281430067486,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 79.446,
+      "fill_newest_age_seconds": -0.452,
+      "spread_bps": 0.4143274429793789,
+      "opposing_depth_change_pct": 171.41964339106912,
+      "oi_change_pct_since_previous_sample": 3.63309185735321,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.01374735792963877,
+      "turnover_5m_usdt": 66101.07458,
+      "taker_imbalance": 0.7355090706768437,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 69.087,
+      "fill_newest_age_seconds": -1.259,
+      "spread_bps": 0.17205929163149533,
+      "opposing_depth_change_pct": 70.25802806421224,
+      "oi_change_pct_since_previous_sample": 0.6060060344656559,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "NEARUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -1155,6 +1441,28 @@
       "spread_bps": 2.054442732409463,
       "opposing_depth_change_pct": 22.834071192234884,
       "oi_change_pct_since_previous_sample": 1.9398548746517363,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "ENAUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.08433480919249892,
+      "turnover_5m_usdt": 45918.581360000004,
+      "taker_imbalance": -0.3602896051461094,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 287.477,
+      "fill_newest_age_seconds": -1.256,
+      "spread_bps": 1.054351837209131,
+      "opposing_depth_change_pct": -9.729223706470425,
+      "oi_change_pct_since_previous_sample": 1.62249543194819,
       "aligned_liquidation_usdt": 0.0,
       "features": {
         "taker_aligned": false,
@@ -1204,6 +1512,28 @@
         "taker_aligned": true,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.10746754189780994,
+      "turnover_5m_usdt": 56630.275607799995,
+      "taker_imbalance": -0.01934368972284109,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 236.381,
+      "fill_newest_age_seconds": 0.999,
+      "spread_bps": 2.0343810395694795,
+      "opposing_depth_change_pct": 1.7224980658256062,
+      "oi_change_pct_since_previous_sample": 2.8249063191808643,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -1297,6 +1627,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "DOGEUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.03704389701797428,
+      "turnover_5m_usdt": 63578.28859,
+      "taker_imbalance": 0.8859056555922658,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 281.939,
+      "fill_newest_age_seconds": 8.876,
+      "spread_bps": 1.8530529046597097,
+      "opposing_depth_change_pct": 10.208300990740437,
+      "oi_change_pct_since_previous_sample": -0.22189495029716344,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "SUIUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -1357,6 +1709,28 @@
       "features": {
         "taker_aligned": true,
         "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "SUIUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.10992462311556483,
+      "turnover_5m_usdt": 63661.20727,
+      "taker_imbalance": 0.2967447910544426,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 136.238,
+      "fill_newest_age_seconds": 0.764,
+      "spread_bps": 1.5702284682419563,
+      "opposing_depth_change_pct": -28.142387676185308,
+      "oi_change_pct_since_previous_sample": 0.46822807779101083,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": true,
         "open_interest_increased": true,
         "aligned_liquidations_present": false
       },
@@ -1429,6 +1803,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "WLDUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.0436871996504995,
+      "turnover_5m_usdt": 15091.8954,
+      "taker_imbalance": -0.13790395006271486,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 489.964,
+      "fill_newest_age_seconds": 34.291,
+      "spread_bps": 4.371584699454284,
+      "opposing_depth_change_pct": -28.411635110083424,
+      "oi_change_pct_since_previous_sample": 0.25155755982255723,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "ADAUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -1468,6 +1864,28 @@
         "taker_aligned": false,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "ADAUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.07092198581561959,
+      "turnover_5m_usdt": 16554.8891,
+      "taker_imbalance": 0.8232233291801422,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 427.016,
+      "fill_newest_age_seconds": 0.755,
+      "spread_bps": 7.0947144377431,
+      "opposing_depth_change_pct": -50.05623717582566,
+      "oi_change_pct_since_previous_sample": 1.9310564821538145,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": true,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -1605,6 +2023,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "PIEVERSEUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.07713562843253419,
+      "turnover_5m_usdt": 15517.51999,
+      "taker_imbalance": 0.4821685464329438,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 253.104,
+      "fill_newest_age_seconds": 31.673,
+      "spread_bps": 8.065554077823508,
+      "opposing_depth_change_pct": -18.65177138014825,
+      "oi_change_pct_since_previous_sample": -1.46865234865311,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "UNIUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -1649,6 +2089,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "UNIUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.022172949002219333,
+      "turnover_5m_usdt": 563.762,
+      "taker_imbalance": -0.12045651603471558,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 931.478,
+      "fill_newest_age_seconds": 2.89,
+      "spread_bps": 2.219016975478633,
+      "opposing_depth_change_pct": -16.01107826717595,
+      "oi_change_pct_since_previous_sample": -1.3506900619929318,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "PROMUSDT",
       "timestamp_ms": 1795524876073,
       "direction": "SHORT",
@@ -1687,6 +2149,28 @@
       "features": {
         "taker_aligned": false,
         "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.042354934349841944,
+      "turnover_5m_usdt": 15813.493999,
+      "taker_imbalance": -0.1498924575161523,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 429.289,
+      "fill_newest_age_seconds": 4.883,
+      "spread_bps": 4.241781548248988,
+      "opposing_depth_change_pct": 10.732201033600441,
+      "oi_change_pct_since_previous_sample": -1.4730347281307399,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
         "aligned_liquidations_present": false
       },
@@ -1759,6 +2243,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "BNBUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.007412761068170681,
+      "turnover_5m_usdt": 13878.6512,
+      "taker_imbalance": 0.9845092590942631,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 159.438,
+      "fill_newest_age_seconds": 0.675,
+      "spread_bps": 0.18540664311985436,
+      "opposing_depth_change_pct": 54.08669439164191,
+      "oi_change_pct_since_previous_sample": 0.6553235361846932,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "ARBUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -1776,6 +2282,28 @@
         "taker_aligned": false,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "ARBUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.1291274672569731,
+      "turnover_5m_usdt": 7452.0220103,
+      "taker_imbalance": 0.6211555091077079,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 555.077,
+      "fill_newest_age_seconds": 3.04,
+      "spread_bps": 2.7661241989767413,
+      "opposing_depth_change_pct": -7.125102661869764,
+      "oi_change_pct_since_previous_sample": 2.04527215401491,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -1847,6 +2375,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "LINKUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.02314546927439931,
+      "turnover_5m_usdt": 9121.073,
+      "taker_imbalance": 0.20772152771735652,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 377.178,
+      "fill_newest_age_seconds": 3.777,
+      "spread_bps": 1.1582787977080236,
+      "opposing_depth_change_pct": 12.672059815503832,
+      "oi_change_pct_since_previous_sample": -0.03180182396935738,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "TAOUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "LONG",
@@ -1913,6 +2463,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "TAOUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.09695448842248489,
+      "turnover_5m_usdt": 132707.10013,
+      "taker_imbalance": 0.05094422992679388,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 59.373,
+      "fill_newest_age_seconds": 13.093,
+      "spread_bps": 1.7109127719639075,
+      "opposing_depth_change_pct": 4.526738384575468,
+      "oi_change_pct_since_previous_sample": -0.17776635246731232,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "AVAXUSDT",
       "timestamp_ms": 1795524876073,
       "direction": "LONG",
@@ -1952,6 +2524,28 @@
         "taker_aligned": false,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.030998140111582195,
+      "turnover_5m_usdt": 3743.7673999999997,
+      "taker_imbalance": 0.3205444197204906,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 810.236,
+      "fill_newest_age_seconds": 28.351,
+      "spread_bps": 1.5507482360230223,
+      "opposing_depth_change_pct": -25.06730561720316,
+      "oi_change_pct_since_previous_sample": -1.3363730268368235,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": false,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -2155,6 +2749,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "ONDOUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.07377351530799547,
+      "turnover_5m_usdt": 1284.1396399999999,
+      "taker_imbalance": -0.5324440397423671,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 655.708,
+      "fill_newest_age_seconds": -2.452,
+      "spread_bps": 3.6893562073414126,
+      "opposing_depth_change_pct": -34.062529813812326,
+      "oi_change_pct_since_previous_sample": 0.7403021707374835,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "TRUMPUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "LONG",
@@ -2195,6 +2811,28 @@
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": true,
         "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "TRUMPUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.02409928907096681,
+      "turnover_5m_usdt": 2131.8866900000003,
+      "taker_imbalance": -0.885535063203579,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 618.824,
+      "fill_newest_age_seconds": 46.517,
+      "spread_bps": 6.025911419101476,
+      "opposing_depth_change_pct": -29.1222419971924,
+      "oi_change_pct_since_previous_sample": 1.0714095044233263,
+      "aligned_liquidation_usdt": 6.8968707951214725,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": true
       },
       "forward_10m_return_pct": null
     },
@@ -2331,6 +2969,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "AAVEUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.14135044036098776,
+      "turnover_5m_usdt": 4001.421,
+      "taker_imbalance": -0.006972342798182507,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 912.279,
+      "fill_newest_age_seconds": 2.357,
+      "spread_bps": 2.179598953792069,
+      "opposing_depth_change_pct": 16.82860570940918,
+      "oi_change_pct_since_previous_sample": -0.0919342906998466,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "BCHUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -2392,6 +3052,28 @@
         "taker_aligned": true,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "BCHUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.13827716890300046,
+      "turnover_5m_usdt": 2236.8411,
+      "taker_imbalance": 0.0801087684410157,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 263.43,
+      "fill_newest_age_seconds": -2.78,
+      "spread_bps": 0.5120458793117758,
+      "opposing_depth_change_pct": -19.183438963827648,
+      "oi_change_pct_since_previous_sample": 1.1322411618480466,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": true,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -2463,6 +3145,28 @@
       "forward_10m_return_pct": null
     },
     {
+      "symbol": "ZROUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "SHORT",
+      "move_5m_pct": -0.05015548199418518,
+      "turnover_5m_usdt": 1185.9253,
+      "taker_imbalance": -0.07475420421116401,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 1382.792,
+      "fill_newest_age_seconds": 26.876,
+      "spread_bps": 8.03212851405534,
+      "opposing_depth_change_pct": 13.198127188195595,
+      "oi_change_pct_since_previous_sample": 2.7620214791648445,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
       "symbol": "RENDERUSDT",
       "timestamp_ms": 1795524832168,
       "direction": "SHORT",
@@ -2524,6 +3228,28 @@
         "taker_aligned": false,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": true,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "RENDERUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.08102414519528534,
+      "turnover_5m_usdt": 3619.9899,
+      "taker_imbalance": 0.9158933769219574,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 434.721,
+      "fill_newest_age_seconds": 52.95,
+      "spread_bps": 7.283026502123414,
+      "opposing_depth_change_pct": -44.62505690272571,
+      "oi_change_pct_since_previous_sample": -0.8372794563106356,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": true,
+        "opposing_book_depth_withdrawal_15pct": true,
+        "open_interest_increased": false,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -2656,6 +3382,28 @@
         "taker_aligned": true,
         "opposing_book_depth_withdrawal_15pct": false,
         "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "XMRUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.027869570410476996,
+      "turnover_5m_usdt": 3977.4236,
+      "taker_imbalance": -0.8390141192036099,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 400.673,
+      "fill_newest_age_seconds": -0.318,
+      "spread_bps": 3.1849669559683296,
+      "opposing_depth_change_pct": 3.537272859067886,
+      "oi_change_pct_since_previous_sample": 3.1750499750607952,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": true,
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
@@ -2901,15 +3649,37 @@
         "aligned_liquidations_present": false
       },
       "forward_10m_return_pct": null
+    },
+    {
+      "symbol": "GRAMUSDT",
+      "timestamp_ms": 1795599499751,
+      "direction": "LONG",
+      "move_5m_pct": 0.05396654074474316,
+      "turnover_5m_usdt": 10037.84544,
+      "taker_imbalance": -0.44188592541980765,
+      "taker_fill_count": 100,
+      "fill_sample_span_seconds": 583.772,
+      "fill_newest_age_seconds": 155.634,
+      "spread_bps": 8.647713760674769,
+      "opposing_depth_change_pct": null,
+      "oi_change_pct_since_previous_sample": null,
+      "aligned_liquidation_usdt": 0.0,
+      "features": {
+        "taker_aligned": false,
+        "opposing_book_depth_withdrawal_15pct": false,
+        "open_interest_increased": false,
+        "aligned_liquidations_present": false
+      },
+      "forward_10m_return_pct": null
     }
   ],
-  "symbols": 57,
-  "snapshots": 200,
+  "symbols": 61,
+  "snapshots": 250,
   "first_snapshot_utc": "2026-11-24T12:53:52.168000+00:00",
-  "last_snapshot_utc": "2026-11-25T00:59:25.917000+00:00",
+  "last_snapshot_utc": "2026-11-25T09:38:19.751000+00:00",
   "latest_collection": {
-    "timestamp_ms": 1795568365917,
-    "timestamp_utc": "2026-11-25T00:59:25.917000+00:00",
+    "timestamp_ms": 1795599499751,
+    "timestamp_utc": "2026-11-25T09:38:19.751000+00:00",
     "symbols_requested": 50,
     "symbols_with_book": 50,
     "symbols_with_fills": 50,
